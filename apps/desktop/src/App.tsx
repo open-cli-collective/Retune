@@ -14,6 +14,14 @@ type Settings = {
   zebra: boolean
   columnOrder: ColumnKey[]
   autoAddSpotifyLibrary: boolean
+  spotifyClientId: string
+  spotifySyncCompleted: boolean
+}
+
+type ConnectionState = { connected: boolean }
+type SpotifyResults = {
+  artists: { name: string; uri: string }[]
+  albums: { name: string; artist: string; uri: string; trackCount: number | null }[]
 }
 
 type Track = {
@@ -73,6 +81,10 @@ type State = {
   notice?: string
   info?: TrackInfo
   preferences: boolean
+  connected: boolean
+  spotifyResults: SpotifyResults | null
+  spotifySearching: boolean
+  syncPhase?: string
 }
 
 type Action =
@@ -94,6 +106,10 @@ type Action =
   | { type: 'notice'; notice?: string }
   | { type: 'info'; info?: TrackInfo }
   | { type: 'preferences'; open: boolean }
+  | { type: 'connection'; connected: boolean }
+  | { type: 'spotifyResults'; results: SpotifyResults | null }
+  | { type: 'spotifySearching'; searching: boolean }
+  | { type: 'syncPhase'; phase?: string }
 
 const defaultSettings: Settings = {
   theme: 'system',
@@ -101,6 +117,8 @@ const defaultSettings: Settings = {
   zebra: true,
   columnOrder: ['name', 'time', 'artist', 'album', 'genre', 'rating'],
   autoAddSpotifyLibrary: false,
+  spotifyClientId: '',
+  spotifySyncCompleted: false,
 }
 
 const initialState: State = {
@@ -115,6 +133,9 @@ const initialState: State = {
   view: null,
   revision: 0,
   preferences: false,
+  connected: false,
+  spotifyResults: null,
+  spotifySearching: false,
 }
 
 function reducer(state: State, action: Action): State {
@@ -168,6 +189,14 @@ function reducer(state: State, action: Action): State {
       return { ...state, info: action.info, preferences: false }
     case 'preferences':
       return { ...state, preferences: action.open, info: undefined }
+    case 'connection':
+      return { ...state, connected: action.connected }
+    case 'spotifyResults':
+      return { ...state, spotifyResults: action.results, spotifySearching: false }
+    case 'spotifySearching':
+      return { ...state, spotifySearching: action.searching }
+    case 'syncPhase':
+      return { ...state, syncPhase: action.phase }
   }
 }
 
@@ -217,6 +246,9 @@ function App() {
     invoke<string | null>('startup_notice')
       .then((notice) => dispatch({ type: 'notice', notice: notice ?? undefined }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
+    invoke<ConnectionState>('connection_state')
+      .then(({ connected }) => dispatch({ type: 'connection', connected }))
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [])
 
   useEffect(() => {
@@ -233,11 +265,38 @@ function App() {
   useEffect(() => {
     const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
     const failed = listen<string>('operation-error', ({ payload }) => dispatch({ type: 'error', error: payload }))
+    const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connected: payload.connected }))
+    const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
+      void connection.then((stop) => stop())
+      void progress.then((stop) => stop())
     }
   }, [])
+
+  useEffect(() => {
+    const query = state.query.trim()
+    if (state.scope !== 'spotify' || !query || !state.connected) {
+      dispatch({ type: 'spotifyResults', results: null })
+      return
+    }
+    dispatch({ type: 'spotifySearching', searching: true })
+    let active = true
+    const timer = window.setTimeout(() => {
+      invoke<SpotifyResults>('spotify_search', { query })
+        .then((results) => active && dispatch({ type: 'spotifyResults', results }))
+        .catch((error) => {
+          if (!active) return
+          dispatch({ type: 'spotifySearching', searching: false })
+          dispatch({ type: 'error', error: String(error) })
+        })
+    }, 300)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [state.scope, state.query, state.connected])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -366,6 +425,7 @@ function App() {
         query={state.query}
         scope={state.scope}
         theme={state.settings.theme}
+        connected={state.connected}
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
         onScope={(scope) => dispatch({ type: 'scope', scope })}
@@ -392,7 +452,13 @@ function App() {
           )}
           {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
           {state.scope === 'spotify' && state.query.trim() ? (
-            <div className="spotify-stub">Spotify search arrives with the Spotify connection — Phase 5</div>
+            state.connected ? <SpotifySearch
+              searching={state.spotifySearching}
+              results={state.spotifyResults}
+              onArtist={(artist) => dispatch({ type: 'query', query: `artist:"${artist}"` })}
+              onAdd={(album) => invoke('add_spotify_album', album)
+                .catch((error) => dispatch({ type: 'error', error: String(error) }))}
+            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
           ) : (
             <TrackList
               tracks={tracks}
@@ -408,23 +474,24 @@ function App() {
             />
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} />
+          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} />
         </section>
       </div>
       {state.info && <GetInfo key={state.info.id} track={state.info} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
         dispatch({ type: 'info' })
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(autoAddSpotifyLibrary) => {
-        dispatch({ type: 'settings', settings: { autoAddSpotifyLibrary } })
+      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(autoAddSpotifyLibrary, spotifyClientId) => {
+        dispatch({ type: 'settings', settings: { autoAddSpotifyLibrary, spotifyClientId } })
         dispatch({ type: 'preferences', open: false })
       }} />}
     </main>
   )
 }
 
-function TransportBar({ playing, track, query, scope, theme, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onTheme }: {
+function TransportBar({ playing, track, query, scope, theme, connected, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
+  connected: boolean
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onTheme: () => void
@@ -447,6 +514,7 @@ function TransportBar({ playing, track, query, scope, theme, searchRef, onQuery,
         <button className={scope === 'library' ? 'active' : ''} onClick={() => onScope('library')}>Library</button>
         <button className={scope === 'spotify' ? 'active' : ''} onClick={() => onScope('spotify')}>Spotify</button>
       </div>
+      <span className={`connection-dot ${connected ? 'connected' : ''}`} title={connected ? 'Spotify connected' : 'Spotify not connected'} aria-label={connected ? 'Spotify connected' : 'Spotify not connected'} />
       <input ref={searchRef} className="search" type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
       <button className="theme-button" aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`} onClick={onTheme}>{theme === 'system' ? '🖥' : theme === 'dark' ? '☾' : '☀'}</button>
     </div>
@@ -542,6 +610,24 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, 
   </div>
 }
 
+function SpotifySearch({ searching, results, onArtist, onAdd }: {
+  searching: boolean
+  results: SpotifyResults | null
+  onArtist: (artist: string) => void
+  onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
+}) {
+  const [adding, setAdding] = useState<string>()
+  const add = (album: SpotifyResults['albums'][number]) => {
+    setAdding(album.uri)
+    void onAdd(album).finally(() => setAdding(undefined))
+  }
+  if (searching) return <div className="spotify-stub">Searching Spotify…</div>
+  return <div className="spotify-results">
+    <section><h2>Artists</h2>{results?.artists.map((artist) => <button className="spotify-row" key={artist.uri} onClick={() => onArtist(artist.name)}><span>{artist.name}</span><span>View albums ›</span></button>)}{!results?.artists.length && <p>No artists found.</p>}</section>
+    <section><h2>Albums</h2>{results?.albums.map((album) => <div className="spotify-row" key={album.uri}><span><strong>{album.name}</strong><small>{album.artist}{album.trackCount ? ` · ${album.trackCount} tracks` : ''}</small></span><button disabled={adding === album.uri} onClick={() => add(album)}>{adding === album.uri ? 'Adding…' : '+ Add'}</button></div>)}{!results?.albums.length && <p>No albums found.</p>}</section>
+  </div>
+}
+
 function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
   const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat })
   const [rating, setRating] = useState(track.rating)
@@ -580,8 +666,9 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
   </div>
 }
 
-function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (autoAdd: boolean) => void }) {
+function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (autoAdd: boolean, clientId: string) => void }) {
   const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
+  const [clientId, setClientId] = useState(settings.spotifyClientId)
   const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => { dialog.current?.focus() }, [])
   return <div className="modal-backdrop" role="presentation">
@@ -589,20 +676,21 @@ function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCan
       <h2 id="preferences-title">Preferences</h2>
       <fieldset>
         <legend>Library</legend>
+        <label>Spotify Client ID<input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
         <label className="checkbox"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} />Automatically add my entire Spotify library</label>
         <p>Takes effect when Spotify is connected.</p>
       </fieldset>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd)}>Save</button></div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd, clientId.trim())}>Save</button></div>
     </div>
   </div>
 }
 
-function StatusBar({ view, unit }: { view: BrowseView | null; unit: string }) {
+function StatusBar({ view, unit, syncPhase }: { view: BrowseView | null; unit: string; syncPhase?: string }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
-  return <footer className="status-bar"><button aria-label="Add">+</button><span>{count} {count === 1 ? unit : `${unit}s`}, {hours}:{String(minutes).padStart(2, '0')} hours</span><span>{view?.counts.overlayEdits ?? 0} overlay edits</span></footer>
+  return <footer className="status-bar"><button aria-label="Add">+</button><span>{syncPhase ?? `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`}</span><span>{view?.counts.overlayEdits ?? 0} overlay edits</span></footer>
 }
 
 export default App

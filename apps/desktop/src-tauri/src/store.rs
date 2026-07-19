@@ -75,6 +75,10 @@ pub struct Settings {
     pub zebra: bool,
     pub column_order: Vec<String>,
     pub auto_add_spotify_library: bool,
+    #[serde(default)]
+    pub spotify_client_id: String,
+    #[serde(default)]
+    pub spotify_sync_completed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -95,6 +99,8 @@ impl Default for Settings {
                 .map(String::from)
                 .to_vec(),
             auto_add_spotify_library: false,
+            spotify_client_id: String::new(),
+            spotify_sync_completed: false,
         }
     }
 }
@@ -233,6 +239,8 @@ mod tests {
                 .map(String::from)
                 .to_vec(),
             auto_add_spotify_library: true,
+            spotify_client_id: "client-id".into(),
+            spotify_sync_completed: true,
         };
 
         assert!(store.load().unwrap().is_none());

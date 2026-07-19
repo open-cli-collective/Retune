@@ -1,8 +1,16 @@
 mod fixture;
+mod provider;
 mod store;
+mod sync;
 
-use std::{collections::BTreeSet, fs, sync::Mutex};
+use std::{
+    collections::BTreeSet,
+    fs,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
+use provider::{MediaProvider, SearchResults};
 use retune_core::{
     browse::{self, Selection},
     io::{export_json, export_json_gz, import},
@@ -10,12 +18,20 @@ use retune_core::{
         AlbumKey, EffectiveRating, Library, Rating, SourceId, TrackEdit, TrackId, TrackRecord,
     },
 };
+use retune_spotify::{
+    auth::{self, LoopbackListener, Pkce},
+    client::{HttpTransport, SpotifyClient},
+    tokens::{KeychainTokenStore, TokenStore, Tokens},
+};
 use serde::{Deserialize, Serialize};
 use store::{FsOverlayStore, FsSettingsStore, OverlayStore, Settings, StoreError, Theme};
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Emitter, Manager,
 };
+use tauri_plugin_opener::OpenerExt;
+
+type SpotifyProvider = SpotifyClient<HttpTransport, KeychainTokenStore>;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 struct AppState {
@@ -25,6 +41,8 @@ struct AppState {
     settings_store: FsSettingsStore,
     menu_checks: MenuChecks,
     recovery_notice: Mutex<Option<String>>,
+    spotify: Mutex<Option<Arc<SpotifyProvider>>>,
+    syncing: tokio::sync::Mutex<()>,
 }
 
 struct MenuChecks {
@@ -32,6 +50,9 @@ struct MenuChecks {
     light: CheckMenuItem<tauri::Wry>,
     dark: CheckMenuItem<tauri::Wry>,
     system: CheckMenuItem<tauri::Wry>,
+    account_status: tauri::menu::MenuItem<tauri::Wry>,
+    connect: tauri::menu::MenuItem<tauri::Wry>,
+    disconnect: tauri::menu::MenuItem<tauri::Wry>,
 }
 
 impl MenuChecks {
@@ -41,6 +62,21 @@ impl MenuChecks {
         self.dark.set_checked(settings.theme == Theme::Dark)?;
         self.system.set_checked(settings.theme == Theme::System)
     }
+
+    fn sync_connection(&self, connected: bool) -> tauri::Result<()> {
+        self.account_status.set_text(if connected {
+            "Connected"
+        } else {
+            "Not connected"
+        })?;
+        self.connect.set_enabled(!connected)?;
+        self.disconnect.set_enabled(connected)
+    }
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct ConnectionState {
+    connected: bool,
 }
 
 #[derive(Deserialize)]
@@ -406,7 +442,11 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-fn set_settings(state: tauri::State<'_, AppState>, settings: Settings) -> Result<(), String> {
+fn set_settings(state: tauri::State<'_, AppState>, mut settings: Settings) -> Result<(), String> {
+    let current = state.settings.lock().expect("settings mutex poisoned");
+    let client_id_changed = current.spotify_client_id != settings.spotify_client_id;
+    settings.spotify_sync_completed = current.spotify_sync_completed;
+    drop(current);
     state
         .settings_store
         .save(&settings)
@@ -416,7 +456,240 @@ fn set_settings(state: tauri::State<'_, AppState>, settings: Settings) -> Result
         .menu_checks
         .sync(&settings)
         .map_err(|error| error.to_string())?;
+    if client_id_changed {
+        *state.spotify.lock().expect("spotify mutex poisoned") =
+            spotify_provider(&settings.spotify_client_id)?;
+    }
     Ok(())
+}
+
+fn spotify_provider(client_id: &str) -> Result<Option<Arc<SpotifyProvider>>, String> {
+    if client_id.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(SpotifyClient::new(
+        client_id.trim(),
+        HttpTransport::new(),
+        KeychainTokenStore::new().map_err(|error| error.to_string())?,
+    ))))
+}
+
+fn stored_connection_state() -> Result<ConnectionState, String> {
+    Ok(ConnectionState {
+        connected: KeychainTokenStore::new()
+            .and_then(|store| store.load())
+            .map_err(|error| error.to_string())?
+            .is_some(),
+    })
+}
+
+#[tauri::command]
+fn connection_state() -> Result<ConnectionState, String> {
+    stored_connection_state()
+}
+
+fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
+    let connection = stored_connection_state()?;
+    app.state::<AppState>()
+        .menu_checks
+        .sync_connection(connection.connected)
+        .map_err(|error| error.to_string())?;
+    app.emit("connection-changed", connection)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
+    let client_id = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .spotify_client_id
+        .trim()
+        .to_owned();
+    if client_id.is_empty() {
+        return Err("Spotify Client ID is missing. Add it in Preferences, then try again.".into());
+    }
+
+    let listener = LoopbackListener::bind().map_err(|error| error.to_string())?;
+    let redirect_uri = listener.redirect_uri().map_err(|error| error.to_string())?;
+    let state = auth::random_state();
+    let pkce = Pkce::generate();
+    let url = auth::authorize_url(&client_id, &redirect_uri, &state, &pkce.challenge)
+        .map_err(|error| error.to_string())?;
+    app.opener()
+        .open_url(url.to_string(), None::<String>)
+        .map_err(|error| error.to_string())?;
+    let callback = tauri::async_runtime::spawn_blocking(move || {
+        listener.accept(&state, Duration::from_secs(180))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    let token = auth::exchange_code(
+        &reqwest::Client::new(),
+        &client_id,
+        &callback.code,
+        &redirect_uri,
+        &pkce.verifier,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let refresh = token
+        .refresh_token
+        .ok_or_else(|| "Spotify did not return a refresh token".to_string())?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    KeychainTokenStore::new()
+        .and_then(|store| {
+            store.save(&Tokens {
+                access: token.access_token,
+                refresh,
+                expires_at: now.saturating_add(token.expires_in),
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    *app.state::<AppState>()
+        .spotify
+        .lock()
+        .expect("spotify mutex poisoned") = spotify_provider(&client_id)?;
+    emit_connection_state(&app)?;
+    sync_spotify(&app).await
+}
+
+#[tauri::command]
+fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
+    KeychainTokenStore::new()
+        .and_then(|store| store.clear())
+        .map_err(|error| error.to_string())?;
+    emit_connection_state(&app)
+}
+
+fn provider_from(state: &AppState) -> Result<Arc<SpotifyProvider>, String> {
+    state
+        .spotify
+        .lock()
+        .expect("spotify mutex poisoned")
+        .clone()
+        .ok_or_else(|| {
+            "Spotify Client ID is missing. Add it in Preferences, then try again.".into()
+        })
+}
+
+async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
+    let result = sync_spotify_inner(app).await;
+    let _ = app.emit("sync-progress", "");
+    result
+}
+
+async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _sync = state.syncing.lock().await;
+    if !stored_connection_state()?.connected {
+        return Err("Connect to Spotify before syncing.".into());
+    }
+    let client_id = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .spotify_client_id
+        .clone();
+    let provider = spotify_provider(&client_id)?.ok_or_else(|| {
+        "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
+    })?;
+    *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
+    let incoming = sync::snapshot(provider.as_ref(), |phase| {
+        let _ = app.emit("sync-progress", phase);
+    })
+    .await?;
+    app.emit("sync-progress", "Saving library…")
+        .map_err(|error| error.to_string())?;
+    let first_sync = !state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .spotify_sync_completed;
+    {
+        let mut library = state.library.lock().expect("library mutex poisoned");
+        sync::apply(&mut library, &state.store, first_sync, incoming)?;
+    }
+    if first_sync {
+        let mut settings = state.settings.lock().expect("settings mutex poisoned");
+        settings.spotify_sync_completed = true;
+        state
+            .settings_store
+            .save(&settings)
+            .map_err(|error| error.to_string())?;
+    }
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+fn initial_library(debug: bool) -> Library {
+    if debug {
+        fixture::library()
+    } else {
+        Library::new()
+    }
+}
+
+#[tauri::command]
+async fn sync_from_spotify(app: tauri::AppHandle) -> Result<(), String> {
+    sync_spotify(&app).await
+}
+
+#[tauri::command]
+async fn spotify_search(
+    state: tauri::State<'_, AppState>,
+    query: String,
+) -> Result<SearchResults, String> {
+    if query.trim().is_empty() {
+        return Ok(SearchResults {
+            artists: vec![],
+            albums: vec![],
+        });
+    }
+    if !stored_connection_state()?.connected {
+        return Err("Connect to Spotify to search.".into());
+    }
+    let provider = provider_from(&state)?;
+    MediaProvider::search(provider.as_ref(), query.trim()).await
+}
+
+#[tauri::command]
+async fn add_spotify_album(
+    app: tauri::AppHandle,
+    uri: String,
+    name: String,
+    artist: String,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let provider = provider_from(&state)?;
+    let mut tracks = MediaProvider::album_tracks(provider.as_ref(), &uri).await?;
+    for track in &mut tracks {
+        if track.alb.is_empty() {
+            track.alb.clone_from(&name);
+        }
+        if track.art.is_empty() {
+            track.art.clone_from(&artist);
+        }
+    }
+    let uris = tracks
+        .iter()
+        .map(|track| track.uri.clone())
+        .collect::<Vec<_>>();
+    provider.save_to_spotify(&uris).await?;
+    mutate_library(&state, |library| {
+        for track in tracks {
+            library.add(track);
+        }
+        Ok(())
+    })?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
 }
 
 fn mutate_library<T>(
@@ -446,11 +719,22 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let file = SubmenuBuilder::new(app, "File")
         .item(&get_info)
         .separator()
+        .text("sync_spotify", "Sync from Spotify")
+        .separator()
         .text("backup_library", "Back Up Library…")
         .text("export_library", "Export Library…")
         .separator()
         .text("restore_library", "Restore Library…")
         .text("merge_library", "Merge Library…")
+        .build()?;
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
         .build()?;
     let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In")
         .accelerator("CmdOrCtrl+=")
@@ -488,8 +772,21 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         .text("previous", "Previous")
         .text("next", "Next")
         .build()?;
+    let connect = MenuItemBuilder::with_id("connect_spotify", "Connect to Spotify…").build(app)?;
+    let disconnect = MenuItemBuilder::with_id("disconnect_spotify", "Disconnect").build(app)?;
+    let account_status = MenuItemBuilder::with_id("spotify_status", "Not connected")
+        .enabled(false)
+        .build(app)?;
+    let account = SubmenuBuilder::new(app, "Account")
+        .items(&[&connect, &disconnect])
+        .separator()
+        .item(&account_status)
+        .build()?;
+    let help = SubmenuBuilder::new(app, "Help")
+        .text("about_retune", "About Retune")
+        .build()?;
     let menu = MenuBuilder::new(app)
-        .items(&[&app_menu, &file, &view, &controls])
+        .items(&[&app_menu, &file, &edit, &view, &controls, &account, &help])
         .build()?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
@@ -500,6 +797,36 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "export_library" => export_library(app, true),
         "restore_library" => import_library(app, true),
         "merge_library" => import_library(app, false),
+        "sync_spotify" => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = sync_spotify(&handle).await {
+                    notify_error(&handle, error);
+                }
+            });
+        }
+        "connect_spotify" => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = connect_spotify(handle.clone()).await {
+                    notify_error(&handle, error);
+                }
+            });
+        }
+        "disconnect_spotify" => {
+            if let Err(error) = disconnect_spotify(app.clone()) {
+                notify_error(app, error);
+            }
+        }
+        "about_retune" => {
+            app.dialog()
+                .message(format!(
+                    "Retune {}\n\nOverlay edits stay local",
+                    app.package_info().version
+                ))
+                .title("About Retune")
+                .show(|_| {});
+        }
         "preferences" => {
             let _ = app.emit("open-preferences", ());
         }
@@ -517,6 +844,9 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         light,
         dark,
         system,
+        account_status,
+        connect,
+        disconnect,
     })
 }
 
@@ -610,6 +940,7 @@ fn notify_error(app: &tauri::AppHandle, error: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             browse,
             click_track_star,
@@ -618,7 +949,13 @@ pub fn run() {
             edit_track,
             startup_notice,
             get_settings,
-            set_settings
+            set_settings,
+            connection_state,
+            connect_spotify,
+            disconnect_spotify,
+            sync_from_spotify,
+            spotify_search,
+            add_spotify_album
         ])
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
@@ -626,7 +963,7 @@ pub fn run() {
             let (library, recovery_notice) = match store.load() {
                 Ok(Some(library)) => (library, None),
                 Ok(None) => {
-                    let library = fixture::library();
+                    let library = initial_library(cfg!(debug_assertions));
                     store.save(&library)?;
                     (library, None)
                 }
@@ -648,6 +985,11 @@ pub fn run() {
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
+            let connected = stored_connection_state().map_err(std::io::Error::other)?.connected;
+            menu_checks.sync_connection(connected)?;
+            let spotify = spotify_provider(&settings.spotify_client_id)
+                .map_err(std::io::Error::other)?;
+            let startup_sync = connected && settings.auto_add_spotify_library;
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -655,7 +997,17 @@ pub fn run() {
                 settings_store,
                 menu_checks,
                 recovery_notice: Mutex::new(recovery_notice),
+                spotify: Mutex::new(spotify),
+                syncing: tokio::sync::Mutex::new(()),
             });
+            if startup_sync {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = sync_spotify(&handle).await {
+                        notify_error(&handle, error);
+                    }
+                });
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -672,6 +1024,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_first_run_starts_empty() {
+        assert!(initial_library(false).tracks().is_empty());
+        assert!(!initial_library(true).tracks().is_empty());
+    }
 
     #[test]
     fn fixture_counts_cover_visible_tracks_and_global_overlay_edits() {
