@@ -1084,6 +1084,12 @@ pub fn run() {
             player_set_volume
         ])
         .setup(|app| {
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .max_file_size(5_000_000)
+                    .build(),
+            )?;
             let app_data_dir = app.path().app_data_dir()?;
             let store = FsOverlayStore::new(&app_data_dir);
             let (library, recovery_notice) = match store.load() {
@@ -1114,9 +1120,16 @@ pub fn run() {
             let token_store = Arc::new(CachedTokenStore::new(
                 KeychainTokenStore::new().map_err(std::io::Error::other)?,
             ));
-            let connected = stored_connection_state(&token_store)
-                .map_err(std::io::Error::other)?
-                .connected;
+            // Keychain access can fail transiently (e.g. "In dark wake, no UI
+            // possible" while the display sleeps); start disconnected rather
+            // than abort — the cache retries the Keychain on the next access.
+            let connected = match stored_connection_state(&token_store) {
+                Ok(state) => state.connected,
+                Err(error) => {
+                    log::warn!("Token store unavailable at startup: {error}");
+                    false
+                }
+            };
             menu_checks.sync_connection(connected)?;
             let spotify = spotify_provider(&settings.spotify_client_id, Arc::clone(&token_store))
                 .map_err(std::io::Error::other)?;
@@ -1133,12 +1146,6 @@ pub fn run() {
                 playback: Arc::new(Playback::default()),
                 syncing: tokio::sync::Mutex::new(()),
             });
-            app.handle().plugin(
-                tauri_plugin_log::Builder::default()
-                    .level(log::LevelFilter::Info)
-                    .max_file_size(5_000_000)
-                    .build(),
-            )?;
             if startup_sync {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
