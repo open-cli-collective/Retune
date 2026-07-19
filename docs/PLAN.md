@@ -98,7 +98,10 @@ struct AlbumKey { source: SourceId, art: String, alb: String }
 - **Serialization**: versioned JSON envelope (`{"version":1, ...}`), serde. A
   `migrate(json) -> Library` entry point runs version upgrades; a fixture test pins
   that v1 files always load. Export `.json` / `.json.gz` (flate2); import sniffs gzip
-  magic bytes. **Restore** replaces; **Merge** is additive, dedupe by `uri` (existing
+  magic bytes. **Import validates `Library` invariants** — duplicate track ids or
+  URIs are rejected as invalid (our own exports never produce them, so they mean
+  corruption), and `next_id` is always recomputed above the max seen id so a stale
+  value can never mint colliding ids. **Restore** replaces; **Merge** is additive, dedupe by `uri` (existing
   record wins, keeps its overlay edits). Corrupt file on startup → rename aside as
   `.corrupt-<ts>`, start empty, surface a notice — never silently overwrite.
 
@@ -151,6 +154,9 @@ struct AlbumKey { source: SourceId, art: String, alb: String }
   context. A ~1-poll seam at track boundaries is accepted. Phase-5 checks include a
   natural-completion run and an external-takeover run. Target device = the user's
   logged-in desktop client.
+- **Album artwork** is provider metadata, not overlay identity: the application
+  layer's track/album DTOs carry an artwork URL (with a small on-disk cache later
+  if needed); it never enters `retune-core` records.
 - No play counts (spec: cut).
 
 ## Phases — each ends with a concrete check
