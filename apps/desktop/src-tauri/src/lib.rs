@@ -9,9 +9,9 @@ use retune_core::{
     model::{AlbumKey, EffectiveRating, Library, Rating, SourceId, TrackEdit, TrackId},
 };
 use serde::{Deserialize, Serialize};
-use store::{FsOverlayStore, OverlayStore, StoreError};
+use store::{FsOverlayStore, FsSettingsStore, OverlayStore, Settings, StoreError, Theme};
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Emitter, Manager,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
@@ -19,7 +19,26 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 struct AppState {
     library: Mutex<Library>,
     store: FsOverlayStore,
+    settings: Mutex<Settings>,
+    settings_store: FsSettingsStore,
+    menu_checks: MenuChecks,
     recovery_notice: Mutex<Option<String>>,
+}
+
+struct MenuChecks {
+    zebra: CheckMenuItem<tauri::Wry>,
+    light: CheckMenuItem<tauri::Wry>,
+    dark: CheckMenuItem<tauri::Wry>,
+    system: CheckMenuItem<tauri::Wry>,
+}
+
+impl MenuChecks {
+    fn sync(&self, settings: &Settings) -> tauri::Result<()> {
+        self.zebra.set_checked(settings.zebra)?;
+        self.light.set_checked(settings.theme == Theme::Light)?;
+        self.dark.set_checked(settings.theme == Theme::Dark)?;
+        self.system.set_checked(settings.theme == Theme::System)
+    }
 }
 
 #[derive(Deserialize)]
@@ -333,6 +352,29 @@ fn startup_notice(state: tauri::State<'_, AppState>) -> Option<String> {
         .take()
 }
 
+#[tauri::command]
+fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
+    state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone()
+}
+
+#[tauri::command]
+fn set_settings(state: tauri::State<'_, AppState>, settings: Settings) -> Result<(), String> {
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    state
+        .menu_checks
+        .sync(&settings)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn mutate_library<T>(
     state: &AppState,
     mutation: impl FnOnce(&mut Library) -> Result<T, String>,
@@ -345,7 +387,15 @@ fn mutate_library<T>(
     Ok(value)
 }
 
-fn install_file_menu(app: &tauri::App) -> tauri::Result<()> {
+fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<MenuChecks> {
+    let preferences = MenuItemBuilder::with_id("preferences", "Preferences…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+    let app_menu = SubmenuBuilder::new(app, "Retune")
+        .item(&preferences)
+        .separator()
+        .quit()
+        .build()?;
     let get_info = MenuItemBuilder::with_id("get_info", "Get Info")
         .accelerator("CmdOrCtrl+I")
         .build(app)?;
@@ -358,7 +408,45 @@ fn install_file_menu(app: &tauri::App) -> tauri::Result<()> {
         .text("restore_library", "Restore Library…")
         .text("merge_library", "Merge Library…")
         .build()?;
-    let menu = MenuBuilder::new(app).item(&file).build()?;
+    let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In")
+        .accelerator("CmdOrCtrl+=")
+        .build(app)?;
+    let zoom_out = MenuItemBuilder::with_id("zoom_out", "Zoom Out")
+        .accelerator("CmdOrCtrl+-")
+        .build(app)?;
+    let actual_size = MenuItemBuilder::with_id("actual_size", "Actual Size")
+        .accelerator("CmdOrCtrl+0")
+        .build(app)?;
+    let zebra = CheckMenuItemBuilder::with_id("toggle_zebra", "Toggle Zebra Striping")
+        .checked(settings.zebra)
+        .build(app)?;
+    let light = CheckMenuItemBuilder::with_id("theme_light", "Light")
+        .checked(settings.theme == Theme::Light)
+        .build(app)?;
+    let dark = CheckMenuItemBuilder::with_id("theme_dark", "Dark")
+        .checked(settings.theme == Theme::Dark)
+        .build(app)?;
+    let system = CheckMenuItemBuilder::with_id("theme_system", "System")
+        .checked(settings.theme == Theme::System)
+        .build(app)?;
+    let theme = SubmenuBuilder::new(app, "Theme")
+        .items(&[&light, &dark, &system])
+        .build()?;
+    let view = SubmenuBuilder::new(app, "View")
+        .items(&[&zoom_in, &zoom_out, &actual_size])
+        .separator()
+        .item(&zebra)
+        .separator()
+        .item(&theme)
+        .build()?;
+    let controls = SubmenuBuilder::new(app, "Controls")
+        .text("play_pause", "Play/Pause\tSpace")
+        .text("previous", "Previous")
+        .text("next", "Next")
+        .build()?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&app_menu, &file, &view, &controls])
+        .build()?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
         "get_info" => {
@@ -368,9 +456,24 @@ fn install_file_menu(app: &tauri::App) -> tauri::Result<()> {
         "export_library" => export_library(app, true),
         "restore_library" => import_library(app, true),
         "merge_library" => import_library(app, false),
+        "preferences" => {
+            let _ = app.emit("open-preferences", ());
+        }
+        "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "theme_light" | "theme_dark"
+        | "theme_system" => {
+            let _ = app.emit("view-action", event.id().as_ref());
+        }
+        "play_pause" | "previous" | "next" => {
+            let _ = app.emit("player-action", event.id().as_ref());
+        }
         _ => {}
     });
-    Ok(())
+    Ok(MenuChecks {
+        zebra,
+        light,
+        dark,
+        system,
+    })
 }
 
 fn export_library(app: &tauri::AppHandle, compressed: bool) {
@@ -469,10 +572,13 @@ pub fn run() {
             set_album_rating,
             get_track,
             edit_track,
-            startup_notice
+            startup_notice,
+            get_settings,
+            set_settings
         ])
         .setup(|app| {
-            let store = FsOverlayStore::new(app.path().app_data_dir()?);
+            let app_data_dir = app.path().app_data_dir()?;
+            let store = FsOverlayStore::new(&app_data_dir);
             let (library, recovery_notice) = match store.load() {
                 Ok(Some(library)) => (library, None),
                 Ok(None) => {
@@ -494,12 +600,18 @@ pub fn run() {
                 }
                 Err(error) => return Err(error.into()),
             };
+            let settings_store = FsSettingsStore::new(&app_data_dir);
+            let settings = settings_store.load()?.unwrap_or_default();
+            settings_store.save(&settings)?;
+            let menu_checks = install_file_menu(app, &settings)?;
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
+                settings: Mutex::new(settings),
+                settings_store,
+                menu_checks,
                 recovery_notice: Mutex::new(recovery_notice),
             });
-            install_file_menu(app)?;
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

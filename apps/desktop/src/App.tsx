@@ -1,11 +1,20 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
+type ColumnKey = 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
 type Selection = { cat?: string; art?: string; alb?: string }
+
+type Settings = {
+  theme: Theme
+  zoom: number
+  zebra: boolean
+  columnOrder: ColumnKey[]
+  autoAddSpotifyLibrary: boolean
+}
 
 type Track = {
   id: number
@@ -53,13 +62,15 @@ type State = {
   scope: 'library' | 'spotify'
   selectedTrackId?: number
   playing: { trackId: number; elapsed: number; isPlaying: boolean } | null
-  theme: Theme
+  settings: Settings
+  settingsHydrated: boolean
   systemDark: boolean
   view: BrowseView | null
   revision: number
   error?: string
   notice?: string
   info?: TrackInfo
+  preferences: boolean
 }
 
 type Action =
@@ -74,11 +85,21 @@ type Action =
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
-  | { type: 'theme' }
+  | { type: 'hydrateSettings'; settings: Settings }
+  | { type: 'settings'; settings: Partial<Settings> }
   | { type: 'systemTheme'; dark: boolean }
   | { type: 'refresh' }
   | { type: 'notice'; notice?: string }
   | { type: 'info'; info?: TrackInfo }
+  | { type: 'preferences'; open: boolean }
+
+const defaultSettings: Settings = {
+  theme: 'system',
+  zoom: 1,
+  zebra: true,
+  columnOrder: ['name', 'time', 'artist', 'album', 'genre', 'rating'],
+  autoAddSpotifyLibrary: false,
+}
 
 const initialState: State = {
   source: 'music',
@@ -86,10 +107,12 @@ const initialState: State = {
   query: '',
   scope: 'library',
   playing: null,
-  theme: 'system',
+  settings: defaultSettings,
+  settingsHydrated: false,
   systemDark: false,
   view: null,
   revision: 0,
+  preferences: false,
 }
 
 function reducer(state: State, action: Action): State {
@@ -127,10 +150,10 @@ function reducer(state: State, action: Action): State {
       return state.playing.elapsed + 1 >= action.duration
         ? { ...state, playing: { trackId: action.nextId, elapsed: 0, isPlaying: true } }
         : { ...state, playing: { ...state.playing, elapsed: state.playing.elapsed + 1 } }
-    case 'theme': {
-      const theme = state.theme === 'system' ? 'light' : state.theme === 'light' ? 'dark' : 'system'
-      return { ...state, theme }
-    }
+    case 'hydrateSettings':
+      return { ...state, settings: action.settings, settingsHydrated: true }
+    case 'settings':
+      return { ...state, settings: { ...state.settings, ...action.settings } }
     case 'systemTheme':
       return { ...state, systemDark: action.dark }
     case 'refresh':
@@ -138,7 +161,9 @@ function reducer(state: State, action: Action): State {
     case 'notice':
       return { ...state, notice: action.notice }
     case 'info':
-      return { ...state, info: action.info }
+      return { ...state, info: action.info, preferences: false }
+    case 'preferences':
+      return { ...state, preferences: action.open, info: undefined }
   }
 }
 
@@ -159,6 +184,7 @@ function formatTime(seconds: number) {
 
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
+  const search = useRef<HTMLInputElement>(null)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
   const openInfo = (id?: number) => {
@@ -180,10 +206,19 @@ function App() {
   }, [state.source, state.sel, state.query, state.scope, state.revision])
 
   useEffect(() => {
+    invoke<Settings>('get_settings')
+      .then((settings) => dispatch({ type: 'hydrateSettings', settings }))
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
     invoke<string | null>('startup_notice')
       .then((notice) => dispatch({ type: 'notice', notice: notice ?? undefined }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [])
+
+  useEffect(() => {
+    if (!state.settingsHydrated) return
+    invoke('set_settings', { settings: state.settings })
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }, [state.settings, state.settingsHydrated])
 
   useEffect(() => {
     const unlisten = listen('get-info', () => openInfo(state.selectedTrackId))
@@ -208,10 +243,10 @@ function App() {
   }, [])
 
   useEffect(() => {
-    document.documentElement.dataset.theme = state.theme === 'system'
+    document.documentElement.dataset.theme = state.settings.theme === 'system'
       ? state.systemDark ? 'dark' : 'light'
-      : state.theme
-  }, [state.theme, state.systemDark])
+      : state.settings.theme
+  }, [state.settings.theme, state.systemDark])
 
   useEffect(() => {
     if (!state.playing?.isPlaying) return
@@ -230,28 +265,107 @@ function App() {
       .then(() => dispatch({ type: 'refresh' }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }
-  const step = (direction: number) => {
+  const step = useCallback((direction: number) => {
     if (!tracks.length) return
     const index = tracks.findIndex((track) => track.id === state.playing?.trackId)
     const next = tracks[(index < 0 ? 0 : index + direction + tracks.length) % tracks.length]
     dispatch({ type: 'step', id: next.id })
-  }
+  }, [state.playing?.trackId, tracks])
+  const setZoom = (zoom: number) => dispatch({
+    type: 'settings',
+    settings: { zoom: Math.min(1.8, Math.max(0.7, Math.round(zoom * 10) / 10)) },
+  })
+  const cycleTheme = () => dispatch({
+    type: 'settings',
+    settings: { theme: state.settings.theme === 'system' ? 'light' : state.settings.theme === 'light' ? 'dark' : 'system' },
+  })
   const playingTrack = tracks.find((track) => track.id === state.playing?.trackId)
 
+  useEffect(() => {
+    const viewActions = listen<string>('view-action', ({ payload }) => {
+      if (payload === 'zoom_in') setZoom(state.settings.zoom + 0.1)
+      else if (payload === 'zoom_out') setZoom(state.settings.zoom - 0.1)
+      else if (payload === 'actual_size') setZoom(1)
+      else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
+      else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
+    })
+    const playerActions = listen<string>('player-action', ({ payload }) => {
+      if (payload === 'play_pause') dispatch({ type: 'togglePlay' })
+      else step(payload === 'previous' ? -1 : 1)
+    })
+    const preferences = listen('open-preferences', () => dispatch({ type: 'preferences', open: true }))
+    return () => {
+      void viewActions.then((stop) => stop())
+      void playerActions.then((stop) => stop())
+      void preferences.then((stop) => stop())
+    }
+  }, [state.settings, step])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modalOpen = Boolean(state.info || state.preferences)
+      if (event.key === 'Escape' && modalOpen) {
+        event.preventDefault()
+        if (state.info) dispatch({ type: 'info' })
+        else dispatch({ type: 'preferences', open: false })
+        return
+      }
+      const target = event.target as HTMLElement | null
+      if (modalOpen || target?.closest('input, textarea, select')) return
+      const command = event.metaKey || event.ctrlKey
+      if (command && ['=', '+', '-', '0'].includes(event.key)) {
+        event.preventDefault()
+        setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
+      } else if (command && event.key.toLowerCase() === 'i') {
+        event.preventDefault()
+        openInfo(state.selectedTrackId)
+      } else if (command && event.key.toLowerCase() === 'l') {
+        event.preventDefault()
+        dispatch({ type: 'scope', scope: 'library' })
+        window.requestAnimationFrame(() => search.current?.focus())
+      } else if (command && event.key === ',') {
+        event.preventDefault()
+        dispatch({ type: 'preferences', open: true })
+      } else if (!command && event.key === ' ') {
+        event.preventDefault()
+        dispatch({ type: 'togglePlay' })
+      } else if (!command && event.key === 'ArrowLeft') {
+        event.preventDefault()
+        step(-1)
+      } else if (!command && event.key === 'ArrowRight') {
+        event.preventDefault()
+        step(1)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [state.info, state.preferences, state.selectedTrackId, state.settings.zoom, step])
+
+  useEffect(() => {
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences) return
+      event.preventDefault()
+      setZoom(state.settings.zoom + (event.deltaY < 0 ? 0.1 : -0.1))
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => window.removeEventListener('wheel', onWheel)
+  }, [state.info, state.preferences, state.settings.zoom])
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: state.settings.zoom }}>
       <TransportBar
         playing={state.playing}
         track={playingTrack}
         query={state.query}
         scope={state.scope}
-        theme={state.theme}
+        theme={state.settings.theme}
+        searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
         onScope={(scope) => dispatch({ type: 'scope', scope })}
         onPlay={() => dispatch({ type: 'togglePlay' })}
         onPrev={() => step(-1)}
         onNext={() => step(1)}
-        onTheme={() => dispatch({ type: 'theme' })}
+        onTheme={cycleTheme}
       />
       <div className="body-grid">
         <Sidebar state={state} onSource={(source) => dispatch({ type: 'source', source })} />
@@ -278,10 +392,12 @@ function App() {
               label={labels[state.source]}
               selectedId={state.selectedTrackId}
               playing={state.playing}
+              columnOrder={state.settings.columnOrder}
               onSelect={(id) => dispatch({ type: 'selectTrack', id })}
               onPlay={(id) => dispatch({ type: 'play', id })}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
               onInfo={openInfo}
+              onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
             />
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
@@ -292,12 +408,17 @@ function App() {
         dispatch({ type: 'info' })
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
+      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(autoAddSpotifyLibrary) => {
+        dispatch({ type: 'settings', settings: { autoAddSpotifyLibrary } })
+        dispatch({ type: 'preferences', open: false })
+      }} />}
     </main>
   )
 }
 
-function TransportBar({ playing, track, query, scope, theme, onQuery, onScope, onPlay, onPrev, onNext, onTheme }: {
+function TransportBar({ playing, track, query, scope, theme, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
+  searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onTheme: () => void
 }) {
@@ -319,7 +440,7 @@ function TransportBar({ playing, track, query, scope, theme, onQuery, onScope, o
         <button className={scope === 'library' ? 'active' : ''} onClick={() => onScope('library')}>Library</button>
         <button className={scope === 'spotify' ? 'active' : ''} onClick={() => onScope('spotify')}>Spotify</button>
       </div>
-      <input className="search" type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
+      <input ref={searchRef} className="search" type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
       <button className="theme-button" aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`} onClick={onTheme}>{theme === 'system' ? '🖥' : theme === 'dark' ? '☾' : '☀'}</button>
     </div>
   </header>
@@ -367,19 +488,47 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /><span>· applies to all tracks unless individually overridden</span></div>
 }
 
-function TrackList({ tracks, label, selectedId, playing, onSelect, onPlay, onRate, onInfo }: {
+function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, onPlay, onRate, onInfo, onReorder }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedId?: number; playing: State['playing']
-  onSelect: (id: number) => void; onPlay: (id: number) => void; onRate: (id: number, stars: number) => void; onInfo: (id: number) => void
+  columnOrder: ColumnKey[]; onSelect: (id: number) => void; onPlay: (id: number) => void
+  onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
 }) {
+  const [dragging, setDragging] = useState<ColumnKey>()
+  const headings: Record<ColumnKey, string> = {
+    name: label.item[0].toUpperCase() + label.item.slice(1),
+    time: 'Time',
+    artist: label.facets[1],
+    album: label.facets[2],
+    genre: label.facets[0],
+    rating: 'Rating',
+  }
+  const widths: Record<ColumnKey, string> = { name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px' }
+  const columns = `22px ${columnOrder.map((column) => widths[column]).join(' ')}`
+  const drop = (target: ColumnKey) => {
+    if (!dragging || dragging === target) return
+    const next = columnOrder.filter((column) => column !== dragging)
+    next.splice(next.indexOf(target), 0, dragging)
+    onReorder(next)
+  }
+  const cell = (track: Track, column: ColumnKey) => {
+    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.name}{selectedId === track.id && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
+    if (column === 'time') return <span key={column}>{formatTime(track.durationSecs)}</span>
+    if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
+    if (column === 'album') return <span key={column} title={track.alb}>{track.alb}</span>
+    if (column === 'genre') return <span key={column} title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
+    return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
+  }
   return <div className="track-list">
-    <div className="track-row track-header"><span /><span>{label.item[0].toUpperCase() + label.item.slice(1)}</span><span>Time</span><span>{label.facets[1]}</span><span>{label.facets[2]}</span><span>{label.facets[0]}</span><span>Rating</span></div>
+    <div className="track-row track-header" style={{ gridTemplateColumns: columns }}><span />{columnOrder.map((column) => <span key={column} draggable className={dragging === column ? 'dragging' : ''} onDragStart={(event) => {
+      setDragging(column)
+      event.dataTransfer.effectAllowed = 'move'
+    }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}>{headings[column]}</span>)}</div>
     <div className="track-scroll">
       {tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
-        return <div key={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
+        return <div key={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
-          <span className="track-name" title={track.name}>{track.name}{selectedId === track.id && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span><span>{formatTime(track.durationSecs)}</span><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span><span title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
-          <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
+          {columnOrder.map((column) => cell(track, column))}
         </div>
       })}
     </div>
@@ -412,7 +561,7 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, [key]: event.target.value }),
   })
   return <div className="modal-backdrop" role="presentation">
-    <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="get-info-title" tabIndex={-1} ref={dialog} onKeyDown={(event) => { if (event.key === 'Escape') onCancel() }}>
+    <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="get-info-title" tabIndex={-1} ref={dialog}>
       <h2 id="get-info-title">Get Info</h2>
       <label>Spotify ID<input value={track.uri} readOnly /></label>
       <label>Name<input {...field('name')} /></label>
@@ -424,6 +573,23 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
       <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /></div>
       {track.origCat && draft.cat !== track.origCat && <div className="override-banner">Spotify reports this as “{track.origCat}”. Your overlay wins in Retune.</div>}
       <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
+    </div>
+  </div>
+}
+
+function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (autoAdd: boolean) => void }) {
+  const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
+  const dialog = useRef<HTMLDivElement>(null)
+  useEffect(() => { dialog.current?.focus() }, [])
+  return <div className="modal-backdrop" role="presentation">
+    <div className="get-info preferences" role="dialog" aria-modal="true" aria-labelledby="preferences-title" tabIndex={-1} ref={dialog}>
+      <h2 id="preferences-title">Preferences</h2>
+      <fieldset>
+        <legend>Library</legend>
+        <label className="checkbox"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} />Automatically add my entire Spotify library</label>
+        <p>Takes effect when Spotify is connected.</p>
+      </fieldset>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd)}>Save</button></div>
     </div>
   </div>
 }
