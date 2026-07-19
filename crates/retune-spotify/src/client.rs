@@ -324,6 +324,21 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         .await
     }
 
+    pub async fn seek(&self, position_ms: u32, device_id: Option<&str>) -> Result<()> {
+        // Scoped: the Serializer holds a non-Sync dyn Fn and must drop
+        // before the await so command futures stay Send.
+        let query = {
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("position_ms", &position_ms.to_string());
+            if let Some(device_id) = device_id {
+                query.append_pair("device_id", device_id);
+            }
+            query.finish()
+        };
+        self.empty(Method::Put, &format!("/me/player/seek?{query}"), Vec::new())
+            .await
+    }
+
     pub async fn transfer(&self, device_id: &str, play: bool) -> Result<()> {
         self.empty(
             Method::Put,

@@ -187,6 +187,29 @@ impl Playback {
         ))
     }
 
+    pub async fn seek<T: Transport, S: TokenStore>(
+        &self,
+        client: &SpotifyClient<T, S>,
+        seconds: u64,
+    ) -> Result<PlayerStateEvent, String> {
+        let mut state = self.state.lock().await;
+        let context = state.context.as_mut().ok_or("Nothing is playing")?;
+        let seconds = seconds.min(context.snapshot.current().duration_secs);
+        let position_ms = u32::try_from(seconds.saturating_mul(1000))
+            .map_err(|_| "seek position out of range".to_string())?;
+        client
+            .seek(position_ms, Some(&context.device_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        context.previous.elapsed = seconds;
+        Ok(local_event(
+            &context.snapshot,
+            seconds,
+            context.previous.is_playing,
+            context.volume_supported,
+        ))
+    }
+
     pub async fn next<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,

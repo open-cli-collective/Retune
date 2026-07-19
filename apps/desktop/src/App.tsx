@@ -114,6 +114,7 @@ type Action =
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
+  | { type: 'seek'; elapsed: number }
   | { type: 'playerState'; player: PlayerState; queue: readonly Track[] }
   | { type: 'hydrateSettings'; settings: Settings }
   | { type: 'settings'; settings: Partial<Settings> }
@@ -207,6 +208,10 @@ function reducer(state: State, action: Action): State {
             selectedTrackId: action.player.trackId ?? state.selectedTrackId,
             playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue },
           }
+    case 'seek':
+      return state.playing
+        ? { ...state, playing: { ...state.playing, elapsed: action.elapsed } }
+        : state
     case 'hydrateSettings':
       return { ...state, settings: action.settings, settingsHydrated: true }
     case 'settings':
@@ -298,9 +303,17 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
     volumeTimer.current = window.setTimeout(() => run('player_set_volume', { volume }), 150)
   }, [connected, run])
 
+  const seek = useCallback((seconds: number) => {
+    if (connected) {
+      if (playingRef.current && !playingRef.current.external) run('player_seek', { seconds })
+      return
+    }
+    dispatch({ type: 'seek', elapsed: seconds })
+  }, [connected, dispatch, run])
+
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
-  return useMemo(() => ({ start, toggle, step, setVolume }), [setVolume, start, step, toggle])
+  return useMemo(() => ({ start, toggle, step, setVolume, seek }), [seek, setVolume, start, step, toggle])
 }
 
 function App() {
@@ -515,6 +528,7 @@ function App() {
         onPrev={() => player.step(-1)}
         onNext={() => player.step(1)}
         onVolume={player.setVolume}
+        onSeek={player.seek}
         onTheme={cycleTheme}
       />
       <div className="body-grid">
@@ -572,11 +586,11 @@ function App() {
   )
 }
 
-function TransportBar({ playing, track, query, scope, theme, connected, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onTheme }: {
+function TransportBar({ playing, track, query, scope, theme, connected, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
   connected: boolean
   searchRef: React.RefObject<HTMLInputElement | null>
-  onQuery: (query: string) => void; onScope: (scope: State['scope']) => void
+  onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onTheme: () => void
 }) {
   const elapsed = playing?.elapsed ?? 0
@@ -597,7 +611,16 @@ function TransportBar({ playing, track, query, scope, theme, connected, searchRe
     </div>
     <div className="lcd">
       <div className={`lcd-copy ${playing?.external ? 'external' : ''}`}><strong>{shown?.name ?? 'Retune'}</strong><span>{shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'}</span></div>
-      <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress max={duration || 1} value={elapsed} /><time>{shown ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
+      <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress
+        max={duration || 1}
+        value={elapsed}
+        onClick={(event) => {
+          if (!shown || !duration) return
+          const bar = event.currentTarget.getBoundingClientRect()
+          const fraction = Math.min(1, Math.max(0, (event.clientX - bar.left) / bar.width))
+          onSeek(Math.round(fraction * duration))
+        }}
+      /><time>{shown ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
     </div>
     <div className="search-area">
       <div className="scope-pills" aria-label="Search scope">

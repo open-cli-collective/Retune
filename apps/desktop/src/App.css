@@ -26,7 +26,7 @@ button { color: inherit; }
 .lcd-copy.external { color: var(--dim); }
 .progress-row { display: grid; grid-template-columns: 34px 1fr 38px; align-items: center; gap: 5px; color: var(--dim); font-size: 10px; }
 .progress-row time:last-child { text-align: right; }
-.progress-row progress { width: 100%; height: 5px; accent-color: var(--accent); }
+.progress-row progress { width: 100%; height: 5px; accent-color: var(--accent); cursor: pointer; }
 .search-area { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .scope-pills { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--control) 80%, transparent); }
 .scope-pills button { padding: 2px 8px; border-radius: 8px; color: var(--dim); }

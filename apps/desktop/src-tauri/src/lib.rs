@@ -760,6 +760,15 @@ async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn player_seek(app: tauri::AppHandle, seconds: u64) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let event = state.playback.seek(client.as_ref(), seconds).await?;
+    app.emit("player-state", event)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn player_set_volume(state: tauri::State<'_, AppState>, volume: u8) -> Result<(), String> {
     let client = provider_from(&state)?;
     let playback = Arc::clone(&state.playback);
@@ -1041,6 +1050,7 @@ pub fn run() {
             player_toggle,
             player_next,
             player_prev,
+            player_seek,
             player_set_volume
         ])
         .setup(|app| {
