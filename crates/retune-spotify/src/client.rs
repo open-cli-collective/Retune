@@ -615,6 +615,9 @@ pub struct Device {
     #[serde(rename = "type")]
     pub device_type: String,
     pub is_active: bool,
+    #[serde(default)]
+    pub supports_volume: bool,
+    pub volume_percent: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]

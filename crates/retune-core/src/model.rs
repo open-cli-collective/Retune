@@ -291,7 +291,9 @@ impl Library {
                     .ok_or_else(|| format!("track id {} exhausts the id space", track.id.0))
             })
             .try_fold(0u64, |acc, next| next.map(|n| acc.max(n)))?;
-        self.next_id = self.next_id.max(past_max);
+        // Recomputed outright: with no delete API, max(id)+1 is exactly
+        // right, and it neutralizes a hostile stored value like u64::MAX.
+        self.next_id = past_max;
         Ok(())
     }
 

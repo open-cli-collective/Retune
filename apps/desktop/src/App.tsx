@@ -270,12 +270,14 @@ function App() {
       .then(() => dispatch({ type: 'refresh' }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }
+  const playingQueue = state.playing?.queue
+  const playingTrackId = state.playing?.trackId
   const step = useCallback((direction: number) => {
-    if (!state.playing?.queue.length) return
-    const index = state.playing.queue.findIndex((track) => track.id === state.playing?.trackId)
-    const next = state.playing.queue[(index + direction + state.playing.queue.length) % state.playing.queue.length]
+    if (!playingQueue?.length) return
+    const index = playingQueue.findIndex((track) => track.id === playingTrackId)
+    const next = playingQueue[(index + direction + playingQueue.length) % playingQueue.length]
     dispatch({ type: 'step', id: next.id })
-  }, [state.playing])
+  }, [playingQueue, playingTrackId])
   const setZoom = (zoom: number) => dispatch({
     type: 'settings',
     settings: { zoom: Math.min(1.8, Math.max(0.7, Math.round(zoom * 10) / 10)) },

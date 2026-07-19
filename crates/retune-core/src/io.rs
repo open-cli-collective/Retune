@@ -164,6 +164,25 @@ mod tests {
     }
 
     #[test]
+    fn imported_next_id_is_recomputed_from_tracks() {
+        let hostile = format!(
+            r#"{{"version":1,"library":{{"tracks":[{{"id":7,"uri":"a","source":"music","cat":"Rock","art":"A","alb":"B","name":"N","duration":{{"secs":1,"nanos":0}},"rating":null,"orig_cat":null}}],"album_ratings":[],"next_id":{}}}}}"#,
+            u64::MAX
+        );
+        let mut library = import(hostile.as_bytes()).unwrap();
+        let id = library.add(NewTrack {
+            uri: "b".into(),
+            source: SourceId::Music,
+            cat: "Rock".into(),
+            art: "A".into(),
+            alb: "B".into(),
+            name: "M".into(),
+            duration: Duration::from_secs(1),
+        });
+        assert_eq!(id.0, 8);
+    }
+
+    #[test]
     fn future_versions_are_rejected() {
         assert!(matches!(
             import(br#"{"version":999,"library":{}}"#),
