@@ -14,27 +14,38 @@ pub async fn reconcile<P: MediaProvider, S: OverlayStore>(
     store: &S,
     first_sync: bool,
     mut progress: impl FnMut(&str),
-) -> Result<bool, String> {
-    let (incoming, genres_degraded) = snapshot(provider, &mut progress).await?;
-    apply(library, store, first_sync, incoming)?;
-    Ok(genres_degraded)
+) -> Result<(), String> {
+    let outcome = snapshot(provider, &mut progress).await?;
+    apply(library, store, first_sync, outcome.tracks)
+}
+
+pub struct SnapshotOutcome {
+    pub tracks: Vec<retune_core::model::NewTrack>,
+    pub genres_degraded: bool,
+    pub partial: bool,
 }
 
 pub async fn snapshot<P: MediaProvider>(
     provider: &P,
     mut progress: impl FnMut(&str),
-) -> Result<(Vec<retune_core::model::NewTrack>, bool), String> {
+) -> Result<SnapshotOutcome, String> {
     let mut incoming = vec![];
     let mut genres_degraded = false;
+    let mut partial = false;
     for kind in crate::provider::LibraryKind::ALL {
         progress(kind.phase());
         let snapshot = provider.library_snapshot(kind).await?;
         genres_degraded |= snapshot.genres_degraded;
+        partial |= snapshot.partial;
         for batch in snapshot.batches {
             incoming.extend(batch);
         }
     }
-    Ok((incoming, genres_degraded))
+    Ok(SnapshotOutcome {
+        tracks: incoming,
+        genres_degraded,
+        partial,
+    })
 }
 
 pub fn apply<S: OverlayStore>(
@@ -157,6 +168,7 @@ mod tests {
                 ),
             ]),
             genres_degraded: false,
+            partial: false,
         };
         let store = RecordingStore::default();
         let mut phases: Vec<String> = vec![];
@@ -190,6 +202,29 @@ mod tests {
             1
         );
         assert_eq!(library.get(existing).unwrap().name, "Local name");
+    }
+
+    #[tokio::test]
+    async fn partial_snapshot_applies_collected_tracks() {
+        let provider = FakeProvider {
+            snapshots: HashMap::from([(
+                LibraryKind::Tracks,
+                vec![vec![track("spotify:track:partial", "Partial")]],
+            )]),
+            genres_degraded: false,
+            partial: true,
+        };
+        let store = RecordingStore::default();
+        let mut library = Library::new();
+
+        let outcome = snapshot(&provider, |_| {}).await.unwrap();
+        assert!(outcome.partial);
+        apply(&mut library, &store, false, outcome.tracks).unwrap();
+
+        assert!(library
+            .tracks()
+            .iter()
+            .any(|track| track.uri == "spotify:track:partial"));
     }
 
     #[test]

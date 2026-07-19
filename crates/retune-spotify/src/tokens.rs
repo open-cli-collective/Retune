@@ -35,6 +35,20 @@ impl<S: TokenStore + ?Sized> TokenStore for Arc<S> {
     }
 }
 
+impl<S: TokenStore + ?Sized> TokenStore for Box<S> {
+    fn load(&self) -> Result<Option<Tokens>> {
+        (**self).load()
+    }
+
+    fn save(&self, tokens: &Tokens) -> Result<()> {
+        (**self).save(tokens)
+    }
+
+    fn clear(&self) -> Result<()> {
+        (**self).clear()
+    }
+}
+
 pub struct CachedTokenStore<S> {
     inner: S,
     cache: Mutex<Option<Option<Tokens>>>,

@@ -66,6 +66,7 @@ pub struct SearchResults {
 pub struct Snapshot {
     pub batches: Vec<Vec<NewTrack>>,
     pub genres_degraded: bool,
+    pub partial: bool,
 }
 
 pub trait MediaProvider: Send + Sync {
@@ -76,27 +77,45 @@ pub trait MediaProvider: Send + Sync {
     async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String>;
 }
 
+#[derive(Default)]
+struct SyncHealth {
+    genres_degraded: AtomicBool,
+    partial: AtomicBool,
+}
+
+impl SyncHealth {
+    fn snapshot_page<T>(&self, result: retune_spotify::Result<T>) -> Result<Option<T>, String> {
+        match result {
+            Ok(page) => Ok(Some(page)),
+            Err(error @ retune_spotify::Error::RateLimited { .. }) => {
+                if !self.partial.swap(true, Ordering::Relaxed) {
+                    log::warn!("Spotify library snapshot is partial: {error}");
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
 struct GenreSource<'c, T: Transport, S: TokenStore> {
     client: &'c SpotifyClient<T, S>,
-    degraded: AtomicBool,
+    health: &'c SyncHealth,
 }
 
 impl<'c, T: Transport, S: TokenStore> GenreSource<'c, T, S> {
-    fn new(client: &'c SpotifyClient<T, S>) -> Self {
-        Self {
-            client,
-            degraded: AtomicBool::new(false),
-        }
+    fn new(client: &'c SpotifyClient<T, S>, health: &'c SyncHealth) -> Self {
+        Self { client, health }
     }
 
     async fn artist(&self, id: &str) -> Result<Option<Artist>, String> {
-        if self.degraded.load(Ordering::Relaxed) {
+        if self.health.genres_degraded.load(Ordering::Relaxed) {
             return Ok(None);
         }
         match self.client.artist(id).await {
             Ok(artist) => Ok(Some(artist)),
             Err(error @ retune_spotify::Error::RateLimited { .. }) => {
-                if !self.degraded.swap(true, Ordering::Relaxed) {
+                if !self.health.genres_degraded.swap(true, Ordering::Relaxed) {
                     log::warn!("Spotify artist genres unavailable for this sync: {error}");
                 }
                 Ok(None)
@@ -146,22 +165,24 @@ async fn normalized_track<T: Transport, S: TokenStore>(
 async fn normalized_album_tracks<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     genres: &GenreSource<'_, T, S>,
+    health: &SyncHealth,
     album: &Album,
-) -> Result<Vec<NewTrack>, String> {
+) -> Result<(Vec<NewTrack>, bool), String> {
     let mut offset = 0;
     let mut tracks = vec![];
     loop {
-        let page = client
-            .album_tracks(&album.id, offset, PAGE_SIZE)
-            .await
-            .map_err(|error| error.to_string())?;
+        let Some(page) =
+            health.snapshot_page(client.album_tracks(&album.id, offset, PAGE_SIZE).await)?
+        else {
+            return Ok((tracks, true));
+        };
         let count = page.items.len() as u32;
         warm_artists(genres, &page.items, Some(album)).await?;
         for track in page.items {
             tracks.push(normalized_track(genres, &track, Some(album)).await?);
         }
         if page.next.is_none() || count == 0 {
-            return Ok(tracks);
+            return Ok((tracks, false));
         }
         offset += count;
     }
@@ -169,16 +190,18 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
 
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String> {
-        let genres = GenreSource::new(self);
+        let health = SyncHealth::default();
+        let genres = GenreSource::new(self, &health);
         let mut offset = 0;
         let mut batches = vec![];
-        loop {
+        'pages: loop {
             let (batch, count, has_next) = match kind {
                 LibraryKind::Tracks => {
-                    let page = self
-                        .saved_tracks(offset, PAGE_SIZE)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let Some(page) =
+                        health.snapshot_page(self.saved_tracks(offset, PAGE_SIZE).await)?
+                    else {
+                        break 'pages;
+                    };
                     let count = page.items.len() as u32;
                     warm_artists(&genres, page.items.iter().map(|saved| &saved.track), None)
                         .await?;
@@ -189,31 +212,43 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     (batch, count, page.next.is_some())
                 }
                 LibraryKind::Albums => {
-                    let page = self
-                        .saved_albums(offset, PAGE_SIZE)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let Some(page) =
+                        health.snapshot_page(self.saved_albums(offset, PAGE_SIZE).await)?
+                    else {
+                        break 'pages;
+                    };
                     let count = page.items.len() as u32;
                     let mut batch = vec![];
                     for saved in page.items {
-                        batch.extend(normalized_album_tracks(self, &genres, &saved.album).await?);
+                        let (tracks, partial) =
+                            normalized_album_tracks(self, &genres, &health, &saved.album).await?;
+                        batch.extend(tracks);
+                        if partial {
+                            batches.push(batch);
+                            break 'pages;
+                        }
                     }
                     (batch, count, page.next.is_some())
                 }
                 LibraryKind::Shows => {
-                    let page = self
-                        .saved_shows(offset, PAGE_SIZE)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let Some(page) =
+                        health.snapshot_page(self.saved_shows(offset, PAGE_SIZE).await)?
+                    else {
+                        break 'pages;
+                    };
                     let count = page.items.len() as u32;
                     let mut batch = vec![];
                     for saved in page.items {
                         let mut episode_offset = 0;
                         loop {
-                            let episodes = self
-                                .show_episodes(&saved.show.id, episode_offset, PAGE_SIZE)
-                                .await
-                                .map_err(|error| error.to_string())?;
+                            let Some(episodes) = health.snapshot_page(
+                                self.show_episodes(&saved.show.id, episode_offset, PAGE_SIZE)
+                                    .await,
+                            )?
+                            else {
+                                batches.push(batch);
+                                break 'pages;
+                            };
                             let episode_count = episodes.items.len() as u32;
                             batch.extend(
                                 episodes
@@ -230,10 +265,11 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     (batch, count, page.next.is_some())
                 }
                 LibraryKind::Episodes => {
-                    let page = self
-                        .saved_episodes(offset, PAGE_SIZE)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let Some(page) =
+                        health.snapshot_page(self.saved_episodes(offset, PAGE_SIZE).await)?
+                    else {
+                        break 'pages;
+                    };
                     let count = page.items.len() as u32;
                     let batch = page
                         .items
@@ -243,19 +279,24 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     (batch, count, page.next.is_some())
                 }
                 LibraryKind::Audiobooks => {
-                    let page = self
-                        .saved_audiobooks(offset, PAGE_SIZE)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let Some(page) =
+                        health.snapshot_page(self.saved_audiobooks(offset, PAGE_SIZE).await)?
+                    else {
+                        break 'pages;
+                    };
                     let count = page.items.len() as u32;
                     let mut batch = vec![];
                     for book in page.items {
                         let mut chapter_offset = 0;
                         loop {
-                            let chapters = self
-                                .audiobook_chapters(&book.id, chapter_offset, PAGE_SIZE)
-                                .await
-                                .map_err(|error| error.to_string())?;
+                            let Some(chapters) = health.snapshot_page(
+                                self.audiobook_chapters(&book.id, chapter_offset, PAGE_SIZE)
+                                    .await,
+                            )?
+                            else {
+                                batches.push(batch);
+                                break 'pages;
+                            };
                             let chapter_count = chapters.items.len() as u32;
                             batch.extend(
                                 chapters
@@ -274,13 +315,15 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
             };
             batches.push(batch);
             if !has_next || count == 0 {
-                return Ok(Snapshot {
-                    batches,
-                    genres_degraded: genres.degraded.load(Ordering::Relaxed),
-                });
+                break;
             }
             offset += count;
         }
+        Ok(Snapshot {
+            batches,
+            genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
+            partial: health.partial.load(Ordering::Relaxed),
+        })
     }
 
     async fn search(&self, query: &str) -> Result<SearchResults, String> {
@@ -344,7 +387,8 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
-        let genres = GenreSource::new(self);
+        let health = SyncHealth::default();
+        let genres = GenreSource::new(self, &health);
         let id = album.rsplit(':').next().unwrap_or(album);
         let mut offset = 0;
         let mut normalized = vec![];
@@ -372,9 +416,11 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
 }
 
 #[cfg(test)]
+#[derive(Default)]
 pub struct FakeProvider {
     pub snapshots: std::collections::HashMap<LibraryKind, Vec<Vec<NewTrack>>>,
     pub genres_degraded: bool,
+    pub partial: bool,
 }
 
 #[cfg(test)]
@@ -383,6 +429,7 @@ impl MediaProvider for FakeProvider {
         Ok(Snapshot {
             batches: self.snapshots.get(&kind).cloned().unwrap_or_default(),
             genres_degraded: self.genres_degraded,
+            partial: self.partial,
         })
     }
 
@@ -428,6 +475,12 @@ mod tests {
                 expires_at: u64::MAX,
             })),
         )
+    }
+
+    fn rate_limited() -> Response {
+        let mut response = Response::json(429, serde_json::json!({}));
+        response.headers.insert("retry-after".into(), "3600".into());
+        response
     }
 
     fn assert_track(
@@ -518,6 +571,56 @@ mod tests {
             "Song",
         );
         assert_eq!(batches[0][0].duration.as_millis(), 1234);
+    }
+
+    #[tokio::test]
+    async fn album_track_rate_limit_keeps_previously_collected_tracks() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [
+                    {"track": {"uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
+                        "artists": [], "album": null}},
+                    {"track": {"uri": "spotify:track:2", "name": "Two", "duration_ms": 1000,
+                        "artists": [], "album": null}}
+                ], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{"album": {
+                    "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                    "artists": [], "images": []
+                }}], "next": null}),
+            ),
+            rate_limited(),
+        ]);
+
+        let tracks = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+        let albums = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+
+        assert_eq!(tracks.batches[0].len(), 2);
+        assert!(!tracks.partial);
+        assert!(albums.partial);
+        assert!(albums.batches[0].is_empty());
+        assert_eq!(
+            client
+                .transport()
+                .requests()
+                .iter()
+                .filter(|request| request.url.contains("/albums/album-1/tracks"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn first_saved_tracks_rate_limit_returns_empty_partial_snapshot() {
+        let client = client([rate_limited()]);
+
+        let snapshot = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+
+        assert!(snapshot.batches.is_empty());
+        assert!(snapshot.partial);
     }
 
     #[tokio::test]
@@ -725,8 +828,6 @@ mod tests {
 
     #[tokio::test]
     async fn artist_rate_limit_degrades_genres_and_opens_breaker() {
-        let mut limited = Response::json(429, serde_json::json!({}));
-        limited.headers.insert("retry-after".into(), "3600".into());
         let client = client([
             Response::json(
                 200,
@@ -739,7 +840,7 @@ mod tests {
                         "artists": [{"id": "artist-2", "name": "Two"}], "album": null}}
                 ], "next": null}),
             ),
-            limited,
+            rate_limited(),
         ]);
 
         let snapshot = client.library_snapshot(LibraryKind::Tracks).await.unwrap();

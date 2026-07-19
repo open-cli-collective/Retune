@@ -1,12 +1,14 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use retune_core::io::{export_json, import};
 use retune_core::model::Library;
+use retune_spotify::tokens::{TokenStore, Tokens};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -190,6 +192,51 @@ impl OverlayStore for FsOverlayStore {
     }
 }
 
+/// Debug-build token store: a 0600 JSON file beside the overlay, so dev
+/// iteration never touches the Keychain (whose ACL grants reset with every
+/// rebuild's ad-hoc signature). Release builds use the Keychain.
+pub struct FsTokenStore {
+    path: PathBuf,
+}
+
+impl FsTokenStore {
+    pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: app_data_dir.as_ref().join("dev-tokens.json"),
+        }
+    }
+}
+
+fn token_error(error: impl std::fmt::Display) -> retune_spotify::Error {
+    retune_spotify::Error::TokenStore(error.to_string())
+}
+
+impl TokenStore for FsTokenStore {
+    fn load(&self) -> retune_spotify::Result<Option<Tokens>> {
+        match fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(token_error),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(token_error(error)),
+        }
+    }
+
+    fn save(&self, tokens: &Tokens) -> retune_spotify::Result<()> {
+        let bytes = serde_json::to_vec(tokens).map_err(token_error)?;
+        atomic_write(&self.path, &bytes).map_err(token_error)?;
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)).map_err(token_error)
+    }
+
+    fn clear(&self) -> retune_spotify::Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(token_error(error)),
+        }
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> StoreResult<()> {
     fs::create_dir_all(path.parent().expect("store path has a parent"))?;
     let temporary = path.with_extension("json.tmp");
@@ -225,6 +272,29 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&library).unwrap();
         assert_eq!(store.load().unwrap(), Some(library));
+    }
+
+    #[test]
+    fn token_store_round_trip_clear_and_owner_only_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsTokenStore::new(dir.path());
+        let tokens = Tokens {
+            access: "access".into(),
+            refresh: "refresh".into(),
+            expires_at: 42,
+        };
+
+        assert!(store.load().unwrap().is_none());
+        store.save(&tokens).unwrap();
+        assert_eq!(store.load().unwrap(), Some(tokens));
+        let mode = fs::metadata(dir.path().join("dev-tokens.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        store.clear().unwrap();
+        assert!(store.load().unwrap().is_none());
+        store.clear().unwrap();
     }
 
     #[test]

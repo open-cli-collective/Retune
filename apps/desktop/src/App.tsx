@@ -48,7 +48,9 @@ type PlayerState = {
   volumeSupported: boolean
 }
 
-type Playing = PlayerState & { queue: readonly Track[] }
+// `simulated` marks a local prototype session (disconnected, or fixture tracks
+// whose URIs must never reach the real Spotify API).
+type Playing = PlayerState & { queue: readonly Track[]; simulated?: boolean }
 
 type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }
@@ -184,7 +186,7 @@ function reducer(state: State, action: Action): State {
         playing: {
           trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
           external: false, name: null, art: null, alb: null, durationSecs: null,
-          volumeSupported: false,
+          volumeSupported: false, simulated: true,
         },
       }
     case 'togglePlay':
@@ -270,7 +272,8 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [dispatch])
 
   const start = useCallback((id: number, tracks: readonly Track[]) => {
-    if (!connected) {
+    const target = tracks.find((track) => track.id === id)
+    if (!connected || !target?.uri.startsWith('spotify:')) {
       dispatch({ type: 'play', id, queue: tracks })
       return
     }
@@ -279,14 +282,14 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [connected, dispatch, run])
 
   const toggle = useCallback(() => {
-    if (connected) {
+    if (connected && !playingRef.current?.simulated) {
       if (playingRef.current && !playingRef.current.external) run('player_toggle')
     }
     else dispatch({ type: 'togglePlay' })
   }, [connected, dispatch, run])
 
   const step = useCallback((direction: number) => {
-    if (connected) {
+    if (connected && !playingRef.current?.simulated) {
       if (playingRef.current && !playingRef.current.external) run(direction < 0 ? 'player_prev' : 'player_next')
       return
     }
@@ -298,13 +301,13 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [connected, dispatch, run])
 
   const setVolume = useCallback((volume: number) => {
-    if (!connected) return
+    if (!connected || playingRef.current?.simulated) return
     window.clearTimeout(volumeTimer.current)
     volumeTimer.current = window.setTimeout(() => run('player_set_volume', { volume }), 150)
   }, [connected, run])
 
   const seek = useCallback((seconds: number) => {
-    if (connected) {
+    if (connected && !playingRef.current?.simulated) {
       if (playingRef.current && !playingRef.current.external) run('player_seek', { seconds })
       return
     }
@@ -415,7 +418,7 @@ function App() {
   }, [state.settings.theme, state.systemDark])
 
   useEffect(() => {
-    if (state.connected) return
+    if (state.connected && !state.playing?.simulated) return
     if (!state.playing?.isPlaying) return
     const currentIndex = playbackTracks.findIndex((track) => track.id === state.playing?.trackId)
     const current = playbackTracks[currentIndex]

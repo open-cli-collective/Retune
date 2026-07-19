@@ -43,7 +43,10 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
         cat: show
             .and_then(|show| show.category.clone())
             .unwrap_or_else(|| UNCATEGORIZED.into()),
-        art: show.map(|show| show.publisher.clone()).unwrap_or_default(),
+        art: show
+            .map(|show| show.publisher.clone())
+            .filter(|publisher| !publisher.is_empty())
+            .unwrap_or_else(|| "Unknown".into()),
         alb: show.map(|show| show.name.clone()).unwrap_or_default(),
         name: value.name.clone(),
         duration: Duration::from_millis(value.duration_ms),
@@ -171,6 +174,23 @@ mod tests {
             }),
         );
         assert_eq!(uncategorized.cat, UNCATEGORIZED);
+    }
+
+    #[test]
+    fn show_missing_publisher_decodes_and_normalizes_to_unknown() {
+        // Live /me/shows payloads can omit publisher despite the documented shape.
+        let show: Show = serde_json::from_value(serde_json::json!({
+            "id": "show-1", "uri": "spotify:show:1", "name": "The Show", "category": null
+        }))
+        .unwrap();
+        assert_eq!(show.publisher, "");
+        let value = Episode {
+            uri: "spotify:episode:1".into(),
+            name: "Episode".into(),
+            duration_ms: 2000,
+            show: None,
+        };
+        assert_eq!(episode(&value, Some(&show)).art, "Unknown");
     }
 
     #[test]

@@ -598,6 +598,8 @@ pub struct Show {
     pub id: String,
     pub uri: String,
     pub name: String,
+    /// Absent from some live /me/shows payloads despite the documented shape.
+    #[serde(default)]
     pub publisher: String,
     pub category: Option<String>,
     #[serde(default)]

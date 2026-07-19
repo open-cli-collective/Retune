@@ -33,7 +33,7 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
-type SharedTokenStore = Arc<CachedTokenStore<KeychainTokenStore>>;
+pub(crate) type SharedTokenStore = Arc<CachedTokenStore<Box<dyn TokenStore>>>;
 type SpotifyProvider = SpotifyClient<HttpTransport, SharedTokenStore>;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
@@ -632,7 +632,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
             "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
         })?;
     *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
-    let (incoming, genres_degraded) = sync::snapshot(provider.as_ref(), |phase| {
+    let outcome = sync::snapshot(provider.as_ref(), |phase| {
         log::info!("{phase}");
         let _ = app.emit("sync-progress", phase);
     })
@@ -646,20 +646,30 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
         .spotify_sync_completed;
     {
         let mut library = state.library.lock().expect("library mutex poisoned");
-        sync::apply(&mut library, &state.store, first_sync, incoming)?;
+        sync::apply(&mut library, &state.store, first_sync, outcome.tracks)?;
         log::info!(
             "Spotify sync applied; {} library tracks",
             library.tracks().len()
         );
     }
-    if genres_degraded {
+    if outcome.partial {
+        let message = "Partial import (Spotify rate limit) — run File → Sync later to finish.";
+        log::warn!("{message}");
+        if outcome.genres_degraded {
+            log::warn!(
+                "Imported without genres (Spotify rate limit) — genres will fill in on a later sync."
+            );
+        }
+        app.emit("sync-progress", message)
+            .map_err(|error| error.to_string())?;
+    } else if outcome.genres_degraded {
         let message =
             "Imported without genres (Spotify rate limit) — genres will fill in on a later sync.";
         log::warn!("{message}");
         app.emit("sync-progress", message)
             .map_err(|error| error.to_string())?;
     }
-    if first_sync {
+    if first_sync && !outcome.partial {
         let mut settings = state.settings.lock().expect("settings mutex poisoned");
         settings.spotify_sync_completed = true;
         state
@@ -1117,9 +1127,15 @@ pub fn run() {
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
-            let token_store = Arc::new(CachedTokenStore::new(
-                KeychainTokenStore::new().map_err(std::io::Error::other)?,
-            ));
+            // Dev builds keep tokens in a 0600 file: Keychain ACL grants are
+            // keyed to the binary signature, which changes every rebuild, so
+            // dev iteration would re-prompt constantly. Release uses Keychain.
+            let backing: Box<dyn TokenStore> = if cfg!(debug_assertions) {
+                Box::new(store::FsTokenStore::new(&app_data_dir))
+            } else {
+                Box::new(KeychainTokenStore::new().map_err(std::io::Error::other)?)
+            };
+            let token_store = Arc::new(CachedTokenStore::new(backing));
             // Keychain access can fail transiently (e.g. "In dark wake, no UI
             // possible" while the display sleeps); start disconnected rather
             // than abort — the cache retries the Keychain on the next access.
