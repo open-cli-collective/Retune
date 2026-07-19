@@ -1,4 +1,5 @@
 mod fixture;
+mod playback;
 mod provider;
 mod store;
 mod sync;
@@ -10,6 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use playback::{Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{MediaProvider, SearchResults};
 use retune_core::{
     browse::{self, Selection},
@@ -42,6 +44,7 @@ struct AppState {
     menu_checks: MenuChecks,
     recovery_notice: Mutex<Option<String>>,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
+    playback: Arc<Playback>,
     syncing: tokio::sync::Mutex<()>,
 }
 
@@ -108,6 +111,7 @@ struct FacetsView {
 #[serde(rename_all = "camelCase")]
 struct TrackView {
     id: u64,
+    uri: String,
     name: String,
     art: String,
     alb: String,
@@ -202,6 +206,7 @@ fn browse(
         .into_iter()
         .map(|track| TrackView {
             id: track.id.0,
+            uri: track.uri.clone(),
             name: track.name.clone(),
             art: track.art.clone(),
             alb: track.alb.clone(),
@@ -561,11 +566,28 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
+async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
+    app.state::<AppState>().playback.clear().await;
     KeychainTokenStore::new()
         .and_then(|store| store.clear())
         .map_err(|error| error.to_string())?;
-    emit_connection_state(&app)
+    emit_connection_state(&app)?;
+    app.emit("player-state", empty_player_state())
+        .map_err(|error| error.to_string())
+}
+
+fn empty_player_state() -> PlayerStateEvent {
+    PlayerStateEvent {
+        track_id: None,
+        elapsed: 0,
+        is_playing: false,
+        external: false,
+        name: None,
+        art: None,
+        alb: None,
+        duration_secs: None,
+        volume_supported: false,
+    }
 }
 
 fn provider_from(state: &AppState) -> Result<Arc<SpotifyProvider>, String> {
@@ -692,6 +714,60 @@ async fn add_spotify_album(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn play_tracks(
+    app: tauri::AppHandle,
+    snapshot: Vec<SnapshotTrack>,
+    start_index: usize,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let event = state
+        .playback
+        .start(client, app.clone(), snapshot, start_index)
+        .await?;
+    app.emit("player-state", event)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let event = state.playback.toggle_pause(client.as_ref()).await?;
+    app.emit("player-state", event)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn player_next(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let event = state.playback.next(client.as_ref()).await?;
+    app.emit("player-state", event)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let event = state.playback.prev(client.as_ref()).await?;
+    app.emit("player-state", event)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn player_set_volume(state: tauri::State<'_, AppState>, volume: u8) -> Result<(), String> {
+    let client = provider_from(&state)?;
+    let playback = Arc::clone(&state.playback);
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(playback.set_volume(client.as_ref(), volume))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn mutate_library<T>(
     state: &AppState,
     mutation: impl FnOnce(&mut Library) -> Result<T, String>,
@@ -814,9 +890,12 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
             });
         }
         "disconnect_spotify" => {
-            if let Err(error) = disconnect_spotify(app.clone()) {
-                notify_error(app, error);
-            }
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = disconnect_spotify(handle.clone()).await {
+                    notify_error(&handle, error);
+                }
+            });
         }
         "about_retune" => {
             app.dialog()
@@ -955,7 +1034,12 @@ pub fn run() {
             disconnect_spotify,
             sync_from_spotify,
             spotify_search,
-            add_spotify_album
+            add_spotify_album,
+            play_tracks,
+            player_toggle,
+            player_next,
+            player_prev,
+            player_set_volume
         ])
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
@@ -998,6 +1082,7 @@ pub fn run() {
                 menu_checks,
                 recovery_notice: Mutex::new(recovery_notice),
                 spotify: Mutex::new(spotify),
+                playback: Arc::new(Playback::default()),
                 syncing: tokio::sync::Mutex::new(()),
             });
             if startup_sync {

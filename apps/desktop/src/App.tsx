@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
@@ -26,6 +26,7 @@ type SpotifyResults = {
 
 type Track = {
   id: number
+  uri: string
   name: string
   art: string
   alb: string
@@ -34,6 +35,20 @@ type Track = {
   overridden: boolean
   rating: { stars: number; explicit: boolean } | null
 }
+
+type PlayerState = {
+  trackId: number | null
+  elapsed: number
+  isPlaying: boolean
+  external: boolean
+  name: string | null
+  art: string | null
+  alb: string | null
+  durationSecs: number | null
+  volumeSupported: boolean
+}
+
+type Playing = PlayerState & { queue: readonly Track[] }
 
 type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }
@@ -71,7 +86,7 @@ type State = {
   query: string
   scope: 'library' | 'spotify'
   selectedTrackId?: number
-  playing: { trackId: number; elapsed: number; isPlaying: boolean; queue: readonly Track[] } | null
+  playing: Playing | null
   settings: Settings
   settingsHydrated: boolean
   systemDark: boolean
@@ -99,6 +114,7 @@ type Action =
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
+  | { type: 'playerState'; player: PlayerState; queue: readonly Track[] }
   | { type: 'hydrateSettings'; settings: Settings }
   | { type: 'settings'; settings: Partial<Settings> }
   | { type: 'systemTheme'; dark: boolean }
@@ -161,7 +177,15 @@ function reducer(state: State, action: Action): State {
     case 'selectTrack':
       return { ...state, selectedTrackId: action.id }
     case 'play':
-      return { ...state, selectedTrackId: action.id, playing: { trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue } }
+      return {
+        ...state,
+        selectedTrackId: action.id,
+        playing: {
+          trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
+          external: false, name: null, art: null, alb: null, durationSecs: null,
+          volumeSupported: false,
+        },
+      }
     case 'togglePlay':
       return state.playing
         ? { ...state, playing: { ...state.playing, isPlaying: !state.playing.isPlaying } }
@@ -175,6 +199,14 @@ function reducer(state: State, action: Action): State {
       return state.playing.elapsed + 1 >= action.duration
         ? { ...state, playing: { ...state.playing, trackId: action.nextId, elapsed: 0, isPlaying: true } }
         : { ...state, playing: { ...state.playing, elapsed: state.playing.elapsed + 1 } }
+    case 'playerState':
+      return action.player.trackId === null && !action.player.name
+        ? { ...state, playing: null }
+        : {
+            ...state,
+            selectedTrackId: action.player.trackId ?? state.selectedTrackId,
+            playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue },
+          }
     case 'hydrateSettings':
       return { ...state, settings: action.settings, settingsHydrated: true }
     case 'settings':
@@ -215,12 +247,69 @@ function formatTime(seconds: number) {
     : `${minutes}:${String(secs).padStart(2, '0')}`
 }
 
+function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
+  const queue = useRef<readonly Track[]>(emptyTracks)
+  const playingRef = useRef(playing)
+  const volumeTimer = useRef<number>(undefined)
+  playingRef.current = playing
+
+  useEffect(() => {
+    const playerState = listen<PlayerState>('player-state', ({ payload }) => {
+      dispatch({ type: 'playerState', player: payload, queue: queue.current })
+    })
+    return () => { void playerState.then((stop) => stop()) }
+  }, [dispatch])
+
+  const run = useCallback((command: string, args?: Record<string, unknown>) => {
+    invoke(command, args).catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }, [dispatch])
+
+  const start = useCallback((id: number, tracks: readonly Track[]) => {
+    if (!connected) {
+      dispatch({ type: 'play', id, queue: tracks })
+      return
+    }
+    queue.current = tracks
+    run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
+  }, [connected, dispatch, run])
+
+  const toggle = useCallback(() => {
+    if (connected) {
+      if (playingRef.current && !playingRef.current.external) run('player_toggle')
+    }
+    else dispatch({ type: 'togglePlay' })
+  }, [connected, dispatch, run])
+
+  const step = useCallback((direction: number) => {
+    if (connected) {
+      if (playingRef.current && !playingRef.current.external) run(direction < 0 ? 'player_prev' : 'player_next')
+      return
+    }
+    const current = playingRef.current
+    if (!current?.queue.length || current.trackId === null) return
+    const index = current.queue.findIndex((track) => track.id === current.trackId)
+    const next = current.queue[(index + direction + current.queue.length) % current.queue.length]
+    dispatch({ type: 'step', id: next.id })
+  }, [connected, dispatch, run])
+
+  const setVolume = useCallback((volume: number) => {
+    if (!connected) return
+    window.clearTimeout(volumeTimer.current)
+    volumeTimer.current = window.setTimeout(() => run('player_set_volume', { volume }), 150)
+  }, [connected, run])
+
+  useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
+
+  return useMemo(() => ({ start, toggle, step, setVolume }), [setVolume, start, step, toggle])
+}
+
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const search = useRef<HTMLInputElement>(null)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
   const playbackTracks = state.playing?.queue ?? emptyTracks
+  const player = usePlayer(state.connected, state.playing, dispatch)
   const openInfo = (id?: number) => {
     if (id === undefined) return
     invoke<TrackInfo>('get_track', { id })
@@ -313,6 +402,7 @@ function App() {
   }, [state.settings.theme, state.systemDark])
 
   useEffect(() => {
+    if (state.connected) return
     if (!state.playing?.isPlaying) return
     const currentIndex = playbackTracks.findIndex((track) => track.id === state.playing?.trackId)
     const current = playbackTracks[currentIndex]
@@ -322,21 +412,13 @@ function App() {
       dispatch({ type: 'tick', duration: current.durationSecs, nextId: next.id })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [state.playing?.trackId, state.playing?.isPlaying, playbackTracks])
+  }, [state.connected, state.playing?.trackId, state.playing?.isPlaying, playbackTracks])
 
   const mutate = (command: string, args: Record<string, unknown>) => {
     invoke(command, args)
       .then(() => dispatch({ type: 'refresh' }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }
-  const playingQueue = state.playing?.queue
-  const playingTrackId = state.playing?.trackId
-  const step = useCallback((direction: number) => {
-    if (!playingQueue?.length) return
-    const index = playingQueue.findIndex((track) => track.id === playingTrackId)
-    const next = playingQueue[(index + direction + playingQueue.length) % playingQueue.length]
-    dispatch({ type: 'step', id: next.id })
-  }, [playingQueue, playingTrackId])
   const setZoom = (zoom: number) => dispatch({
     type: 'settings',
     settings: { zoom: Math.min(1.8, Math.max(0.7, Math.round(zoom * 10) / 10)) },
@@ -356,8 +438,8 @@ function App() {
       else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
     })
     const playerActions = listen<string>('player-action', ({ payload }) => {
-      if (payload === 'play_pause') dispatch({ type: 'togglePlay' })
-      else step(payload === 'previous' ? -1 : 1)
+      if (payload === 'play_pause') player.toggle()
+      else player.step(payload === 'previous' ? -1 : 1)
     })
     const preferences = listen('open-preferences', () => dispatch({ type: 'preferences', open: true }))
     return () => {
@@ -365,7 +447,7 @@ function App() {
       void playerActions.then((stop) => stop())
       void preferences.then((stop) => stop())
     }
-  }, [state.settings, step])
+  }, [state.settings, player])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -394,18 +476,18 @@ function App() {
         dispatch({ type: 'preferences', open: true })
       } else if (!command && event.key === ' ') {
         event.preventDefault()
-        dispatch({ type: 'togglePlay' })
+        player.toggle()
       } else if (!command && event.key === 'ArrowLeft') {
         event.preventDefault()
-        step(-1)
+        player.step(-1)
       } else if (!command && event.key === 'ArrowRight') {
         event.preventDefault()
-        step(1)
+        player.step(1)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [state.info, state.preferences, state.selectedTrackId, state.settings.zoom, step])
+  }, [state.info, state.preferences, state.selectedTrackId, state.settings.zoom, player])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -429,9 +511,10 @@ function App() {
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
         onScope={(scope) => dispatch({ type: 'scope', scope })}
-        onPlay={() => dispatch({ type: 'togglePlay' })}
-        onPrev={() => step(-1)}
-        onNext={() => step(1)}
+        onPlay={player.toggle}
+        onPrev={() => player.step(-1)}
+        onNext={() => player.step(1)}
+        onVolume={player.setVolume}
         onTheme={cycleTheme}
       />
       <div className="body-grid">
@@ -467,7 +550,7 @@ function App() {
               playing={state.playing}
               columnOrder={state.settings.columnOrder}
               onSelect={(id) => dispatch({ type: 'selectTrack', id })}
-              onPlay={(id) => dispatch({ type: 'play', id, queue: tracks })}
+              onPlay={(id) => player.start(id, tracks)}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
               onInfo={openInfo}
               onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
@@ -489,25 +572,32 @@ function App() {
   )
 }
 
-function TransportBar({ playing, track, query, scope, theme, connected, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onTheme }: {
+function TransportBar({ playing, track, query, scope, theme, connected, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
   connected: boolean
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void
-  onPlay: () => void; onPrev: () => void; onNext: () => void; onTheme: () => void
+  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onTheme: () => void
 }) {
   const elapsed = playing?.elapsed ?? 0
-  const duration = track?.durationSecs ?? 0
+  const shown = playing?.external ? {
+    name: `${playing.name ?? 'Unknown Track'} (Spotify)`,
+    art: playing.art ?? '',
+    alb: playing.alb ?? '',
+    durationSecs: playing.durationSecs ?? 0,
+  } : track
+  const duration = shown?.durationSecs ?? 0
+  const volumeVisible = !connected || playing?.volumeSupported
   return <header className="transport">
     <div className="transport-controls">
       <button aria-label="Previous track" onClick={onPrev}>◀◀</button>
       <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '❚❚' : '▶'}</button>
       <button aria-label="Next track" onClick={onNext}>▶▶</button>
-      <span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" defaultValue="62" />
+      {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" defaultValue="62" onChange={(event) => onVolume(Number(event.target.value))} /></>}
     </div>
     <div className="lcd">
-      <div className="lcd-copy"><strong>{track?.name ?? 'Retune'}</strong><span>{track ? `${track.art} — ${track.alb}` : 'Not Playing'}</span></div>
-      <div className="progress-row"><time>{track ? formatTime(elapsed) : '—:—'}</time><progress max={duration || 1} value={elapsed} /><time>{track ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
+      <div className={`lcd-copy ${playing?.external ? 'external' : ''}`}><strong>{shown?.name ?? 'Retune'}</strong><span>{shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'}</span></div>
+      <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress max={duration || 1} value={elapsed} /><time>{shown ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
     </div>
     <div className="search-area">
       <div className="scope-pills" aria-label="Search scope">
