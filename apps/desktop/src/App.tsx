@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useEffect, useReducer } from 'react'
+import { listen } from '@tauri-apps/api/event'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
@@ -29,6 +30,20 @@ type BrowseView = {
   }
 }
 
+type TrackInfo = {
+  id: number
+  uri: string
+  source: Source
+  name: string
+  art: string
+  alb: string
+  cat: string
+  origCat: string | null
+  rating: { stars: number; explicit: boolean } | null
+  inheritedRating: number | null
+  genres: string[]
+}
+
 const emptyTracks: Track[] = []
 
 type State = {
@@ -43,6 +58,8 @@ type State = {
   view: BrowseView | null
   revision: number
   error?: string
+  notice?: string
+  info?: TrackInfo
 }
 
 type Action =
@@ -60,6 +77,8 @@ type Action =
   | { type: 'theme' }
   | { type: 'systemTheme'; dark: boolean }
   | { type: 'refresh' }
+  | { type: 'notice'; notice?: string }
+  | { type: 'info'; info?: TrackInfo }
 
 const initialState: State = {
   source: 'music',
@@ -116,6 +135,10 @@ function reducer(state: State, action: Action): State {
       return { ...state, systemDark: action.dark }
     case 'refresh':
       return { ...state, revision: state.revision + 1 }
+    case 'notice':
+      return { ...state, notice: action.notice }
+    case 'info':
+      return { ...state, info: action.info }
   }
 }
 
@@ -138,6 +161,12 @@ function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
+  const openInfo = (id?: number) => {
+    if (id === undefined) return
+    invoke<TrackInfo>('get_track', { id })
+      .then((info) => dispatch({ type: 'info', info }))
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }
 
   useEffect(() => {
     let active = true
@@ -149,6 +178,26 @@ function App() {
       .catch((error) => active && dispatch({ type: 'error', error: String(error) }))
     return () => { active = false }
   }, [state.source, state.sel, state.query, state.scope, state.revision])
+
+  useEffect(() => {
+    invoke<string | null>('startup_notice')
+      .then((notice) => dispatch({ type: 'notice', notice: notice ?? undefined }))
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }, [])
+
+  useEffect(() => {
+    const unlisten = listen('get-info', () => openInfo(state.selectedTrackId))
+    return () => { void unlisten.then((stop) => stop()) }
+  }, [state.selectedTrackId])
+
+  useEffect(() => {
+    const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
+    const failed = listen<string>('operation-error', ({ payload }) => dispatch({ type: 'error', error: payload }))
+    return () => {
+      void changed.then((stop) => stop())
+      void failed.then((stop) => stop())
+    }
+  }, [])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -220,6 +269,7 @@ function App() {
               })}
             />
           )}
+          {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
           {state.scope === 'spotify' ? (
             <div className="spotify-stub">Spotify search arrives with the Spotify connection — Phase 5</div>
           ) : (
@@ -231,12 +281,17 @@ function App() {
               onSelect={(id) => dispatch({ type: 'selectTrack', id })}
               onPlay={(id) => dispatch({ type: 'play', id })}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
+              onInfo={openInfo}
             />
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
           <StatusBar view={view} unit={labels[state.source].item} />
         </section>
       </div>
+      {state.info && <GetInfo key={state.info.id} track={state.info} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
+        dispatch({ type: 'info' })
+        dispatch({ type: 'refresh' })
+      }} onError={(error) => dispatch({ type: 'error', error })} />}
     </main>
   )
 }
@@ -312,9 +367,9 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /><span>· applies to all tracks unless individually overridden</span></div>
 }
 
-function TrackList({ tracks, label, selectedId, playing, onSelect, onPlay, onRate }: {
+function TrackList({ tracks, label, selectedId, playing, onSelect, onPlay, onRate, onInfo }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedId?: number; playing: State['playing']
-  onSelect: (id: number) => void; onPlay: (id: number) => void; onRate: (id: number, stars: number) => void
+  onSelect: (id: number) => void; onPlay: (id: number) => void; onRate: (id: number, stars: number) => void; onInfo: (id: number) => void
 }) {
   return <div className="track-list">
     <div className="track-row track-header"><span /><span>{label.item[0].toUpperCase() + label.item.slice(1)}</span><span>Time</span><span>{label.facets[1]}</span><span>{label.facets[2]}</span><span>{label.facets[0]}</span><span>Rating</span></div>
@@ -323,10 +378,52 @@ function TrackList({ tracks, label, selectedId, playing, onSelect, onPlay, onRat
         const isPlaying = playing?.trackId === track.id
         return <div key={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
-          <span title={track.name}>{track.name}</span><span>{formatTime(track.durationSecs)}</span><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span><span title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
+          <span className="track-name" title={track.name}>{track.name}{selectedId === track.id && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span><span>{formatTime(track.durationSecs)}</span><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span><span title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
           <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
         </div>
       })}
+    </div>
+  </div>
+}
+
+function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
+  const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat })
+  const [rating, setRating] = useState(track.rating)
+  const dialog = useRef<HTMLDivElement>(null)
+  useEffect(() => { dialog.current?.focus() }, [])
+  const rate = (stars: number) => setRating((current) => current?.explicit && current.stars === stars
+    ? track.inheritedRating === null ? null : { stars: track.inheritedRating, explicit: false }
+    : { stars, explicit: true })
+  const save = async () => {
+    try {
+      await invoke('edit_track', { id: track.id, edit: draft })
+      if (track.rating?.explicit && (!rating?.explicit || rating.stars !== track.rating.stars)) {
+        await invoke('click_track_star', { id: track.id, stars: rating?.explicit ? rating.stars : track.rating.stars })
+      } else if (!track.rating?.explicit && rating?.explicit) {
+        await invoke('click_track_star', { id: track.id, stars: rating.stars })
+      }
+      onSaved()
+    } catch (error) {
+      onError(String(error))
+    }
+  }
+  const field = (key: keyof typeof draft) => ({
+    value: draft[key],
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, [key]: event.target.value }),
+  })
+  return <div className="modal-backdrop" role="presentation">
+    <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="get-info-title" tabIndex={-1} ref={dialog} onKeyDown={(event) => { if (event.key === 'Escape') onCancel() }}>
+      <h2 id="get-info-title">Get Info</h2>
+      <label>Spotify ID<input value={track.uri} readOnly /></label>
+      <label>Name<input {...field('name')} /></label>
+      <label>Artist<input {...field('art')} /></label>
+      <label>Album<input {...field('alb')} /></label>
+      <label>Genre<input {...field('cat')} list={`genres-${track.id}`} /></label>
+      <datalist id={`genres-${track.id}`}>{track.genres.map((genre) => <option key={genre} value={genre} />)}</datalist>
+      <div className="genre-hint">normalize freely, e.g. “Operatic Rock” → “Rock”</div>
+      <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /></div>
+      {track.origCat && draft.cat !== track.origCat && <div className="override-banner">Spotify reports this as “{track.origCat}”. Your overlay wins in Retune.</div>}
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
     </div>
   </div>
 }
