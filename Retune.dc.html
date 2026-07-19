@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: "Lucida Grande", "Helvetica Neue", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: rgba(140,140,140,.5); border: 3px solid transparent; background-clip: content-box; border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  a { color: #2f6fd0; }
+  a:hover { color: #1a54ad; }
+  input::placeholder { color: #a7a7a7; }
+</style>
+</helmet>
+
+<div id="retune-desk" style="{{ deskStyle }}">
+  <div style="{{ winStyle }}">
+
+    <!-- Title bar -->
+    <div style="height:34px; flex:0 0 auto; background:linear-gradient(var(--bar1,#f3f3f3),var(--bar2,#dcdcdc)); border-bottom:1px solid var(--border,#b7b7b7); display:flex; align-items:center; padding:0 12px; position:relative;">
+      <div style="display:flex; gap:8px; align-items:center;">
+        <span style="width:12px; height:12px; border-radius:50%; background:#ff5f57;"></span>
+        <span style="width:12px; height:12px; border-radius:50%; background:#febc2e;"></span>
+        <span style="width:12px; height:12px; border-radius:50%; background:#28c840;"></span>
+      </div>
+      <div style="position:absolute; left:0; right:0; text-align:center; font-size:12px; font-weight:600; color:var(--dim,#4a4a4a); pointer-events:none;">Retune — Library</div>
+      <div onClick="{{ toggleTheme }}" style="position:absolute; right:12px; font-size:13px; color:var(--dim,#666); cursor:default;">{{ themeIcon }}</div>
+    </div>
+
+    <!-- Menu bar -->
+    <div style="height:24px; flex:0 0 auto; background:var(--menu,#f4f4f4); border-bottom:1px solid var(--border,#cdcdcd); display:flex; align-items:center; padding:0 8px; gap:2px; font-size:12px; color:var(--txt,#2a2a2a); position:relative; z-index:40;">
+      <span onClick="{{ openPrefs }}" style="font-weight:700; padding:2px 8px; cursor:default;">Retune</span>
+      <span onClick="{{ toggleFileMenu }}" style="{{ fileMenuStyle }}">File</span>
+      <span style="padding:2px 8px; color:var(--menudim,#8a8a8a);">Edit</span>
+      <span onClick="{{ toggleViewMenu }}" style="{{ viewMenuStyle }}">View</span>
+      <span style="padding:2px 8px; color:var(--menudim,#8a8a8a);">Controls</span>
+      <span style="padding:2px 8px; color:var(--menudim,#8a8a8a);">Account</span>
+      <span style="padding:2px 8px; color:var(--menudim,#8a8a8a);">Help</span>
+
+      <sc-if value="{{ fileMenuOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; top:23px; left:52px; width:250px; background:var(--panel,#f7f7f7); border:1px solid var(--border,#b0b0b0); border-radius:6px; box-shadow:0 12px 30px rgba(0,0,0,.28); padding:5px 0; font-size:12.5px; color:var(--txt,#1a1a1a);">
+          <div onClick="{{ menuGetInfo }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Get Info<span style="color:var(--menudim,#9a9a9a);">⌘I</span></div>
+          <div onClick="{{ menuPrefs }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Preferences…<span style="color:var(--menudim,#9a9a9a);">⌘,</span></div>
+          <div style="height:1px; background:var(--border,#dcdcdc); margin:5px 10px; opacity:.5;"></div>
+          <div onClick="{{ addToLibrary }}" style="padding:5px 16px; cursor:default;">Add to Library from Spotify…</div>
+          <div style="height:1px; background:var(--border,#dcdcdc); margin:5px 10px; opacity:.5;"></div>
+          <div onClick="{{ menuBackup }}" style="padding:5px 16px; cursor:default;">Back Up Library (.json)…</div>
+          <div onClick="{{ menuExport }}" style="padding:5px 16px; cursor:default;">Export Library (.json.gz)…</div>
+          <div onClick="{{ menuRestore }}" style="padding:5px 16px; cursor:default;">Restore Library…</div>
+          <div onClick="{{ menuMerge }}" style="padding:5px 16px; cursor:default;">Merge Library…</div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ viewMenuOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; top:23px; left:96px; width:220px; background:var(--panel,#f7f7f7); border:1px solid var(--border,#b0b0b0); border-radius:6px; box-shadow:0 12px 30px rgba(0,0,0,.28); padding:5px 0; font-size:12.5px; color:var(--txt,#1a1a1a);">
+          <div onClick="{{ zoomIn }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Increase Text Size<span style="color:var(--menudim,#9a9a9a);">⌘+</span></div>
+          <div onClick="{{ zoomOut }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Decrease Text Size<span style="color:var(--menudim,#9a9a9a);">⌘−</span></div>
+          <div onClick="{{ zoomReset }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Actual Size <span style="color:var(--menudim,#9a9a9a);">{{ zoomLabel }} · ⌘0</span></div>
+          <div style="height:1px; background:var(--border,#dcdcdc); margin:5px 10px; opacity:.5;"></div>
+          <div onClick="{{ setLight }}" style="padding:5px 16px; display:flex; gap:8px; cursor:default;"><span style="width:12px;">{{ checkLight }}</span>Light</div>
+          <div onClick="{{ setDark }}" style="padding:5px 16px; display:flex; gap:8px; cursor:default;"><span style="width:12px;">{{ checkDark }}</span>Dark</div>
+          <div onClick="{{ setSystem }}" style="padding:5px 16px; display:flex; gap:8px; cursor:default;"><span style="width:12px;">{{ checkSystem }}</span>Use System Setting</div>
+        </div>
+      </sc-if>
+    </div>
+
+    <!-- Transport / control bar -->
+    <div style="height:60px; flex:0 0 auto; background:linear-gradient(var(--head1,#fafafa),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#b7b7b7); display:grid; grid-template-columns:200px 1fr 268px; align-items:center; gap:16px; padding:0 16px;">
+      <div style="display:flex; align-items:center; gap:14px;">
+        <span onClick="{{ prevTrack }}" style="font-size:18px; color:var(--dim,#3a3a3a); cursor:default;">⏮</span>
+        <span onClick="{{ togglePlay }}" style="font-size:24px; color:var(--txt,#1a1a1a); cursor:default; width:24px; text-align:center;">{{ playIcon }}</span>
+        <span onClick="{{ nextTrack }}" style="font-size:18px; color:var(--dim,#3a3a3a); cursor:default;">⏭</span>
+        <span style="font-size:13px; color:var(--dim,#8a8a8a); margin-left:4px;">🔊</span>
+        <div style="width:52px; height:4px; border-radius:2px; background:var(--ctlb,#cfcfcf);"><div style="width:65%; height:4px; border-radius:2px; background:var(--dim,#8a8a8a);"></div></div>
+      </div>
+
+      <!-- LCD display -->
+      <div style="height:40px; background:linear-gradient(var(--lcd1,#eef2f7),var(--lcd2,#e2e8f0)); border:1px solid var(--border,#b9c2cd); border-radius:6px; box-shadow:inset 0 1px 2px rgba(0,0,0,.12); display:flex; flex-direction:column; justify-content:center; padding:4px 14px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; font-size:12px; color:var(--lcdtxt,#2b3440);">
+          <span style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ npTitle }}</span>
+          <span style="color:var(--lcddim,#7a8593); font-size:11px; flex:0 0 auto; margin-left:12px;">{{ npMeta }}</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:3px;">
+          <span style="font-size:10px; color:var(--lcddim,#7a8593); width:30px;">{{ npElapsed }}</span>
+          <div style="flex:1; height:4px; border-radius:2px; background:var(--ctlb,#cdd5df);"><div style="width:{{ npProgress }}; height:4px; border-radius:2px; background:#5a86c4;"></div></div>
+          <span style="font-size:10px; color:var(--lcddim,#7a8593); width:34px; text-align:right;">{{ npRemaining }}</span>
+        </div>
+      </div>
+
+      <!-- Search with scope toggle -->
+      <div style="display:flex; align-items:center; gap:6px; justify-content:flex-end;">
+        <div style="display:flex; background:var(--ctlb,#d8d8d8); border-radius:11px; padding:2px;">
+          <span onClick="{{ scopeLibrary }}" style="{{ scopeLibStyle }}">Library</span>
+          <span onClick="{{ scopeSpotify }}" style="{{ scopeSpotStyle }}">Spotify</span>
+        </div>
+        <div style="width:150px; height:24px; background:var(--list,#fff); border:1px solid var(--ctlb,#bdbdbd); border-radius:12px; display:flex; align-items:center; padding:0 10px; gap:6px;">
+          <span style="color:#a0a0a0; font-size:12px;">⌕</span>
+          <input value="{{ query }}" onInput="{{ onSearch }}" placeholder="{{ searchPlaceholder }}" style="border:none; outline:none; font-size:12px; width:100%; background:transparent; font-family:inherit; color:var(--txt,#333);" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div style="flex:1 1 auto; display:grid; grid-template-columns:190px 1fr; min-height:0;">
+
+      <!-- Sidebar -->
+      <div style="background:linear-gradient(var(--side1,#e6ebf2),var(--side2,#dbe2ec)); border-right:1px solid var(--border,#b7bdc7); display:flex; flex-direction:column; min-height:0;">
+        <div style="padding:10px 12px 4px; font-size:10px; font-weight:700; letter-spacing:.04em; color:var(--sub,#8a93a1); text-transform:uppercase;">Library</div>
+        <sc-for list="{{ sources }}" as="s" hint-placeholder-count="3">
+          <div onClick="{{ s.onClick }}" style="{{ s.style }}">
+            <span style="width:16px; text-align:center;">{{ s.icon }}</span>
+            <span style="flex:1;">{{ s.label }}</span>
+            <span style="font-size:10px; color:{{ s.countColor }};">{{ s.count }}</span>
+          </div>
+        </sc-for>
+        <div style="padding:14px 12px 4px; font-size:10px; font-weight:700; letter-spacing:.04em; color:var(--sub,#8a93a1); text-transform:uppercase;">Playlists</div>
+        <div style="padding:4px 14px; font-size:12px; color:var(--sub,#b0b6c0); font-style:italic;">Recently Added</div>
+        <div style="padding:4px 14px; font-size:12px; color:var(--sub,#b0b6c0); font-style:italic;">▸ Smart Playlist…</div>
+        <div style="flex:1;"></div>
+        <div style="padding:10px 12px; font-size:10.5px; color:var(--sub,#8a93a1); border-top:1px solid var(--border,#cdd3dc); line-height:1.5;">🔒 Overlay edits stay local.<br/>Never written back to Spotify.</div>
+      </div>
+
+      <!-- Content -->
+      <div style="display:flex; flex-direction:column; min-height:0; background:var(--list,#fff);">
+
+        <!-- Browser: 3 columns -->
+        <div style="height:200px; flex:0 0 auto; display:grid; grid-template-columns:1fr 1fr 1fr; border-bottom:1px solid var(--border,#b7b7b7);">
+          <div style="display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border,#d6d6d6);">
+            <div style="height:20px; background:linear-gradient(var(--head1,#f0f0f0),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#cfcfcf); font-size:11px; font-weight:600; color:var(--dim,#4a4a4a); display:flex; align-items:center; padding:0 8px;">{{ colGenre }}</div>
+            <div style="flex:1; overflow:auto;">
+              <sc-for list="{{ genreItems }}" as="g" hint-placeholder-count="6">
+                <div onClick="{{ g.onClick }}" style="{{ g.style }}">{{ g.label }}</div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border,#d6d6d6);">
+            <div style="height:20px; background:linear-gradient(var(--head1,#f0f0f0),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#cfcfcf); font-size:11px; font-weight:600; color:var(--dim,#4a4a4a); display:flex; align-items:center; padding:0 8px;">{{ colArtist }}</div>
+            <div style="flex:1; overflow:auto;">
+              <sc-for list="{{ artistItems }}" as="a" hint-placeholder-count="6">
+                <div onClick="{{ a.onClick }}" style="{{ a.style }}">{{ a.label }}</div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; min-height:0;">
+            <div style="height:20px; background:linear-gradient(var(--head1,#f0f0f0),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#cfcfcf); font-size:11px; font-weight:600; color:var(--dim,#4a4a4a); display:flex; align-items:center; padding:0 8px;">{{ colAlbum }}</div>
+            <div style="flex:1; overflow:auto;">
+              <sc-for list="{{ albumItems }}" as="al" hint-placeholder-count="6">
+                <div onClick="{{ al.onClick }}" style="{{ al.style }}">{{ al.label }}</div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+
+        <!-- Album rating context strip -->
+        <sc-if value="{{ showAlbumStrip }}" hint-placeholder-val="{{ false }}">
+          <div style="flex:0 0 auto; height:28px; background:var(--menu,#f6f6f6); border-bottom:1px solid var(--border,#d6d6d6); display:flex; align-items:center; gap:10px; padding:0 12px; font-size:11.5px; color:var(--txt,#3a3a3a);">
+            <span style="font-weight:600;">{{ albumStripLabel }}</span>
+            <span style="display:flex; gap:1px;">
+              <sc-for list="{{ albumStars }}" as="st" hint-placeholder-count="5">
+                <span onClick="{{ st.onClick }}" style="{{ st.style }}">{{ st.char }}</span>
+              </sc-for>
+            </span>
+            <span style="color:var(--sub,#9a9a9a); font-size:10.5px;">{{ albumStripHint }}</span>
+          </div>
+        </sc-if>
+
+        <!-- Track list -->
+        <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+          <div style="height:20px; flex:0 0 auto; background:linear-gradient(var(--head1,#f4f4f4),var(--head2,#e6e6e6)); border-bottom:1px solid var(--border,#cfcfcf); display:grid; grid-template-columns:22px minmax(160px,1.6fr) 52px 1.1fr 1.1fr 0.9fr 84px; align-items:center; font-size:11px; font-weight:600; color:var(--dim,#5a5a5a); padding:0 6px;">
+            <span></span><span>{{ hName }}</span><span>Time</span><span>{{ hArtist }}</span><span>{{ hAlbum }}</span><span>{{ hGenre }}</span><span style="text-align:center;">Rating</span>
+          </div>
+          <div style="flex:1; overflow:auto;">
+            <sc-if value="{{ showSpotifyStub }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:40px; text-align:center; color:var(--sub,#9a9a9a); font-size:12.5px; line-height:1.7;">🔎 Searching <b>Spotify</b> for "{{ query }}"<br/>Global results appear here. Use <b>+ Add to Library</b> on a result to pull it — and its metadata — into your local overlay.</div>
+            </sc-if>
+            <sc-if value="{{ showTracks }}" hint-placeholder-val="{{ true }}">
+              <sc-for list="{{ trackItems }}" as="t" hint-placeholder-count="12">
+                <div onClick="{{ t.onClick }}" onDoubleClick="{{ t.onPlay }}" style="{{ t.style }}">
+                  <span style="text-align:center; color:{{ t.iconColor }};">{{ t.icon }}</span>
+                  <span style="overflow:hidden; text-overflow:ellipsis;">{{ t.name }}</span>
+                  <span style="color:{{ t.dim }};">{{ t.time }}</span>
+                  <span style="overflow:hidden; text-overflow:ellipsis;">{{ t.art }}</span>
+                  <span style="overflow:hidden; text-overflow:ellipsis; color:{{ t.dim }};">{{ t.alb }}</span>
+                  <span style="overflow:hidden; text-overflow:ellipsis; color:{{ t.dim }};">{{ t.catLabel }}</span>
+                  <span style="display:flex; gap:1px; justify-content:center;">
+                    <sc-for list="{{ t.stars }}" as="st" hint-placeholder-count="5">
+                      <span onClick="{{ st.onClick }}" style="{{ st.style }}">{{ st.char }}</span>
+                    </sc-for>
+                  </span>
+                </div>
+              </sc-for>
+            </sc-if>
+          </div>
+        </div>
+
+        <!-- Status bar -->
+        <div style="height:26px; flex:0 0 auto; background:linear-gradient(var(--head1,#eaeaea),var(--head2,#dcdcdc)); border-top:1px solid var(--border,#b7b7b7); display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--dim,#5a5a5a); position:relative;">
+          <span onClick="{{ addToLibrary }}" style="position:absolute; left:10px; width:20px; height:20px; border-radius:4px; background:var(--ctl,#f4f4f4); border:1px solid var(--ctlb,#bcbcbc); display:flex; align-items:center; justify-content:center; font-size:14px; color:var(--dim,#666); cursor:default;">+</span>
+          <span>{{ statusLine }}</span>
+          <span style="position:absolute; right:10px; color:var(--sub,#8a8a8a);">{{ overrideCount }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Get Info modal -->
+  <sc-if value="{{ infoOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeInfo }}" style="position:fixed; inset:0; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:60;">
+      <div onClick="{{ stop }}" style="width:470px; background:var(--panel,#f2f2f2); border:1px solid var(--border,#9a9a9a); border-radius:9px; box-shadow:0 30px 70px rgba(0,0,0,.4); overflow:hidden; color:var(--txt,#1a1a1a);">
+        <div style="height:46px; background:linear-gradient(var(--head1,#f6f6f6),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#c4c4c4); display:flex; align-items:center; padding:0 18px; font-size:14px; font-weight:700;">Overlay Info</div>
+        <div style="padding:18px 22px; display:flex; flex-direction:column; gap:12px;">
+          <div style="display:flex; gap:14px; align-items:center; padding-bottom:12px; border-bottom:1px solid var(--border,#dcdcdc);">
+            <div style="width:56px; height:56px; border-radius:6px; background:repeating-linear-gradient(45deg,#dfe4ea,#dfe4ea 6px,#d3d9e0 6px,#d3d9e0 12px); border:1px solid #c4c9d0; display:flex; align-items:center; justify-content:center; font-size:20px; color:#9aa2ac;">♪</div>
+            <div style="font-size:11px; color:var(--dim,#8a8a8a); line-height:1.6;">
+              <div><span style="color:var(--sub,#5a5a5a);">Spotify ID</span> &nbsp;{{ infoSpotifyId }}</div>
+              <div style="font-size:10.5px; color:var(--sub,#a0a0a0);">ID is read-only · your overlay edits never write to Spotify</div>
+            </div>
+          </div>
+          <label style="font-size:11px; color:var(--sub,#666);">{{ hName }}
+            <input value="{{ infoName }}" onInput="{{ editName }}" style="display:block; width:100%; margin-top:3px; height:26px; border:1px solid var(--ctlb,#bcbcbc); border-radius:4px; padding:0 8px; font-size:12.5px; font-family:inherit; background:var(--list,#fff); color:var(--txt,#1a1a1a);" />
+          </label>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <label style="font-size:11px; color:var(--sub,#666);">{{ hArtist }}
+              <input value="{{ infoArt }}" onInput="{{ editArt }}" style="display:block; width:100%; margin-top:3px; height:26px; border:1px solid var(--ctlb,#bcbcbc); border-radius:4px; padding:0 8px; font-size:12.5px; font-family:inherit; background:var(--list,#fff); color:var(--txt,#1a1a1a);" />
+            </label>
+            <label style="font-size:11px; color:var(--sub,#666);">{{ hAlbum }}
+              <input value="{{ infoAlb }}" onInput="{{ editAlb }}" style="display:block; width:100%; margin-top:3px; height:26px; border:1px solid var(--ctlb,#bcbcbc); border-radius:4px; padding:0 8px; font-size:12.5px; font-family:inherit; background:var(--list,#fff); color:var(--txt,#1a1a1a);" />
+            </label>
+          </div>
+          <label style="font-size:11px; color:var(--sub,#666);">{{ hGenre }} <span style="color:var(--sub,#9a9a9a);">— normalize freely (e.g. "Operatic Rock" → "Rock")</span>
+            <input value="{{ infoCat }}" onInput="{{ editCat }}" style="display:block; width:100%; margin-top:3px; height:26px; border:1px solid var(--ctlb,#bcbcbc); border-radius:4px; padding:0 8px; font-size:12.5px; font-family:inherit; background:var(--list,#fff); color:var(--txt,#1a1a1a);" />
+          </label>
+          <div style="display:flex; align-items:center; gap:10px; font-size:11px; color:var(--sub,#666);">Track rating
+            <span style="display:flex; gap:2px;">
+              <sc-for list="{{ infoStars }}" as="st" hint-placeholder-count="5">
+                <span onClick="{{ st.onClick }}" style="{{ st.style }}">{{ st.char }}</span>
+              </sc-for>
+            </span>
+            <span style="color:var(--sub,#9a9a9a); font-size:10.5px;">{{ infoRatingHint }}</span>
+          </div>
+          <div style="font-size:11px; color:var(--dim,#8a8a8a); background:var(--menu,#e9edf3); border:1px solid var(--border,#d3dae3); border-radius:5px; padding:8px 10px;">{{ infoOriginal }}</div>
+        </div>
+        <div style="padding:0 22px 18px; display:flex; justify-content:flex-end; gap:10px;">
+          <button onClick="{{ closeInfo }}" style="height:28px; padding:0 16px; border-radius:6px; border:1px solid var(--ctlb,#bcbcbc); background:var(--ctl,#fafafa); color:var(--txt,#1a1a1a); font-size:12.5px; font-family:inherit; cursor:default;">Cancel</button>
+          <button onClick="{{ saveInfo }}" style="height:28px; padding:0 18px; border-radius:6px; border:1px solid #2f6fd0; background:#3f7fd6; color:#fff; font-size:12.5px; font-weight:600; font-family:inherit; cursor:default;">Save Overlay</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ prefsOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closePrefs }}" style="position:fixed; inset:0; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:60;">
+      <div onClick="{{ stop }}" style="width:490px; background:var(--panel,#f2f2f2); border:1px solid var(--border,#9a9a9a); border-radius:9px; box-shadow:0 30px 70px rgba(0,0,0,.4); overflow:hidden; color:var(--txt,#1a1a1a);">
+        <div style="height:46px; background:linear-gradient(var(--head1,#f6f6f6),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#c4c4c4); display:flex; align-items:center; padding:0 18px; font-size:14px; font-weight:700;">Preferences</div>
+        <div style="padding:18px 22px; display:flex; flex-direction:column; gap:18px;">
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--sub,#8a93a1);">Library</div>
+            <sc-for list="{{ libraryToggles }}" as="t" hint-placeholder-count="1">
+              <div onClick="{{ t.onClick }}" style="display:flex; align-items:center; gap:12px; cursor:default;">
+                <div style="{{ t.trackStyle }}"><div style="{{ t.knobStyle }}"></div></div>
+                <div style="display:flex; flex-direction:column;"><span style="font-size:12.5px;">{{ t.label }}</span><span style="font-size:10.5px; color:var(--sub,#9a9a9a);">{{ t.help }}</span></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="padding:0 22px 18px; display:flex; justify-content:flex-end;">
+          <button onClick="{{ closePrefs }}" style="height:28px; padding:0 18px; border-radius:6px; border:1px solid #2f6fd0; background:#3f7fd6; color:#fff; font-size:12.5px; font-weight:600; font-family:inherit; cursor:default;">Done</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <input id="retune-import" type="file" accept=".json,.gz,application/json,application/gzip" style="display:none;" onChange="{{ onImportFile }}" />
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;,&quot;system&quot;],&quot;tsType&quot;:&quot;'light' | 'dark' | 'system'&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#3f7fd6&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;zebra&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Appearance&quot;}}">
+class Component extends DCLogic {
+  state = {
+    source: 'music',
+    genre: null, artist: null, album: null,
+    selectedTrack: null,
+    playing: null, isPlaying: false, elapsed: 0,
+    query: '', searchScope: 'library',
+    theme: 'light', zoom: 1,
+    fileMenuOpen: false, viewMenuOpen: false,
+    infoOpen: false, infoTrack: null, draft: null, importMode: 'restore',
+    prefsOpen: false,
+    settings: { autoAdd: true },
+    library: null,
+  };
+
+  componentDidMount() {
+    this.setState({ theme: this.props.theme ?? 'light' });
+    let lib = this.defaultLibrary();
+    try { const saved = localStorage.getItem('retune.library.v2'); if (saved) lib = JSON.parse(saved); } catch (e) {}
+    this.setState({ library: lib });
+    this._timer = setInterval(() => {
+      if (this.state.isPlaying && this.state.playing) {
+        const t = this.findTrack(this.state.playing);
+        const dur = t ? this.toSec(t.time) : 0;
+        this.setState(s => ({ elapsed: s.elapsed + 1 >= dur ? 0 : s.elapsed + 1 }));
+      }
+    }, 1000);
+    this._onKey = (e) => this.onKey(e);
+    window.addEventListener('keydown', this._onKey);
+    this._mql = window.matchMedia('(prefers-color-scheme: dark)');
+    this._onScheme = () => { if (this.state.theme === 'system') this.forceUpdate(); };
+    this._mql.addEventListener('change', this._onScheme);
+    this._onWheel = (e) => { if (e.metaKey || e.ctrlKey) { e.preventDefault(); this.zoomBy(e.deltaY < 0 ? 0.08 : -0.08); } };
+    window.addEventListener('wheel', this._onWheel, { passive: false });
+  }
+  componentWillUnmount() { clearInterval(this._timer); window.removeEventListener('keydown', this._onKey); if (this._mql) this._mql.removeEventListener('change', this._onScheme); window.removeEventListener('wheel', this._onWheel); }
+  zoomBy(d) { this.setState(s => ({ zoom: Math.min(1.8, Math.max(0.7, +(s.zoom + d).toFixed(2))) })); }
+
+  onKey(e) {
+    const tag = (e.target.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'textarea';
+    if (e.key === 'Escape') { this.setState({ infoOpen: false, fileMenuOpen: false, viewMenuOpen: false, prefsOpen: false }); return; }
+    if (e.metaKey && e.key === ',') { e.preventDefault(); this.setState({ prefsOpen: true }); return; }
+    if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); this.zoomBy(0.1); return; }
+    if ((e.metaKey || e.ctrlKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); this.zoomBy(-0.1); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key === '0') { e.preventDefault(); this.setState({ zoom: 1 }); return; }
+    if (typing) return;
+    if (e.key === ' ') { e.preventDefault(); this.setState(s => ({ isPlaying: s.playing ? !s.isPlaying : s.isPlaying })); }
+    else if (e.key === 'ArrowRight' && !e.metaKey) { this.step(1); }
+    else if (e.key === 'ArrowLeft' && !e.metaKey) { this.step(-1); }
+    else if (e.metaKey && e.key.toLowerCase() === 'i') { e.preventDefault(); const t = this.state.selectedTrack ? this.findTrack(this.state.selectedTrack) : null; if (t) this.openInfo(t); }
+    else if (e.metaKey && e.key.toLowerCase() === 'l') { e.preventDefault(); this.setState({ searchScope: 'library' }); }
+  }
+
+  save(lib) { try { localStorage.setItem('retune.library.v2', JSON.stringify(lib)); } catch (e) {} }
+  toSec(t) { const p = String(t).split(':').map(Number); return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + (p[1] || 0); }
+  fmt(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+  findTrack(id) { const all = this.state.library ? this.state.library[this.state.source] : []; return all.find(x => x.id === id); }
+  akey(t) { return t.art + '\u241e' + t.alb; }
+  albumRating(t) { const m = this.state.library.albumRatings[this.state.source] || {}; return m[this.akey(t)] || 0; }
+
+  defaultLibrary() {
+    let n = 0; const T = (cat, art, alb, name, time, rating, orig) => ({ id: 'sp' + (++n), spotifyId: 'spotify:track:' + Math.random().toString(36).slice(2, 12), cat, art, alb, name, time, plays: Math.floor(Math.random() * 260), rating: rating ?? null, orig: orig || null });
+    return {
+      music: [
+        T('Rock', 'The Eagles', 'Hotel California', 'Hotel California', '6:30'),
+        T('Rock', 'The Eagles', 'Hotel California', 'New Kid in Town', '5:04'),
+        T('Rock', 'The Eagles', 'Hotel California', 'Life in the Fast Lane', '4:46', 5),
+        T('Rock', 'The Eagles', 'Hotel California', 'Wasted Time', '4:55'),
+        T('Rock', 'Fleetwood Mac', 'Rumours', 'Dreams', '4:14'),
+        T('Rock', 'Fleetwood Mac', 'Rumours', 'Go Your Own Way', '3:38'),
+        T('Rock', 'Fleetwood Mac', 'Rumours', 'The Chain', '4:28'),
+        T('Rock', 'Queen', 'A Night at the Opera', 'Bohemian Rhapsody', '5:55', null, 'Progressive/Operatic Rock'),
+        T('Rock', 'Queen', 'A Night at the Opera', "You're My Best Friend", '2:52', null, 'Progressive/Operatic Rock'),
+        T('Rock', 'Queen', 'A Night at the Opera', 'Love of My Life', '3:39', null, 'Progressive/Operatic Rock'),
+        T('Alternative', 'Radiohead', 'OK Computer', 'Paranoid Android', '6:23'),
+        T('Alternative', 'Radiohead', 'OK Computer', 'Karma Police', '4:21'),
+        T('Alternative', 'Radiohead', 'OK Computer', 'No Surprises', '3:48'),
+        T('Alternative', 'The Strokes', 'Is This It', 'Last Nite', '3:17'),
+        T('Alternative', 'The Strokes', 'Is This It', 'Someday', '3:05'),
+        T('Jazz', 'Miles Davis', 'Kind of Blue', 'So What', '9:22'),
+        T('Jazz', 'Miles Davis', 'Kind of Blue', 'Freddie Freeloader', '9:46'),
+        T('Jazz', 'Miles Davis', 'Kind of Blue', 'Blue in Green', '5:37'),
+        T('Jazz', 'John Coltrane', 'A Love Supreme', 'Acknowledgement', '7:43'),
+        T('Jazz', 'John Coltrane', 'A Love Supreme', 'Resolution', '7:20'),
+        T('Electronic', 'Daft Punk', 'Discovery', 'One More Time', '5:20'),
+        T('Electronic', 'Daft Punk', 'Discovery', 'Digital Love', '4:58'),
+        T('Electronic', 'Daft Punk', 'Discovery', 'Harder Better Faster Stronger', '3:45'),
+        T('Electronic', 'Boards of Canada', 'Music Has the Right to Children', 'Roygbiv', '2:31'),
+        T('Classical', 'Glenn Gould', 'Goldberg Variations', 'Aria', '3:56'),
+        T('Classical', 'Glenn Gould', 'Goldberg Variations', 'Variatio 5', '1:12'),
+      ],
+      podcasts: [
+        T('Technology', 'Acquired', 'S14 · Semiconductors', 'The Foundry Model', '48:12'),
+        T('Technology', 'Acquired', 'S14 · Semiconductors', 'ASML & EUV', '52:40'),
+        T('Technology', 'Lex Fridman', 'AI Frontiers', 'On Interpretability', '2:41:03'),
+        T('Comedy', 'Smartless', 'Guests', 'Episode 214', '58:09'),
+      ],
+      audiobooks: [
+        T('Fiction', 'Ursula K. Le Guin', 'The Left Hand of Darkness', 'Ch. 1 — A Parade in Erhenrang', '28:14'),
+        T('Fiction', 'Ursula K. Le Guin', 'The Left Hand of Darkness', 'Ch. 2 — The Place Inside the Blizzard', '31:50'),
+        T('Nonfiction', 'Robert Caro', 'The Power Broker', 'Ch. 1 — The Years of Idealism', '44:22'),
+      ],
+      albumRatings: { music: { 'The Eagles\u241eHotel California': 4 }, podcasts: {}, audiobooks: {} },
+    };
+  }
+
+  labels() {
+    const m = {
+      music: { g: 'Genre', a: 'Artist', b: 'Album', name: 'Song', unit: 'songs' },
+      podcasts: { g: 'Category', a: 'Podcaster', b: 'Show', name: 'Episode', unit: 'episodes' },
+      audiobooks: { g: 'Category', a: 'Author', b: 'Book', name: 'Chapter', unit: 'chapters' },
+    };
+    return m[this.state.source];
+  }
+  uniq(a) { return [...new Set(a)]; }
+
+  currentTracks() {
+    const st = this.state; if (!st.library) return [];
+    let items = st.library[st.source];
+    const q = st.query.trim().toLowerCase();
+    if (st.searchScope === 'library' && q) items = items.filter(t => (t.name + ' ' + t.art + ' ' + t.alb + ' ' + t.cat).toLowerCase().includes(q));
+    let s = st.genre ? items.filter(t => t.cat === st.genre) : items;
+    if (st.artist) s = s.filter(t => t.art === st.artist);
+    if (st.album) s = s.filter(t => t.alb === st.album);
+    return s;
+  }
+
+  makeStars(effective, inherited, onSet, big) {
+    const size = big ? '15px' : '11px';
+    return [1, 2, 3, 4, 5].map(i => {
+      const filled = i <= effective;
+      return {
+        char: filled ? '★' : '☆',
+        style: 'font-size:' + size + '; cursor:default; color:' + (filled ? (inherited ? 'rgba(150,150,150,.7)' : '#e0a53d') : 'rgba(150,150,150,.4)') + ';',
+        onClick: (e) => { e.stopPropagation(); onSet(i); },
+      };
+    });
+  }
+
+  renderVals() {
+    const st = this.state;
+    if (!st.library) return {};
+    const L = this.labels();
+    const accent = this.props.accent ?? '#3f7fd6';
+    const zebra = this.props.zebra ?? true;
+    const mode = st.theme;
+    const sysDark = this._mql ? this._mql.matches : false;
+    const theme = mode === 'system' ? (sysDark ? 'dark' : 'light') : mode;
+    const P = theme === 'dark'
+      ? { desk: '#161719', bar1: '#3a3c41', bar2: '#2f3135', menu: '#303236', border: '#45474c', list: '#1f2124', alt: '#26282d', txt: '#e9e9ec', dim: '#b7b8bd', head1: '#35373c', head2: '#2c2e32', side1: '#2c2e33', side2: '#26282c', panel: '#2b2d31', lcd1: '#33363c', lcd2: '#282a2e', lcdtxt: '#dfe3ea', lcddim: '#8b909a', ctl: '#3a3c41', ctlb: '#4a4c52', menudim: '#8b8d94', sub: '#7f838c' }
+      : { desk: '#b9bcc2', bar1: '#f3f3f3', bar2: '#dcdcdc', menu: '#f4f4f4', border: '#b7b7b7', list: '#ffffff', alt: '#edf3fe', txt: '#1a1a1a', dim: '#5a5a5a', head1: '#f0f0f0', head2: '#e2e2e2', side1: '#e6ebf2', side2: '#dbe2ec', panel: '#f2f2f2', lcd1: '#eef2f7', lcd2: '#e2e8f0', lcdtxt: '#2b3440', lcddim: '#7a8593', ctl: '#f4f4f4', ctlb: '#cfcfcf', menudim: '#8a8a8a', sub: '#8a93a1' };
+    const vars = Object.keys(P).map(k => '--' + k + ':' + P[k]).join(';') + ';';
+    const alt = zebra ? P.alt : P.list;
+    const seg = (on) => 'padding:4px 12px; font-size:11.5px; cursor:default; border-radius:5px;' + (on ? 'background:' + accent + '; color:#fff; font-weight:600;' : 'color:' + P.txt + ';');
+    const swT = (on) => 'width:36px; height:20px; border-radius:10px; position:relative; cursor:default; flex:0 0 auto; background:' + (on ? accent : P.ctlb) + ';';
+    const swK = (on) => 'position:absolute; top:2px; left:' + (on ? '18px' : '2px') + '; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.3);';
+    const setg = st.settings;
+
+    let items = st.library[st.source];
+    const q = st.query.trim().toLowerCase();
+    if (st.searchScope === 'library' && q) items = items.filter(t => (t.name + ' ' + t.art + ' ' + t.alb + ' ' + t.cat).toLowerCase().includes(q));
+
+    const rowBase = 'font-size:11px; height:17px; line-height:17px; padding:0 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:default; color:' + P.txt + ';';
+    const pick = (sel, i) => sel ? ('background:' + accent + '; color:#fff;') : ('background:' + (i % 2 ? alt : P.list) + ';');
+
+    const genres = this.uniq(items.map(t => t.cat)).sort();
+    const genreItems = [{ label: 'All (' + genres.length + ' ' + L.g + 's)', onClick: () => this.setState({ genre: null, artist: null, album: null, selectedTrack: null }), style: rowBase + (st.genre == null ? 'background:' + accent + '; color:#fff;' : 'background:' + P.list + ';') }]
+      .concat(genres.map((g, i) => ({ label: g, onClick: () => this.setState({ genre: g, artist: null, album: null, selectedTrack: null }), style: rowBase + pick(st.genre === g, i + 1) })));
+
+    let scope = st.genre ? items.filter(t => t.cat === st.genre) : items;
+    const artists = this.uniq(scope.map(t => t.art)).sort();
+    const artistItems = [{ label: 'All (' + artists.length + ' ' + L.a + 's)', onClick: () => this.setState({ artist: null, album: null, selectedTrack: null }), style: rowBase + (st.artist == null ? 'background:' + accent + '; color:#fff;' : 'background:' + P.list + ';') }]
+      .concat(artists.map((a, i) => ({ label: a, onClick: () => this.setState({ artist: a, album: null, selectedTrack: null }), style: rowBase + pick(st.artist === a, i + 1) })));
+
+    let scope2 = st.artist ? scope.filter(t => t.art === st.artist) : scope;
+    const albums = this.uniq(scope2.map(t => t.alb)).sort();
+    const albumItems = [{ label: 'All (' + albums.length + ' ' + L.b + 's)', onClick: () => this.setState({ album: null, selectedTrack: null }), style: rowBase + (st.album == null ? 'background:' + accent + '; color:#fff;' : 'background:' + P.list + ';') }]
+      .concat(albums.map((a, i) => ({ label: a, onClick: () => this.setState({ album: a, selectedTrack: null }), style: rowBase + pick(st.album === a, i + 1) })));
+
+    const tracks = this.currentTracks();
+    const trackGrid = 'display:grid; grid-template-columns:22px minmax(160px,1.6fr) 52px 1.1fr 1.1fr 0.9fr 84px; align-items:center; height:18px; font-size:11px; padding:0 6px; white-space:nowrap; cursor:default;';
+    const trackItems = tracks.map((t, i) => {
+      const sel = st.selectedTrack === t.id;
+      const isPlay = st.playing === t.id;
+      const albR = this.albumRating(t);
+      const inherited = t.rating == null && albR > 0;
+      const eff = t.rating != null ? t.rating : albR;
+      return {
+        name: t.name, time: t.time, art: t.art, alb: t.alb,
+        catLabel: (t.orig ? '● ' : '') + t.cat,
+        icon: isPlay ? (st.isPlaying ? '▶' : '❚❚') : '',
+        iconColor: sel ? '#fff' : accent,
+        dim: sel ? 'rgba(255,255,255,.8)' : P.dim,
+        style: trackGrid + (sel ? ('background:' + accent + '; color:#fff;') : ('background:' + (i % 2 ? alt : P.list) + '; color:' + P.txt + ';')),
+        stars: this.makeStars(eff, inherited, (r) => this.setTrackRating(t, r), false),
+        onClick: () => this.setState({ selectedTrack: t.id }),
+        onPlay: () => this.playTrack(t),
+        onInfo: (e) => { e.stopPropagation(); this.openInfo(t); },
+      };
+    });
+
+    const srcDef = [{ key: 'music', label: 'Music', icon: '♪' }, { key: 'podcasts', label: 'Podcasts', icon: '🎙' }, { key: 'audiobooks', label: 'Audiobooks', icon: '📖' }];
+    const srcBase = 'display:flex; align-items:center; gap:8px; padding:4px 12px; font-size:12.5px; cursor:default;';
+    const sources = srcDef.map(s => ({
+      label: s.label, icon: s.icon, count: st.library[s.key].length,
+      countColor: st.source === s.key ? 'rgba(255,255,255,.85)' : P.sub,
+      style: srcBase + (st.source === s.key ? ('background:' + accent + '; color:#fff; font-weight:600;') : ('color:' + (theme === 'dark' ? '#c9ccd2' : '#3a4250') + ';')),
+      onClick: () => this.setState({ source: s.key, genre: null, artist: null, album: null, selectedTrack: null, query: '' }),
+    }));
+
+    const np = st.playing ? this.findTrack(st.playing) : null;
+    const dur = np ? this.toSec(np.time) : 0;
+    const totalSec = tracks.reduce((a, t) => a + this.toSec(t.time), 0);
+    const h = Math.floor(totalSec / 3600), mm = Math.floor((totalSec % 3600) / 60);
+    const totalStr = h ? (h + ':' + String(mm).padStart(2, '0') + ' hours') : (mm + ' minutes');
+    const overrides = st.library[st.source].filter(t => t.orig).length;
+
+    const scopeSpot = st.searchScope === 'spotify';
+    const pill = (on) => 'padding:2px 10px; border-radius:9px; font-size:11px; cursor:default;' + (on ? 'background:' + P.list + '; color:' + P.txt + '; font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.15);' : 'color:' + P.sub + ';');
+
+    const albStrip = !!st.album;
+    const stripAlbR = albStrip && tracks[0] ? this.albumRating(tracks[0]) : 0;
+
+    const d = st.draft || {};
+    const dTrack = st.infoTrack;
+    const dEff = dTrack ? (d.rating != null ? d.rating : this.albumRating(dTrack)) : 0;
+    const dInh = dTrack ? (d.rating == null && this.albumRating(dTrack) > 0) : false;
+
+    return {
+      deskStyle: vars + 'height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; background:' + P.desk + ';',
+      winStyle: vars + 'zoom:' + st.zoom + '; width:1120px; height:720px; display:flex; flex-direction:column; border-radius:9px; overflow:hidden; box-shadow:0 24px 60px rgba(0,0,0,.35); background:' + P.menu + '; border:1px solid ' + P.border + ';',
+      themeIcon: mode === 'system' ? '🖥' : (mode === 'dark' ? '☾' : '☀'),
+      toggleTheme: () => this.setState(s => ({ theme: s.theme === 'light' ? 'dark' : s.theme === 'dark' ? 'system' : 'light' })),
+      colGenre: L.g, colArtist: L.a, colAlbum: L.b, hName: L.name, hArtist: L.a, hAlbum: L.b, hGenre: L.g,
+      sources, genreItems, artistItems, albumItems, trackItems,
+      showTracks: !scopeSpot || !q, showSpotifyStub: scopeSpot && !!q,
+      showAlbumStrip: albStrip,
+      albumStripLabel: st.album, albumStripHint: '· applies to all tracks unless individually overridden',
+      albumStars: this.makeStars(stripAlbR, false, (r) => this.setAlbumRating(tracks[0], r), false),
+      playIcon: st.isPlaying ? '❚❚' : '▶',
+      npTitle: np ? np.name : 'Retune', npMeta: np ? (np.art + ' — ' + np.alb) : 'Not Playing',
+      npElapsed: np ? this.fmt(st.elapsed) : '—:—', npRemaining: np ? '-' + this.fmt(dur - st.elapsed) : '',
+      npProgress: (np && dur ? Math.min(100, st.elapsed / dur * 100) : 0) + '%',
+      togglePlay: () => this.setState(s => ({ isPlaying: s.playing ? !s.isPlaying : s.isPlaying })),
+      prevTrack: () => this.step(-1), nextTrack: () => this.step(1),
+      query: st.query, onSearch: (e) => this.setState({ query: e.target.value, genre: null, artist: null, album: null }),
+      searchPlaceholder: scopeSpot ? 'Search Spotify' : 'Search Library',
+      scopeLibStyle: pill(!scopeSpot), scopeSpotStyle: pill(scopeSpot),
+      scopeLibrary: () => this.setState({ searchScope: 'library' }), scopeSpotify: () => this.setState({ searchScope: 'spotify' }),
+      statusLine: tracks.length + ' ' + L.unit + ', ' + totalStr, overrideCount: overrides + ' overlay edits',
+      addToLibrary: () => { this.setState({ fileMenuOpen: false }); alert('Add to Library — searches Spotify and pulls the track and its metadata into your local overlay. Everything in your Spotify library auto-populates here. (Stubbed in prototype.)'); },
+      fileMenuOpen: st.fileMenuOpen,
+      fileMenuStyle: 'padding:2px 8px; border-radius:4px; cursor:default;' + (st.fileMenuOpen ? 'background:' + accent + '; color:#fff;' : ''),
+      toggleFileMenu: () => this.setState(s => ({ fileMenuOpen: !s.fileMenuOpen, viewMenuOpen: false })),
+      viewMenuOpen: st.viewMenuOpen,
+      viewMenuStyle: 'padding:2px 8px; border-radius:4px; cursor:default;' + (st.viewMenuOpen ? 'background:' + accent + '; color:#fff;' : 'color:' + P.menudim + ';'),
+      toggleViewMenu: () => this.setState(s => ({ viewMenuOpen: !s.viewMenuOpen, fileMenuOpen: false })),
+      zoomIn: () => { this.zoomBy(0.1); this.setState({ viewMenuOpen: false }); },
+      zoomOut: () => { this.zoomBy(-0.1); this.setState({ viewMenuOpen: false }); },
+      zoomReset: () => this.setState({ zoom: 1, viewMenuOpen: false }),
+      setLight: () => this.setState({ theme: 'light', viewMenuOpen: false }),
+      setDark: () => this.setState({ theme: 'dark', viewMenuOpen: false }),
+      setSystem: () => this.setState({ theme: 'system', viewMenuOpen: false }),
+      checkLight: mode === 'light' ? '✓' : '', checkDark: mode === 'dark' ? '✓' : '', checkSystem: mode === 'system' ? '✓' : '',
+      zoomLabel: Math.round(st.zoom * 100) + '%',
+      menuGetInfo: () => { this.setState({ fileMenuOpen: false }); const t = st.selectedTrack ? this.findTrack(st.selectedTrack) : null; if (t) this.openInfo(t); else alert('Select a track first.'); },
+      menuBackup: () => { this.setState({ fileMenuOpen: false }); this.backup(false); },
+      menuExport: () => { this.setState({ fileMenuOpen: false }); this.backup(true); },
+      menuRestore: () => { this.setState({ fileMenuOpen: false, importMode: 'restore' }); document.getElementById('retune-import').click(); },
+      menuMerge: () => { this.setState({ fileMenuOpen: false, importMode: 'merge' }); document.getElementById('retune-import').click(); },
+      onImportFile: (e) => this.importFile(e),
+      openPrefs: () => this.setState({ prefsOpen: true, fileMenuOpen: false }),
+      closePrefs: () => this.setState({ prefsOpen: false }),
+      menuPrefs: () => this.setState({ prefsOpen: true, fileMenuOpen: false }),
+      prefsOpen: st.prefsOpen,
+      libraryToggles: [
+        { key: 'autoAdd', label: 'Auto-add my entire Spotify library', help: 'Everything you save on Spotify appears here automatically.' },
+      ].map(t => ({ label: t.label, help: t.help, onClick: () => this.setSetting(t.key, !setg[t.key]), trackStyle: swT(setg[t.key]), knobStyle: swK(setg[t.key]) })),
+      infoOpen: st.infoOpen,
+      infoSpotifyId: dTrack ? dTrack.spotifyId : '',
+      infoOriginal: dTrack && dTrack.orig ? ('Spotify reports this as "' + dTrack.orig + '". Your overlay wins in Retune.') : 'No conflicting Spotify metadata for this track.',
+      infoName: d.name || '', infoArt: d.art || '', infoAlb: d.alb || '', infoCat: d.cat || '',
+      infoStars: this.makeStars(dEff, dInh, (r) => this.setState(s => ({ draft: { ...s.draft, rating: s.draft.rating === r ? null : r } })), false),
+      infoRatingHint: dInh ? 'inherited from album — click to override' : (d.rating != null ? 'overridden · click same star to clear' : 'not rated'),
+      editName: (e) => this.edit('name', e.target.value), editArt: (e) => this.edit('art', e.target.value),
+      editAlb: (e) => this.edit('alb', e.target.value), editCat: (e) => this.edit('cat', e.target.value),
+      closeInfo: () => this.setState({ infoOpen: false }), saveInfo: () => this.saveInfo(), stop: (e) => e.stopPropagation(),
+    };
+  }
+
+  playTrack(t) { this.setState({ playing: t.id, isPlaying: true, elapsed: 0, selectedTrack: t.id }); }
+  step(dir) {
+    const tracks = this.currentTracks(); if (!tracks.length) return;
+    const idx = tracks.findIndex(t => t.id === this.state.playing);
+    const ni = idx < 0 ? 0 : (idx + dir + tracks.length) % tracks.length;
+    this.playTrack(tracks[ni]);
+  }
+  setTrackRating(t, r) {
+    const { library, source } = this.state;
+    const lib = { ...library, [source]: library[source].map(x => x.id === t.id ? { ...x, rating: x.rating === r ? null : r } : x) };
+    this.save(lib); this.setState({ library: lib });
+  }
+  setAlbumRating(t, r) {
+    const { library, source } = this.state;
+    const m = { ...(library.albumRatings[source] || {}) };
+    const k = this.akey(t);
+    if (m[k] === r) delete m[k]; else m[k] = r;
+    const lib = { ...library, albumRatings: { ...library.albumRatings, [source]: m } };
+    this.save(lib); this.setState({ library: lib });
+  }
+  setSetting(k, v) { this.setState(s => ({ settings: { ...s.settings, [k]: v } })); }
+  openInfo(t) { this.setState({ infoOpen: true, infoTrack: t, draft: { name: t.name, art: t.art, alb: t.alb, cat: t.cat, rating: t.rating } }); }
+  edit(k, v) { this.setState(s => ({ draft: { ...s.draft, [k]: v } })); }
+  saveInfo() {
+    const { infoTrack, draft, library, source } = this.state;
+    const changedCat = draft.cat !== infoTrack.cat;
+    const lib = { ...library, [source]: library[source].map(t => t.id === infoTrack.id ? { ...t, name: draft.name, art: draft.art, alb: draft.alb, cat: draft.cat, rating: draft.rating, orig: changedCat && !t.orig ? t.cat : t.orig } : t) };
+    this.save(lib); this.setState({ library: lib, infoOpen: false });
+  }
+
+  async backup(gz) {
+    const json = JSON.stringify(this.state.library, null, gz ? 0 : 2);
+    let blob, name;
+    if (gz && window.CompressionStream) {
+      const cs = new CompressionStream('gzip');
+      const stream = new Blob([json]).stream().pipeThrough(cs);
+      blob = await new Response(stream).blob();
+      name = 'retune-library.json.gz';
+    } else { blob = new Blob([json], { type: 'application/json' }); name = 'retune-library.json'; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  async importFile(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const mode = this.state.importMode;
+    try {
+      let text;
+      if (file.name.endsWith('.gz') && window.DecompressionStream) {
+        const ds = new DecompressionStream('gzip');
+        const stream = file.stream().pipeThrough(ds);
+        text = await new Response(stream).text();
+      } else { text = await file.text(); }
+      const data = JSON.parse(text);
+      let lib;
+      if (mode === 'restore') { lib = data; }
+      else {
+        lib = { ...this.state.library, albumRatings: { ...this.state.library.albumRatings } };
+        for (const k of ['music', 'podcasts', 'audiobooks']) {
+          const have = new Set((lib[k] || []).map(t => t.spotifyId));
+          lib[k] = (lib[k] || []).concat((data[k] || []).filter(t => !have.has(t.spotifyId)));
+          lib.albumRatings[k] = { ...(data.albumRatings ? data.albumRatings[k] : {}), ...(lib.albumRatings[k] || {}) };
+        }
+      }
+      this.save(lib);
+      this.setState({ library: lib, genre: null, artist: null, album: null, selectedTrack: null });
+    } catch (err) { alert('Could not read library: ' + err.message); }
+    e.target.value = '';
+  }
+}
+</script>
+</body>
+</html>
