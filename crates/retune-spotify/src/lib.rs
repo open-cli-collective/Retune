@@ -1,14 +1,40 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Offline-testable Spotify Web API adapter.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod auth;
+pub mod client;
+pub mod normalize;
+pub mod tokens;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+use thiserror::Error;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("OAuth callback error: {0}")]
+    Callback(String),
+    #[error("OAuth state mismatch")]
+    StateMismatch,
+    #[error("HTTP transport error: {0}")]
+    Transport(String),
+    #[error("Spotify {endpoint} returned HTTP {status}: {body}")]
+    Http {
+        endpoint: String,
+        status: u16,
+        body: String,
+    },
+    #[error("invalid JSON from Spotify {endpoint}: {source}")]
+    Json {
+        endpoint: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("token store error: {0}")]
+    TokenStore(String),
+    #[error("no Spotify tokens are stored")]
+    MissingToken,
+    #[error("Spotify refresh response did not contain a refresh token or a stored fallback")]
+    MissingRefreshToken,
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
 }

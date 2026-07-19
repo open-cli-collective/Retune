@@ -1,0 +1,180 @@
+use std::time::Duration;
+
+use retune_core::model::{NewTrack, SourceId};
+
+use crate::client::{Artist, Audiobook, Chapter, Episode, Show, Track};
+
+pub fn track(value: &Track, primary_artist: Option<&Artist>) -> NewTrack {
+    NewTrack {
+        uri: value.uri.clone(),
+        source: SourceId::Music,
+        cat: primary_artist
+            .and_then(|artist| artist.genres.first())
+            .cloned()
+            .unwrap_or_else(|| "Unknown".into()),
+        art: value
+            .artists
+            .first()
+            .map(|artist| artist.name.clone())
+            .unwrap_or_default(),
+        alb: value
+            .album
+            .as_ref()
+            .map(|album| album.name.clone())
+            .unwrap_or_default(),
+        name: value.name.clone(),
+        duration: Duration::from_millis(value.duration_ms),
+    }
+}
+
+pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
+    let show = value.show.as_ref().or(parent_show);
+    NewTrack {
+        uri: value.uri.clone(),
+        source: SourceId::Podcasts,
+        cat: show
+            .and_then(|show| show.category.clone())
+            .unwrap_or_else(|| "Uncategorized".into()),
+        art: show.map(|show| show.publisher.clone()).unwrap_or_default(),
+        alb: show.map(|show| show.name.clone()).unwrap_or_default(),
+        name: value.name.clone(),
+        duration: Duration::from_millis(value.duration_ms),
+    }
+}
+
+pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
+    NewTrack {
+        uri: value.uri.clone(),
+        source: SourceId::Audiobooks,
+        cat: book
+            .genres
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Uncategorized".into()),
+        art: book
+            .authors
+            .first()
+            .map(|author| author.name.clone())
+            .unwrap_or_default(),
+        alb: book.name.clone(),
+        name: value.name.clone(),
+        duration: Duration::from_millis(value.duration_ms),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::{AlbumSummary, Author, SimplifiedArtist};
+
+    use super::*;
+
+    fn music() -> Track {
+        Track {
+            uri: "spotify:track:1".into(),
+            name: "Song".into(),
+            duration_ms: 1234,
+            artists: vec![SimplifiedArtist {
+                id: "artist-1".into(),
+                name: "Primary".into(),
+            }],
+            album: Some(AlbumSummary {
+                id: "album-1".into(),
+                uri: "spotify:album:1".into(),
+                name: "Record".into(),
+                images: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn track_uses_first_primary_artist_genre_and_unknown_fallback() {
+        let artist = Artist {
+            id: "artist-1".into(),
+            name: "Primary".into(),
+            genres: vec!["indie".into(), "rock".into()],
+        };
+        let mapped = track(&music(), Some(&artist));
+        assert_eq!(mapped.uri, "spotify:track:1");
+        assert_eq!(mapped.cat, "indie");
+        assert_eq!(mapped.art, "Primary");
+        assert_eq!(mapped.alb, "Record");
+        assert_eq!(track(&music(), None).cat, "Unknown");
+        assert_eq!(
+            track(
+                &music(),
+                Some(&Artist {
+                    genres: vec![],
+                    ..artist
+                })
+            )
+            .cat,
+            "Unknown"
+        );
+    }
+
+    #[test]
+    fn episode_uses_show_facets_and_uncategorized_fallback() {
+        let show = Show {
+            id: "show-1".into(),
+            uri: "spotify:show:1".into(),
+            name: "The Show".into(),
+            publisher: "Podcaster".into(),
+            category: Some("Technology".into()),
+            images: vec![],
+        };
+        let value = Episode {
+            uri: "spotify:episode:1".into(),
+            name: "Episode".into(),
+            duration_ms: 2000,
+            show: None,
+        };
+        let mapped = episode(&value, Some(&show));
+        assert_eq!(mapped.cat, "Technology");
+        assert_eq!(mapped.art, "Podcaster");
+        assert_eq!(mapped.alb, "The Show");
+        let uncategorized = episode(
+            &value,
+            Some(&Show {
+                category: None,
+                ..show
+            }),
+        );
+        assert_eq!(uncategorized.cat, "Uncategorized");
+    }
+
+    #[test]
+    fn chapter_uses_first_author_genre_and_fallbacks() {
+        let value = Chapter {
+            uri: "spotify:chapter:1".into(),
+            name: "Chapter One".into(),
+            duration_ms: 3000,
+        };
+        let book = Audiobook {
+            id: "book-1".into(),
+            uri: "spotify:audiobook:1".into(),
+            name: "The Book".into(),
+            authors: vec![Author {
+                name: "First Author".into(),
+            }],
+            genres: vec!["History".into()],
+            images: vec![],
+        };
+        let mapped = chapter(&value, &book);
+        assert_eq!(mapped.uri, "spotify:chapter:1");
+        assert_eq!(mapped.cat, "History");
+        assert_eq!(mapped.art, "First Author");
+        assert_eq!(mapped.alb, "The Book");
+        assert_eq!(
+            chapter(
+                &value,
+                &Audiobook {
+                    genres: vec![],
+                    authors: vec![],
+                    ..book
+                }
+            )
+            .cat,
+            "Uncategorized"
+        );
+    }
+}
