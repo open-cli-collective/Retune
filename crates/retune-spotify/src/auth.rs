@@ -180,8 +180,12 @@ impl LoopbackListener {
                 }
                 Err(error) => return Err(Error::Callback(error.to_string())),
             };
+            // Accepted sockets inherit the listener's non-blocking flag on
+            // BSD/macOS; restore blocking so the read timeout governs and a
+            // not-yet-arrived request isn't mistaken for a dead connection.
             stream
-                .set_read_timeout(Some(remaining))
+                .set_nonblocking(false)
+                .and_then(|()| stream.set_read_timeout(Some(remaining)))
                 .map_err(|error| Error::Callback(error.to_string()))?;
             // Read until the header terminator: the request line can arrive
             // split across segments, and a partial read misparses as malformed.
