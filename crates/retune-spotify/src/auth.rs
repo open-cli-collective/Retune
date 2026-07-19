@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -183,11 +183,29 @@ impl LoopbackListener {
             stream
                 .set_read_timeout(Some(remaining))
                 .map_err(|error| Error::Callback(error.to_string()))?;
-            let mut buffer = [0_u8; 8192];
-            let Ok(read) = stream.read(&mut buffer) else {
-                continue;
+            // Read until the header terminator: the request line can arrive
+            // split across segments, and a partial read misparses as malformed.
+            let mut buffer = Vec::with_capacity(2048);
+            let mut chunk = [0_u8; 2048];
+            let complete = loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break false,
+                    Ok(read) => {
+                        buffer.extend_from_slice(&chunk[..read]);
+                        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break true;
+                        }
+                        if buffer.len() > 16 * 1024 {
+                            break false;
+                        }
+                    }
+                    Err(_) => break false,
+                }
             };
-            let Ok(url) = callback_url(&String::from_utf8_lossy(&buffer[..read])) else {
+            if !complete {
+                continue;
+            }
+            let Ok(url) = callback_url(&String::from_utf8_lossy(&buffer)) else {
                 let _ = respond(
                     &mut stream,
                     "400 Bad Request",
@@ -250,13 +268,22 @@ fn query_value(url: &Url, name: &str) -> Option<String> {
         .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
 }
 
-fn respond(stream: &mut impl Write, status: &str, body: &str) -> Result<()> {
+fn respond(stream: &mut TcpStream, status: &str, body: &str) -> Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
-    .map_err(|error| Error::Callback(error.to_string()))
+    .and_then(|()| stream.flush())
+    .map_err(|error| Error::Callback(error.to_string()))?;
+    // Graceful close: shutdown our write side and drain whatever the peer
+    // still has in flight. Dropping with unread bytes buffered sends RST,
+    // which races the peer's read of our response (flaky on CI runners).
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut sink = [0_u8; 1024];
+    while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+    Ok(())
 }
 
 #[cfg(test)]
