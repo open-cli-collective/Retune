@@ -16,7 +16,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-futures = "0.3"
 retune-core = { path = "../../../crates/retune-core" }
 retune-spotify = { path = "../../../crates/retune-spotify" }
 serde_json = "1.0"

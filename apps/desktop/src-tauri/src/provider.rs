@@ -1,11 +1,12 @@
-use std::collections::HashSet;
-
-use futures::{stream, StreamExt, TryStreamExt};
 use retune_core::model::NewTrack;
 use retune_spotify::{
-    client::{Album, SpotifyClient, Transport},
+    client::{Album, Artist, SpotifyClient, Transport},
     normalize,
     tokens::TokenStore,
+};
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 const PAGE_SIZE: u32 = 50;
@@ -62,16 +63,51 @@ pub struct SearchResults {
     pub albums: Vec<SearchAlbum>,
 }
 
+pub struct Snapshot {
+    pub batches: Vec<Vec<NewTrack>>,
+    pub genres_degraded: bool,
+}
+
 pub trait MediaProvider: Send + Sync {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Vec<Vec<NewTrack>>, String>;
+    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String>;
     async fn search(&self, query: &str) -> Result<SearchResults, String>;
     async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String>;
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String>;
     async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String>;
 }
 
+struct GenreSource<'c, T: Transport, S: TokenStore> {
+    client: &'c SpotifyClient<T, S>,
+    degraded: AtomicBool,
+}
+
+impl<'c, T: Transport, S: TokenStore> GenreSource<'c, T, S> {
+    fn new(client: &'c SpotifyClient<T, S>) -> Self {
+        Self {
+            client,
+            degraded: AtomicBool::new(false),
+        }
+    }
+
+    async fn artist(&self, id: &str) -> Result<Option<Artist>, String> {
+        if self.degraded.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        match self.client.artist(id).await {
+            Ok(artist) => Ok(Some(artist)),
+            Err(error @ retune_spotify::Error::RateLimited { .. }) => {
+                if !self.degraded.swap(true, Ordering::Relaxed) {
+                    log::warn!("Spotify artist genres unavailable for this sync: {error}");
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
 async fn warm_artists<'a, T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+    genres: &GenreSource<'_, T, S>,
     tracks: impl IntoIterator<Item = &'a retune_spotify::client::Track>,
     album: Option<&Album>,
 ) -> Result<(), String> {
@@ -85,18 +121,14 @@ async fn warm_artists<'a, T: Transport, S: TokenStore>(
                 .map(|artist| artist.id.clone())
         })
         .collect::<HashSet<_>>();
-    stream::iter(
-        ids.into_iter()
-            .map(|id| async move { client.artist(&id).await.map_err(|error| error.to_string()) }),
-    )
-    .buffer_unordered(4)
-    .try_collect::<Vec<_>>()
-    .await?;
+    for id in ids {
+        genres.artist(&id).await?;
+    }
     Ok(())
 }
 
 async fn normalized_track<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+    genres: &GenreSource<'_, T, S>,
     track: &retune_spotify::client::Track,
     album: Option<&Album>,
 ) -> Result<NewTrack, String> {
@@ -105,12 +137,7 @@ async fn normalized_track<T: Transport, S: TokenStore>(
         .first()
         .or_else(|| album.and_then(|album| album.artists.first()))
     {
-        Some(artist) => Some(
-            client
-                .artist(&artist.id)
-                .await
-                .map_err(|error| error.to_string())?,
-        ),
+        Some(artist) => genres.artist(&artist.id).await?,
         None => None,
     };
     Ok(normalize::track(track, artist.as_ref(), album))
@@ -118,6 +145,7 @@ async fn normalized_track<T: Transport, S: TokenStore>(
 
 async fn normalized_album_tracks<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
+    genres: &GenreSource<'_, T, S>,
     album: &Album,
 ) -> Result<Vec<NewTrack>, String> {
     let mut offset = 0;
@@ -128,9 +156,9 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
             .await
             .map_err(|error| error.to_string())?;
         let count = page.items.len() as u32;
-        warm_artists(client, &page.items, Some(album)).await?;
+        warm_artists(genres, &page.items, Some(album)).await?;
         for track in page.items {
-            tracks.push(normalized_track(client, &track, Some(album)).await?);
+            tracks.push(normalized_track(genres, &track, Some(album)).await?);
         }
         if page.next.is_none() || count == 0 {
             return Ok(tracks);
@@ -140,7 +168,8 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
 }
 
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Vec<Vec<NewTrack>>, String> {
+    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String> {
+        let genres = GenreSource::new(self);
         let mut offset = 0;
         let mut batches = vec![];
         loop {
@@ -151,10 +180,11 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .await
                         .map_err(|error| error.to_string())?;
                     let count = page.items.len() as u32;
-                    warm_artists(self, page.items.iter().map(|saved| &saved.track), None).await?;
+                    warm_artists(&genres, page.items.iter().map(|saved| &saved.track), None)
+                        .await?;
                     let mut batch = Vec::with_capacity(page.items.len());
                     for saved in page.items {
-                        batch.push(normalized_track(self, &saved.track, None).await?);
+                        batch.push(normalized_track(&genres, &saved.track, None).await?);
                     }
                     (batch, count, page.next.is_some())
                 }
@@ -166,7 +196,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     let count = page.items.len() as u32;
                     let mut batch = vec![];
                     for saved in page.items {
-                        batch.extend(normalized_album_tracks(self, &saved.album).await?);
+                        batch.extend(normalized_album_tracks(self, &genres, &saved.album).await?);
                     }
                     (batch, count, page.next.is_some())
                 }
@@ -244,7 +274,10 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
             };
             batches.push(batch);
             if !has_next || count == 0 {
-                return Ok(batches);
+                return Ok(Snapshot {
+                    batches,
+                    genres_degraded: genres.degraded.load(Ordering::Relaxed),
+                });
             }
             offset += count;
         }
@@ -311,6 +344,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
+        let genres = GenreSource::new(self);
         let id = album.rsplit(':').next().unwrap_or(album);
         let mut offset = 0;
         let mut normalized = vec![];
@@ -319,9 +353,9 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                 .await
                 .map_err(|error| error.to_string())?;
             let count = page.items.len() as u32;
-            warm_artists(self, &page.items, None).await?;
+            warm_artists(&genres, &page.items, None).await?;
             for track in page.items {
-                normalized.push(normalized_track(self, &track, None).await?);
+                normalized.push(normalized_track(&genres, &track, None).await?);
             }
             if page.next.is_none() || count == 0 {
                 return Ok(normalized);
@@ -340,12 +374,16 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
 #[cfg(test)]
 pub struct FakeProvider {
     pub snapshots: std::collections::HashMap<LibraryKind, Vec<Vec<NewTrack>>>,
+    pub genres_degraded: bool,
 }
 
 #[cfg(test)]
 impl MediaProvider for FakeProvider {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Vec<Vec<NewTrack>>, String> {
-        Ok(self.snapshots.get(&kind).cloned().unwrap_or_default())
+    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String> {
+        Ok(Snapshot {
+            batches: self.snapshots.get(&kind).cloned().unwrap_or_default(),
+            genres_degraded: self.genres_degraded,
+        })
     }
 
     async fn search(&self, _query: &str) -> Result<SearchResults, String> {
@@ -426,9 +464,10 @@ mod tests {
             ),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
         ]);
-        let batches = MediaProvider::library_snapshot(&client, LibraryKind::Tracks)
+        let snapshot = MediaProvider::library_snapshot(&client, LibraryKind::Tracks)
             .await
             .unwrap();
+        let batches = snapshot.batches;
 
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0][0].cat, "rock");
@@ -463,7 +502,11 @@ mod tests {
             ),
         ]);
 
-        let batches = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+        let batches = client
+            .library_snapshot(LibraryKind::Albums)
+            .await
+            .unwrap()
+            .batches;
 
         assert_track(
             &batches[0][0],
@@ -496,7 +539,11 @@ mod tests {
             ),
         ]);
 
-        let batches = client.library_snapshot(LibraryKind::Shows).await.unwrap();
+        let batches = client
+            .library_snapshot(LibraryKind::Shows)
+            .await
+            .unwrap()
+            .batches;
 
         assert_track(
             &batches[0][0],
@@ -524,7 +571,8 @@ mod tests {
         let batches = client
             .library_snapshot(LibraryKind::Episodes)
             .await
-            .unwrap();
+            .unwrap()
+            .batches;
 
         assert_track(
             &batches[0][0],
@@ -559,7 +607,8 @@ mod tests {
         let batches = client
             .library_snapshot(LibraryKind::Audiobooks)
             .await
-            .unwrap();
+            .unwrap()
+            .batches;
 
         assert_track(
             &batches[0][0],
@@ -655,7 +704,11 @@ mod tests {
         }));
         let client = client(responses);
 
-        let batches = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+        let batches = client
+            .library_snapshot(LibraryKind::Tracks)
+            .await
+            .unwrap()
+            .batches;
 
         assert_eq!(batches[0].len(), 5);
         assert!(batches[0].iter().all(|track| track.cat == "genre"));
@@ -667,6 +720,43 @@ mod tests {
                 .filter(|request| request.url.contains("/artists/"))
                 .count(),
             4
+        );
+    }
+
+    #[tokio::test]
+    async fn artist_rate_limit_degrades_genres_and_opens_breaker() {
+        let mut limited = Response::json(429, serde_json::json!({}));
+        limited.headers.insert("retry-after".into(), "3600".into());
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [
+                    {"track": {"uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
+                        "artists": [{"id": "artist-1", "name": "One"}], "album": null}},
+                    {"track": {"uri": "spotify:track:2", "name": "Two", "duration_ms": 1000,
+                        "artists": [{"id": "artist-1", "name": "One"}], "album": null}},
+                    {"track": {"uri": "spotify:track:3", "name": "Three", "duration_ms": 1000,
+                        "artists": [{"id": "artist-2", "name": "Two"}], "album": null}}
+                ], "next": null}),
+            ),
+            limited,
+        ]);
+
+        let snapshot = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+
+        assert!(snapshot.genres_degraded);
+        assert_eq!(snapshot.batches[0].len(), 3);
+        assert!(snapshot.batches[0]
+            .iter()
+            .all(|track| track.cat == normalize::UNCATEGORIZED));
+        assert_eq!(
+            client
+                .transport()
+                .requests()
+                .iter()
+                .filter(|request| request.url.contains("/artists/"))
+                .count(),
+            1
         );
     }
 }

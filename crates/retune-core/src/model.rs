@@ -163,6 +163,23 @@ impl Library {
         id
     }
 
+    /// Adds a new record or refreshes the provider category of an existing one.
+    pub fn upsert(&mut self, incoming: NewTrack) -> TrackId {
+        if let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.uri == incoming.uri)
+        {
+            if track.orig_cat.is_some() {
+                track.orig_cat = Some(incoming.cat);
+            } else {
+                track.cat = incoming.cat;
+            }
+            return track.id;
+        }
+        self.add(incoming)
+    }
+
     /// Edits the user-facing fields of one track (Get Info). Setting `cat`
     /// to a new value records `orig_cat` on first divergence; setting it
     /// back to the original leaves `orig_cat` in place (the marker equality
@@ -371,6 +388,53 @@ mod tests {
         assert_ne!(second, first);
         assert_eq!(library.tracks().len(), 2);
         assert_eq!(library.get(first).unwrap().cat, "Rock");
+    }
+
+    #[test]
+    fn upsert_inserts_new_track() {
+        let mut library = Library::new();
+        let id = library.upsert(track("one", "Rock", "Artist", "Album"));
+
+        assert_eq!(library.tracks().len(), 1);
+        assert_eq!(library.get(id).unwrap().cat, "Rock");
+    }
+
+    #[test]
+    fn upsert_refreshes_unedited_category_without_other_changes() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+        library.set_track_rating(id, Some(rating(5))).unwrap();
+
+        let mut changed = track("one", "Metal", "Other", "Changed");
+        changed.name = "Changed name".into();
+        let existing = library.upsert(changed);
+
+        assert_eq!(existing, id);
+        let record = library.get(id).unwrap();
+        assert_eq!(record.cat, "Metal");
+        assert_eq!(record.name, "one");
+        assert_eq!(record.rating, Some(rating(5)));
+    }
+
+    #[test]
+    fn upsert_refreshes_original_category_without_overwriting_user_edit() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+        library
+            .edit(
+                id,
+                TrackEdit {
+                    cat: Some("Personal".into()),
+                    ..TrackEdit::default()
+                },
+            )
+            .unwrap();
+
+        library.upsert(track("one", "Metal", "Other", "Changed"));
+
+        let record = library.get(id).unwrap();
+        assert_eq!(record.cat, "Personal");
+        assert_eq!(record.orig_cat.as_deref(), Some("Metal"));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use retune_core::{
     io::{export_json, import},
     model::Library,
@@ -12,23 +14,27 @@ pub async fn reconcile<P: MediaProvider, S: OverlayStore>(
     store: &S,
     first_sync: bool,
     mut progress: impl FnMut(&str),
-) -> Result<(), String> {
-    let incoming = snapshot(provider, &mut progress).await?;
-    apply(library, store, first_sync, incoming)
+) -> Result<bool, String> {
+    let (incoming, genres_degraded) = snapshot(provider, &mut progress).await?;
+    apply(library, store, first_sync, incoming)?;
+    Ok(genres_degraded)
 }
 
 pub async fn snapshot<P: MediaProvider>(
     provider: &P,
     mut progress: impl FnMut(&str),
-) -> Result<Vec<retune_core::model::NewTrack>, String> {
+) -> Result<(Vec<retune_core::model::NewTrack>, bool), String> {
     let mut incoming = vec![];
+    let mut genres_degraded = false;
     for kind in crate::provider::LibraryKind::ALL {
         progress(kind.phase());
-        for batch in provider.library_snapshot(kind).await? {
+        let snapshot = provider.library_snapshot(kind).await?;
+        genres_degraded |= snapshot.genres_degraded;
+        for batch in snapshot.batches {
             incoming.extend(batch);
         }
     }
-    Ok(incoming)
+    Ok((incoming, genres_degraded))
 }
 
 pub fn apply<S: OverlayStore>(
@@ -37,12 +43,30 @@ pub fn apply<S: OverlayStore>(
     first_sync: bool,
     incoming: Vec<retune_core::model::NewTrack>,
 ) -> Result<(), String> {
+    let provider_genres = library
+        .tracks()
+        .iter()
+        .map(|track| {
+            (
+                track.uri.clone(),
+                track.orig_cat.clone().unwrap_or_else(|| track.cat.clone()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut next = library.clone();
     if first_sync {
         next = without_fixtures(&next)?;
     }
-    for track in incoming {
-        next.add(track);
+    for mut track in incoming {
+        if track.cat == retune_spotify::normalize::UNCATEGORIZED {
+            if let Some(existing) = provider_genres
+                .get(&track.uri)
+                .filter(|genre| genre.as_str() != retune_spotify::normalize::UNCATEGORIZED)
+            {
+                track.cat.clone_from(existing);
+            }
+        }
+        next.upsert(track);
     }
     store.save(&next).map_err(|error| error.to_string())?;
     *library = next;
@@ -132,6 +156,7 @@ mod tests {
                     vec![vec![track("spotify:track:new", "Duplicate")]],
                 ),
             ]),
+            genres_degraded: false,
         };
         let store = RecordingStore::default();
         let mut phases: Vec<String> = vec![];
@@ -165,5 +190,22 @@ mod tests {
             1
         );
         assert_eq!(library.get(existing).unwrap().name, "Local name");
+    }
+
+    #[test]
+    fn degraded_sync_preserves_genre_and_healthy_sync_heals_it() {
+        let mut library = Library::new();
+        let id = library.add(track("spotify:track:one", "One"));
+        let store = RecordingStore::default();
+        let mut degraded = track("spotify:track:one", "Changed");
+        degraded.cat = retune_spotify::normalize::UNCATEGORIZED.into();
+
+        apply(&mut library, &store, false, vec![degraded]).unwrap();
+        assert_eq!(library.get(id).unwrap().cat, "Rock");
+
+        let mut healthy = track("spotify:track:one", "Changed again");
+        healthy.cat = "Metal".into();
+        apply(&mut library, &store, false, vec![healthy]).unwrap();
+        assert_eq!(library.get(id).unwrap().cat, "Metal");
     }
 }

@@ -632,7 +632,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
             "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
         })?;
     *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
-    let incoming = sync::snapshot(provider.as_ref(), |phase| {
+    let (incoming, genres_degraded) = sync::snapshot(provider.as_ref(), |phase| {
         log::info!("{phase}");
         let _ = app.emit("sync-progress", phase);
     })
@@ -651,6 +651,13 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
             "Spotify sync applied; {} library tracks",
             library.tracks().len()
         );
+    }
+    if genres_degraded {
+        let message =
+            "Imported without genres (Spotify rate limit) — genres will fill in on a later sync.";
+        log::warn!("{message}");
+        app.emit("sync-progress", message)
+            .map_err(|error| error.to_string())?;
     }
     if first_sync {
         let mut settings = state.settings.lock().expect("settings mutex poisoned");

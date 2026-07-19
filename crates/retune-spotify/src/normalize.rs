@@ -4,6 +4,8 @@ use retune_core::model::{NewTrack, SourceId};
 
 use crate::client::{Album, Artist, Audiobook, Chapter, Episode, Show, Track};
 
+pub const UNCATEGORIZED: &str = "Uncategorized";
+
 pub fn track(
     value: &Track,
     primary_artist: Option<&Artist>,
@@ -15,7 +17,7 @@ pub fn track(
         cat: primary_artist
             .and_then(|artist| artist.genres.first())
             .cloned()
-            .unwrap_or_else(|| "Unknown".into()),
+            .unwrap_or_else(|| UNCATEGORIZED.into()),
         art: value
             .artists
             .first()
@@ -40,7 +42,7 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
         source: SourceId::Podcasts,
         cat: show
             .and_then(|show| show.category.clone())
-            .unwrap_or_else(|| "Uncategorized".into()),
+            .unwrap_or_else(|| UNCATEGORIZED.into()),
         art: show.map(|show| show.publisher.clone()).unwrap_or_default(),
         alb: show.map(|show| show.name.clone()).unwrap_or_default(),
         name: value.name.clone(),
@@ -56,7 +58,7 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
             .genres
             .first()
             .cloned()
-            .unwrap_or_else(|| "Uncategorized".into()),
+            .unwrap_or_else(|| UNCATEGORIZED.into()),
         art: book
             .authors
             .first()
@@ -104,7 +106,7 @@ mod tests {
         assert_eq!(mapped.cat, "indie");
         assert_eq!(mapped.art, "Primary");
         assert_eq!(mapped.alb, "Record");
-        assert_eq!(track(&music(), None, None).cat, "Unknown");
+        assert_eq!(track(&music(), None, None).cat, UNCATEGORIZED);
         assert_eq!(
             track(
                 &music(),
@@ -115,7 +117,7 @@ mod tests {
                 None,
             )
             .cat,
-            "Unknown"
+            UNCATEGORIZED
         );
     }
 
@@ -168,7 +170,7 @@ mod tests {
                 ..show
             }),
         );
-        assert_eq!(uncategorized.cat, "Uncategorized");
+        assert_eq!(uncategorized.cat, UNCATEGORIZED);
     }
 
     #[test]
@@ -203,7 +205,7 @@ mod tests {
                 }
             )
             .cat,
-            "Uncategorized"
+            UNCATEGORIZED
         );
     }
 }
