@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, de::DeserializeOwned};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::auth::TokenResponse;
 use crate::tokens::{TokenStore, Tokens};
@@ -131,6 +132,7 @@ impl Transport for FakeTransport {
                 .lock()
                 .map_err(|error| Error::Transport(error.to_string()))?
                 .push(request);
+            tokio::task::yield_now().await;
             self.responses
                 .lock()
                 .map_err(|error| Error::Transport(error.to_string()))?
@@ -145,6 +147,7 @@ pub struct SpotifyClient<T, S> {
     transport: T,
     tokens: S,
     artist_cache: Mutex<HashMap<String, Artist>>,
+    refresh_lock: AsyncMutex<()>,
 }
 
 impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
@@ -154,6 +157,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             transport,
             tokens,
             artist_cache: Mutex::default(),
+            refresh_lock: AsyncMutex::new(()),
         }
     }
 
@@ -267,6 +271,12 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         decode("/me/player", &response.body).map(Some)
     }
 
+    pub async fn devices(&self) -> Result<Vec<Device>> {
+        self.get::<Devices>("/me/player/devices")
+            .await
+            .map(|response| response.devices)
+    }
+
     pub async fn play(&self, device_id: Option<&str>, uris: &[String]) -> Result<()> {
         let path = device_path("/me/player/play", device_id);
         self.empty(
@@ -277,10 +287,38 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         .await
     }
 
+    pub async fn resume(&self, device_id: Option<&str>) -> Result<()> {
+        self.empty(
+            Method::Put,
+            &device_path("/me/player/play", device_id),
+            Vec::new(),
+        )
+        .await
+    }
+
     pub async fn pause(&self, device_id: Option<&str>) -> Result<()> {
         self.empty(
             Method::Put,
             &device_path("/me/player/pause", device_id),
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn set_volume(&self, volume_percent: u8, device_id: Option<&str>) -> Result<()> {
+        if volume_percent > 100 {
+            return Err(Error::InvalidRequest(
+                "volume percent must be between 0 and 100".into(),
+            ));
+        }
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("volume_percent", &volume_percent.to_string());
+        if let Some(device_id) = device_id {
+            query.append_pair("device_id", device_id);
+        }
+        self.empty(
+            Method::Put,
+            &format!("/me/player/volume?{}", query.finish()),
             Vec::new(),
         )
         .await
@@ -339,7 +377,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                 })
                 .await?;
             if response.status == 401 && !refreshed {
-                self.refresh_token().await?;
+                self.refresh_token(&access).await?;
                 refreshed = true;
                 continue;
             }
@@ -355,8 +393,12 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         }
     }
 
-    async fn refresh_token(&self) -> Result<()> {
+    async fn refresh_token(&self, stale_access: &str) -> Result<()> {
+        let _guard = self.refresh_lock.lock().await;
         let stored = self.tokens.load()?.ok_or(Error::MissingToken)?;
+        if stored.access != stale_access {
+            return Ok(());
+        }
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", &self.client_id)
             .append_pair("grant_type", "refresh_token")
@@ -569,6 +611,15 @@ pub struct SearchResults {
 pub struct Device {
     pub id: Option<String>,
     pub name: String,
+    pub is_restricted: bool,
+    #[serde(rename = "type")]
+    pub device_type: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct Devices {
+    devices: Vec<Device>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -677,27 +728,75 @@ mod tests {
     #[tokio::test]
     async fn player_writes_have_expected_shapes() {
         let transport = FakeTransport::new([
+            Response::json(
+                200,
+                serde_json::json!({"devices": [{
+                    "id": "desk", "name": "Desk", "is_restricted": false,
+                    "type": "Computer", "is_active": true
+                }]}),
+            ),
+            Response::json(204, serde_json::json!(null)),
+            Response::json(204, serde_json::json!(null)),
             Response::json(204, serde_json::json!(null)),
             Response::json(204, serde_json::json!(null)),
             Response::json(204, serde_json::json!(null)),
             Response::json(200, serde_json::json!(null)),
         ]);
         let client = SpotifyClient::new("client", transport, tokens());
+        let devices = client.devices().await.unwrap();
+        assert_eq!(devices[0].device_type, "Computer");
+        assert!(devices[0].is_active);
+        assert!(!devices[0].is_restricted);
         client
             .play(Some("desk & one"), &["spotify:track:1".into()])
             .await
             .unwrap();
+        client.resume(None).await.unwrap();
         client.pause(None).await.unwrap();
+        client.set_volume(42, Some("desk & one")).await.unwrap();
         client.transfer("desk", true).await.unwrap();
         client.save_to_library("spotify:album:1").await.unwrap();
         let requests = client.transport().requests();
         assert!(
-            requests[0]
+            requests[1]
                 .url
                 .ends_with("/me/player/play?device_id=desk+%26+one")
         );
-        assert!(requests[1].url.ends_with("/me/player/pause"));
-        assert_eq!(requests[2].url, format!("{API_BASE}/me/player"));
-        assert_eq!(requests[3].url, format!("{API_BASE}/me/library"));
+        assert_eq!(requests[2].body, Vec::<u8>::new());
+        assert!(requests[3].url.ends_with("/me/player/pause"));
+        assert!(
+            requests[4]
+                .url
+                .ends_with("/me/player/volume?volume_percent=42&device_id=desk+%26+one")
+        );
+        assert_eq!(requests[5].url, format!("{API_BASE}/me/player"));
+        assert_eq!(requests[6].url, format!("{API_BASE}/me/library"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_unauthorized_requests_refresh_once() {
+        let transport = FakeTransport::new([
+            Response::json(401, serde_json::json!({"error": "expired"})),
+            Response::json(401, serde_json::json!({"error": "expired"})),
+            Response::json(
+                200,
+                serde_json::json!({"access_token": "new", "expires_in": 3600}),
+            ),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+        let (left, right) = tokio::join!(client.saved_tracks(0, 1), client.saved_tracks(1, 1));
+        left.unwrap();
+        right.unwrap();
+        assert_eq!(
+            client
+                .transport()
+                .requests()
+                .iter()
+                .filter(|request| request.url == TOKEN_URL)
+                .count(),
+            1
+        );
     }
 }

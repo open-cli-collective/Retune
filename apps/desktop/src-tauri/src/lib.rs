@@ -6,7 +6,9 @@ use std::{collections::BTreeSet, fs, sync::Mutex};
 use retune_core::{
     browse::{self, Selection},
     io::{export_json, export_json_gz, import},
-    model::{AlbumKey, EffectiveRating, Library, Rating, SourceId, TrackEdit, TrackId},
+    model::{
+        AlbumKey, EffectiveRating, Library, Rating, SourceId, TrackEdit, TrackId, TrackRecord,
+    },
 };
 use serde::{Deserialize, Serialize};
 use store::{FsOverlayStore, FsSettingsStore, OverlayStore, Settings, StoreError, Theme};
@@ -54,6 +56,8 @@ struct BrowseView {
     facets: FacetsView,
     tracks: Vec<TrackView>,
     album_rating: Option<u8>,
+    album_rating_artist: Option<String>,
+    album_rating_ambiguous: bool,
     counts: CountsView,
 }
 
@@ -94,11 +98,20 @@ struct TrackInfoView {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TrackEditDto {
     name: Option<String>,
     art: Option<String>,
     alb: Option<String>,
     cat: Option<String>,
+    /// Present = set (`stars: n`) or clear (`stars: null`) the explicit
+    /// track rating in the same transaction; absent = leave it untouched.
+    rating_change: Option<RatingChangeDto>,
+}
+
+#[derive(Deserialize)]
+struct RatingChangeDto {
+    stars: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -138,18 +151,7 @@ fn browse(
 
     let facet_view = browse::facets(&library, source, &selection);
     let query = query.unwrap_or_default().trim().to_lowercase();
-    let selected_tracks = browse::tracks(&library, source, &selection);
-    let album_rating = selection.alb().and_then(|alb| {
-        let art = selection
-            .art()
-            .or_else(|| selected_tracks.first().map(|track| track.art.as_str()))?;
-        library.album_rating(&AlbumKey {
-            source,
-            art: art.into(),
-            alb: alb.into(),
-        })
-    });
-    let tracks = selected_tracks
+    let selected_tracks = browse::tracks(&library, source, &selection)
         .into_iter()
         .filter(|track| {
             query.is_empty()
@@ -157,6 +159,11 @@ fn browse(
                     .iter()
                     .any(|value| value.to_lowercase().contains(&query))
         })
+        .collect::<Vec<_>>();
+    let (album_rating, album_rating_artist, album_rating_ambiguous) =
+        album_rating_view(&library, &selection, &selected_tracks);
+    let tracks = selected_tracks
+        .into_iter()
         .map(|track| TrackView {
             id: track.id.0,
             name: track.name.clone(),
@@ -190,9 +197,34 @@ fn browse(
             albs: facet_view.albs,
         },
         tracks,
-        album_rating: album_rating.map(Rating::stars),
+        album_rating,
+        album_rating_artist,
+        album_rating_ambiguous,
         counts: counts(&library, source, &selection, &query),
     }
+}
+
+fn album_rating_view(
+    library: &Library,
+    selection: &Selection,
+    tracks: &[&TrackRecord],
+) -> (Option<u8>, Option<String>, bool) {
+    if selection.alb().is_none() {
+        return (None, None, false);
+    }
+    let albums = tracks
+        .iter()
+        .map(|track| AlbumKey::of(track))
+        .collect::<BTreeSet<_>>();
+    if albums.len() != 1 {
+        return (None, None, true);
+    }
+    let album = albums.into_iter().next().expect("one album key");
+    (
+        library.album_rating(&album).map(Rating::stars),
+        Some(album.art),
+        false,
+    )
 }
 
 fn counts(library: &Library, source: SourceId, selection: &Selection, query: &str) -> CountsView {
@@ -339,7 +371,19 @@ fn edit_track(
                     cat: edit.cat,
                 },
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if let Some(change) = edit.rating_change {
+            let rating = change
+                .stars
+                .map(|stars| {
+                    Rating::new(stars).ok_or_else(|| format!("invalid star rating {stars}"))
+                })
+                .transpose()?;
+            library
+                .set_track_rating(TrackId(id), rating)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     })
 }
 
@@ -641,5 +685,33 @@ mod tests {
 
         let filtered = counts(&library, SourceId::Music, &Selection::default(), "bohemian");
         assert_eq!(filtered.tracks, 1);
+    }
+
+    #[test]
+    fn album_rating_is_ambiguous_for_same_named_albums_by_different_artists() {
+        let mut library = fixture::library();
+        let fleetwood_track = library
+            .tracks()
+            .iter()
+            .find(|track| track.art == "Fleetwood Mac")
+            .expect("fixture has Fleetwood Mac")
+            .id;
+        library
+            .edit(
+                fleetwood_track,
+                TrackEdit {
+                    alb: Some("Hotel California".into()),
+                    ..TrackEdit::default()
+                },
+            )
+            .expect("fixture track exists");
+        let mut selection = Selection::default();
+        selection.select_alb(Some("Hotel California".into()));
+        let tracks = browse::tracks(&library, SourceId::Music, &selection);
+
+        assert_eq!(
+            album_rating_view(&library, &selection, &tracks),
+            (None, None, true)
+        );
     }
 }

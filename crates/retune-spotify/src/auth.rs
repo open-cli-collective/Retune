@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use rand::RngCore;
@@ -153,57 +155,101 @@ impl LoopbackListener {
             .map_err(|error| Error::Callback(error.to_string()))
     }
 
-    pub fn accept(self, expected_state: &str) -> Result<Callback> {
-        let (mut stream, _) = self
-            .listener
-            .accept()
+    pub fn accept(self, expected_state: &str, timeout: Duration) -> Result<Callback> {
+        self.listener
+            .set_nonblocking(true)
             .map_err(|error| Error::Callback(error.to_string()))?;
-        let mut buffer = [0_u8; 8192];
-        let read = stream
-            .read(&mut buffer)
-            .map_err(|error| Error::Callback(error.to_string()))?;
-        let callback = parse_callback_request(&String::from_utf8_lossy(&buffer[..read]))?;
-        let (status, body) = if callback.state == expected_state {
-            (
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now());
+            let Some(remaining) = remaining.filter(|remaining| !remaining.is_zero()) else {
+                return Err(Error::Timeout);
+            };
+            let (mut stream, _) = match self.listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(remaining.min(Duration::from_millis(10)));
+                    continue;
+                }
+                Err(error) => return Err(Error::Callback(error.to_string())),
+            };
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|error| Error::Callback(error.to_string()))?;
+            let mut buffer = [0_u8; 8192];
+            let Ok(read) = stream.read(&mut buffer) else {
+                continue;
+            };
+            let Ok(url) = callback_url(&String::from_utf8_lossy(&buffer[..read])) else {
+                let _ = respond(
+                    &mut stream,
+                    "400 Bad Request",
+                    "Malformed callback request.",
+                );
+                continue;
+            };
+            if url.path() != "/callback" {
+                let _ = respond(&mut stream, "404 Not Found", "Not found.");
+                continue;
+            }
+            let Some(state) = query_value(&url, "state") else {
+                let _ = respond(&mut stream, "400 Bad Request", "Missing callback state.");
+                continue;
+            };
+            if state != expected_state {
+                let _ = respond(
+                    &mut stream,
+                    "400 Bad Request",
+                    "Authorization failed: state mismatch.",
+                );
+                return Err(Error::StateMismatch);
+            }
+            if let Some(error) = query_value(&url, "error") {
+                let description = query_value(&url, "error_description").unwrap_or(error);
+                let body = format!("Authorization was denied: {description}");
+                let _ = respond(&mut stream, "400 Bad Request", &body);
+                return Err(Error::AccessDenied(description));
+            }
+            let Some(code) = query_value(&url, "code") else {
+                let _ = respond(
+                    &mut stream,
+                    "400 Bad Request",
+                    "Missing authorization code.",
+                );
+                continue;
+            };
+            let _ = respond(
+                &mut stream,
                 "200 OK",
                 "Authorization complete. You can close this window.",
-            )
-        } else {
-            ("400 Bad Request", "Authorization failed: state mismatch.")
-        };
-        write!(
-            stream,
-            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .map_err(|error| Error::Callback(error.to_string()))?;
-        if callback.state != expected_state {
-            return Err(Error::StateMismatch);
+            );
+            return Ok(Callback { code, state });
         }
-        Ok(callback)
     }
 }
 
-fn parse_callback_request(request: &str) -> Result<Callback> {
+fn callback_url(request: &str) -> Result<Url> {
     let target = request
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .ok_or_else(|| Error::Callback("malformed HTTP request line".into()))?;
-    let url = Url::parse(&format!("http://127.0.0.1{target}"))
-        .map_err(|error| Error::Callback(error.to_string()))?;
-    if url.path() != "/callback" {
-        return Err(Error::Callback("unexpected callback path".into()));
-    }
-    let value = |name: &str| {
-        url.query_pairs()
-            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
-            .ok_or_else(|| Error::Callback(format!("missing {name}")))
-    };
-    Ok(Callback {
-        code: value("code")?,
-        state: value("state")?,
-    })
+    Url::parse(&format!("http://127.0.0.1{target}"))
+        .map_err(|error| Error::Callback(error.to_string()))
+}
+
+fn query_value(url: &Url, name: &str) -> Option<String> {
+    url.query_pairs()
+        .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+}
+
+fn respond(stream: &mut impl Write, status: &str, body: &str) -> Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .map_err(|error| Error::Callback(error.to_string()))
 }
 
 #[cfg(test)]
@@ -211,6 +257,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::thread;
+    use std::time::Duration;
 
     use super::*;
 
@@ -227,7 +274,7 @@ mod tests {
     fn callback_uses_a_real_loopback_request_and_checks_state() {
         let listener = LoopbackListener::bind().unwrap();
         let redirect = listener.redirect_uri().unwrap();
-        let handle = thread::spawn(move || listener.accept("right"));
+        let handle = thread::spawn(move || listener.accept("right", Duration::from_secs(1)));
         let url = Url::parse(&redirect).unwrap();
         let mut stream = TcpStream::connect(("127.0.0.1", url.port().unwrap())).unwrap();
         write!(
@@ -251,7 +298,7 @@ mod tests {
     fn callback_rejects_wrong_state() {
         let listener = LoopbackListener::bind().unwrap();
         let redirect = Url::parse(&listener.redirect_uri().unwrap()).unwrap();
-        let handle = thread::spawn(move || listener.accept("right"));
+        let handle = thread::spawn(move || listener.accept("right", Duration::from_secs(1)));
         let mut stream = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
         write!(
             stream,
@@ -262,5 +309,60 @@ mod tests {
         stream.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
         assert!(matches!(handle.join().unwrap(), Err(Error::StateMismatch)));
+    }
+
+    #[test]
+    fn callback_ignores_stray_request_then_accepts_valid_callback() {
+        let listener = LoopbackListener::bind().unwrap();
+        let redirect = Url::parse(&listener.redirect_uri().unwrap()).unwrap();
+        let handle = thread::spawn(move || listener.accept("right", Duration::from_secs(1)));
+
+        let mut stray = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        write!(
+            stray,
+            "GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stray.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+
+        let mut callback = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        write!(
+            callback,
+            "GET /callback?code=ok&state=right HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        callback.read_to_string(&mut String::new()).unwrap();
+        assert_eq!(handle.join().unwrap().unwrap().code, "ok");
+    }
+
+    #[test]
+    fn callback_reports_access_denied() {
+        let listener = LoopbackListener::bind().unwrap();
+        let redirect = Url::parse(&listener.redirect_uri().unwrap()).unwrap();
+        let handle = thread::spawn(move || listener.accept("right", Duration::from_secs(1)));
+        let mut stream = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        write!(
+            stream,
+            "GET /callback?error=access_denied&error_description=User+declined&state=right HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.contains("Authorization was denied: User declined"));
+        assert!(matches!(
+            handle.join().unwrap(),
+            Err(Error::AccessDenied(_))
+        ));
+    }
+
+    #[test]
+    fn callback_times_out() {
+        let listener = LoopbackListener::bind().unwrap();
+        assert!(matches!(
+            listener.accept("right", Duration::from_millis(10)),
+            Err(Error::Timeout)
+        ));
     }
 }

@@ -205,6 +205,22 @@ impl Library {
         Ok(())
     }
 
+    /// Directly sets or clears a track's explicit override — the Get Info
+    /// form semantic, distinct from [`Self::click_track_star`]'s toggle.
+    pub fn set_track_rating(
+        &mut self,
+        id: TrackId,
+        rating: Option<Rating>,
+    ) -> Result<(), UnknownTrack> {
+        let track = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == id)
+            .ok_or(UnknownTrack(id))?;
+        track.rating = rating;
+        Ok(())
+    }
+
     pub fn set_album_rating(&mut self, key: AlbumKey, rating: Option<Rating>) {
         match rating {
             Some(rating) => {
@@ -267,9 +283,14 @@ impl Library {
         let past_max = self
             .tracks
             .iter()
-            .map(|track| track.id.0 + 1)
-            .max()
-            .unwrap_or(0);
+            .map(|track| {
+                track
+                    .id
+                    .0
+                    .checked_add(1)
+                    .ok_or_else(|| format!("track id {} exhausts the id space", track.id.0))
+            })
+            .try_fold(0u64, |acc, next| next.map(|n| acc.max(n)))?;
         self.next_id = self.next_id.max(past_max);
         Ok(())
     }

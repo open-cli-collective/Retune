@@ -2,9 +2,13 @@ use std::time::Duration;
 
 use retune_core::model::{NewTrack, SourceId};
 
-use crate::client::{Artist, Audiobook, Chapter, Episode, Show, Track};
+use crate::client::{Album, Artist, Audiobook, Chapter, Episode, Show, Track};
 
-pub fn track(value: &Track, primary_artist: Option<&Artist>) -> NewTrack {
+pub fn track(
+    value: &Track,
+    primary_artist: Option<&Artist>,
+    parent_album: Option<&Album>,
+) -> NewTrack {
     NewTrack {
         uri: value.uri.clone(),
         source: SourceId::Music,
@@ -15,12 +19,14 @@ pub fn track(value: &Track, primary_artist: Option<&Artist>) -> NewTrack {
         art: value
             .artists
             .first()
+            .or_else(|| parent_album.and_then(|album| album.artists.first()))
             .map(|artist| artist.name.clone())
             .unwrap_or_default(),
         alb: value
             .album
             .as_ref()
             .map(|album| album.name.clone())
+            .or_else(|| parent_album.map(|album| album.name.clone()))
             .unwrap_or_default(),
         name: value.name.clone(),
         duration: Duration::from_millis(value.duration_ms),
@@ -64,7 +70,7 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
 
 #[cfg(test)]
 mod tests {
-    use crate::client::{AlbumSummary, Author, SimplifiedArtist};
+    use crate::client::{Album, AlbumSummary, Author, SimplifiedArtist};
 
     use super::*;
 
@@ -93,23 +99,46 @@ mod tests {
             name: "Primary".into(),
             genres: vec!["indie".into(), "rock".into()],
         };
-        let mapped = track(&music(), Some(&artist));
+        let mapped = track(&music(), Some(&artist), None);
         assert_eq!(mapped.uri, "spotify:track:1");
         assert_eq!(mapped.cat, "indie");
         assert_eq!(mapped.art, "Primary");
         assert_eq!(mapped.alb, "Record");
-        assert_eq!(track(&music(), None).cat, "Unknown");
+        assert_eq!(track(&music(), None, None).cat, "Unknown");
         assert_eq!(
             track(
                 &music(),
                 Some(&Artist {
                     genres: vec![],
                     ..artist
-                })
+                }),
+                None,
             )
             .cat,
             "Unknown"
         );
+    }
+
+    #[test]
+    fn simplified_album_track_uses_parent_album_metadata() {
+        let value = Track {
+            album: None,
+            artists: vec![],
+            ..music()
+        };
+        let album = Album {
+            id: "album-1".into(),
+            uri: "spotify:album:1".into(),
+            name: "Parent Record".into(),
+            artists: vec![SimplifiedArtist {
+                id: "artist-1".into(),
+                name: "Parent Artist".into(),
+            }],
+            images: vec![],
+        };
+        let mapped = track(&value, None, Some(&album));
+        assert_eq!(mapped.alb, "Parent Record");
+        assert_eq!(mapped.art, "Parent Artist");
     }
 
     #[test]

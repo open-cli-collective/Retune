@@ -15,6 +15,10 @@ pub enum Error {
     Callback(String),
     #[error("OAuth state mismatch")]
     StateMismatch,
+    #[error("OAuth callback timed out")]
+    Timeout,
+    #[error("Spotify authorization was denied: {0}")]
+    AccessDenied(String),
     #[error("HTTP transport error: {0}")]
     Transport(String),
     #[error("Spotify {endpoint} returned HTTP {status}: {body}")]

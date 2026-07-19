@@ -31,6 +31,8 @@ type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }
   tracks: Track[]
   albumRating: number | null
+  albumRatingArtist: string | null
+  albumRatingAmbiguous: boolean
   counts: {
     tracks: number
     totalSecs: number
@@ -61,7 +63,7 @@ type State = {
   query: string
   scope: 'library' | 'spotify'
   selectedTrackId?: number
-  playing: { trackId: number; elapsed: number; isPlaying: boolean } | null
+  playing: { trackId: number; elapsed: number; isPlaying: boolean; queue: readonly Track[] } | null
   settings: Settings
   settingsHydrated: boolean
   systemDark: boolean
@@ -81,7 +83,7 @@ type Action =
   | { type: 'query'; query: string }
   | { type: 'scope'; scope: State['scope'] }
   | { type: 'selectTrack'; id: number }
-  | { type: 'play'; id: number }
+  | { type: 'play'; id: number; queue: readonly Track[] }
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
@@ -138,17 +140,19 @@ function reducer(state: State, action: Action): State {
     case 'selectTrack':
       return { ...state, selectedTrackId: action.id }
     case 'play':
-      return { ...state, selectedTrackId: action.id, playing: { trackId: action.id, elapsed: 0, isPlaying: true } }
+      return { ...state, selectedTrackId: action.id, playing: { trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue } }
     case 'togglePlay':
       return state.playing
         ? { ...state, playing: { ...state.playing, isPlaying: !state.playing.isPlaying } }
         : state
     case 'step':
-      return { ...state, selectedTrackId: action.id, playing: { trackId: action.id, elapsed: 0, isPlaying: true } }
+      return state.playing
+        ? { ...state, selectedTrackId: action.id, playing: { ...state.playing, trackId: action.id, elapsed: 0, isPlaying: true } }
+        : state
     case 'tick':
       if (!state.playing?.isPlaying) return state
       return state.playing.elapsed + 1 >= action.duration
-        ? { ...state, playing: { trackId: action.nextId, elapsed: 0, isPlaying: true } }
+        ? { ...state, playing: { ...state.playing, trackId: action.nextId, elapsed: 0, isPlaying: true } }
         : { ...state, playing: { ...state.playing, elapsed: state.playing.elapsed + 1 } }
     case 'hydrateSettings':
       return { ...state, settings: action.settings, settingsHydrated: true }
@@ -187,6 +191,7 @@ function App() {
   const search = useRef<HTMLInputElement>(null)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
+  const playbackTracks = state.playing?.queue ?? emptyTracks
   const openInfo = (id?: number) => {
     if (id === undefined) return
     invoke<TrackInfo>('get_track', { id })
@@ -250,15 +255,15 @@ function App() {
 
   useEffect(() => {
     if (!state.playing?.isPlaying) return
-    const currentIndex = tracks.findIndex((track) => track.id === state.playing?.trackId)
-    const current = tracks[currentIndex]
+    const currentIndex = playbackTracks.findIndex((track) => track.id === state.playing?.trackId)
+    const current = playbackTracks[currentIndex]
     if (!current) return
-    const next = tracks[(currentIndex + 1) % tracks.length]
+    const next = playbackTracks[(currentIndex + 1) % playbackTracks.length]
     const timer = window.setInterval(() => {
       dispatch({ type: 'tick', duration: current.durationSecs, nextId: next.id })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [state.playing?.trackId, state.playing?.isPlaying, tracks])
+  }, [state.playing?.trackId, state.playing?.isPlaying, playbackTracks])
 
   const mutate = (command: string, args: Record<string, unknown>) => {
     invoke(command, args)
@@ -266,11 +271,11 @@ function App() {
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }
   const step = useCallback((direction: number) => {
-    if (!tracks.length) return
-    const index = tracks.findIndex((track) => track.id === state.playing?.trackId)
-    const next = tracks[(index < 0 ? 0 : index + direction + tracks.length) % tracks.length]
+    if (!state.playing?.queue.length) return
+    const index = state.playing.queue.findIndex((track) => track.id === state.playing?.trackId)
+    const next = state.playing.queue[(index + direction + state.playing.queue.length) % state.playing.queue.length]
     dispatch({ type: 'step', id: next.id })
-  }, [state.playing?.trackId, tracks])
+  }, [state.playing])
   const setZoom = (zoom: number) => dispatch({
     type: 'settings',
     settings: { zoom: Math.min(1.8, Math.max(0.7, Math.round(zoom * 10) / 10)) },
@@ -279,7 +284,7 @@ function App() {
     type: 'settings',
     settings: { theme: state.settings.theme === 'system' ? 'light' : state.settings.theme === 'light' ? 'dark' : 'system' },
   })
-  const playingTrack = tracks.find((track) => track.id === state.playing?.trackId)
+  const playingTrack = playbackTracks.find((track) => track.id === state.playing?.trackId)
 
   useEffect(() => {
     const viewActions = listen<string>('view-action', ({ payload }) => {
@@ -371,20 +376,20 @@ function App() {
         <Sidebar state={state} onSource={(source) => dispatch({ type: 'source', source })} />
         <section className="content">
           <BrowserPane state={state} onSelect={(facet, value) => dispatch({ type: 'select', facet, value })} />
-          {state.sel.alb && (
+          {state.sel.alb && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
             <AlbumRatingStrip
               album={state.sel.alb}
               rating={view?.albumRating ?? null}
               onRate={(stars) => mutate('set_album_rating', {
                 source: state.source,
-                art: state.sel.art ?? tracks[0]?.art ?? '',
+                art: view.albumRatingArtist,
                 alb: state.sel.alb,
                 stars,
               })}
             />
           )}
           {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
-          {state.scope === 'spotify' ? (
+          {state.scope === 'spotify' && state.query.trim() ? (
             <div className="spotify-stub">Spotify search arrives with the Spotify connection — Phase 5</div>
           ) : (
             <TrackList
@@ -394,7 +399,7 @@ function App() {
               playing={state.playing}
               columnOrder={state.settings.columnOrder}
               onSelect={(id) => dispatch({ type: 'selectTrack', id })}
-              onPlay={(id) => dispatch({ type: 'play', id })}
+              onPlay={(id) => dispatch({ type: 'play', id, queue: tracks })}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
               onInfo={openInfo}
               onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
@@ -545,12 +550,8 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
     : { stars, explicit: true })
   const save = async () => {
     try {
-      await invoke('edit_track', { id: track.id, edit: draft })
-      if (track.rating?.explicit && (!rating?.explicit || rating.stars !== track.rating.stars)) {
-        await invoke('click_track_star', { id: track.id, stars: rating?.explicit ? rating.stars : track.rating.stars })
-      } else if (!track.rating?.explicit && rating?.explicit) {
-        await invoke('click_track_star', { id: track.id, stars: rating.stars })
-      }
+      const ratingChange = { stars: rating?.explicit ? rating.stars : null }
+      await invoke('edit_track', { id: track.id, edit: { ...draft, ratingChange } })
       onSaved()
     } catch (error) {
       onError(String(error))
