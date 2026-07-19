@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,67 @@ pub trait TokenStore: Send + Sync {
     fn load(&self) -> Result<Option<Tokens>>;
     fn save(&self, tokens: &Tokens) -> Result<()>;
     fn clear(&self) -> Result<()>;
+}
+
+impl<S: TokenStore + ?Sized> TokenStore for Arc<S> {
+    fn load(&self) -> Result<Option<Tokens>> {
+        (**self).load()
+    }
+
+    fn save(&self, tokens: &Tokens) -> Result<()> {
+        (**self).save(tokens)
+    }
+
+    fn clear(&self) -> Result<()> {
+        (**self).clear()
+    }
+}
+
+pub struct CachedTokenStore<S> {
+    inner: S,
+    cache: Mutex<Option<Option<Tokens>>>,
+}
+
+impl<S: TokenStore> CachedTokenStore<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            cache: Mutex::new(None),
+        }
+    }
+}
+
+impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
+    fn load(&self) -> Result<Option<Tokens>> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|error| Error::TokenStore(error.to_string()))?;
+        if let Some(tokens) = cache.as_ref() {
+            return Ok(tokens.clone());
+        }
+        let tokens = self.inner.load()?;
+        *cache = Some(tokens.clone());
+        Ok(tokens)
+    }
+
+    fn save(&self, tokens: &Tokens) -> Result<()> {
+        self.inner.save(tokens)?;
+        *self
+            .cache
+            .lock()
+            .map_err(|error| Error::TokenStore(error.to_string()))? = Some(Some(tokens.clone()));
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<()> {
+        self.inner.clear()?;
+        *self
+            .cache
+            .lock()
+            .map_err(|error| Error::TokenStore(error.to_string()))? = Some(None);
+        Ok(())
+    }
 }
 
 pub struct KeychainTokenStore {
@@ -97,7 +158,48 @@ impl TokenStore for InMemoryTokenStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
+
+    #[derive(Default)]
+    struct CountingStore {
+        tokens: Mutex<Option<Tokens>>,
+        loads: AtomicUsize,
+        saves: AtomicUsize,
+        clears: AtomicUsize,
+        fail_save: AtomicBool,
+    }
+
+    impl TokenStore for CountingStore {
+        fn load(&self) -> Result<Option<Tokens>> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            Ok(self.tokens.lock().unwrap().clone())
+        }
+
+        fn save(&self, tokens: &Tokens) -> Result<()> {
+            self.saves.fetch_add(1, Ordering::Relaxed);
+            if self.fail_save.load(Ordering::Relaxed) {
+                return Err(Error::TokenStore("save failed".into()));
+            }
+            *self.tokens.lock().unwrap() = Some(tokens.clone());
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<()> {
+            self.clears.fetch_add(1, Ordering::Relaxed);
+            *self.tokens.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    fn tokens(access: &str) -> Tokens {
+        Tokens {
+            access: access.into(),
+            refresh: "refresh".into(),
+            expires_at: 42,
+        }
+    }
 
     #[test]
     fn memory_store_round_trip_and_clear() {
@@ -111,5 +213,44 @@ mod tests {
         assert_eq!(store.load().unwrap(), Some(tokens));
         store.clear().unwrap();
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn cached_store_reads_inner_once_and_updates_after_writes() {
+        let inner = Arc::new(CountingStore {
+            tokens: Mutex::new(Some(tokens("initial"))),
+            ..Default::default()
+        });
+        let store = CachedTokenStore::new(Arc::clone(&inner));
+
+        assert_eq!(store.load().unwrap(), Some(tokens("initial")));
+        assert_eq!(store.load().unwrap(), Some(tokens("initial")));
+        assert_eq!(inner.loads.load(Ordering::Relaxed), 1);
+
+        store.save(&tokens("saved")).unwrap();
+        assert_eq!(store.load().unwrap(), Some(tokens("saved")));
+        assert_eq!(inner.loads.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.saves.load(Ordering::Relaxed), 1);
+
+        store.clear().unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        assert_eq!(inner.loads.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.clears.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn failed_save_keeps_cached_tokens() {
+        let inner = Arc::new(CountingStore {
+            tokens: Mutex::new(Some(tokens("initial"))),
+            ..Default::default()
+        });
+        let store = CachedTokenStore::new(Arc::clone(&inner));
+        assert_eq!(store.load().unwrap(), Some(tokens("initial")));
+        inner.fail_save.store(true, Ordering::Relaxed);
+
+        assert!(store.save(&tokens("failed")).is_err());
+        assert_eq!(store.load().unwrap(), Some(tokens("initial")));
+        assert_eq!(inner.loads.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.saves.load(Ordering::Relaxed), 1);
     }
 }

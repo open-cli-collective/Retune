@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use retune_spotify::{
     client::{Device, HttpTransport, PlayerState, SpotifyClient, Transport},
-    tokens::{KeychainTokenStore, TokenStore},
+    tokens::{CachedTokenStore, KeychainTokenStore, TokenStore},
 };
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
-type LiveClient = SpotifyClient<HttpTransport, KeychainTokenStore>;
+type LiveClient = SpotifyClient<HttpTransport, Arc<CachedTokenStore<KeychainTokenStore>>>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

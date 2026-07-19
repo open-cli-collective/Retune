@@ -23,7 +23,7 @@ use retune_core::{
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
     client::{HttpTransport, SpotifyClient},
-    tokens::{KeychainTokenStore, TokenStore, Tokens},
+    tokens::{CachedTokenStore, KeychainTokenStore, TokenStore, Tokens},
 };
 use serde::{Deserialize, Serialize};
 use store::{FsOverlayStore, FsSettingsStore, OverlayStore, Settings, StoreError, Theme};
@@ -33,7 +33,8 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
-type SpotifyProvider = SpotifyClient<HttpTransport, KeychainTokenStore>;
+type SharedTokenStore = Arc<CachedTokenStore<KeychainTokenStore>>;
+type SpotifyProvider = SpotifyClient<HttpTransport, SharedTokenStore>;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 struct AppState {
@@ -43,6 +44,7 @@ struct AppState {
     settings_store: FsSettingsStore,
     menu_checks: MenuChecks,
     recovery_notice: Mutex<Option<String>>,
+    token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     playback: Arc<Playback>,
     syncing: tokio::sync::Mutex<()>,
@@ -463,39 +465,43 @@ fn set_settings(state: tauri::State<'_, AppState>, mut settings: Settings) -> Re
         .map_err(|error| error.to_string())?;
     if client_id_changed {
         *state.spotify.lock().expect("spotify mutex poisoned") =
-            spotify_provider(&settings.spotify_client_id)?;
+            spotify_provider(&settings.spotify_client_id, Arc::clone(&state.token_store))?;
     }
     Ok(())
 }
 
-fn spotify_provider(client_id: &str) -> Result<Option<Arc<SpotifyProvider>>, String> {
+fn spotify_provider(
+    client_id: &str,
+    token_store: SharedTokenStore,
+) -> Result<Option<Arc<SpotifyProvider>>, String> {
     if client_id.trim().is_empty() {
         return Ok(None);
     }
     Ok(Some(Arc::new(SpotifyClient::new(
         client_id.trim(),
         HttpTransport::new(),
-        KeychainTokenStore::new().map_err(|error| error.to_string())?,
+        token_store,
     ))))
 }
 
-fn stored_connection_state() -> Result<ConnectionState, String> {
+fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionState, String> {
     Ok(ConnectionState {
-        connected: KeychainTokenStore::new()
-            .and_then(|store| store.load())
+        connected: token_store
+            .load()
             .map_err(|error| error.to_string())?
             .is_some(),
     })
 }
 
 #[tauri::command]
-fn connection_state() -> Result<ConnectionState, String> {
-    stored_connection_state()
+fn connection_state(state: tauri::State<'_, AppState>) -> Result<ConnectionState, String> {
+    stored_connection_state(&state.token_store)
 }
 
 fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
-    let connection = stored_connection_state()?;
-    app.state::<AppState>()
+    let state = app.state::<AppState>();
+    let connection = stored_connection_state(&state.token_store)?;
+    state
         .menu_checks
         .sync_connection(connection.connected)
         .map_err(|error| error.to_string())?;
@@ -550,19 +556,17 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_secs();
-    KeychainTokenStore::new()
-        .and_then(|store| {
-            store.save(&Tokens {
-                access: token.access_token,
-                refresh,
-                expires_at: now.saturating_add(token.expires_in),
-            })
+    let state = app.state::<AppState>();
+    state
+        .token_store
+        .save(&Tokens {
+            access: token.access_token,
+            refresh,
+            expires_at: now.saturating_add(token.expires_in),
         })
         .map_err(|error| error.to_string())?;
-    *app.state::<AppState>()
-        .spotify
-        .lock()
-        .expect("spotify mutex poisoned") = spotify_provider(&client_id)?;
+    *state.spotify.lock().expect("spotify mutex poisoned") =
+        spotify_provider(&client_id, Arc::clone(&state.token_store))?;
     emit_connection_state(&app)?;
     sync_spotify(&app).await
 }
@@ -570,8 +574,9 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
     app.state::<AppState>().playback.clear().await;
-    KeychainTokenStore::new()
-        .and_then(|store| store.clear())
+    app.state::<AppState>()
+        .token_store
+        .clear()
         .map_err(|error| error.to_string())?;
     emit_connection_state(&app)?;
     app.emit("player-state", empty_player_state())
@@ -613,7 +618,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
     log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
     let _sync = state.syncing.lock().await;
-    if !stored_connection_state()?.connected {
+    if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify before syncing.".into());
     }
     let client_id = state
@@ -622,9 +627,10 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
         .expect("settings mutex poisoned")
         .spotify_client_id
         .clone();
-    let provider = spotify_provider(&client_id)?.ok_or_else(|| {
-        "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
-    })?;
+    let provider =
+        spotify_provider(&client_id, Arc::clone(&state.token_store))?.ok_or_else(|| {
+            "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
+        })?;
     *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
     let incoming = sync::snapshot(provider.as_ref(), |phase| {
         log::info!("{phase}");
@@ -682,7 +688,7 @@ async fn spotify_search(
             albums: vec![],
         });
     }
-    if !stored_connection_state()?.connected {
+    if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify to search.".into());
     }
     let provider = provider_from(&state)?;
@@ -1098,9 +1104,14 @@ pub fn run() {
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
-            let connected = stored_connection_state().map_err(std::io::Error::other)?.connected;
+            let token_store = Arc::new(CachedTokenStore::new(
+                KeychainTokenStore::new().map_err(std::io::Error::other)?,
+            ));
+            let connected = stored_connection_state(&token_store)
+                .map_err(std::io::Error::other)?
+                .connected;
             menu_checks.sync_connection(connected)?;
-            let spotify = spotify_provider(&settings.spotify_client_id)
+            let spotify = spotify_provider(&settings.spotify_client_id, Arc::clone(&token_store))
                 .map_err(std::io::Error::other)?;
             let startup_sync = should_startup_sync(connected, &settings);
             app.manage(AppState {
@@ -1110,6 +1121,7 @@ pub fn run() {
                 settings_store,
                 menu_checks,
                 recovery_notice: Mutex::new(recovery_notice),
+                token_store,
                 spotify: Mutex::new(spotify),
                 playback: Arc::new(Playback::default()),
                 syncing: tokio::sync::Mutex::new(()),
