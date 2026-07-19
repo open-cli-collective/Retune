@@ -27,6 +27,11 @@ pub enum Error {
         status: u16,
         body: String,
     },
+    #[error("Spotify rate limited {endpoint}; retry after {retry_after_secs}s")]
+    RateLimited {
+        endpoint: String,
+        retry_after_secs: u64,
+    },
     #[error("invalid JSON from Spotify {endpoint}: {source}")]
     Json {
         endpoint: String,

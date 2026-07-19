@@ -14,6 +14,7 @@ use crate::{Error, Result};
 const API_BASE: &str = "https://api.spotify.com/v1";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const MAX_RATE_LIMIT_RETRIES: usize = 3;
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(300);
 
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<Response>> + Send + 'a>>;
 
@@ -53,12 +54,24 @@ pub trait Transport: Send + Sync {
     fn send(&self, request: Request) -> SendFuture<'_>;
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HttpTransport(reqwest::Client);
 
 impl HttpTransport {
     pub fn new() -> Self {
-        Self(reqwest::Client::new())
+        Self(
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest client"),
+        )
+    }
+}
+
+impl Default for HttpTransport {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -394,9 +407,26 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                 refreshed = true;
                 continue;
             }
-            if response.status == 429 && rate_retries < MAX_RATE_LIMIT_RETRIES {
+            if response.status == 429 {
+                let wait = retry_after(&response.headers);
+                if wait > MAX_RATE_LIMIT_WAIT || rate_retries >= MAX_RATE_LIMIT_RETRIES {
+                    log::warn!(
+                        "Spotify rate limited {path}; retry after {}s (not retrying)",
+                        wait.as_secs()
+                    );
+                    return Err(Error::RateLimited {
+                        endpoint: path.into(),
+                        retry_after_secs: wait.as_secs(),
+                    });
+                }
                 rate_retries += 1;
-                tokio::time::sleep(retry_after(&response.headers)).await;
+                log::warn!(
+                    "Spotify rate limited {path}; waiting {}s (attempt {}/{})",
+                    wait.as_secs(),
+                    rate_retries,
+                    MAX_RATE_LIMIT_RETRIES
+                );
+                tokio::time::sleep(wait).await;
                 continue;
             }
             if !(200..300).contains(&response.status) {
@@ -412,6 +442,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         if stored.access != stale_access {
             return Ok(());
         }
+        log::info!("Refreshing Spotify access token");
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", &self.client_id)
             .append_pair("grant_type", "refresh_token")
@@ -438,7 +469,9 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             access: token.access_token,
             refresh: token.refresh_token.unwrap_or(stored.refresh),
             expires_at: unix_now().saturating_add(token.expires_in),
-        })
+        })?;
+        log::info!("Refreshed Spotify access token");
+        Ok(())
     }
 }
 
@@ -725,8 +758,25 @@ mod tests {
         let transport = FakeTransport::new([limited(), limited(), limited(), limited()]);
         let client = SpotifyClient::new("client", transport, tokens());
         let error = client.saved_tracks(0, 1).await.unwrap_err();
-        assert!(matches!(error, Error::Http { status: 429, .. }));
+        assert!(matches!(error, Error::RateLimited { .. }));
         assert_eq!(client.transport().requests().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn long_rate_limit_returns_without_retrying() {
+        let mut limited = Response::json(429, serde_json::json!({}));
+        limited.headers.insert("retry-after".into(), "3600".into());
+        let transport = FakeTransport::new([limited]);
+        let client = SpotifyClient::new("client", transport, tokens());
+        let error = client.saved_tracks(0, 1).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::RateLimited {
+                retry_after_secs: 3600,
+                ..
+            }
+        ));
+        assert_eq!(client.transport().requests().len(), 1);
     }
 
     #[tokio::test]

@@ -610,6 +610,7 @@ async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
+    log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
     let _sync = state.syncing.lock().await;
     if !stored_connection_state()?.connected {
@@ -626,6 +627,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
     })?;
     *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
     let incoming = sync::snapshot(provider.as_ref(), |phase| {
+        log::info!("{phase}");
         let _ = app.emit("sync-progress", phase);
     })
     .await?;
@@ -639,6 +641,10 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
     {
         let mut library = state.library.lock().expect("library mutex poisoned");
         sync::apply(&mut library, &state.store, first_sync, incoming)?;
+        log::info!(
+            "Spotify sync applied; {} library tracks",
+            library.tracks().len()
+        );
     }
     if first_sync {
         let mut settings = state.settings.lock().expect("settings mutex poisoned");
@@ -1032,6 +1038,7 @@ fn apply_import(app: &tauri::AppHandle, imported: Library, replace: bool) {
 }
 
 fn notify_error(app: &tauri::AppHandle, error: String) {
+    log::error!("{error}");
     let _ = app.emit("operation-error", error);
 }
 
@@ -1107,6 +1114,12 @@ pub fn run() {
                 playback: Arc::new(Playback::default()),
                 syncing: tokio::sync::Mutex::new(()),
             });
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .max_file_size(5_000_000)
+                    .build(),
+            )?;
             if startup_sync {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -1114,13 +1127,6 @@ pub fn run() {
                         notify_error(&handle, error);
                     }
                 });
-            }
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
             }
             Ok(())
         })
