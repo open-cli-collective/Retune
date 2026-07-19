@@ -141,6 +141,16 @@ struct AlbumKey { source: SourceId, art: String, alb: String }
   *Audiobook chapters*: `cat` = `"Uncategorized"` unless the API supplies a genre,
   `art` = first-listed author, `alb` = book name, `name` = chapter name. Multiple
   authors/publishers: first-listed wins, same rule as track artists.
+- **Playback engine binds the concrete Spotify client deliberately.** The
+  substitution boundary (`MediaProvider`) covers library/search/save — the paths
+  tests actually substitute. A player port would today be a single-implementation
+  interface, which this plan's own rules reject; extract one when a second playback
+  backend (e.g. librespot) actually exists.
+- **Sync cadence semantics**: Connect always performs the full first import (the
+  product requirement). Startup reconciliation runs when connected and the
+  "auto-add my entire Spotify library" preference is on (default **on**); manual
+  File → Sync from Spotify always works. The preference means "keep pulling in
+  what I add on Spotify automatically," nothing more.
 - **Playback**: double-click establishes the playback context = the current filtered
   track list snapshot; next/prev navigate that snapshot via explicit play-track calls
   (never Spotify's own queue-next). Player state (playing/elapsed/current track) is

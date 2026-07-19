@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+
+use futures::{stream, StreamExt, TryStreamExt};
 use retune_core::model::NewTrack;
 use retune_spotify::{
     client::{Album, SpotifyClient, Transport},
@@ -6,6 +9,7 @@ use retune_spotify::{
 };
 
 const PAGE_SIZE: u32 = 50;
+const SEARCH_PAGE_SIZE: u32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LibraryKind {
@@ -61,8 +65,34 @@ pub struct SearchResults {
 pub trait MediaProvider: Send + Sync {
     async fn library_snapshot(&self, kind: LibraryKind) -> Result<Vec<Vec<NewTrack>>, String>;
     async fn search(&self, query: &str) -> Result<SearchResults, String>;
+    async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String>;
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String>;
     async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String>;
+}
+
+async fn warm_artists<'a, T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    tracks: impl IntoIterator<Item = &'a retune_spotify::client::Track>,
+    album: Option<&Album>,
+) -> Result<(), String> {
+    let ids = tracks
+        .into_iter()
+        .filter_map(|track| {
+            track
+                .artists
+                .first()
+                .or_else(|| album.and_then(|album| album.artists.first()))
+                .map(|artist| artist.id.clone())
+        })
+        .collect::<HashSet<_>>();
+    stream::iter(
+        ids.into_iter()
+            .map(|id| async move { client.artist(&id).await.map_err(|error| error.to_string()) }),
+    )
+    .buffer_unordered(4)
+    .try_collect::<Vec<_>>()
+    .await?;
+    Ok(())
 }
 
 async fn normalized_track<T: Transport, S: TokenStore>(
@@ -98,6 +128,7 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
             .await
             .map_err(|error| error.to_string())?;
         let count = page.items.len() as u32;
+        warm_artists(client, &page.items, Some(album)).await?;
         for track in page.items {
             tracks.push(normalized_track(client, &track, Some(album)).await?);
         }
@@ -120,6 +151,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .await
                         .map_err(|error| error.to_string())?;
                     let count = page.items.len() as u32;
+                    warm_artists(self, page.items.iter().map(|saved| &saved.track), None).await?;
                     let mut batch = Vec::with_capacity(page.items.len());
                     for saved in page.items {
                         batch.push(normalized_track(self, &saved.track, None).await?);
@@ -219,7 +251,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 
     async fn search(&self, query: &str) -> Result<SearchResults, String> {
-        let results = SpotifyClient::search(self, query, 0, PAGE_SIZE)
+        let results = SpotifyClient::search(self, query, 0, SEARCH_PAGE_SIZE)
             .await
             .map_err(|error| error.to_string())?;
         Ok(SearchResults {
@@ -250,6 +282,34 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
         })
     }
 
+    async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String> {
+        let id = artist.rsplit(':').next().unwrap_or(artist);
+        let mut offset = 0;
+        let mut albums = vec![];
+        loop {
+            let page = SpotifyClient::artist_albums(self, id, offset, PAGE_SIZE)
+                .await
+                .map_err(|error| error.to_string())?;
+            let count = page.items.len() as u32;
+            albums.extend(page.items.into_iter().map(|album| {
+                SearchAlbum {
+                    artist: album
+                        .artists
+                        .first()
+                        .map(|artist| artist.name.clone())
+                        .unwrap_or_default(),
+                    name: album.name,
+                    uri: album.uri,
+                    track_count: None,
+                }
+            }));
+            if page.next.is_none() || count == 0 {
+                return Ok(albums);
+            }
+            offset += count;
+        }
+    }
+
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
         let id = album.rsplit(':').next().unwrap_or(album);
         let mut offset = 0;
@@ -259,6 +319,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                 .await
                 .map_err(|error| error.to_string())?;
             let count = page.items.len() as u32;
+            warm_artists(self, &page.items, None).await?;
             for track in page.items {
                 normalized.push(normalized_track(self, &track, None).await?);
             }
@@ -270,12 +331,9 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 
     async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String> {
-        for uri in uris {
-            self.save_to_library(uri)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
+        self.save_to_library(uris)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -297,6 +355,10 @@ impl MediaProvider for FakeProvider {
         })
     }
 
+    async fn artist_albums(&self, _artist: &str) -> Result<Vec<SearchAlbum>, String> {
+        Ok(vec![])
+    }
+
     async fn album_tracks(&self, _album: &str) -> Result<Vec<NewTrack>, String> {
         Ok(vec![])
     }
@@ -308,6 +370,7 @@ impl MediaProvider for FakeProvider {
 
 #[cfg(test)]
 mod tests {
+    use retune_core::model::SourceId;
     use retune_spotify::{
         client::{FakeTransport, Response},
         tokens::{InMemoryTokenStore, Tokens},
@@ -315,9 +378,40 @@ mod tests {
 
     use super::*;
 
+    fn client(
+        responses: impl IntoIterator<Item = Response>,
+    ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
+        SpotifyClient::new(
+            "client",
+            FakeTransport::new(responses),
+            InMemoryTokenStore::new(Some(Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+            })),
+        )
+    }
+
+    fn assert_track(
+        track: &NewTrack,
+        source: SourceId,
+        uri: &str,
+        cat: &str,
+        art: &str,
+        alb: &str,
+        name: &str,
+    ) {
+        assert_eq!(track.source, source);
+        assert_eq!(track.uri, uri);
+        assert_eq!(track.cat, cat);
+        assert_eq!(track.art, art);
+        assert_eq!(track.alb, alb);
+        assert_eq!(track.name, name);
+    }
+
     #[tokio::test]
     async fn spotify_provider_pages_and_normalizes_saved_tracks() {
-        let transport = FakeTransport::new([
+        let client = client([
             Response::json(
                 200,
                 serde_json::json!({"items": [{"track": {
@@ -332,16 +426,6 @@ mod tests {
             ),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
         ]);
-        let client = SpotifyClient::new(
-            "client",
-            transport,
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-            })),
-        );
-
         let batches = MediaProvider::library_snapshot(&client, LibraryKind::Tracks)
             .await
             .unwrap();
@@ -352,5 +436,237 @@ mod tests {
         assert!(client.transport().requests()[2]
             .url
             .ends_with("offset=1&limit=50"));
+    }
+
+    #[tokio::test]
+    async fn saved_albums_expand_tracks_and_normalize_album_metadata() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [{"album": {
+                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                "artists": [{"id": "artist-1", "name": "Artist"}], "images": []
+            }}], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                "uri": "spotify:track:1", "name": "Song", "duration_ms": 1234,
+                "artists": [], "album": null
+            }], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "id": "artist-1", "name": "Artist", "genres": ["rock"]
+                }),
+            ),
+        ]);
+
+        let batches = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+
+        assert_track(
+            &batches[0][0],
+            SourceId::Music,
+            "spotify:track:1",
+            "rock",
+            "Artist",
+            "Record",
+            "Song",
+        );
+        assert_eq!(batches[0][0].duration.as_millis(), 1234);
+    }
+
+    #[tokio::test]
+    async fn saved_shows_expand_episodes() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [{"show": {
+                "id": "show-1", "uri": "spotify:show:1", "name": "Show",
+                "publisher": "Publisher", "category": "Technology", "images": []
+            }}], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                "uri": "spotify:episode:1", "name": "Episode", "duration_ms": 2000,
+                "show": null
+            }], "next": null}),
+            ),
+        ]);
+
+        let batches = client.library_snapshot(LibraryKind::Shows).await.unwrap();
+
+        assert_track(
+            &batches[0][0],
+            SourceId::Podcasts,
+            "spotify:episode:1",
+            "Technology",
+            "Publisher",
+            "Show",
+            "Episode",
+        );
+        assert_eq!(batches[0][0].duration.as_millis(), 2000);
+    }
+
+    #[tokio::test]
+    async fn saved_episodes_use_embedded_show_metadata() {
+        let client = client([Response::json(
+            200,
+            serde_json::json!({"items": [{"episode": {
+            "uri": "spotify:episode:2", "name": "Saved Episode", "duration_ms": 3000,
+            "show": {"id": "show-2", "uri": "spotify:show:2", "name": "Saved Show",
+                "publisher": "Host", "category": null, "images": []}
+        }}], "next": null}),
+        )]);
+
+        let batches = client
+            .library_snapshot(LibraryKind::Episodes)
+            .await
+            .unwrap();
+
+        assert_track(
+            &batches[0][0],
+            SourceId::Podcasts,
+            "spotify:episode:2",
+            "Uncategorized",
+            "Host",
+            "Saved Show",
+            "Saved Episode",
+        );
+        assert_eq!(batches[0][0].duration.as_millis(), 3000);
+    }
+
+    #[tokio::test]
+    async fn saved_audiobooks_expand_chapters() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                "id": "book-1", "uri": "spotify:audiobook:1", "name": "Book",
+                "authors": [{"name": "Author"}], "genres": ["History"], "images": []
+            }], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                "uri": "spotify:chapter:1", "name": "Chapter", "duration_ms": 4000
+            }], "next": null}),
+            ),
+        ]);
+
+        let batches = client
+            .library_snapshot(LibraryKind::Audiobooks)
+            .await
+            .unwrap();
+
+        assert_track(
+            &batches[0][0],
+            SourceId::Audiobooks,
+            "spotify:chapter:1",
+            "History",
+            "Author",
+            "Book",
+            "Chapter",
+        );
+        assert_eq!(batches[0][0].duration.as_millis(), 4000);
+    }
+
+    #[tokio::test]
+    async fn search_maps_results_and_uses_search_page_limit() {
+        let client = client([Response::json(
+            200,
+            serde_json::json!({
+                "artists": {"items": [{"id": "artist-1", "name": "Artist", "genres": []}], "next": null},
+                "albums": {"items": [{"id": "album-1", "uri": "spotify:album:1", "name": "Album",
+                    "artists": [{"id": "artist-1", "name": "Artist"}], "images": []}], "next": null}
+            }),
+        )]);
+
+        let results = MediaProvider::search(&client, "artist").await.unwrap();
+
+        assert_eq!(
+            results.artists[0],
+            SearchArtist {
+                name: "Artist".into(),
+                uri: "spotify:artist:artist-1".into()
+            }
+        );
+        assert_eq!(results.albums[0].uri, "spotify:album:1");
+        assert!(client.transport().requests()[0]
+            .url
+            .ends_with("offset=0&limit=10"));
+    }
+
+    #[tokio::test]
+    async fn artist_albums_pages_by_artist_id() {
+        let client = client([Response::json(
+            200,
+            serde_json::json!({"items": [{
+            "id": "album-1", "uri": "spotify:album:1", "name": "Album",
+            "artists": [{"id": "artist-1", "name": "Artist"}], "images": []
+        }], "next": null}),
+        )]);
+
+        let albums = MediaProvider::artist_albums(&client, "spotify:artist:artist-1")
+            .await
+            .unwrap();
+
+        assert_eq!(albums[0].name, "Album");
+        assert!(client.transport().requests()[0]
+            .url
+            .contains("/artists/artist-1/albums?"));
+    }
+
+    #[tokio::test]
+    async fn album_add_uses_query_only_library_request() {
+        let client = client([Response::json(204, serde_json::Value::Null)]);
+
+        client
+            .save_to_spotify(&["spotify:album:1".into()])
+            .await
+            .unwrap();
+
+        let request = &client.transport().requests()[0];
+        assert!(request.url.contains("/me/library?uris=spotify%3Aalbum%3A1"));
+        assert!(request.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn distinct_artist_lookups_are_bounded_and_duplicate_ids_stay_cached() {
+        let tracks = (0..5)
+            .map(|index| serde_json::json!({
+                "track": {"uri": format!("spotify:track:{index}"), "name": format!("Track {index}"),
+                    "duration_ms": 1000, "artists": [{"id": format!("artist-{}", index % 4), "name": "Artist"}], "album": null}
+            }))
+            .collect::<Vec<_>>();
+        let mut responses = vec![Response::json(
+            200,
+            serde_json::json!({"items": tracks, "next": null}),
+        )];
+        responses.extend((0..4).map(|index| {
+            Response::json(
+                200,
+                serde_json::json!({
+                    "id": format!("artist-{index}"), "name": "Artist", "genres": ["genre"]
+                }),
+            )
+        }));
+        let client = client(responses);
+
+        let batches = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+
+        assert_eq!(batches[0].len(), 5);
+        assert!(batches[0].iter().all(|track| track.cat == "genre"));
+        assert_eq!(
+            client
+                .transport()
+                .requests()
+                .iter()
+                .filter(|request| request.url.contains("/artists/"))
+                .count(),
+            4
+        );
     }
 }

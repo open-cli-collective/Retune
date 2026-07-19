@@ -133,7 +133,7 @@ const defaultSettings: Settings = {
   zoom: 1,
   zebra: true,
   columnOrder: ['name', 'time', 'artist', 'album', 'genre', 'rating'],
-  autoAddSpotifyLibrary: false,
+  autoAddSpotifyLibrary: true,
   spotifyClientId: '',
   spotifySyncCompleted: false,
 }
@@ -552,7 +552,15 @@ function App() {
             state.connected ? <SpotifySearch
               searching={state.spotifySearching}
               results={state.spotifyResults}
-              onArtist={(artist) => dispatch({ type: 'query', query: `artist:"${artist}"` })}
+              onArtist={(artist) => {
+                dispatch({ type: 'spotifySearching', searching: true })
+                invoke<SpotifyResults['albums']>('spotify_artist_albums', { artistId: artist.uri })
+                  .then((albums) => dispatch({
+                    type: 'spotifyResults',
+                    results: { artists: state.spotifyResults?.artists ?? [artist], albums },
+                  }))
+                  .catch((error) => dispatch({ type: 'error', error: String(error) }))
+              }}
               onAdd={(album) => invoke('add_spotify_album', album)
                 .catch((error) => dispatch({ type: 'error', error: String(error) }))}
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
@@ -726,7 +734,7 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, 
 function SpotifySearch({ searching, results, onArtist, onAdd }: {
   searching: boolean
   results: SpotifyResults | null
-  onArtist: (artist: string) => void
+  onArtist: (artist: SpotifyResults['artists'][number]) => void
   onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
 }) {
   const [adding, setAdding] = useState<string>()
@@ -736,7 +744,7 @@ function SpotifySearch({ searching, results, onArtist, onAdd }: {
   }
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
   return <div className="spotify-results">
-    <section><h2>Artists</h2>{results?.artists.map((artist) => <button className="spotify-row" key={artist.uri} onClick={() => onArtist(artist.name)}><span>{artist.name}</span><span>View albums ›</span></button>)}{!results?.artists.length && <p>No artists found.</p>}</section>
+    <section><h2>Artists</h2>{results?.artists.map((artist) => <button className="spotify-row" key={artist.uri} onClick={() => onArtist(artist)}><span>{artist.name}</span><span>View albums ›</span></button>)}{!results?.artists.length && <p>No artists found.</p>}</section>
     <section><h2>Albums</h2>{results?.albums.map((album) => <div className="spotify-row" key={album.uri}><span><strong>{album.name}</strong><small>{album.artist}{album.trackCount ? ` · ${album.trackCount} tracks` : ''}</small></span><button disabled={adding === album.uri} onClick={() => add(album)}>{adding === album.uri ? 'Adding…' : '+ Add'}</button></div>)}{!results?.albums.length && <p>No albums found.</p>}</section>
   </div>
 }
@@ -791,7 +799,7 @@ function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCan
         <legend>Library</legend>
         <label>Spotify Client ID<input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
         <label className="checkbox"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} />Automatically add my entire Spotify library</label>
-        <p>Takes effect when Spotify is connected.</p>
+        <p>Keep pulling in music you add on Spotify each time Retune starts.</p>
       </fieldset>
       <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd, clientId.trim())}>Save</button></div>
     </div>

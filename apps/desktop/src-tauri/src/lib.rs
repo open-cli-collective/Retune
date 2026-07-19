@@ -12,7 +12,7 @@ use std::{
 };
 
 use playback::{Playback, PlayerStateEvent, SnapshotTrack};
-use provider::{MediaProvider, SearchResults};
+use provider::{MediaProvider, SearchAlbum, SearchResults};
 use retune_core::{
     browse::{self, Selection},
     io::{export_json, export_json_gz, import},
@@ -683,6 +683,15 @@ async fn spotify_search(
     MediaProvider::search(provider.as_ref(), query.trim()).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn spotify_artist_albums(
+    state: tauri::State<'_, AppState>,
+    artist_id: String,
+) -> Result<Vec<SearchAlbum>, String> {
+    let provider = provider_from(&state)?;
+    MediaProvider::artist_albums(provider.as_ref(), &artist_id).await
+}
+
 #[tauri::command]
 async fn add_spotify_album(
     app: tauri::AppHandle,
@@ -1045,6 +1054,7 @@ pub fn run() {
             disconnect_spotify,
             sync_from_spotify,
             spotify_search,
+            spotify_artist_albums,
             add_spotify_album,
             play_tracks,
             player_toggle,
@@ -1085,7 +1095,7 @@ pub fn run() {
             menu_checks.sync_connection(connected)?;
             let spotify = spotify_provider(&settings.spotify_client_id)
                 .map_err(std::io::Error::other)?;
-            let startup_sync = connected && settings.auto_add_spotify_library;
+            let startup_sync = should_startup_sync(connected, &settings);
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -1118,6 +1128,10 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+fn should_startup_sync(connected: bool, settings: &Settings) -> bool {
+    connected && settings.auto_add_spotify_library
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1140,18 @@ mod tests {
     fn release_first_run_starts_empty() {
         assert!(initial_library(false).tracks().is_empty());
         assert!(!initial_library(true).tracks().is_empty());
+    }
+
+    #[test]
+    fn startup_sync_runs_only_when_connected_and_enabled() {
+        let enabled = Settings::default();
+        assert!(should_startup_sync(true, &enabled));
+        assert!(!should_startup_sync(false, &enabled));
+        let disabled = Settings {
+            auto_add_spotify_library: false,
+            ..enabled
+        };
+        assert!(!should_startup_sync(true, &disabled));
     }
 
     #[test]

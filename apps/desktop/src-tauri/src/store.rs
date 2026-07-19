@@ -98,7 +98,7 @@ impl Default for Settings {
             column_order: ["name", "time", "artist", "album", "genre", "rating"]
                 .map(String::from)
                 .to_vec(),
-            auto_add_spotify_library: false,
+            auto_add_spotify_library: true,
             spotify_client_id: String::new(),
             spotify_sync_completed: false,
         }
@@ -246,6 +246,11 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn spotify_startup_sync_defaults_on() {
+        assert!(Settings::default().auto_add_spotify_library);
     }
 
     #[test]

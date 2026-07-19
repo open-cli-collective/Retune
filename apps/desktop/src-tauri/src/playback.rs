@@ -54,23 +54,39 @@ pub enum PlaybackDecision {
 }
 
 pub fn resolve(prev: PolledState, now: PolledState, expected: &Snapshot) -> PlaybackDecision {
-    if !now.device_present {
-        return PlaybackDecision::DeviceGone;
-    }
-    if now.track_id.as_deref() == Some(expected.current().uri.as_str()) {
-        return PlaybackDecision::Tick;
-    }
-    if prev.track_id.as_deref() == Some(expected.current().uri.as_str())
-        && prev.elapsed.saturating_add(5) >= expected.current().duration_secs
-    {
+    let terminal = || {
         if expected.has_next() {
             PlaybackDecision::Advance
         } else {
             PlaybackDecision::Stop
         }
+    };
+    let near_end = |state: &PolledState| {
+        state.track_id.as_deref() == Some(expected.current().uri.as_str())
+            && state.elapsed.saturating_add(5) >= expected.current().duration_secs
+    };
+    if near_end(&now) && !now.is_playing {
+        return terminal();
+    }
+    if !now.device_present {
+        return if near_end(&prev) {
+            terminal()
+        } else {
+            PlaybackDecision::DeviceGone
+        };
+    }
+    if now.track_id.as_deref() == Some(expected.current().uri.as_str()) {
+        return PlaybackDecision::Tick;
+    }
+    if near_end(&prev) {
+        terminal()
     } else {
         PlaybackDecision::Takeover
     }
+}
+
+fn poll_decision(context: &Context, now: PolledState, epoch: u64) -> Option<PlaybackDecision> {
+    (context.epoch == epoch).then(|| resolve(context.previous.clone(), now, &context.snapshot))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -93,6 +109,7 @@ struct Context {
     volume_supported: bool,
     previous: PolledState,
     generation: u64,
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -161,6 +178,7 @@ impl Playback {
             device_id,
             volume_supported: device.supports_volume,
             generation,
+            epoch: 1,
         });
         Ok(event)
     }
@@ -178,6 +196,7 @@ impl Playback {
             client.pause(Some(&context.device_id)).await
         }
         .map_err(|error| error.to_string())?;
+        context.epoch = context.epoch.wrapping_add(1);
         context.previous.is_playing = playing;
         Ok(local_event(
             &context.snapshot,
@@ -201,6 +220,7 @@ impl Playback {
             .seek(position_ms, Some(&context.device_id))
             .await
             .map_err(|error| error.to_string())?;
+        context.epoch = context.epoch.wrapping_add(1);
         context.previous.elapsed = seconds;
         Ok(local_event(
             &context.snapshot,
@@ -252,6 +272,7 @@ impl Playback {
             )
             .await
             .map_err(|error| error.to_string())?;
+        context.epoch = context.epoch.wrapping_add(1);
         context.previous = PolledState {
             track_id: Some(context.snapshot.current().uri.clone()),
             elapsed: 0,
@@ -296,6 +317,17 @@ impl Playback {
         interval.tick().await;
         loop {
             interval.tick().await;
+            let epoch = {
+                let state = self.state.lock().await;
+                let Some(context) = state
+                    .context
+                    .as_ref()
+                    .filter(|context| context.generation == generation)
+                else {
+                    return;
+                };
+                context.epoch
+            };
             let polled = match client.player().await {
                 Ok(player) => player,
                 Err(error) => {
@@ -313,7 +345,9 @@ impl Playback {
                 return;
             };
             let now = polled_state(polled.as_ref());
-            let decision = resolve(context.previous.clone(), now.clone(), &context.snapshot);
+            let Some(decision) = poll_decision(context, now.clone(), epoch) else {
+                continue;
+            };
             let event = match decision {
                 PlaybackDecision::Tick => {
                     context.previous = now;
@@ -518,6 +552,62 @@ mod tests {
                 &expected,
             ),
             PlaybackDecision::Tick
+        );
+    }
+
+    #[test]
+    fn paused_expected_track_at_end_advances() {
+        assert_eq!(
+            resolve(
+                polled(Some("spotify:track:1"), 94, true),
+                polled(Some("spotify:track:1"), 96, false),
+                &snapshot(0),
+            ),
+            PlaybackDecision::Advance
+        );
+    }
+
+    #[test]
+    fn missing_player_after_near_end_advances() {
+        let mut missing = polled(None, 0, false);
+        missing.device_present = false;
+        assert_eq!(
+            resolve(
+                polled(Some("spotify:track:1"), 96, true),
+                missing,
+                &snapshot(0),
+            ),
+            PlaybackDecision::Advance
+        );
+    }
+
+    #[test]
+    fn null_item_after_near_end_advances() {
+        assert_eq!(
+            resolve(
+                polled(Some("spotify:track:1"), 96, true),
+                polled(None, 0, false),
+                &snapshot(0),
+            ),
+            PlaybackDecision::Advance
+        );
+    }
+
+    #[test]
+    fn stale_poll_epoch_is_discarded() {
+        let expected = snapshot(0);
+        let context = Context {
+            previous: polled(Some("spotify:track:1"), 20, true),
+            snapshot: expected,
+            device_id: "desk".into(),
+            volume_supported: true,
+            generation: 1,
+            epoch: 2,
+        };
+
+        assert_eq!(
+            poll_decision(&context, polled(Some("spotify:track:else"), 0, true), 1),
+            None
         );
     }
 

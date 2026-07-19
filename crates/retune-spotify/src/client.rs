@@ -352,17 +352,15 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         .await
     }
 
-    /// Must be verified against the February 2026 URI-based `/me/library`
-    /// contract during the live feasibility gate.
-    pub async fn save_to_library(&self, uri: &str) -> Result<()> {
-        const PATH: &str = "/me/library";
-        self.empty(
-            Method::Put,
-            PATH,
-            serde_json::to_vec(&serde_json::json!({ "uris": [uri] }))
-                .expect("library body serializes"),
-        )
-        .await
+    pub async fn save_to_library(&self, uris: &[String]) -> Result<()> {
+        for chunk in uris.chunks(40) {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("uris", &chunk.join(","))
+                .finish();
+            self.empty(Method::Put, &format!("/me/library?{query}"), Vec::new())
+                .await?;
+        }
+        Ok(())
     }
 
     async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
@@ -773,7 +771,10 @@ mod tests {
         client.pause(None).await.unwrap();
         client.set_volume(42, Some("desk & one")).await.unwrap();
         client.transfer("desk", true).await.unwrap();
-        client.save_to_library("spotify:album:1").await.unwrap();
+        client
+            .save_to_library(&["spotify:album:1".into()])
+            .await
+            .unwrap();
         let requests = client.transport().requests();
         assert!(
             requests[1]
@@ -788,7 +789,51 @@ mod tests {
                 .ends_with("/me/player/volume?volume_percent=42&device_id=desk+%26+one")
         );
         assert_eq!(requests[5].url, format!("{API_BASE}/me/player"));
-        assert_eq!(requests[6].url, format!("{API_BASE}/me/library"));
+        let url = url::Url::parse(&requests[6].url).unwrap();
+        assert_eq!(url.path(), "/v1/me/library");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            [("uris".into(), "spotify:album:1".into())]
+        );
+        assert!(requests[6].body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_to_library_chunks_forty_uris_into_query_only_requests() {
+        let transport = FakeTransport::new([
+            Response::json(204, serde_json::Value::Null),
+            Response::json(204, serde_json::Value::Null),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+        let uris = (0..41)
+            .map(|index| format!("spotify:track:{index}"))
+            .collect::<Vec<_>>();
+
+        client.save_to_library(&uris).await.unwrap();
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.body.is_empty()));
+        assert_eq!(
+            url::Url::parse(&requests[0].url)
+                .unwrap()
+                .query_pairs()
+                .find(|(key, _)| key == "uris")
+                .unwrap()
+                .1
+                .split(',')
+                .count(),
+            40
+        );
+        assert_eq!(
+            url::Url::parse(&requests[1].url)
+                .unwrap()
+                .query_pairs()
+                .find(|(key, _)| key == "uris")
+                .unwrap()
+                .1,
+            "spotify:track:40"
+        );
     }
 
     #[tokio::test]
