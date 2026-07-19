@@ -142,8 +142,15 @@ pub struct LoopbackListener {
 }
 
 impl LoopbackListener {
+    /// Binds an OS-assigned ephemeral port — for tests. Real OAuth flows
+    /// need [`Self::bind_on`]: Spotify matches redirect URIs exactly, so
+    /// the port must be the one registered in the app dashboard.
     pub fn bind() -> Result<Self> {
-        TcpListener::bind(("127.0.0.1", 0))
+        Self::bind_on(0)
+    }
+
+    pub fn bind_on(port: u16) -> Result<Self> {
+        TcpListener::bind(("127.0.0.1", port))
             .map(|listener| Self { listener })
             .map_err(|error| Error::Callback(error.to_string()))
     }

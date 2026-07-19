@@ -517,7 +517,9 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
         return Err("Spotify Client ID is missing. Add it in Preferences, then try again.".into());
     }
 
-    let listener = LoopbackListener::bind().map_err(|error| error.to_string())?;
+    // Fixed port: Spotify matches redirect URIs exactly, so the dashboard
+    // registration must be http://127.0.0.1:8898/callback.
+    let listener = LoopbackListener::bind_on(8898).map_err(|error| error.to_string())?;
     let redirect_uri = listener.redirect_uri().map_err(|error| error.to_string())?;
     let state = auth::random_state();
     let pkce = Pkce::generate();
