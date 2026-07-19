@@ -29,18 +29,21 @@ impl Selection {
     }
 
     /// Select a category (`None` = the "All" row). Resets artist and album.
-    pub fn select_cat(&mut self, _cat: Option<String>) {
-        todo!()
+    pub fn select_cat(&mut self, cat: Option<String>) {
+        self.cat = cat;
+        self.art = None;
+        self.alb = None;
     }
 
     /// Select an artist (`None` = "All"). Resets album, keeps category.
-    pub fn select_art(&mut self, _art: Option<String>) {
-        todo!()
+    pub fn select_art(&mut self, art: Option<String>) {
+        self.art = art;
+        self.alb = None;
     }
 
     /// Select an album (`None` = "All"). Keeps category and artist.
-    pub fn select_alb(&mut self, _alb: Option<String>) {
-        todo!()
+    pub fn select_alb(&mut self, alb: Option<String>) {
+        self.alb = alb;
     }
 }
 
@@ -55,17 +58,175 @@ pub struct Facets {
     pub albs: Vec<String>,
 }
 
-pub fn facets(_library: &Library, _source: SourceId, _selection: &Selection) -> Facets {
-    todo!()
+pub fn facets(library: &Library, source: SourceId, selection: &Selection) -> Facets {
+    let records = library
+        .tracks()
+        .iter()
+        .filter(|track| track.source == source);
+    let cats = sorted_unique(records.clone().map(|track| track.cat.clone()).collect());
+    let arts = sorted_unique(
+        records
+            .clone()
+            .filter(|track| selected(&selection.cat, &track.cat))
+            .map(|track| track.art.clone())
+            .collect(),
+    );
+    let albs = sorted_unique(
+        records
+            .filter(|track| {
+                selected(&selection.cat, &track.cat) && selected(&selection.art, &track.art)
+            })
+            .map(|track| track.alb.clone())
+            .collect(),
+    );
+    Facets { cats, arts, albs }
 }
 
 /// The track list for the current intersection of selections, in stable
 /// browse order: artist, then album, then library insertion order (proxy for
 /// track number until providers supply one).
 pub fn tracks<'a>(
-    _library: &'a Library,
-    _source: SourceId,
-    _selection: &Selection,
+    library: &'a Library,
+    source: SourceId,
+    selection: &Selection,
 ) -> Vec<&'a TrackRecord> {
-    todo!()
+    let mut tracks: Vec<_> = library
+        .tracks()
+        .iter()
+        .filter(|track| {
+            track.source == source
+                && selected(&selection.cat, &track.cat)
+                && selected(&selection.art, &track.art)
+                && selected(&selection.alb, &track.alb)
+        })
+        .collect();
+    tracks.sort_by(|left, right| {
+        left.art
+            .to_lowercase()
+            .cmp(&right.art.to_lowercase())
+            .then_with(|| left.alb.to_lowercase().cmp(&right.alb.to_lowercase()))
+    });
+    tracks
+}
+
+fn selected(selection: &Option<String>, value: &str) -> bool {
+    selection
+        .as_deref()
+        .is_none_or(|selected| selected == value)
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    values.dedup();
+    values
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::model::NewTrack;
+
+    fn add(library: &mut Library, source: SourceId, uri: &str, cat: &str, art: &str, alb: &str) {
+        library.add(NewTrack {
+            uri: uri.into(),
+            source,
+            cat: cat.into(),
+            art: art.into(),
+            alb: alb.into(),
+            name: uri.into(),
+            duration: Duration::ZERO,
+        });
+    }
+
+    fn library() -> Library {
+        let mut library = Library::new();
+        add(&mut library, SourceId::Music, "1", "Rock", "beta", "Zoo");
+        add(&mut library, SourceId::Music, "2", "Jazz", "Alpha", "First");
+        add(
+            &mut library,
+            SourceId::Music,
+            "3",
+            "Rock",
+            "alpha",
+            "Second",
+        );
+        add(&mut library, SourceId::Music, "4", "Rock", "beta", "Able");
+        add(&mut library, SourceId::Music, "5", "Rock", "beta", "Able");
+        add(
+            &mut library,
+            SourceId::Podcasts,
+            "podcast",
+            "Audio",
+            "Network",
+            "Show",
+        );
+        library
+    }
+
+    #[test]
+    fn selection_transitions_reset_only_narrower_facets() {
+        let mut selection = Selection::default();
+        selection.select_cat(Some("Rock".into()));
+        selection.select_art(Some("Artist".into()));
+        selection.select_alb(Some("Album".into()));
+        assert_eq!(selection.cat(), Some("Rock"));
+        assert_eq!(selection.art(), Some("Artist"));
+        assert_eq!(selection.alb(), Some("Album"));
+
+        selection.select_art(None);
+        assert_eq!(selection.cat(), Some("Rock"));
+        assert_eq!(selection.art(), None);
+        assert_eq!(selection.alb(), None);
+
+        selection.select_alb(Some("Album".into()));
+        selection.select_cat(None);
+        assert_eq!(selection.cat(), None);
+        assert_eq!(selection.art(), None);
+        assert_eq!(selection.alb(), None);
+    }
+
+    #[test]
+    fn facets_use_only_broader_selections_and_the_requested_source() {
+        let library = library();
+        let mut selection = Selection::default();
+        selection.select_cat(Some("Rock".into()));
+        selection.select_art(Some("beta".into()));
+        selection.select_alb(Some("Zoo".into()));
+
+        assert_eq!(
+            facets(&library, SourceId::Music, &selection),
+            Facets {
+                cats: vec!["Jazz".into(), "Rock".into()],
+                arts: vec!["alpha".into(), "beta".into()],
+                albs: vec!["Able".into(), "Zoo".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn tracks_intersect_selections_and_sort_artist_album_then_insertion() {
+        let library = library();
+        let mut selection = Selection::default();
+        selection.select_cat(Some("Rock".into()));
+
+        let uris: Vec<_> = tracks(&library, SourceId::Music, &selection)
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect();
+        assert_eq!(uris, ["3", "4", "5", "1"]);
+
+        selection.select_art(Some("beta".into()));
+        selection.select_alb(Some("Able".into()));
+        let uris: Vec<_> = tracks(&library, SourceId::Music, &selection)
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect();
+        assert_eq!(uris, ["4", "5"]);
+    }
 }
