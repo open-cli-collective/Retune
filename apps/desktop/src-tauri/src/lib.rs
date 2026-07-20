@@ -1375,6 +1375,7 @@ pub fn run() {
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
                     .max_file_size(5_000_000)
+                    .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                     .build(),
             )?;
             let app_data_dir = app.path().app_data_dir()?;
