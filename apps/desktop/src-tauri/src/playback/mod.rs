@@ -166,7 +166,6 @@ enum PlayerBackend {
 }
 
 impl PlayerBackend {
-    #[cfg(test)]
     fn is_local(&self) -> bool {
         matches!(self, Self::Local(_))
     }
@@ -439,8 +438,10 @@ impl Playback {
         }
     }
 
-    #[cfg(test)]
-    async fn is_local(&self) -> bool {
+    /// Whether the LOCAL backend is what commands currently dispatch to —
+    /// can differ from the persisted setting when activation failed and
+    /// playback fell back to Connect.
+    pub async fn is_local_active(&self) -> bool {
         self.state.lock().await.backend.is_local()
     }
 
@@ -579,7 +580,7 @@ mod tests {
             .switch_to_local_with(None, || async { Err("preflight failed".into()) })
             .await;
         assert_eq!(result.unwrap_err(), "preflight failed");
-        assert!(!playback.is_local().await);
+        assert!(!playback.is_local_active().await);
     }
 
     #[test]

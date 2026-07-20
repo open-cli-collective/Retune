@@ -496,8 +496,13 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
     settings.spotify_sync_completed = current.spotify_sync_completed;
     settings.last_full_sync = current.last_full_sync;
     settings.validate().map_err(|error| error.to_string())?;
-    if current.playback_backend != settings.playback_backend {
-        let switch = if settings.playback_backend == "local" {
+    // Compare against the ACTIVE backend, not the persisted setting: a failed
+    // activation (e.g. under-scoped token at startup) leaves the setting on
+    // "local" while playback fell back to Connect, and re-selecting the radio
+    // must retry the switch.
+    let wants_local = settings.playback_backend == "local";
+    if wants_local != state.playback.is_local_active().await {
+        let switch = if wants_local {
             switch_to_local(&state, settings.volume).await
         } else {
             state.playback.switch_to_connect().await;

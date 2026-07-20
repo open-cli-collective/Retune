@@ -284,6 +284,14 @@ impl<'a> SyncHealth<'a> {
                 }
                 Ok(None)
             }
+            Err(retune_spotify::Error::ServerError { endpoint, status }) => {
+                if !self.partial.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "Spotify library snapshot is partial: Spotify {endpoint} failed with HTTP {status} after retries"
+                    );
+                }
+                Ok(None)
+            }
             // Live payloads stray from the documented shapes; a page we cannot
             // decode should cost its section, not the whole import.
             Err(error @ retune_spotify::Error::Json { .. }) => {
@@ -350,6 +358,12 @@ impl<'c, T: Transport, S: TokenStore> GenreSource<'c, T, S> {
                         "Spotify artist genres unavailable for this sync: Spotify rate limited {endpoint}; retry after {retry_after_secs}s"
                     );
                 }
+                Ok(None)
+            }
+            Err(retune_spotify::Error::ServerError { endpoint, status }) => {
+                log::warn!(
+                    "Skipping Spotify artist genre lookup: Spotify {endpoint} failed with HTTP {status} after retries"
+                );
                 Ok(None)
             }
             Err(error) => Err(error.to_string()),
@@ -1094,6 +1108,50 @@ mod tests {
 
         assert!(snapshot.partial);
         assert!(cooldowns["/me/tracks"] > unix_now());
+    }
+
+    #[test]
+    fn server_error_marks_snapshot_partial_without_a_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let client = client([]);
+        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let health = SyncHealth::new(Some(&provider.run));
+
+        let page = health
+            .snapshot_page::<()>(Err(retune_spotify::Error::ServerError {
+                endpoint: "/me/albums?offset=50&limit=50".into(),
+                status: 502,
+            }))
+            .unwrap();
+
+        assert!(page.is_none());
+        assert!(health.partial.load(Ordering::Relaxed));
+        assert_eq!(provider.earliest_cooldown(), None);
+        assert!(store.cooldowns(unix_now()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn artist_server_error_skips_only_that_artist() {
+        let client = client([
+            Response::json(500, serde_json::json!({})),
+            Response::json(502, serde_json::json!({})),
+            Response::json(504, serde_json::json!({})),
+            Response::json(
+                200,
+                serde_json::json!({"id": "artist-2", "name": "Two", "genres": ["rock"]}),
+            ),
+        ]);
+        let health = SyncHealth::new(None);
+        let genres = GenreSource::new(&client, &health);
+
+        assert!(genres.artist("artist-1").await.unwrap().is_none());
+        assert_eq!(
+            genres.artist("artist-2").await.unwrap().unwrap().id,
+            "artist-2"
+        );
+        assert!(!health.genres_degraded.load(Ordering::Relaxed));
+        assert_eq!(client.transport().requests().len(), 4);
     }
 
     #[tokio::test]

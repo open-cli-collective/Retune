@@ -15,6 +15,10 @@ const API_BASE: &str = "https://api.spotify.com/v1";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const MAX_RATE_LIMIT_RETRIES: usize = 3;
 const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(300);
+#[cfg(not(test))]
+const SERVER_RETRY_BACKOFFS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
+#[cfg(test)]
+const SERVER_RETRY_BACKOFFS: [Duration; 2] = [Duration::ZERO; 2];
 
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<Response>> + Send + 'a>>;
 
@@ -416,6 +420,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     async fn api_request(&self, method: Method, path: &str, body: Vec<u8>) -> Result<Response> {
         let mut refreshed = false;
         let mut rate_retries = 0;
+        let mut server_retries = 0;
         loop {
             let access = self.tokens.load()?.ok_or(Error::MissingToken)?.access;
             *self
@@ -459,6 +464,25 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                     wait.as_secs(),
                     rate_retries,
                     MAX_RATE_LIMIT_RETRIES
+                );
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            if matches!(response.status, 500 | 502 | 503 | 504) {
+                if server_retries == SERVER_RETRY_BACKOFFS.len() {
+                    return Err(Error::ServerError {
+                        endpoint: path.into(),
+                        status: response.status,
+                    });
+                }
+                let wait = SERVER_RETRY_BACKOFFS[server_retries];
+                server_retries += 1;
+                log::warn!(
+                    "Spotify {path} returned HTTP {}; retrying in {}s (attempt {}/{})",
+                    response.status,
+                    wait.as_secs(),
+                    server_retries,
+                    SERVER_RETRY_BACKOFFS.len()
                 );
                 tokio::time::sleep(wait).await;
                 continue;
@@ -930,6 +954,39 @@ mod tests {
             }
         ));
         assert_eq!(client.transport().requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_server_errors_twice_then_succeeds() {
+        let transport = FakeTransport::new([
+            Response::json(500, serde_json::json!({})),
+            Response::json(502, serde_json::json!({})),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+
+        assert!(client.saved_albums(50, 50).await.is_ok());
+        assert_eq!(client.transport().requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn server_error_retries_are_capped() {
+        let transport = FakeTransport::new([
+            Response::json(500, serde_json::json!({})),
+            Response::json(502, serde_json::json!({})),
+            Response::json(503, serde_json::json!({})),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+
+        let error = client.saved_albums(50, 50).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ServerError {
+                endpoint,
+                status: 503
+            } if endpoint == "/me/albums?offset=50&limit=50"
+        ));
+        assert_eq!(client.transport().requests().len(), 3);
     }
 
     #[tokio::test]
