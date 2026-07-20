@@ -183,7 +183,7 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
         else {
             return Ok((tracks, true));
         };
-        let count = page.items.len() as u32;
+        let count = (page.items.len() + page.skipped) as u32;
         warm_artists(genres, &page.items, Some(album)).await?;
         for track in page.items {
             tracks.push(normalized_track(genres, &track, Some(album)).await?);
@@ -209,7 +209,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     else {
                         break 'pages;
                     };
-                    let count = page.items.len() as u32;
+                    let count = (page.items.len() + page.skipped) as u32;
                     warm_artists(&genres, page.items.iter().map(|saved| &saved.track), None)
                         .await?;
                     let mut batch = Vec::with_capacity(page.items.len());
@@ -224,7 +224,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     else {
                         break 'pages;
                     };
-                    let count = page.items.len() as u32;
+                    let count = (page.items.len() + page.skipped) as u32;
                     let mut batch = vec![];
                     for saved in page.items {
                         let (tracks, partial) =
@@ -243,7 +243,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     else {
                         break 'pages;
                     };
-                    let count = page.items.len() as u32;
+                    let count = (page.items.len() + page.skipped) as u32;
                     let mut batch = vec![];
                     for saved in page.items {
                         let mut episode_offset = 0;
@@ -256,7 +256,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                                 batches.push(batch);
                                 break 'pages;
                             };
-                            let episode_count = episodes.items.len() as u32;
+                            let episode_count = (episodes.items.len() + episodes.skipped) as u32;
                             batch.extend(
                                 episodes
                                     .items
@@ -277,7 +277,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     else {
                         break 'pages;
                     };
-                    let count = page.items.len() as u32;
+                    let count = (page.items.len() + page.skipped) as u32;
                     let batch = page
                         .items
                         .iter()
@@ -291,7 +291,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                     else {
                         break 'pages;
                     };
-                    let count = page.items.len() as u32;
+                    let count = (page.items.len() + page.skipped) as u32;
                     let mut batch = vec![];
                     for book in page.items {
                         let mut chapter_offset = 0;
@@ -304,7 +304,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                                 batches.push(batch);
                                 break 'pages;
                             };
-                            let chapter_count = chapters.items.len() as u32;
+                            let chapter_count = (chapters.items.len() + chapters.skipped) as u32;
                             batch.extend(
                                 chapters
                                     .items
@@ -373,7 +373,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
             let page = SpotifyClient::artist_albums(self, id, offset, PAGE_SIZE)
                 .await
                 .map_err(|error| error.to_string())?;
-            let count = page.items.len() as u32;
+            let count = (page.items.len() + page.skipped) as u32;
             albums.extend(page.items.into_iter().map(|album| {
                 SearchAlbum {
                     artist: album
@@ -403,7 +403,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
             let page = SpotifyClient::album_tracks(self, id, offset, PAGE_SIZE)
                 .await
                 .map_err(|error| error.to_string())?;
-            let count = page.items.len() as u32;
+            let count = (page.items.len() + page.skipped) as u32;
             warm_artists(&genres, &page.items, None).await?;
             for track in page.items {
                 normalized.push(normalized_track(&genres, &track, None).await?);
@@ -779,13 +779,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn undecodable_page_degrades_to_partial_instead_of_failing() {
+    async fn undecodable_item_is_skipped_and_the_rest_of_the_page_imports() {
         let client = client([Response::json(
             200,
-            serde_json::json!({"items": [{"episode": {
-                "uri": "spotify:episode:1", "name": "Ep", "duration_ms": "bogus"
-            }}], "next": null}),
+            serde_json::json!({"items": [
+                {"episode": {"uri": "spotify:episode:1", "name": "Ep", "duration_ms": "bogus"}},
+                {"episode": {"uri": "spotify:episode:2", "name": "Good", "duration_ms": 2000,
+                    "show": {"id": "show-1", "uri": "spotify:show:1", "name": "Show",
+                        "publisher": "Host", "category": null, "images": []}}}
+            ], "next": null}),
         )]);
+
+        let snapshot = client
+            .library_snapshot(LibraryKind::Episodes)
+            .await
+            .unwrap();
+
+        assert!(!snapshot.partial);
+        let tracks: Vec<_> = snapshot.batches.concat();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].uri, "spotify:episode:2");
+    }
+
+    #[tokio::test]
+    async fn undecodable_page_degrades_to_partial_instead_of_failing() {
+        let client = client([Response::json(200, serde_json::json!({"items": "bogus"}))]);
 
         let snapshot = client
             .library_snapshot(LibraryKind::Episodes)

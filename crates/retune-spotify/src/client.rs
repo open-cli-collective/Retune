@@ -528,10 +528,43 @@ fn device_path(path: &str, device_id: Option<&str>) -> String {
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T> {
     pub items: Vec<T>,
     pub next: Option<String>,
+    /// Items in the payload that failed to decode and were dropped. Live
+    /// pages null out fields of removed/unplayable content; one bad item
+    /// must not cost the page. Counted so pagination offsets stay correct.
+    pub skipped: usize,
+}
+
+impl<'de, T: DeserializeOwned> Deserialize<'de> for Page<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct RawPage {
+            items: Vec<serde_json::Value>,
+            next: Option<String>,
+        }
+        let raw = RawPage::deserialize(deserializer)?;
+        let mut items = Vec::with_capacity(raw.items.len());
+        let mut skipped = 0;
+        for item in raw.items {
+            match serde_json::from_value(item) {
+                Ok(item) => items.push(item),
+                Err(error) => {
+                    skipped += 1;
+                    log::warn!("Skipped undecodable item in a Spotify page: {error}");
+                }
+            }
+        }
+        Ok(Self {
+            items,
+            next: raw.next,
+            skipped,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
