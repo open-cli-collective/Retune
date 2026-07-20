@@ -484,6 +484,7 @@ impl Playback {
         if !invalid {
             return Ok(());
         }
+        log::info!("Recreating local playback session");
         let generation = state.generation.wrapping_add(1);
         let mut local =
             LocalBackend::activate(client, self.events.clone(), generation, state.volume)
@@ -555,6 +556,7 @@ impl Playback {
                     }
                 }
                 ReducerAction::Invalidate => {
+                    log::info!("Local playback session lost; will reconnect on next use");
                     state.generation = state.generation.wrapping_add(1);
                     let generation = state.generation;
                     state.reducer.activate(generation);

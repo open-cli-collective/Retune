@@ -94,10 +94,21 @@ impl EventReducer {
         match event {
             NeutralEvent::ConnectState { state, .. } => self.connect_state(state),
             NeutralEvent::Error { message, .. } => vec![ReducerAction::Error(message)],
-            NeutralEvent::Disconnected { .. } => vec![
-                ReducerAction::Error("Spotify playback lost its network connection.".into()),
-                ReducerAction::Invalidate,
-            ],
+            // An idle session dropping (Spotify closes quiet connections) is
+            // routine and self-healing; only an interruption the listener can
+            // hear deserves an error surface.
+            NeutralEvent::Disconnected { .. } => {
+                if self.state.is_playing {
+                    vec![
+                        ReducerAction::Error(
+                            "Spotify playback lost its network connection.".into(),
+                        ),
+                        ReducerAction::Invalidate,
+                    ]
+                } else {
+                    vec![ReducerAction::Invalidate]
+                }
+            }
             NeutralEvent::RequestIdChanged { request_id, .. } => {
                 if let Some(intent) = self.pending.pop_front() {
                     self.bindings.insert(request_id, intent);
@@ -370,6 +381,33 @@ mod tests {
                 .as_slice(),
             [ReducerAction::Error(_), ReducerAction::Advance]
         ));
+    }
+
+    #[test]
+    fn disconnect_while_playing_reports_error_and_invalidates() {
+        let mut reducer = reducer();
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        reducer.handle(NeutralEvent::Playing {
+            generation: 7,
+            request_id: 1,
+            uri: "spotify:track:1".into(),
+            position_ms: 1000,
+        });
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::Disconnected { generation: 7 })
+                .as_slice(),
+            [ReducerAction::Error(_), ReducerAction::Invalidate]
+        ));
+    }
+
+    #[test]
+    fn disconnect_while_idle_invalidates_silently() {
+        let mut reducer = reducer();
+        assert_eq!(
+            reducer.handle(NeutralEvent::Disconnected { generation: 7 }),
+            [ReducerAction::Invalidate]
+        );
     }
 
     #[test]
