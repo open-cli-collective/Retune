@@ -1116,7 +1116,17 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let app_menu = SubmenuBuilder::new(app, "Retune")
         .item(&preferences)
         .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
         .quit()
+        .build()?;
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
         .build()?;
     let get_info = MenuItemBuilder::with_id("get_info", "Get Info")
         .accelerator("CmdOrCtrl+I")
@@ -1175,7 +1185,15 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let help = SubmenuBuilder::new(app, "Help")
         .text("about_retune", "About Retune")
         .build()?;
-    let menu = MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &view, &controls, &account]);
+    let menu = MenuBuilder::new(app).items(&[
+        &app_menu,
+        &file,
+        &edit,
+        &view,
+        &controls,
+        &account,
+        &window_menu,
+    ]);
     #[cfg(debug_assertions)]
     let menu = menu.item(&local_spike::menu(app)?);
     let menu = menu.item(&help).build()?;
