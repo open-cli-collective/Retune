@@ -1054,13 +1054,8 @@ async fn player_seek(app: tauri::AppHandle, seconds: u64) -> Result<(), String> 
 #[tauri::command]
 async fn player_set_volume(app: tauri::AppHandle, volume: u8) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    let playback = Arc::clone(&state.playback);
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(playback.set_volume(client.as_ref(), volume))
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    // Persist first: the volume preference must survive even when applying it
+    // live fails (disconnected, no active device).
     let mut settings = state
         .settings
         .lock()
@@ -1073,7 +1068,14 @@ async fn player_set_volume(app: tauri::AppHandle, volume: u8) -> Result<(), Stri
         .map_err(|error| error.to_string())?;
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let client = provider_from(&state)?;
+    let playback = Arc::clone(&state.playback);
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(playback.set_volume(client.as_ref(), volume))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1124,7 +1126,6 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         .separator()
         .text("sync_spotify", "Sync from Spotify")
         .separator()
-        .text("backup_library", "Back Up Library…")
         .text("export_library", "Export Library…")
         .separator()
         .text("restore_library", "Restore Library…")
@@ -1183,8 +1184,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "get_info" => {
             let _ = app.emit("get-info", ());
         }
-        "backup_library" => export_library(app, false),
-        "export_library" => export_library(app, true),
+        "export_library" => export_library(app, false),
         "restore_library" => import_library(app, true),
         "merge_library" => import_library(app, false),
         "sync_spotify" => {

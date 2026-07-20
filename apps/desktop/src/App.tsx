@@ -629,7 +629,7 @@ function App() {
         onPrev={() => player.step(-1)}
         onNext={() => player.step(1)}
         onRepeat={cycleRepeat}
-        onVolume={player.setVolume}
+        onVolume={(volume) => { dispatch({ type: 'settings', settings: { volume } }); player.setVolume(volume) }}
         onSeek={player.seek}
         onTheme={cycleTheme}
       />
@@ -742,7 +742,7 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
       <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '❚❚' : '▶'}</button>
       <button aria-label="Next track" onClick={onNext}>▶▶</button>
       <button className={`repeat-button ${repeat !== 'off' ? 'active' : ''}`} aria-label={`Repeat: ${repeat}`} title={`Repeat: ${repeat}`} onClick={onRepeat}>⟳{repeat === 'one' && <sup>1</sup>}</button>
-      {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" defaultValue={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
+      {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
     </div>
     <div className="lcd">
       <div className={`lcd-copy ${playing?.external ? 'external' : ''}`}><strong>{shown?.name ?? 'Retune'}</strong><span>{shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'}</span></div>
@@ -808,7 +808,7 @@ function RatingStars({ rating, explicit = false, onRate }: { rating: number | nu
 }
 
 function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: number | null; onRate: (rating: number | null) => void }) {
-  return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /><span>· applies to all tracks unless individually overridden</span></div>
+  return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
 function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, onActivate, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
