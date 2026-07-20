@@ -280,6 +280,7 @@ function formatTime(seconds: number) {
 
 function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly Track[]>(emptyTracks)
+  const pendingPlay = useRef<{ id: number; tracks: readonly Track[] } | null>(null)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
   playingRef.current = playing
@@ -297,13 +298,28 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
   const start = useCallback((id: number, tracks: readonly Track[]) => {
     const target = tracks.find((track) => track.id === id)
-    if (!connected || !target?.uri.startsWith('spotify:')) {
+    if (!target?.uri.startsWith('spotify:')) {
       dispatch({ type: 'play', id, queue: tracks })
+      return
+    }
+    if (!connected) {
+      // Kick off the OAuth flow instead of erroring; the pending play fires
+      // once connection-changed reports connected.
+      pendingPlay.current = { id, tracks }
+      run('connect_spotify')
       return
     }
     queue.current = tracks
     run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
   }, [connected, dispatch, run])
+
+  useEffect(() => {
+    if (!connected || !pendingPlay.current) return
+    const { id, tracks } = pendingPlay.current
+    pendingPlay.current = null
+    queue.current = tracks
+    run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
+  }, [connected, run])
 
   const toggle = useCallback(() => {
     if (connected && !playingRef.current?.simulated) {

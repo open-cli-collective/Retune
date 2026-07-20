@@ -78,7 +78,7 @@ button { color: inherit; }
 .column-menu { position: absolute; z-index: 10; min-width: 130px; padding: 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--control); box-shadow: 0 3px 10px #0004; }
 .column-menu label { display: block; padding: 2px 5px; }
 .column-menu input { margin-right: 6px; }
-.track-row.selected { color: #fff; background: var(--accent); }
+.track-row.selected, .zebra .track-scroll .track-row.selected:nth-child(even) { color: #fff; background: var(--accent); }
 .track-row.playing { font-weight: 700; }
 .playing-marker { color: var(--accent); }
 .selected .playing-marker { color: #fff; }
