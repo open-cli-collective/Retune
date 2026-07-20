@@ -76,6 +76,7 @@ button { color: inherit; }
 .column-menu label { display: block; padding: 2px 5px; }
 .column-menu input { margin-right: 6px; }
 .track-row.selected { color: #fff; background: var(--accent); }
+.track-row.playing { font-weight: 700; }
 .playing-marker { color: var(--accent); }
 .selected .playing-marker { color: #fff; }
 .spotify-stub { min-height: 0; flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 24px; color: var(--dim); background: var(--list); font-size: 12px; }

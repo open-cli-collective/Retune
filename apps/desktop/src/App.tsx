@@ -217,7 +217,7 @@ function reducer(state: State, action: Action): State {
         : state
     case 'step':
       return state.playing
-        ? { ...state, selectedTrackIds: new Set([action.id]), selectionAnchor: action.id, playing: { ...state.playing, trackId: action.id, elapsed: 0, isPlaying: true } }
+        ? { ...state, playing: { ...state.playing, trackId: action.id, elapsed: 0, isPlaying: true } }
         : state
     case 'tick':
       if (!state.playing?.isPlaying) return state
@@ -229,8 +229,6 @@ function reducer(state: State, action: Action): State {
         ? { ...state, playing: null }
         : {
             ...state,
-            selectedTrackIds: action.player.trackId === null ? state.selectedTrackIds : new Set([action.player.trackId]),
-            selectionAnchor: action.player.trackId ?? state.selectionAnchor,
             playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue },
           }
     case 'seek':
@@ -833,7 +831,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     <div className="track-scroll">
       {tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
-        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)}>
+        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
         </div>
