@@ -220,9 +220,18 @@ prompts one re-consent. No librespot credential cache at all (no plaintext
 blob): a Session is created per run from our token, refresh stays in
 `SpotifyClient`.
 
-**Premium preflight is mandatory**: librespot 0.8 `process::exit(1)`s on
-non-Premium accounts, which embedded would kill Retune. `GET /me` product
-check gates Session creation; non-Premium → clear error, stay on Connect.
+**Premium preflight is mandatory and fails closed**: librespot 0.8
+`process::exit(1)`s on non-Premium accounts, which embedded would kill Retune.
+`GET /me` product gates Session creation, but `product` is deprecated — treat
+missing/unknown as NOT premium (fail closed). The preflight is a stopgap, not
+the protection: before L-C, pin/patch librespot so a non-Premium session
+returns an error instead of exiting. Messaging: playback requires Premium on
+BOTH backends (Connect playback is Premium-only too) — a free account gets one
+honest error, not a fallback suggestion.
+
+Token records gain a `scopes` field (serde default empty = legacy grant) so
+the app can tell an old consent from an upgraded one; enabling the local
+backend with a legacy token triggers the one re-consent.
 
 ### Dependencies & lifecycle
 - `librespot-core` + `librespot-playback` only (NOT the umbrella crate —
@@ -239,25 +248,50 @@ check gates Session creation; non-Premium → clear error, stay on Connect.
 
 ### Event mapping (L-B contract)
 Set `PlayerConfig.position_update_interval` (else `PositionChanged` never
-fires). Reject stale events by `play_request_id`. Map `SpotifyUri` back to the
-snapshot URI then to the snapshot's local u64 id (never parse base62). Define
-mappings for `Loading, Playing, Paused, Seeked, PositionCorrection,
-Unavailable, Stopped, EndOfTrack`. Volume: Retune 0..=100 → softmixer
-0..=65535, initial volume applied from settings and persisted on change; soft
-volume attenuates in-app audio, not macOS system volume.
+fires). Map `SpotifyUri` back to the snapshot URI then to the snapshot's local
+u64 id (never parse base62). Transition table (librespot event → emitted
+`PlayerStateEvent`), applied only when `play_request_id` matches the current
+generation — anything stale is discarded:
+
+| librespot event        | emitted state                                        |
+|------------------------|------------------------------------------------------|
+| Loading{uri}           | trackId=local(uri), elapsed=0, isPlaying=true        |
+| Playing{uri, pos}      | trackId=local(uri), elapsed=pos, isPlaying=true      |
+| Paused{uri, pos}       | same but isPlaying=false                             |
+| Seeked{pos} / PositionCorrection{pos} | elapsed=pos, playing state unchanged  |
+| Unavailable{uri}       | `operation-error` for the track, then advance the queue (identical to EndOfTrack) — optimistic UI state reverts to the next track or empty |
+| Stopped                | empty player state                                   |
+| EndOfTrack             | backend advances the queue FIRST (loads next, same generation); no intermediate empty emission — the next Loading/Playing drives the UI; queue exhausted → empty state |
+
+Reducer tests cover: stale-generation discard, Unavailable advance + error,
+Stopped clear, natural advance ordering (no flicker-empty between tracks).
+Volume: Retune 0..=100 → softmixer 0..=65535, initial volume applied from
+settings and persisted on change; soft volume attenuates in-app audio, not
+macOS system volume.
 
 ### Media coverage limit
-librespot plays tracks, episodes, and local files — NOT audiobook chapter
-URIs. LocalBackend rejects chapter playback with a clear error pointing at the
-Connect backend in Preferences; audiobooks remain a Connect feature for now.
+librespot plays track and episode URIs. Audiobook chapter URIs are playable on
+NEITHER backend as documented (`/me/player/play` documents track URIs and
+album/artist/playlist contexts; Retune stores `spotify:chapter:` URIs, and the
+current Connect path attempting them is unverified). Empirically verify
+chapter playback via Connect at the live gate; until proven, audiobook
+playback is rejected on both backends with an honest message. Local files:
+out of scope entirely (librespot needs configured directories and paths our
+snapshot doesn't carry).
 
 ### Selection & risk posture
-`Settings.playback_backend: "connect" | "local"`. librespot is a
-reverse-engineered protocol Spotify does not sanction: auth paths have broken
-before and account risk is nonzero — this is why Connect fallback is retained
-and why the toggle is explicit in Preferences. Credentials may be revoked
-server-side at any time; the backend must degrade to a visible error, never a
-crash.
+`Settings.playback_backend: "connect" | "local"`, serde default `connect` so
+existing settings files upgrade silently. Switching to local is atomic and
+fail-safe: preflight (scopes, Premium) and create the local session FIRST;
+only on success stop the Connect backend and persist the selection; any
+failure leaves Connect running and the setting unchanged. Tests: missing
+field defaults to connect; failed switch retains connect.
+
+librespot is a reverse-engineered protocol Spotify does not sanction: auth
+paths have broken before and account risk is nonzero — this is why Connect
+fallback is retained and why the toggle is explicit in Preferences.
+Credentials may be revoked server-side at any time; the backend must degrade
+to a visible error, never a crash.
 
 ### Phases
 - L-A Spike: scope additions + re-consent → Premium preflight → Session from
