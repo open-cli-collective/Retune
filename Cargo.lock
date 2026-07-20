@@ -3884,6 +3884,7 @@ dependencies = [
 name = "retune-desktop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "flate2",
  "librespot-core",
  "librespot-playback",

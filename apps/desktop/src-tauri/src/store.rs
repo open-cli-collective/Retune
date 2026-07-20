@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::PermissionsExt,
@@ -85,6 +86,8 @@ pub struct Settings {
     pub spotify_client_id: String,
     #[serde(default)]
     pub spotify_sync_completed: bool,
+    #[serde(default)]
+    pub last_full_sync: Option<u64>,
     #[serde(default = "default_playback_backend")]
     pub playback_backend: String,
     #[serde(default = "default_volume")]
@@ -127,6 +130,7 @@ impl Default for Settings {
             auto_connect: true,
             spotify_client_id: String::new(),
             spotify_sync_completed: false,
+            last_full_sync: None,
             playback_backend: default_playback_backend(),
             volume: default_volume(),
         }
@@ -186,6 +190,50 @@ impl Settings {
 
 pub struct FsSettingsStore {
     path: PathBuf,
+}
+
+pub struct FsSyncStore {
+    cooldowns_path: PathBuf,
+    artist_genres_path: PathBuf,
+}
+
+impl FsSyncStore {
+    pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            cooldowns_path: app_data_dir.as_ref().join("cooldowns.json"),
+            artist_genres_path: app_data_dir.as_ref().join("artist-genres.json"),
+        }
+    }
+
+    pub fn cooldowns(&self, now: u64) -> StoreResult<BTreeMap<String, u64>> {
+        let mut cooldowns: BTreeMap<String, u64> = read_json_or_default(&self.cooldowns_path)?;
+        let original_len = cooldowns.len();
+        cooldowns.retain(|_, deadline| *deadline > now);
+        if cooldowns.len() != original_len {
+            atomic_write(&self.cooldowns_path, &serde_json::to_vec(&cooldowns)?)?;
+        }
+        Ok(cooldowns)
+    }
+
+    pub fn save_cooldowns(&self, cooldowns: &BTreeMap<String, u64>) -> StoreResult<()> {
+        atomic_write(&self.cooldowns_path, &serde_json::to_vec(cooldowns)?)
+    }
+
+    pub fn artist_genres(&self) -> StoreResult<BTreeMap<String, Vec<String>>> {
+        read_json_or_default(&self.artist_genres_path)
+    }
+
+    pub fn save_artist_genres(&self, genres: &BTreeMap<String, Vec<String>>) -> StoreResult<()> {
+        atomic_write(&self.artist_genres_path, &serde_json::to_vec(genres)?)
+    }
+}
+
+fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> StoreResult<T> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl FsSettingsStore {
@@ -371,6 +419,7 @@ mod tests {
             auto_connect: false,
             spotify_client_id: "client-id".into(),
             spotify_sync_completed: true,
+            last_full_sync: Some(42),
             playback_backend: "local".into(),
             volume: 40,
         };
@@ -378,6 +427,38 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn cooldowns_persist_and_expire_across_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        store
+            .save_cooldowns(&BTreeMap::from([
+                ("/albums".into(), 200),
+                ("/shows".into(), 50),
+            ]))
+            .unwrap();
+
+        let reloaded = FsSyncStore::new(dir.path());
+        assert_eq!(
+            reloaded.cooldowns(100).unwrap(),
+            BTreeMap::from([("/albums".into(), 200)])
+        );
+        assert_eq!(reloaded.cooldowns(201).unwrap(), BTreeMap::new());
+    }
+
+    #[test]
+    fn artist_genres_persist_across_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        FsSyncStore::new(dir.path())
+            .save_artist_genres(&BTreeMap::from([("artist-1".into(), vec!["rock".into()])]))
+            .unwrap();
+
+        assert_eq!(
+            FsSyncStore::new(dir.path()).artist_genres().unwrap()["artist-1"],
+            ["rock"]
+        );
     }
 
     #[test]

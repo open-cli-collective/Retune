@@ -149,6 +149,7 @@ mod tests {
                 name: "Parent Artist".into(),
             }],
             images: vec![],
+            tracks: None,
         };
         let mapped = track(&value, None, Some(&album));
         assert_eq!(mapped.alb, "Parent Record");

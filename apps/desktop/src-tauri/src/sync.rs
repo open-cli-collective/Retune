@@ -23,6 +23,8 @@ pub struct SnapshotOutcome {
     pub tracks: Vec<retune_core::model::NewTrack>,
     pub genres_degraded: bool,
     pub partial: bool,
+    pub earliest_cooldown: Option<u64>,
+    pub request_counts: std::collections::BTreeMap<String, u64>,
 }
 
 pub async fn snapshot<P: MediaProvider>(
@@ -45,6 +47,8 @@ pub async fn snapshot<P: MediaProvider>(
         tracks: incoming,
         genres_degraded,
         partial,
+        earliest_cooldown: provider.earliest_cooldown(),
+        request_counts: provider.request_counts(),
     })
 }
 

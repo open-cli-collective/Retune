@@ -5,6 +5,7 @@ mod playback;
 mod provider;
 mod store;
 mod sync;
+mod sync_orchestrator;
 
 use std::{
     collections::BTreeSet,
@@ -17,7 +18,7 @@ use std::{
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
 use playback::{Playback, PlayerStateEvent, SnapshotTrack};
-use provider::{MediaProvider, SearchAlbum, SearchResults};
+use provider::{MediaProvider, SearchAlbum, SearchResults, SpotifySyncProvider};
 use retune_core::{
     browse::{self, Selection},
     io::{export_json, import},
@@ -31,7 +32,10 @@ use retune_spotify::{
     tokens::{CachedTokenStore, KeychainTokenStore, TokenStore, Tokens},
 };
 use serde::{Deserialize, Serialize};
-use store::{FsOverlayStore, FsSettingsStore, OverlayStore, Settings, StoreError, Theme};
+use store::{
+    FsOverlayStore, FsSettingsStore, FsSyncStore, OverlayStore, Settings, StoreError, Theme,
+};
+use sync_orchestrator::SyncOrchestrator;
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Emitter, Manager,
@@ -47,12 +51,13 @@ struct AppState {
     store: FsOverlayStore,
     settings: Mutex<Settings>,
     settings_store: FsSettingsStore,
+    sync_store: FsSyncStore,
     menu_checks: MenuChecks,
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     playback: Arc<Playback>,
-    syncing: tokio::sync::Mutex<()>,
+    sync_orchestrator: SyncOrchestrator,
 }
 
 struct MenuChecks {
@@ -489,6 +494,7 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
         .clone();
     let client_id_changed = current.spotify_client_id != settings.spotify_client_id;
     settings.spotify_sync_completed = current.spotify_sync_completed;
+    settings.last_full_sync = current.last_full_sync;
     settings.validate().map_err(|error| error.to_string())?;
     if current.playback_backend != settings.playback_backend {
         let switch = if settings.playback_backend == "local" {
@@ -715,15 +721,67 @@ fn provider_from(state: &AppState) -> Result<Arc<SpotifyProvider>, String> {
 }
 
 async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
-    let result = sync_spotify_inner(app).await;
-    let _ = app.emit("sync-progress", "");
-    result
+    let state = app.state::<AppState>();
+    state.sync_orchestrator.cancel_retry();
+    if !state.sync_orchestrator.begin() {
+        return Ok(());
+    }
+    run_sync_loop(app).await
 }
 
-async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
+async fn run_sync_loop(app: &tauri::AppHandle) -> Result<(), String> {
+    loop {
+        let result = sync_spotify_inner(app).await;
+        if !result.as_ref().is_ok_and(|completion| completion.partial) {
+            let _ = app.emit("sync-progress", "");
+        }
+        if app.state::<AppState>().sync_orchestrator.finish() {
+            continue;
+        }
+        if let Ok(SyncCompletion {
+            auto_resume: Some(deadline),
+            ..
+        }) = &result
+        {
+            schedule_auto_resume(app, *deadline);
+        }
+        return result.map(|_| ());
+    }
+}
+
+fn schedule_auto_resume(app: &tauri::AppHandle, deadline: u64) {
+    let now = unix_now();
+    let jitter = 30
+        + SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64
+            % 61;
+    let delay = Duration::from_secs(deadline.saturating_sub(now).saturating_add(jitter));
+    let handle = app.clone();
+    let retry = tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let state = handle.state::<AppState>();
+        state.sync_orchestrator.retry_fired();
+        if state.sync_orchestrator.begin() {
+            if let Err(error) = Box::pin(run_sync_loop(&handle)).await {
+                notify_error(&handle, error);
+            }
+        }
+    });
+    app.state::<AppState>()
+        .sync_orchestrator
+        .replace_retry(retry);
+}
+
+struct SyncCompletion {
+    partial: bool,
+    auto_resume: Option<u64>,
+}
+
+async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, String> {
     log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
-    let _sync = state.syncing.lock().await;
     if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify before syncing.".into());
     }
@@ -738,11 +796,19 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
             "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
         })?;
     *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
-    let outcome = sync::snapshot(provider.as_ref(), |phase| {
+    let sync_provider = SpotifySyncProvider::new(provider.as_ref(), &state.sync_store)?;
+    let outcome = sync::snapshot(&sync_provider, |phase| {
         log::info!("{phase}");
         let _ = app.emit("sync-progress", phase);
     })
     .await?;
+    let sync::SnapshotOutcome {
+        tracks,
+        genres_degraded,
+        partial,
+        earliest_cooldown,
+        request_counts,
+    } = outcome;
     app.emit("sync-progress", "Saving library…")
         .map_err(|error| error.to_string())?;
     let first_sync = !state
@@ -752,39 +818,74 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<(), String> {
         .spotify_sync_completed;
     {
         let mut library = state.library.lock().expect("library mutex poisoned");
-        sync::apply(&mut library, &state.store, first_sync, outcome.tracks)?;
+        sync::apply(&mut library, &state.store, first_sync, tracks)?;
         log::info!(
             "Spotify sync applied; {} library tracks",
             library.tracks().len()
         );
     }
-    if outcome.partial {
-        let message = "Partial import (Spotify rate limit) — run File → Sync later to finish.";
+    if partial {
+        let message = earliest_cooldown.map_or_else(
+            || "Partial import (Spotify rate limit) — run File → Sync later to finish.".into(),
+            |deadline| {
+                format!(
+                    "Partial import — will finish automatically after {}.",
+                    provider::format_resume_time(deadline)
+                )
+            },
+        );
         log::warn!("{message}");
-        if outcome.genres_degraded {
+        if genres_degraded {
             log::warn!(
                 "Imported without genres (Spotify rate limit) — genres will fill in on a later sync."
             );
         }
         app.emit("sync-progress", message)
             .map_err(|error| error.to_string())?;
-    } else if outcome.genres_degraded {
+    } else if genres_degraded {
         let message =
             "Imported without genres (Spotify rate limit) — genres will fill in on a later sync.";
         log::warn!("{message}");
         app.emit("sync-progress", message)
             .map_err(|error| error.to_string())?;
     }
-    if first_sync && !outcome.partial {
-        let mut settings = state.settings.lock().expect("settings mutex poisoned");
-        settings.spotify_sync_completed = true;
+    let mut settings = state.settings.lock().expect("settings mutex poisoned");
+    if record_full_sync(&mut settings, partial, unix_now()) {
         state
             .settings_store
             .save(&settings)
             .map_err(|error| error.to_string())?;
     }
+    drop(settings);
+    log::info!(
+        "sync requests:{}",
+        request_counts
+            .iter()
+            .map(|(family, count)| format!(" {family}={count}"))
+            .collect::<String>()
+    );
     app.emit("library-changed", ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(SyncCompletion {
+        partial,
+        auto_resume: partial.then_some(earliest_cooldown).flatten(),
+    })
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn record_full_sync(settings: &mut Settings, partial: bool, now: u64) -> bool {
+    if partial {
+        return false;
+    }
+    settings.spotify_sync_completed = true;
+    settings.last_full_sync = Some(now);
+    true
 }
 
 fn initial_library(debug: bool) -> Library {
@@ -1300,6 +1401,7 @@ pub fn run() {
                 Err(error) => return Err(error.into()),
             };
             let settings_store = FsSettingsStore::new(&app_data_dir);
+            let sync_store = FsSyncStore::new(&app_data_dir);
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
@@ -1329,7 +1431,12 @@ pub fn run() {
                 connected,
                 &settings.spotify_client_id,
                 settings.auto_connect,
+                settings.last_full_sync,
+                unix_now(),
             );
+            if connected && startup_action == StartupAction::Nothing {
+                log::info!("startup sync skipped; library fresh");
+            }
             let activate_local = connected && settings.playback_backend == "local";
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::default());
@@ -1338,12 +1445,13 @@ pub fn run() {
                 store,
                 settings: Mutex::new(settings),
                 settings_store,
+                sync_store,
                 menu_checks,
                 recovery_notice: Mutex::new(recovery_notice),
                 token_store,
                 spotify: Mutex::new(spotify),
                 playback: Arc::clone(&playback),
-                syncing: tokio::sync::Mutex::new(()),
+                sync_orchestrator: SyncOrchestrator::default(),
             });
             playback.listen(app.handle().clone());
             if activate_local || startup_action != StartupAction::Nothing {
@@ -1389,9 +1497,19 @@ enum StartupAction {
     Nothing,
 }
 
-fn startup_action(connected: bool, client_id: &str, auto_connect: bool) -> StartupAction {
+fn startup_action(
+    connected: bool,
+    client_id: &str,
+    auto_connect: bool,
+    last_full_sync: Option<u64>,
+    now: u64,
+) -> StartupAction {
     if connected {
-        StartupAction::Sync
+        if last_full_sync.is_some_and(|last| now.saturating_sub(last) <= 15 * 60) {
+            StartupAction::Nothing
+        } else {
+            StartupAction::Sync
+        }
     } else if auto_connect && !client_id.trim().is_empty() {
         StartupAction::Connect
     } else {
@@ -1411,16 +1529,42 @@ mod tests {
 
     #[test]
     fn startup_action_syncs_connects_or_does_nothing() {
-        assert_eq!(startup_action(true, "", false), StartupAction::Sync);
         assert_eq!(
-            startup_action(false, "client-id", true),
-            StartupAction::Connect
+            startup_action(true, "", false, None, 1_000),
+            StartupAction::Sync
         );
-        assert_eq!(startup_action(false, "", true), StartupAction::Nothing);
         assert_eq!(
-            startup_action(false, "client-id", false),
+            startup_action(true, "", false, Some(999), 1_000),
             StartupAction::Nothing
         );
+        assert_eq!(
+            startup_action(true, "", false, Some(99), 1_000),
+            StartupAction::Sync
+        );
+        assert_eq!(
+            startup_action(false, "client-id", true, None, 1_000),
+            StartupAction::Connect
+        );
+        assert_eq!(
+            startup_action(false, "", true, None, 1_000),
+            StartupAction::Nothing
+        );
+        assert_eq!(
+            startup_action(false, "client-id", false, None, 1_000),
+            StartupAction::Nothing
+        );
+    }
+
+    #[test]
+    fn partial_completion_does_not_mark_a_full_sync() {
+        let mut settings = Settings::default();
+        assert!(!record_full_sync(&mut settings, true, 42));
+        assert_eq!(settings.last_full_sync, None);
+        assert!(!settings.spotify_sync_completed);
+
+        assert!(record_full_sync(&mut settings, false, 42));
+        assert_eq!(settings.last_full_sync, Some(42));
+        assert!(settings.spotify_sync_completed);
     }
 
     #[test]
@@ -1440,6 +1584,7 @@ mod tests {
             auto_connect: false,
             spotify_client_id: "exported-machine".into(),
             spotify_sync_completed: true,
+            last_full_sync: Some(42),
             playback_backend: "local".into(),
             volume: 40,
         };

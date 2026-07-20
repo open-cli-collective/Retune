@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -160,6 +160,7 @@ pub struct SpotifyClient<T, S> {
     transport: T,
     tokens: S,
     artist_cache: Mutex<HashMap<String, Artist>>,
+    request_counts: Mutex<BTreeMap<String, u64>>,
     refresh_lock: AsyncMutex<()>,
 }
 
@@ -170,12 +171,27 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             transport,
             tokens,
             artist_cache: Mutex::default(),
+            request_counts: Mutex::default(),
             refresh_lock: AsyncMutex::new(()),
         }
     }
 
     pub fn transport(&self) -> &T {
         &self.transport
+    }
+
+    pub fn reset_request_counts(&self) {
+        self.request_counts
+            .lock()
+            .expect("request count mutex poisoned")
+            .clear();
+    }
+
+    pub fn request_counts(&self) -> BTreeMap<String, u64> {
+        self.request_counts
+            .lock()
+            .expect("request count mutex poisoned")
+            .clone()
     }
 
     pub async fn access_token(&self) -> Result<String> {
@@ -402,6 +418,12 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         let mut rate_retries = 0;
         loop {
             let access = self.tokens.load()?.ok_or(Error::MissingToken)?.access;
+            *self
+                .request_counts
+                .lock()
+                .map_err(|error| Error::Transport(error.to_string()))?
+                .entry(endpoint_family(path))
+                .or_default() += 1;
             let response = self
                 .transport
                 .send(Request {
@@ -529,6 +551,20 @@ fn paged(path: &str, offset: u32, limit: u32) -> String {
     format!("{path}?offset={offset}&limit={limit}")
 }
 
+pub fn endpoint_family(endpoint: &str) -> String {
+    let mut segments = endpoint.split('?').next().unwrap_or(endpoint).split('/');
+    let first = segments
+        .find(|segment| !segment.is_empty())
+        .unwrap_or_default();
+    if first == "me" {
+        segments
+            .find(|segment| !segment.is_empty())
+            .map_or_else(|| "/me".into(), |second| format!("/me/{second}"))
+    } else {
+        format!("/{first}")
+    }
+}
+
 fn device_path(path: &str, device_id: Option<&str>) -> String {
     device_id.map_or_else(
         || path.into(),
@@ -549,6 +585,7 @@ pub struct Page<T> {
     /// pages null out fields of removed/unplayable content; one bad item
     /// must not cost the page. Counted so pagination offsets stay correct.
     pub skipped: usize,
+    pub total: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -571,6 +608,8 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Page<T> {
         struct RawPage {
             items: Vec<serde_json::Value>,
             next: Option<String>,
+            #[serde(default)]
+            total: Option<u32>,
         }
         let raw = RawPage::deserialize(deserializer)?;
         let mut items = Vec::with_capacity(raw.items.len());
@@ -584,10 +623,12 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Page<T> {
                 }
             }
         }
+        let total = raw.total.unwrap_or((items.len() + skipped) as u32);
         Ok(Self {
             items,
             next: raw.next,
             skipped,
+            total,
         })
     }
 }
@@ -633,8 +674,11 @@ pub struct Track {
     pub disc_number: Option<u32>,
     #[serde(default)]
     pub artists: Vec<SimplifiedArtist>,
+    #[serde(default)]
     pub album: Option<AlbumSummary>,
 }
+
+pub type AlbumTrack = Track;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SavedTrack {
@@ -650,6 +694,8 @@ pub struct Album {
     pub artists: Vec<SimplifiedArtist>,
     #[serde(default)]
     pub images: Vec<Image>,
+    #[serde(default)]
+    pub tracks: Option<Page<AlbumTrack>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1018,5 +1064,12 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn endpoint_families_keep_saved_library_sections_distinct() {
+        assert_eq!(endpoint_family("/me/tracks?offset=0"), "/me/tracks");
+        assert_eq!(endpoint_family("/albums/abc/tracks"), "/albums");
+        assert_eq!(endpoint_family("/artists/abc"), "/artists");
     }
 }
