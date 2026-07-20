@@ -720,6 +720,25 @@ function App() {
   )
 }
 
+function Marquee({ text, strong }: { text: string; strong?: boolean }) {
+  const outer = useRef<HTMLDivElement>(null)
+  const inner = useRef<HTMLSpanElement>(null)
+  const [distance, setDistance] = useState(0)
+  useEffect(() => {
+    const measure = () => setDistance(Math.max(0, (inner.current?.scrollWidth ?? 0) - (outer.current?.clientWidth ?? 0)))
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [text])
+  return <div ref={outer} className="lcd-line">
+    <span
+      ref={inner}
+      className={`marquee${distance > 0 ? ' scrolling' : ''}${strong ? ' strong' : ''}`}
+      style={distance > 0 ? { '--marquee-distance': `-${distance}px`, animationDuration: `${Math.max(8, Math.round(distance / 12))}s` } as React.CSSProperties : undefined}
+    >{text}</span>
+  </div>
+}
+
 function TransportBar({ playing, track, query, scope, theme, connected, volume, repeat, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onRepeat, onVolume, onSeek, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
   connected: boolean; volume: number; repeat: RepeatMode
@@ -744,8 +763,9 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
       <button className={`repeat-button ${repeat !== 'off' ? 'active' : ''}`} aria-label={`Repeat: ${repeat}`} title={`Repeat: ${repeat}`} onClick={onRepeat}>⟳{repeat === 'one' && <sup>1</sup>}</button>
       {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
     </div>
-    <div className="lcd">
-      <div className={`lcd-copy ${playing?.external ? 'external' : ''}`}><strong>{shown?.name ?? 'Retune'}</strong><span>{shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'}</span></div>
+    <div className={`lcd ${playing?.external ? 'external' : ''}`}>
+      <Marquee text={shown?.name ?? 'Retune'} strong />
+      <Marquee text={shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'} />
       <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress
         max={duration || 1}
         value={elapsed}
