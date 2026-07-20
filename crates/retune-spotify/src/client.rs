@@ -91,8 +91,12 @@ impl Transport for HttpTransport {
             for (name, value) in request.headers {
                 builder = builder.header(name, value);
             }
-            // Always attach the body: bodiless PUT/POST would go out without
-            // Content-Length and Spotify's edge rejects them with 411.
+            // Spotify's edge (Google front end) rejects PUT/POST without a
+            // Content-Length header with HTTP 411, and attaching an empty body
+            // does not guarantee the header on the wire — set it explicitly.
+            if request.body.is_empty() {
+                builder = builder.header(reqwest::header::CONTENT_LENGTH, 0);
+            }
             builder = builder.body(request.body);
             let response = builder
                 .send()
