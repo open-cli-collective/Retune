@@ -6,6 +6,7 @@ import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
+type PlaybackBackend = 'connect' | 'local'
 type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
 type Selection = { cat?: string; art?: string; alb?: string }
 type ActivePane = 'track' | keyof Selection
@@ -20,6 +21,8 @@ type Settings = {
   autoConnect: boolean
   spotifyClientId: string
   spotifySyncCompleted: boolean
+  playbackBackend: PlaybackBackend
+  volume: number
 }
 
 type ConnectionState = { connected: boolean }
@@ -145,6 +148,8 @@ const defaultSettings: Settings = {
   autoConnect: true,
   spotifyClientId: '',
   spotifySyncCompleted: false,
+  playbackBackend: 'connect',
+  volume: 62,
 }
 
 const initialState: State = {
@@ -555,6 +560,7 @@ function App() {
         scope={state.scope}
         theme={state.settings.theme}
         connected={state.connected}
+        volume={state.settings.volume}
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
         onScope={(scope) => dispatch({ type: 'scope', scope })}
@@ -623,17 +629,17 @@ function App() {
         dispatch({ type: 'info' })
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId) => {
-        dispatch({ type: 'settings', settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId } })
+      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend) => {
+        dispatch({ type: 'settings', settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend } })
         dispatch({ type: 'preferences', open: false })
       }} />}
     </main>
   )
 }
 
-function TransportBar({ playing, track, query, scope, theme, connected, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onTheme }: {
+function TransportBar({ playing, track, query, scope, theme, connected, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
-  connected: boolean
+  connected: boolean; volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onTheme: () => void
@@ -652,7 +658,7 @@ function TransportBar({ playing, track, query, scope, theme, connected, searchRe
       <button aria-label="Previous track" onClick={onPrev}>◀◀</button>
       <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '❚❚' : '▶'}</button>
       <button aria-label="Next track" onClick={onNext}>▶▶</button>
-      {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" defaultValue="62" onChange={(event) => onVolume(Number(event.target.value))} /></>}
+      {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" defaultValue={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
     </div>
     <div className="lcd">
       <div className={`lcd-copy ${playing?.external ? 'external' : ''}`}><strong>{shown?.name ?? 'Retune'}</strong><span>{shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'}</span></div>
@@ -852,11 +858,12 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
   </div>
 }
 
-function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (theme: Theme, autoAdd: boolean, autoConnect: boolean, clientId: string) => void }) {
+function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (theme: Theme, autoAdd: boolean, autoConnect: boolean, clientId: string, playbackBackend: PlaybackBackend) => void }) {
   const [theme, setTheme] = useState(settings.theme)
   const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
   const [autoConnect, setAutoConnect] = useState(settings.autoConnect)
   const [clientId, setClientId] = useState(settings.spotifyClientId)
+  const [playbackBackend, setPlaybackBackend] = useState(settings.playbackBackend)
   const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => { dialog.current?.focus() }, [])
   return <div className="modal-backdrop" role="presentation">
@@ -873,7 +880,12 @@ function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCan
         <label className="checkbox"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} />Connect to Spotify automatically at launch</label>
         <p>Keep pulling in music you add on Spotify each time Retune starts.</p>
       </fieldset>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, autoAdd, autoConnect, clientId.trim())}>Save</button></div>
+      <fieldset>
+        <legend>Playback</legend>
+        <label className="radio"><input type="radio" name="playback-backend" checked={playbackBackend === 'connect'} onChange={() => setPlaybackBackend('connect')} />Spotify app (Connect)</label>
+        <label className="radio"><input type="radio" name="playback-backend" checked={playbackBackend === 'local'} onChange={() => setPlaybackBackend('local')} />Built-in (librespot)</label>
+      </fieldset>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, autoAdd, autoConnect, clientId.trim(), playbackBackend)}>Save</button></div>
     </div>
   </div>
 }

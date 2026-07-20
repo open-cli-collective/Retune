@@ -178,6 +178,14 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         &self.transport
     }
 
+    pub async fn access_token(&self) -> Result<String> {
+        let stored = self.tokens.load()?.ok_or(Error::MissingToken)?;
+        if stored.expires_at <= unix_now() {
+            self.refresh_token(&stored.access).await?;
+        }
+        Ok(self.tokens.load()?.ok_or(Error::MissingToken)?.access)
+    }
+
     pub async fn saved_tracks(&self, offset: u32, limit: u32) -> Result<Page<SavedTrack>> {
         self.get(&paged("/me/tracks", offset, limit)).await
     }
@@ -797,6 +805,21 @@ mod tests {
             client.tokens.load().unwrap().unwrap().scopes,
             "streaming user-read-private"
         );
+    }
+
+    #[tokio::test]
+    async fn access_token_refreshes_an_expired_grant() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(
+                200,
+                serde_json::json!({"access_token": "new", "expires_in": 3600}),
+            )]),
+            tokens(),
+        );
+
+        assert_eq!(client.access_token().await.unwrap(), "new");
+        assert_eq!(client.transport().requests()[0].url, TOKEN_URL);
     }
 
     #[tokio::test]

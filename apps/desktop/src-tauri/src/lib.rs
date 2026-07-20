@@ -480,11 +480,31 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-fn set_settings(state: tauri::State<'_, AppState>, mut settings: Settings) -> Result<(), String> {
-    let current = state.settings.lock().expect("settings mutex poisoned");
+async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let current = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
     let client_id_changed = current.spotify_client_id != settings.spotify_client_id;
     settings.spotify_sync_completed = current.spotify_sync_completed;
-    drop(current);
+    settings.validate().map_err(|error| error.to_string())?;
+    if current.playback_backend != settings.playback_backend {
+        let switch = if settings.playback_backend == "local" {
+            switch_to_local(&state, settings.volume).await
+        } else {
+            state.playback.switch_to_connect().await;
+            Ok(())
+        };
+        if let Err(error) = switch {
+            app.emit("operation-error", error)
+                .map_err(|error| error.to_string())?;
+            app.emit("settings-changed", current)
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
     state
         .settings_store
         .save(&settings)
@@ -499,6 +519,34 @@ fn set_settings(state: tauri::State<'_, AppState>, mut settings: Settings) -> Re
             spotify_provider(&settings.spotify_client_id, Arc::clone(&state.token_store))?;
     }
     Ok(())
+}
+
+async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
+    let stored = state
+        .token_store
+        .load()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Connect to Spotify before enabling built-in playback.".to_string())?;
+    if !stored
+        .scopes
+        .split_whitespace()
+        .any(|scope| scope == "streaming")
+    {
+        return Err("Reconnect to Spotify to grant playback permission (Account → Disconnect, then Connect).".into());
+    }
+    let client = provider_from(state)?;
+    if !client
+        .me()
+        .await
+        .map_err(|error| format!("Could not verify Spotify Premium: {error}"))?
+        .is_premium()
+    {
+        return Err("Playback requires Spotify Premium.".into());
+    }
+    state
+        .playback
+        .switch_to_local(client.as_ref(), volume)
+        .await
 }
 
 fn spotify_provider(
@@ -606,7 +654,14 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
-    app.state::<AppState>().playback.clear().await;
+    let state = app.state::<AppState>();
+    let client = state
+        .spotify
+        .lock()
+        .expect("spotify mutex poisoned")
+        .clone();
+    state.playback.stop(client.as_deref()).await?;
+    state.playback.switch_to_connect().await;
     set_auto_connect(&app, false)?;
     app.state::<AppState>()
         .token_store
@@ -813,59 +868,60 @@ async fn play_tracks(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state)?;
-    let event = state
-        .playback
-        .start(client, app.clone(), snapshot, start_index)
-        .await?;
-    app.emit("player-state", event)
-        .map_err(|error| error.to_string())
+    state.playback.play(client, snapshot, start_index).await
 }
 
 #[tauri::command]
 async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state)?;
-    let event = state.playback.toggle_pause(client.as_ref()).await?;
-    app.emit("player-state", event)
-        .map_err(|error| error.to_string())
+    state.playback.toggle(client.as_ref()).await
 }
 
 #[tauri::command]
 async fn player_next(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state)?;
-    let event = state.playback.next(client.as_ref()).await?;
-    app.emit("player-state", event)
-        .map_err(|error| error.to_string())
+    state.playback.next(client.as_ref()).await
 }
 
 #[tauri::command]
 async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state)?;
-    let event = state.playback.prev(client.as_ref()).await?;
-    app.emit("player-state", event)
-        .map_err(|error| error.to_string())
+    state.playback.prev(client.as_ref()).await
 }
 
 #[tauri::command]
 async fn player_seek(app: tauri::AppHandle, seconds: u64) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state)?;
-    let event = state.playback.seek(client.as_ref(), seconds).await?;
-    app.emit("player-state", event)
-        .map_err(|error| error.to_string())
+    state.playback.seek(client.as_ref(), seconds).await
 }
 
 #[tauri::command]
-async fn player_set_volume(state: tauri::State<'_, AppState>, volume: u8) -> Result<(), String> {
+async fn player_set_volume(app: tauri::AppHandle, volume: u8) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let client = provider_from(&state)?;
     let playback = Arc::clone(&state.playback);
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(playback.set_volume(client.as_ref(), volume))
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    settings.volume = volume;
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    app.emit("settings-changed", settings)
+        .map_err(|error| error.to_string())
 }
 
 fn mutate_library<T>(
@@ -1187,7 +1243,7 @@ fn notify_error(app: &tauri::AppHandle, error: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -1274,6 +1330,9 @@ pub fn run() {
                 &settings.spotify_client_id,
                 settings.auto_connect,
             );
+            let activate_local = connected && settings.playback_backend == "local";
+            let initial_volume = settings.volume;
+            let playback = Arc::new(Playback::default());
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -1283,12 +1342,19 @@ pub fn run() {
                 recovery_notice: Mutex::new(recovery_notice),
                 token_store,
                 spotify: Mutex::new(spotify),
-                playback: Arc::new(Playback::default()),
+                playback: Arc::clone(&playback),
                 syncing: tokio::sync::Mutex::new(()),
             });
-            if startup_action != StartupAction::Nothing {
+            playback.listen(app.handle().clone());
+            if activate_local || startup_action != StartupAction::Nothing {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
+                    if activate_local {
+                        let state = handle.state::<AppState>();
+                        if let Err(error) = switch_to_local(&state, initial_volume).await {
+                            notify_error(&handle, error);
+                        }
+                    }
                     let result = match startup_action {
                         StartupAction::Sync => sync_spotify(&handle).await,
                         StartupAction::Connect => connect_spotify(handle.clone()).await,
@@ -1301,8 +1367,19 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+    let mut ready = false;
+    app.run(move |app, event| match event {
+        tauri::RunEvent::Ready => ready = true,
+        tauri::RunEvent::Resumed if ready => {
+            let playback = Arc::clone(&app.state::<AppState>().playback);
+            tauri::async_runtime::spawn(async move {
+                playback.invalidate_local().await;
+            });
+        }
+        _ => {}
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1363,6 +1440,8 @@ mod tests {
             auto_connect: false,
             spotify_client_id: "exported-machine".into(),
             spotify_sync_completed: true,
+            playback_backend: "local".into(),
+            volume: 40,
         };
         let bytes = export_with_settings(&library, &exported, true).unwrap();
         let (restored_library, visual) = import_with_settings(&bytes, true).unwrap();

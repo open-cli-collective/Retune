@@ -85,10 +85,22 @@ pub struct Settings {
     pub spotify_client_id: String,
     #[serde(default)]
     pub spotify_sync_completed: bool,
+    #[serde(default = "default_playback_backend")]
+    pub playback_backend: String,
+    #[serde(default = "default_volume")]
+    pub volume: u8,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_playback_backend() -> String {
+    "connect".into()
+}
+
+fn default_volume() -> u8 {
+    62
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -115,12 +127,14 @@ impl Default for Settings {
             auto_connect: true,
             spotify_client_id: String::new(),
             spotify_sync_completed: false,
+            playback_backend: default_playback_backend(),
+            volume: default_volume(),
         }
     }
 }
 
 impl Settings {
-    fn validate(&self) -> StoreResult<()> {
+    pub(crate) fn validate(&self) -> StoreResult<()> {
         const COLUMNS: [&str; 7] = [
             "track", "name", "time", "artist", "album", "genre", "rating",
         ];
@@ -154,6 +168,16 @@ impl Settings {
         }) {
             return Err(StoreError::InvalidSettings(
                 "settings hiddenColumns must be unique track columns other than name",
+            ));
+        }
+        if !matches!(self.playback_backend.as_str(), "connect" | "local") {
+            return Err(StoreError::InvalidSettings(
+                "settings playbackBackend must be connect or local",
+            ));
+        }
+        if self.volume > 100 {
+            return Err(StoreError::InvalidSettings(
+                "settings volume must be between 0 and 100",
             ));
         }
         Ok(())
@@ -347,6 +371,8 @@ mod tests {
             auto_connect: false,
             spotify_client_id: "client-id".into(),
             spotify_sync_completed: true,
+            playback_backend: "local".into(),
+            volume: 40,
         };
 
         assert!(store.load().unwrap().is_none());
@@ -378,6 +404,21 @@ mod tests {
         let settings = store.load().unwrap().unwrap();
         assert_eq!(settings.column_order[0], "track");
         assert_eq!(settings.column_order.len(), 7);
+        assert_eq!(settings.playback_backend, "connect");
+        assert_eq!(settings.volume, 62);
+    }
+
+    #[test]
+    fn missing_playback_backend_defaults_to_connect() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "theme": "system",
+            "zoom": 1.0,
+            "zebra": true,
+            "columnOrder": ["track", "name", "time", "artist", "album", "genre", "rating"],
+            "autoAddSpotifyLibrary": true
+        }))
+        .unwrap();
+        assert_eq!(settings.playback_backend, "connect");
     }
 
     #[test]

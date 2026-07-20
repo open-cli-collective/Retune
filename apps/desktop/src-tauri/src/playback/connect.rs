@@ -1,40 +1,12 @@
 use std::sync::Arc;
 
 use retune_spotify::{
-    client::{Device, HttpTransport, PlayerState, SpotifyClient, Transport},
+    client::{Device, PlayerState, SpotifyClient, Transport},
     tokens::TokenStore,
 };
-use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tokio::sync::mpsc;
 
-type LiveClient = SpotifyClient<HttpTransport, crate::SharedTokenStore>;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotTrack {
-    pub id: u64,
-    pub uri: String,
-    pub name: String,
-    pub art: String,
-    pub alb: String,
-    pub duration_secs: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct Snapshot {
-    tracks: Vec<SnapshotTrack>,
-    index: usize,
-}
-
-impl Snapshot {
-    fn current(&self) -> &SnapshotTrack {
-        &self.tracks[self.index]
-    }
-
-    fn has_next(&self) -> bool {
-        self.index + 1 < self.tracks.len()
-    }
-}
+use super::{LiveClient, NeutralEvent, NeutralState, Snapshot, SnapshotTrack};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolledState {
@@ -89,20 +61,6 @@ fn poll_decision(context: &Context, now: PolledState, epoch: u64) -> Option<Play
     (context.epoch == epoch).then(|| resolve(context.previous.clone(), now, &context.snapshot))
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlayerStateEvent {
-    pub track_id: Option<u64>,
-    pub elapsed: u64,
-    pub is_playing: bool,
-    pub external: bool,
-    pub name: Option<String>,
-    pub art: Option<String>,
-    pub alb: Option<String>,
-    pub duration_secs: Option<u64>,
-    pub volume_supported: bool,
-}
-
 struct Context {
     snapshot: Snapshot,
     device_id: String,
@@ -118,20 +76,33 @@ struct State {
     generation: u64,
 }
 
-#[derive(Default)]
-pub struct Playback {
-    state: tokio::sync::Mutex<State>,
+#[derive(Clone)]
+pub(super) struct ConnectBackend {
+    state: Arc<tokio::sync::Mutex<State>>,
+    events: mpsc::UnboundedSender<NeutralEvent>,
+    backend_generation: u64,
 }
 
-impl Playback {
-    pub async fn start(
-        self: &Arc<Self>,
+impl ConnectBackend {
+    pub(super) fn new(
+        events: mpsc::UnboundedSender<NeutralEvent>,
+        backend_generation: u64,
+    ) -> Self {
+        Self {
+            state: Arc::new(tokio::sync::Mutex::new(State::default())),
+            events,
+            backend_generation,
+        }
+    }
+
+    pub(super) async fn play(
+        &self,
         client: Arc<LiveClient>,
-        app: tauri::AppHandle,
-        tracks: Vec<SnapshotTrack>,
-        index: usize,
-    ) -> Result<PlayerStateEvent, String> {
-        let event = self.begin(client.as_ref(), tracks, index).await?;
+        snapshot: Snapshot,
+    ) -> Result<(), String> {
+        let event = self
+            .begin(client.as_ref(), snapshot.tracks, snapshot.index)
+            .await?;
         let generation = self
             .state
             .lock()
@@ -140,11 +111,12 @@ impl Playback {
             .as_ref()
             .expect("start creates context")
             .generation;
-        let playback = Arc::clone(self);
+        self.emit(event);
+        let playback = self.clone();
         tauri::async_runtime::spawn(async move {
-            playback.poll(client, app, generation).await;
+            playback.poll(client, generation).await;
         });
-        Ok(event)
+        Ok(())
     }
 
     async fn begin<T: Transport, S: TokenStore>(
@@ -152,7 +124,7 @@ impl Playback {
         client: &SpotifyClient<T, S>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
-    ) -> Result<PlayerStateEvent, String> {
+    ) -> Result<NeutralState, String> {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
         }
@@ -166,7 +138,7 @@ impl Playback {
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
         let snapshot = Snapshot { tracks, index };
-        let event = local_event(&snapshot, 0, true, device.supports_volume);
+        let event = local_state(&snapshot, 0, true, device.supports_volume);
         state.context = Some(Context {
             previous: PolledState {
                 track_id: Some(snapshot.current().uri.clone()),
@@ -183,10 +155,10 @@ impl Playback {
         Ok(event)
     }
 
-    pub async fn toggle_pause<T: Transport, S: TokenStore>(
+    async fn toggle_pause<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
-    ) -> Result<PlayerStateEvent, String> {
+    ) -> Result<NeutralState, String> {
         let mut state = self.state.lock().await;
         let context = state.context.as_mut().ok_or("Nothing is playing")?;
         let playing = !context.previous.is_playing;
@@ -198,7 +170,7 @@ impl Playback {
         .map_err(|error| error.to_string())?;
         context.epoch = context.epoch.wrapping_add(1);
         context.previous.is_playing = playing;
-        Ok(local_event(
+        Ok(local_state(
             &context.snapshot,
             context.previous.elapsed,
             playing,
@@ -206,11 +178,11 @@ impl Playback {
         ))
     }
 
-    pub async fn seek<T: Transport, S: TokenStore>(
+    async fn seek_state<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
         seconds: u64,
-    ) -> Result<PlayerStateEvent, String> {
+    ) -> Result<NeutralState, String> {
         let mut state = self.state.lock().await;
         let context = state.context.as_mut().ok_or("Nothing is playing")?;
         let seconds = seconds.min(context.snapshot.current().duration_secs);
@@ -222,7 +194,7 @@ impl Playback {
             .map_err(|error| error.to_string())?;
         context.epoch = context.epoch.wrapping_add(1);
         context.previous.elapsed = seconds;
-        Ok(local_event(
+        Ok(local_state(
             &context.snapshot,
             seconds,
             context.previous.is_playing,
@@ -230,25 +202,11 @@ impl Playback {
         ))
     }
 
-    pub async fn next<T: Transport, S: TokenStore>(
-        &self,
-        client: &SpotifyClient<T, S>,
-    ) -> Result<PlayerStateEvent, String> {
-        self.step(client, 1).await
-    }
-
-    pub async fn prev<T: Transport, S: TokenStore>(
-        &self,
-        client: &SpotifyClient<T, S>,
-    ) -> Result<PlayerStateEvent, String> {
-        self.step(client, -1).await
-    }
-
-    async fn step<T: Transport, S: TokenStore>(
+    async fn step_state<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
         direction: i8,
-    ) -> Result<PlayerStateEvent, String> {
+    ) -> Result<NeutralState, String> {
         let mut state = self.state.lock().await;
         let context = state.context.as_mut().ok_or("Nothing is playing")?;
         let next = if direction < 0 {
@@ -262,7 +220,7 @@ impl Playback {
                 .await
                 .map_err(|error| error.to_string())?;
             state.context = None;
-            return Ok(empty_event(false));
+            return Ok(empty_state());
         }
         context.snapshot.index = next;
         client
@@ -279,7 +237,7 @@ impl Playback {
             is_playing: true,
             device_present: true,
         };
-        Ok(local_event(
+        Ok(local_state(
             &context.snapshot,
             0,
             true,
@@ -287,7 +245,23 @@ impl Playback {
         ))
     }
 
-    pub async fn set_volume<T: Transport, S: TokenStore>(
+    #[cfg(test)]
+    async fn next<T: Transport, S: TokenStore>(
+        &self,
+        client: &SpotifyClient<T, S>,
+    ) -> Result<NeutralState, String> {
+        self.step_state(client, 1).await
+    }
+
+    #[cfg(test)]
+    async fn prev<T: Transport, S: TokenStore>(
+        &self,
+        client: &SpotifyClient<T, S>,
+    ) -> Result<NeutralState, String> {
+        self.step_state(client, -1).await
+    }
+
+    async fn set_volume<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
         volume: u8,
@@ -303,16 +277,56 @@ impl Playback {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn clear(&self) {
+    async fn clear(&self) {
         self.state.lock().await.context = None;
     }
 
-    async fn poll(
-        self: Arc<Self>,
-        client: Arc<LiveClient>,
-        app: tauri::AppHandle,
-        generation: u64,
-    ) {
+    pub(super) async fn toggle(&self, client: &LiveClient) -> Result<(), String> {
+        let state = self.toggle_pause(client).await?;
+        self.emit(state);
+        Ok(())
+    }
+
+    pub(super) async fn seek(&self, client: &LiveClient, seconds: u64) -> Result<(), String> {
+        let state = self.seek_state(client, seconds).await?;
+        self.emit(state);
+        Ok(())
+    }
+
+    pub(super) async fn step(&self, client: &LiveClient, direction: i8) -> Result<(), String> {
+        let state = self.step_state(client, direction).await?;
+        self.emit(state);
+        Ok(())
+    }
+
+    pub(super) async fn set_live_volume(
+        &self,
+        client: &LiveClient,
+        volume: u8,
+    ) -> Result<(), String> {
+        self.set_volume(client, volume).await
+    }
+
+    pub(super) async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if let (Some(client), Some(context)) = (client, state.context.as_ref()) {
+            client
+                .pause(Some(&context.device_id))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        state.context = None;
+        Ok(())
+    }
+
+    fn emit(&self, state: NeutralState) {
+        let _ = self.events.send(NeutralEvent::ConnectState {
+            generation: self.backend_generation,
+            state,
+        });
+    }
+
+    async fn poll(self, client: Arc<LiveClient>, generation: u64) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.tick().await;
         loop {
@@ -331,7 +345,10 @@ impl Playback {
             let polled = match client.player().await {
                 Ok(player) => player,
                 Err(error) => {
-                    let _ = app.emit("operation-error", error.to_string());
+                    let _ = self.events.send(NeutralEvent::Error {
+                        generation: self.backend_generation,
+                        message: error.to_string(),
+                    });
                     self.clear().await;
                     return;
                 }
@@ -351,7 +368,7 @@ impl Playback {
             let event = match decision {
                 PlaybackDecision::Tick => {
                     context.previous = now;
-                    local_event(
+                    local_state(
                         &context.snapshot,
                         context.previous.elapsed,
                         context.previous.is_playing,
@@ -367,7 +384,10 @@ impl Playback {
                         )
                         .await
                     {
-                        let _ = app.emit("operation-error", error.to_string());
+                        let _ = self.events.send(NeutralEvent::Error {
+                            generation: self.backend_generation,
+                            message: error.to_string(),
+                        });
                         state.context = None;
                         return;
                     }
@@ -377,20 +397,20 @@ impl Playback {
                         is_playing: true,
                         device_present: true,
                     };
-                    local_event(&context.snapshot, 0, true, context.volume_supported)
+                    local_state(&context.snapshot, 0, true, context.volume_supported)
                 }
                 PlaybackDecision::Stop => {
                     let _ = client.pause(Some(&context.device_id)).await;
                     state.context = None;
-                    empty_event(false)
+                    empty_state()
                 }
                 PlaybackDecision::Takeover | PlaybackDecision::DeviceGone => {
                     state.context = None;
-                    external_event(polled.as_ref())
+                    external_state(polled.as_ref())
                 }
             };
             drop(state);
-            let _ = app.emit("player-state", event);
+            self.emit(event);
             if matches!(
                 decision,
                 PlaybackDecision::Stop | PlaybackDecision::Takeover | PlaybackDecision::DeviceGone
@@ -425,51 +445,68 @@ fn polled_state(player: Option<&PlayerState>) -> PolledState {
     }
 }
 
-fn local_event(
+fn local_state(
     snapshot: &Snapshot,
     elapsed: u64,
     is_playing: bool,
     volume_supported: bool,
-) -> PlayerStateEvent {
+) -> NeutralState {
     let track = snapshot.current();
-    PlayerStateEvent {
-        track_id: Some(track.id),
-        elapsed,
+    NeutralState {
+        uri: Some(track.uri.clone()),
+        position_ms: u32::try_from(elapsed.saturating_mul(1000)).unwrap_or(u32::MAX),
         is_playing,
         external: false,
         name: Some(track.name.clone()),
         art: Some(track.art.clone()),
         alb: Some(track.alb.clone()),
-        duration_secs: Some(track.duration_secs),
+        duration_ms: u32::try_from(track.duration_secs.saturating_mul(1000)).ok(),
         volume_supported,
     }
 }
 
-fn external_event(player: Option<&PlayerState>) -> PlayerStateEvent {
+fn external_state(player: Option<&PlayerState>) -> NeutralState {
     let item = player.and_then(|state| state.item.as_ref());
-    PlayerStateEvent {
-        track_id: None,
-        elapsed: player.and_then(|state| state.progress_ms).unwrap_or(0) / 1000,
+    NeutralState {
+        uri: item.map(|track| track.uri.clone()),
+        position_ms: player
+            .and_then(|state| state.progress_ms)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0),
         is_playing: player.is_some_and(|state| state.is_playing),
         external: true,
         name: item.map(|track| track.name.clone()),
         art: item.and_then(|track| track.artists.first().map(|artist| artist.name.clone())),
         alb: item.and_then(|track| track.album.as_ref().map(|album| album.name.clone())),
-        duration_secs: item.and_then(|track| track.duration_ms).map(|ms| ms / 1000),
+        duration_ms: item.and_then(|track| {
+            track
+                .duration_ms
+                .and_then(|value| u32::try_from(value).ok())
+        }),
         volume_supported: false,
     }
 }
 
-fn empty_event(external: bool) -> PlayerStateEvent {
-    PlayerStateEvent {
-        track_id: None,
-        elapsed: 0,
+impl Default for ConnectBackend {
+    fn default() -> Self {
+        let (events, _) = mpsc::unbounded_channel();
+        Self::new(events, 1)
+    }
+}
+
+#[cfg(test)]
+type Playback = ConnectBackend;
+
+fn empty_state() -> NeutralState {
+    NeutralState {
+        uri: None,
+        position_ms: 0,
         is_playing: false,
-        external,
+        external: false,
         name: None,
         art: None,
         alb: None,
-        duration_secs: None,
+        duration_ms: None,
         volume_supported: false,
     }
 }
@@ -727,11 +764,20 @@ mod tests {
 
         assert!(!playback.toggle_pause(&client).await.unwrap().is_playing);
         assert!(playback.toggle_pause(&client).await.unwrap().is_playing);
-        assert_eq!(playback.next(&client).await.unwrap().track_id, Some(2));
-        assert_eq!(playback.prev(&client).await.unwrap().track_id, Some(1));
+        assert_eq!(
+            playback.next(&client).await.unwrap().uri.as_deref(),
+            Some("spotify:track:2")
+        );
+        assert_eq!(
+            playback.prev(&client).await.unwrap().uri.as_deref(),
+            Some("spotify:track:1")
+        );
         playback.set_volume(&client, 42).await.unwrap();
-        assert_eq!(playback.next(&client).await.unwrap().track_id, Some(2));
-        assert_eq!(playback.next(&client).await.unwrap().track_id, None);
+        assert_eq!(
+            playback.next(&client).await.unwrap().uri.as_deref(),
+            Some("spotify:track:2")
+        );
+        assert_eq!(playback.next(&client).await.unwrap().uri, None);
 
         let requests = client.transport().requests();
         assert!(requests[2].url.ends_with("/me/player/pause?device_id=desk"));
