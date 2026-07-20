@@ -87,9 +87,9 @@ impl Transport for HttpTransport {
             for (name, value) in request.headers {
                 builder = builder.header(name, value);
             }
-            if !request.body.is_empty() {
-                builder = builder.body(request.body);
-            }
+            // Always attach the body: bodiless PUT/POST would go out without
+            // Content-Length and Spotify's edge rejects them with 411.
+            builder = builder.body(request.body);
             let response = builder
                 .send()
                 .await
