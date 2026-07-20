@@ -195,35 +195,77 @@ verification checks — doers never self-certify.
 User decision: embed librespot so Retune plays audio itself — no Spotify desktop
 app required. Connect-based remote control stays as a fallback backend.
 
-### Boundary
-`PlayerBackend` trait in the app layer (playback module) with the async command
-surface `play(snapshot, start_index) / toggle / next / prev / seek / set_volume`.
-Each backend owns emitting `player-state` events; the frontend contract is
-unchanged. Two impls:
+### Boundary (revised after architect review round 1)
+`PlayerBackend` in the app layer with command surface
+`play(snapshot, start_index) / toggle / next / prev / seek / set_volume / stop`.
+Backends emit **backend-neutral events** on a channel; a single application
+controller owns mapping them to `PlayerStateEvent` (local-id lookup from
+snapshot URIs, error mapping, ordering, Tauri emission) so that policy is never
+duplicated. Dispatch is a two-variant enum (`Backend::Connect | Backend::Local`),
+not `dyn` — sidesteps async-trait object safety. Two impls:
 - `ConnectBackend`: today's engine (snapshot queue, 1s poll authority, epoch
   guard, `resolve()` decision fn). Machinery is Connect-specific and stays here.
-- `LocalBackend`: librespot Session + Player. Authoritative *push* events
-  (EndOfTrack, position, pause) replace polling entirely. Queue advance is our
-  explicit call on EndOfTrack — same snapshot semantics, no Spotify queue.
+- `LocalBackend`: librespot Session + Player. Push events replace polling.
+  Queue advance is our explicit call on `EndOfTrack` — same snapshot
+  semantics, no Spotify queue.
 
-### Auth
-librespot cannot use our Web API app token: it needs streaming credentials via
-its own OAuth client (librespot-oauth, localhost redirect). One extra consent in
-the browser, then librespot's credential cache (under app_data_dir/librespot/)
-makes it silent forever. Fully separate from the Keychain/dev-token story.
-Premium is required; surface a clear error otherwise.
+### Auth (corrected)
+librespot accepts our existing Web API access token via
+`Credentials::with_access_token` — we reuse the hardened PKCE flow and the
+existing token store wholesale. `librespot-oauth` is NOT used (its listener
+drops OAuth state and has no timeout handling — a regression on our flow).
+Scope additions to `auth::SCOPES`: `streaming` (session), `user-read-private`
+(Premium preflight). Existing tokens lack these → switching the backend on
+prompts one re-consent. No librespot credential cache at all (no plaintext
+blob): a Session is created per run from our token, refresh stays in
+`SpotifyClient`.
+
+**Premium preflight is mandatory**: librespot 0.8 `process::exit(1)`s on
+non-Premium accounts, which embedded would kill Retune. `GET /me` product
+check gates Session creation; non-Premium → clear error, stay on Connect.
+
+### Dependencies & lifecycle
+- `librespot-core` + `librespot-playback` only (NOT the umbrella crate —
+  default features pull discovery/libmdns), default-features off,
+  `rodio-backend` + one TLS feature. MSRV: librespot 0.8 needs Rust 1.85 —
+  bump the shell's `rust-version` (currently 1.77.2). All librespot types stay
+  behind `LocalBackend`.
+- A disconnected Session is dead: recreate on network loss/sleep-wake; tear
+  down on backend switch; suppress late events from an old session via a
+  generation counter (same pattern as the Connect epoch guard).
+- Commands only *enqueue*: success ≠ playback. `Unavailable` reverses
+  optimistic UI state; the player thread is supervised (`Player::is_invalid`)
+  because rodio sink creation can panic inside it → surface `operation-error`.
+
+### Event mapping (L-B contract)
+Set `PlayerConfig.position_update_interval` (else `PositionChanged` never
+fires). Reject stale events by `play_request_id`. Map `SpotifyUri` back to the
+snapshot URI then to the snapshot's local u64 id (never parse base62). Define
+mappings for `Loading, Playing, Paused, Seeked, PositionCorrection,
+Unavailable, Stopped, EndOfTrack`. Volume: Retune 0..=100 → softmixer
+0..=65535, initial volume applied from settings and persisted on change; soft
+volume attenuates in-app audio, not macOS system volume.
+
+### Media coverage limit
+librespot plays tracks, episodes, and local files — NOT audiobook chapter
+URIs. LocalBackend rejects chapter playback with a clear error pointing at the
+Connect backend in Preferences; audiobooks remain a Connect feature for now.
 
 ### Selection & risk posture
 `Settings.playback_backend: "connect" | "local"`. librespot is a
 reverse-engineered protocol Spotify does not sanction: auth paths have broken
 before and account risk is nonzero — this is why Connect fallback is retained
-and why the toggle is explicit in Preferences.
+and why the toggle is explicit in Preferences. Credentials may be revoked
+server-side at any time; the backend must degrade to a visible error, never a
+crash.
 
 ### Phases
-- L-A Spike: oauth consent → Session → play one hardcoded URI to default
-  output, behind a debug-only menu item. Proves auth + audio on macOS.
-- L-B Full LocalBackend: command surface, queue advance, volume (softvol),
-  position ticks → `player-state` events; Preferences toggle; Connect remains
-  default.
+- L-A Spike: scope additions + re-consent → Premium preflight → Session from
+  our access token → play one hardcoded URI to default output, behind a
+  debug-only menu item. Proves auth + audio on macOS. Record clean release
+  build time and bundle-size delta; audio cache disabled.
+- L-B Full LocalBackend per the contracts above; Preferences toggle; Connect
+  remains default. Empirical matrix: sleep/wake, no output device, output
+  device switch — in `tauri dev` AND a packaged build.
 - L-C Default flip to local once L-B is verified empirically; Connect stays
   selectable.
