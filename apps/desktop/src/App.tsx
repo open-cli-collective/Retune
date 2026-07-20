@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 
@@ -7,6 +8,7 @@ type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
 type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
 type Selection = { cat?: string; art?: string; alb?: string }
+type ActivePane = 'track' | keyof Selection
 
 type Settings = {
   theme: Theme
@@ -326,6 +328,7 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
+  const [activePane, setActivePane] = useState<ActivePane>('track')
   const search = useRef<HTMLInputElement>(null)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
@@ -425,6 +428,11 @@ function App() {
   }, [state.settings.theme, state.systemDark])
 
   useEffect(() => {
+    const title = state.source === 'music' ? 'Retune — Library' : `Retune — ${labels[state.source].name}`
+    getCurrentWindow().setTitle(title).catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }, [state.source])
+
+  useEffect(() => {
     if (state.connected && !state.playing?.simulated) return
     if (!state.playing?.isPlaying) return
     const currentIndex = playbackTracks.findIndex((track) => track.id === state.playing?.trackId)
@@ -458,7 +466,6 @@ function App() {
       else if (payload === 'zoom_out') setZoom(state.settings.zoom - 0.1)
       else if (payload === 'actual_size') setZoom(1)
       else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
-      else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
     })
     const playerActions = listen<string>('player-action', ({ payload }) => {
       if (payload === 'play_pause') player.toggle()
@@ -506,11 +513,28 @@ function App() {
       } else if (!command && event.key === 'ArrowRight') {
         event.preventDefault()
         player.step(1)
+      } else if (!command && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        event.preventDefault()
+        const direction = event.key === 'ArrowUp' ? -1 : 1
+        if (activePane === 'track') {
+          if (!tracks.length) return
+          const current = tracks.findIndex((track) => track.id === state.selectedTrackId)
+          const index = current < 0 ? 0 : Math.max(0, Math.min(tracks.length - 1, current + direction))
+          dispatch({ type: 'selectTrack', id: tracks[index].id })
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${tracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
+        } else {
+          const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+          const values: (string | undefined)[] = [undefined, ...facetValues]
+          const current = values.indexOf(state.sel[activePane])
+          const index = Math.max(0, Math.min(values.length - 1, current + direction))
+          dispatch({ type: 'select', facet: activePane, value: values[index] })
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index}"]`)?.scrollIntoView({ block: 'nearest' }))
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [state.info, state.preferences, state.selectedTrackId, state.settings.zoom, player])
+  }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackId, state.settings.zoom, state.view, tracks, player])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -544,7 +568,7 @@ function App() {
       <div className="body-grid">
         <Sidebar state={state} onSource={(source) => dispatch({ type: 'source', source })} />
         <section className="content">
-          <BrowserPane state={state} onSelect={(facet, value) => dispatch({ type: 'select', facet, value })} />
+          <BrowserPane state={state} onActivate={setActivePane} onSelect={(facet, value) => dispatch({ type: 'select', facet, value })} />
           {state.sel.alb && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
             <AlbumRatingStrip
               album={state.sel.alb}
@@ -582,6 +606,7 @@ function App() {
               playing={state.playing}
               columnOrder={state.settings.columnOrder}
               hiddenColumns={state.settings.hiddenColumns}
+              onActivate={() => setActivePane('track')}
               onSelect={(id) => dispatch({ type: 'selectTrack', id })}
               onPlay={(id) => player.start(id, tracks)}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
@@ -598,8 +623,8 @@ function App() {
         dispatch({ type: 'info' })
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(autoAddSpotifyLibrary, autoConnect, spotifyClientId) => {
-        dispatch({ type: 'settings', settings: { autoAddSpotifyLibrary, autoConnect, spotifyClientId } })
+      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId) => {
+        dispatch({ type: 'settings', settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId } })
         dispatch({ type: 'preferences', open: false })
       }} />}
     </main>
@@ -667,21 +692,21 @@ function Sidebar({ state, onSource }: { state: State; onSource: (source: Source)
   </aside>
 }
 
-function BrowserPane({ state, onSelect }: { state: State; onSelect: (facet: keyof Selection, value?: string) => void }) {
+function BrowserPane({ state, onActivate, onSelect }: { state: State; onActivate: (facet: keyof Selection) => void; onSelect: (facet: keyof Selection, value?: string) => void }) {
   const sourceLabels = labels[state.source].facets
   const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
   return <div className="browser-pane">
-    {facets.map((facet, index) => <FacetColumn key={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} onSelect={(value) => onSelect(facet, value)} />)}
+    {facets.map((facet, index) => <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} onActivate={() => onActivate(facet)} onSelect={(value) => onSelect(facet, value)} />)}
   </div>
 }
 
-function FacetColumn({ title, values, selected, onSelect }: { title: string; values: string[]; selected?: string; onSelect: (value?: string) => void }) {
-  return <div className="facet-column">
+function FacetColumn({ facet, title, values, selected, onActivate, onSelect }: { facet: keyof Selection; title: string; values: string[]; selected?: string; onActivate: () => void; onSelect: (value?: string) => void }) {
+  return <div className="facet-column" data-facet={facet} onMouseDown={onActivate}>
     <div className="column-header">{title}</div>
     <div className="facet-list">
-      <button className={!selected ? 'active' : ''} onClick={() => onSelect(undefined)}>All ({values.length} {title}s)</button>
-      {values.map((value) => <button key={value} className={selected === value ? 'active' : ''} onClick={() => onSelect(value)} title={value}>{value}</button>)}
+      <button data-row-index={0} className={!selected ? 'active' : ''} onClick={() => onSelect(undefined)}>All ({values.length} {title}s)</button>
+      {values.map((value, index) => <button key={value} data-row-index={index + 1} className={selected === value ? 'active' : ''} onClick={() => onSelect(value)} title={value}>{value}</button>)}
     </div>
   </div>
 }
@@ -696,11 +721,11 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /><span>· applies to all tracks unless individually overridden</span></div>
 }
 
-function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColumns, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
+function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColumns, onActivate, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedId?: number; playing: State['playing']
   columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; onSelect: (id: number) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
-  onHiddenColumns: (columns: ColumnKey[]) => void
+  onActivate: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
   const [menu, setMenu] = useState<{ x: number; y: number }>()
@@ -745,7 +770,7 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColu
     if (column === 'genre') return <span key={column} title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
     return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
   }
-  return <div className="track-list" ref={list}>
+  return <div className="track-list" ref={list} onMouseDown={onActivate}>
     <div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       const bounds = list.current?.getBoundingClientRect()
@@ -757,7 +782,7 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColu
     <div className="track-scroll">
       {tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
-        return <div key={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
+        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
         </div>
@@ -827,7 +852,8 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
   </div>
 }
 
-function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (autoAdd: boolean, autoConnect: boolean, clientId: string) => void }) {
+function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (theme: Theme, autoAdd: boolean, autoConnect: boolean, clientId: string) => void }) {
+  const [theme, setTheme] = useState(settings.theme)
   const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
   const [autoConnect, setAutoConnect] = useState(settings.autoConnect)
   const [clientId, setClientId] = useState(settings.spotifyClientId)
@@ -837,13 +863,17 @@ function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCan
     <div className="get-info preferences" role="dialog" aria-modal="true" aria-labelledby="preferences-title" tabIndex={-1} ref={dialog}>
       <h2 id="preferences-title">Preferences</h2>
       <fieldset>
+        <legend>Appearance</legend>
+        {(['system', 'light', 'dark'] as Theme[]).map((value) => <label className="radio" key={value}><input type="radio" name="theme" value={value} checked={theme === value} onChange={() => setTheme(value)} />{value[0].toUpperCase() + value.slice(1)}</label>)}
+      </fieldset>
+      <fieldset>
         <legend>Library</legend>
         <label>Spotify Client ID<input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
         <label className="checkbox"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} />Automatically add my entire Spotify library</label>
         <label className="checkbox"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} />Connect to Spotify automatically at launch</label>
         <p>Keep pulling in music you add on Spotify each time Retune starts.</p>
       </fieldset>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd, autoConnect, clientId.trim())}>Save</button></div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, autoAdd, autoConnect, clientId.trim())}>Save</button></div>
     </div>
   </div>
 }

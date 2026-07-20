@@ -55,9 +55,6 @@ struct AppState {
 
 struct MenuChecks {
     zebra: CheckMenuItem<tauri::Wry>,
-    light: CheckMenuItem<tauri::Wry>,
-    dark: CheckMenuItem<tauri::Wry>,
-    system: CheckMenuItem<tauri::Wry>,
     account_status: tauri::menu::MenuItem<tauri::Wry>,
     connect: tauri::menu::MenuItem<tauri::Wry>,
     disconnect: tauri::menu::MenuItem<tauri::Wry>,
@@ -65,10 +62,7 @@ struct MenuChecks {
 
 impl MenuChecks {
     fn sync(&self, settings: &Settings) -> tauri::Result<()> {
-        self.zebra.set_checked(settings.zebra)?;
-        self.light.set_checked(settings.theme == Theme::Light)?;
-        self.dark.set_checked(settings.theme == Theme::Dark)?;
-        self.system.set_checked(settings.theme == Theme::System)
+        self.zebra.set_checked(settings.zebra)
     }
 
     fn sync_connection(&self, connected: bool) -> tauri::Result<()> {
@@ -927,24 +921,10 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let zebra = CheckMenuItemBuilder::with_id("toggle_zebra", "Toggle Zebra Striping")
         .checked(settings.zebra)
         .build(app)?;
-    let light = CheckMenuItemBuilder::with_id("theme_light", "Light")
-        .checked(settings.theme == Theme::Light)
-        .build(app)?;
-    let dark = CheckMenuItemBuilder::with_id("theme_dark", "Dark")
-        .checked(settings.theme == Theme::Dark)
-        .build(app)?;
-    let system = CheckMenuItemBuilder::with_id("theme_system", "System")
-        .checked(settings.theme == Theme::System)
-        .build(app)?;
-    let theme = SubmenuBuilder::new(app, "Theme")
-        .items(&[&light, &dark, &system])
-        .build()?;
     let view = SubmenuBuilder::new(app, "View")
         .items(&[&zoom_in, &zoom_out, &actual_size])
         .separator()
         .item(&zebra)
-        .separator()
-        .item(&theme)
         .build()?;
     let controls = SubmenuBuilder::new(app, "Controls")
         .text("play_pause", "Play/Pause\tSpace")
@@ -1012,8 +992,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "preferences" => {
             let _ = app.emit("open-preferences", ());
         }
-        "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "theme_light" | "theme_dark"
-        | "theme_system" => {
+        "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" => {
             let _ = app.emit("view-action", event.id().as_ref());
         }
         "play_pause" | "previous" | "next" => {
@@ -1023,9 +1002,6 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     });
     Ok(MenuChecks {
         zebra,
-        light,
-        dark,
-        system,
         account_status,
         connect,
         disconnect,
