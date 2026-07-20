@@ -13,6 +13,8 @@ pub struct Tokens {
     pub refresh: String,
     /// Unix timestamp in seconds.
     pub expires_at: u64,
+    #[serde(default)]
+    pub scopes: String,
 }
 
 pub trait TokenStore: Send + Sync {
@@ -212,6 +214,7 @@ mod tests {
             access: access.into(),
             refresh: "refresh".into(),
             expires_at: 42,
+            scopes: "streaming".into(),
         }
     }
 
@@ -222,6 +225,7 @@ mod tests {
             access: "access".into(),
             refresh: "refresh".into(),
             expires_at: 42,
+            scopes: "streaming".into(),
         };
         store.save(&tokens).unwrap();
         assert_eq!(store.load().unwrap(), Some(tokens));
@@ -266,5 +270,14 @@ mod tests {
         assert_eq!(store.load().unwrap(), Some(tokens("initial")));
         assert_eq!(inner.loads.load(Ordering::Relaxed), 1);
         assert_eq!(inner.saves.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn legacy_record_defaults_scopes_to_empty() {
+        let tokens: Tokens =
+            serde_json::from_str(r#"{"access":"access","refresh":"refresh","expires_at":42}"#)
+                .unwrap();
+
+        assert!(tokens.scopes.is_empty());
     }
 }

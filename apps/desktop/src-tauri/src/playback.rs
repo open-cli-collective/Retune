@@ -652,6 +652,7 @@ mod tests {
                 access: "access".into(),
                 refresh: "refresh".into(),
                 expires_at: u64::MAX,
+                scopes: String::new(),
             })),
         );
         let playback = Playback::default();
@@ -687,6 +688,7 @@ mod tests {
                 access: "access".into(),
                 refresh: "refresh".into(),
                 expires_at: u64::MAX,
+                scopes: String::new(),
             })),
         );
 
@@ -714,6 +716,7 @@ mod tests {
                 access: "access".into(),
                 refresh: "refresh".into(),
                 expires_at: u64::MAX,
+                scopes: String::new(),
             })),
         );
         let playback = Playback::default();

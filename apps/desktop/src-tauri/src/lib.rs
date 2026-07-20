@@ -1,4 +1,6 @@
 mod fixture;
+#[cfg(debug_assertions)]
+mod local_spike;
 mod playback;
 mod provider;
 mod store;
@@ -592,6 +594,7 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
             access: token.access_token,
             refresh,
             expires_at: now.saturating_add(token.expires_in),
+            scopes: auth::SCOPES.into(),
         })
         .map_err(|error| error.to_string())?;
     *state.spotify.lock().expect("spotify mutex poisoned") =
@@ -944,9 +947,10 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let help = SubmenuBuilder::new(app, "Help")
         .text("about_retune", "About Retune")
         .build()?;
-    let menu = MenuBuilder::new(app)
-        .items(&[&app_menu, &file, &edit, &view, &controls, &account, &help])
-        .build()?;
+    let menu = MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &view, &controls, &account]);
+    #[cfg(debug_assertions)]
+    let menu = menu.item(&local_spike::menu(app)?);
+    let menu = menu.item(&help).build()?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
         "get_info" => {
@@ -998,6 +1002,8 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "play_pause" | "previous" | "next" => {
             let _ = app.emit("player-action", event.id().as_ref());
         }
+        #[cfg(debug_assertions)]
+        id if local_spike::handles(id) => local_spike::start(app),
         _ => {}
     });
     Ok(MenuChecks {

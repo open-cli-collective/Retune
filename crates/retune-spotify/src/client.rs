@@ -182,6 +182,10 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         self.get(&paged("/me/tracks", offset, limit)).await
     }
 
+    pub async fn me(&self) -> Result<Profile> {
+        self.get("/me").await
+    }
+
     pub async fn saved_albums(&self, offset: u32, limit: u32) -> Result<Page<SavedAlbum>> {
         self.get(&paged("/me/albums", offset, limit)).await
     }
@@ -469,6 +473,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             access: token.access_token,
             refresh: token.refresh_token.unwrap_or(stored.refresh),
             expires_at: unix_now().saturating_add(token.expires_in),
+            scopes: stored.scopes,
         })?;
         log::info!("Refreshed Spotify access token");
         Ok(())
@@ -536,6 +541,18 @@ pub struct Page<T> {
     /// pages null out fields of removed/unplayable content; one bad item
     /// must not cost the page. Counted so pagination offsets stay correct.
     pub skipped: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Profile {
+    #[serde(default)]
+    pub product: Option<String>,
+}
+
+impl Profile {
+    pub fn is_premium(&self) -> bool {
+        self.product.as_deref() == Some("premium")
+    }
 }
 
 impl<'de, T: DeserializeOwned> Deserialize<'de> for Page<T> {
@@ -736,6 +753,7 @@ mod tests {
             access: "old".into(),
             refresh: "refresh".into(),
             expires_at: 0,
+            scopes: "streaming user-read-private".into(),
         }))
     }
 
@@ -775,6 +793,25 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[1].url, TOKEN_URL);
         assert_eq!(requests[2].headers["authorization"], "Bearer new");
+        assert_eq!(
+            client.tokens.load().unwrap().unwrap().scopes,
+            "streaming user-read-private"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_is_premium_only_for_explicit_premium_product() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(200, serde_json::json!({"product": "premium", "id": "user"})),
+                Response::json(200, serde_json::json!({"id": "user"})),
+            ]),
+            tokens(),
+        );
+
+        assert!(client.me().await.unwrap().is_premium());
+        assert!(!client.me().await.unwrap().is_premium());
     }
 
     #[tokio::test]

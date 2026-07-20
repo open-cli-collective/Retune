@@ -480,6 +480,7 @@ mod tests {
                 access: "access".into(),
                 refresh: "refresh".into(),
                 expires_at: u64::MAX,
+                scopes: String::new(),
             })),
         )
     }

@@ -313,6 +313,7 @@ mod tests {
             access: "access".into(),
             refresh: "refresh".into(),
             expires_at: 42,
+            scopes: "streaming".into(),
         };
 
         assert!(store.load().unwrap().is_none());
