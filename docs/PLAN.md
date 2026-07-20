@@ -274,11 +274,11 @@ never assigned raw. Transition table (librespot event → emitted
 
 | librespot event        | emitted state                                        |
 |------------------------|------------------------------------------------------|
-| Loading{uri, position_ms} | trackId=local(uri), elapsed=position_ms, isPlaying preserves the requested intent (play vs paused-load) |
-| Playing{uri, pos}      | trackId=local(uri), elapsed=pos, isPlaying=true      |
+| Loading{uri, position_ms} | trackId=local(uri), elapsed=position_ms/1000, isPlaying preserves the requested intent (play vs paused-load) |
+| Playing{uri, pos_ms}   | trackId=local(uri), elapsed=pos_ms/1000, isPlaying=true |
 | Paused{uri, pos}       | same but isPlaying=false                             |
-| PositionChanged{pos}   | elapsed=pos, playing state unchanged                 |
-| Seeked{pos} / PositionCorrection{pos} | elapsed=pos, playing state unchanged  |
+| PositionChanged{pos_ms}| elapsed=pos_ms/1000, playing state unchanged         |
+| Seeked{pos_ms} / PositionCorrection{pos_ms} | elapsed=pos_ms/1000, unchanged  |
 | Unavailable{uri}       | `operation-error` for the track, then advance the queue (identical to EndOfTrack) — optimistic UI state reverts to the next track or empty |
 | Stopped                | empty player state                                   |
 | EndOfTrack             | backend advances the queue FIRST (loads next, same generation); no intermediate empty emission — the next Loading/Playing drives the UI; queue exhausted → empty state |
