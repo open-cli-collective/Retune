@@ -261,9 +261,15 @@ Set `PlayerConfig.position_update_interval` (else `PositionChanged` never
 fires). Map `SpotifyUri` back to the snapshot URI then to the snapshot's local
 u64 id (never parse base62). Staleness is a TWO-stage filter with independent
 counters: first the backend generation captured when the session was created
-(drops events from torn-down sessions), then librespot's own latest
-`PlayRequestIdChanged` value (drops events from superseded loads within the
-live session). Transition table (librespot event → emitted
+(drops events from torn-down sessions), then load-intent matching. The second
+stage cannot be "latest `PlayRequestIdChanged` wins": `Player::load()` returns
+BEFORE librespot assigns/emits the request id, so buffered old events could
+slip between a new command and its id event (flicker, double-advance).
+Instead, each queued load intent is bound to the next `PlayRequestIdChanged`
+in FIFO order; events carrying an id belonging to a superseded intent are
+discarded. All position-bearing values cross the controller boundary as
+milliseconds and are converted there to the seconds `PlayerStateEvent` uses —
+never assigned raw. Transition table (librespot event → emitted
 `PlayerStateEvent`) applied only to events passing both filters:
 
 | librespot event        | emitted state                                        |
@@ -277,10 +283,12 @@ live session). Transition table (librespot event → emitted
 | Stopped                | empty player state                                   |
 | EndOfTrack             | backend advances the queue FIRST (loads next, same generation); no intermediate empty emission — the next Loading/Playing drives the UI; queue exhausted → empty state |
 
-Reducer tests cover: stale-generation discard, stale play_request_id discard
-within a live session, Unavailable advance + error, Stopped clear, natural
-advance ordering (no flicker-empty between tracks), Loading position
-preservation, and PositionChanged ticks.
+Reducer tests cover: stale-generation discard, superseded-intent discard
+under rapid A→B loads with a buffered old EndOfTrack (no flicker, no
+double-advance), Unavailable advance + error, Stopped clear, natural advance
+ordering (no flicker-empty between tracks), Loading position preservation,
+PositionChanged ticks, and ms→seconds conversion on every position-bearing
+event.
 Volume: Retune 0..=100 → softmixer 0..=65535, initial volume applied from
 settings and persisted on change; soft volume attenuates in-app audio, not
 macOS system volume.
