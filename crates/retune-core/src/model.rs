@@ -63,6 +63,10 @@ pub struct TrackRecord {
     pub alb: String,
     pub name: String,
     pub duration: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_no: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_no: Option<u32>,
     /// Per-track rating override. `None` means "inherit from album".
     pub rating: Option<Rating>,
     /// The provider's original category, recorded the first time `cat`
@@ -157,6 +161,8 @@ impl Library {
             alb: incoming.alb,
             name: incoming.name,
             duration: incoming.duration,
+            track_no: incoming.track_no,
+            disc_no: incoming.disc_no,
             rating: None,
             orig_cat: None,
         });
@@ -170,6 +176,8 @@ impl Library {
             .iter_mut()
             .find(|track| track.uri == incoming.uri)
         {
+            track.track_no = incoming.track_no;
+            track.disc_no = incoming.disc_no;
             if track.orig_cat.is_some() {
                 track.orig_cat = Some(incoming.cat);
             } else {
@@ -326,7 +334,7 @@ impl Library {
 
 /// A record as it arrives from a provider sync or an import — everything but
 /// the local id, which [`Library::add`] assigns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewTrack {
     pub uri: String,
     pub source: SourceId,
@@ -335,6 +343,10 @@ pub struct NewTrack {
     pub alb: String,
     pub name: String,
     pub duration: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_no: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_no: Option<u32>,
 }
 
 /// Field edits from Get Info. `None` = leave unchanged.
@@ -370,6 +382,8 @@ mod tests {
             alb: alb.into(),
             name: uri.into(),
             duration: Duration::from_secs(180),
+            track_no: None,
+            disc_no: None,
         }
     }
 
@@ -414,6 +428,20 @@ mod tests {
         assert_eq!(record.cat, "Metal");
         assert_eq!(record.name, "one");
         assert_eq!(record.rating, Some(rating(5)));
+    }
+
+    #[test]
+    fn upsert_refreshes_provider_track_numbers() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+        let mut changed = track("one", "Rock", "Artist", "Album");
+        changed.track_no = Some(4);
+        changed.disc_no = Some(2);
+
+        library.upsert(changed);
+
+        let record = library.get(id).unwrap();
+        assert_eq!((record.disc_no, record.track_no), (Some(2), Some(4)));
     }
 
     #[test]

@@ -3002,6 +3002,7 @@ dependencies = [
 name = "retune-desktop"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "log",
  "reqwest 0.12.28",
  "retune-core",

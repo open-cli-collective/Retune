@@ -103,6 +103,8 @@ mod tests {
             alb: "Album".into(),
             name: "Track".into(),
             duration: Duration::from_secs(42),
+            track_no: None,
+            disc_no: None,
         });
         library
             .click_track_star(id, Rating::new(5).unwrap())
@@ -178,6 +180,8 @@ mod tests {
             alb: "B".into(),
             name: "M".into(),
             duration: Duration::from_secs(1),
+            track_no: None,
+            disc_no: None,
         });
         assert_eq!(id.0, 8);
     }

@@ -32,6 +32,8 @@ pub fn track(
             .unwrap_or_default(),
         name: value.name.clone(),
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
+        track_no: value.track_number,
+        disc_no: value.disc_number,
     }
 }
 
@@ -50,6 +52,8 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
         alb: show.map(|show| show.name.clone()).unwrap_or_default(),
         name: value.name.clone(),
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
+        track_no: None,
+        disc_no: None,
     }
 }
 
@@ -70,6 +74,8 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
         alb: book.name.clone(),
         name: value.name.clone(),
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
+        track_no: value.chapter_number,
+        disc_no: None,
     }
 }
 
@@ -84,6 +90,8 @@ mod tests {
             uri: "spotify:track:1".into(),
             name: "Song".into(),
             duration_ms: Some(1234),
+            track_number: Some(2),
+            disc_number: Some(1),
             artists: vec![SimplifiedArtist {
                 id: "artist-1".into(),
                 name: "Primary".into(),
@@ -109,6 +117,7 @@ mod tests {
         assert_eq!(mapped.cat, "indie");
         assert_eq!(mapped.art, "Primary");
         assert_eq!(mapped.alb, "Record");
+        assert_eq!((mapped.disc_no, mapped.track_no), (Some(1), Some(2)));
         assert_eq!(track(&music(), None, None).cat, UNCATEGORIZED);
         assert_eq!(
             track(
@@ -210,6 +219,7 @@ mod tests {
             uri: "spotify:chapter:1".into(),
             name: "Chapter One".into(),
             duration_ms: Some(3000),
+            chapter_number: Some(1),
         };
         let book = Audiobook {
             id: "book-1".into(),
@@ -226,6 +236,7 @@ mod tests {
         assert_eq!(mapped.cat, "History");
         assert_eq!(mapped.art, "First Author");
         assert_eq!(mapped.alb, "The Book");
+        assert_eq!(mapped.track_no, Some(1));
         assert_eq!(
             chapter(
                 &value,

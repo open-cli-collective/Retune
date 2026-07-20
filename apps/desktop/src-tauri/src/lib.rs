@@ -7,15 +7,18 @@ mod sync;
 use std::{
     collections::BTreeSet,
     fs,
+    io::{Read, Write},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
 use playback::{Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{MediaProvider, SearchAlbum, SearchResults};
 use retune_core::{
     browse::{self, Selection},
-    io::{export_json, export_json_gz, import},
+    io::{export_json, import},
     model::{
         AlbumKey, EffectiveRating, Library, Rating, SourceId, TrackEdit, TrackId, TrackRecord,
     },
@@ -84,6 +87,36 @@ struct ConnectionState {
     connected: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VisualSettings {
+    theme: Theme,
+    zoom: f64,
+    zebra: bool,
+    column_order: Vec<String>,
+    hidden_columns: Vec<String>,
+}
+
+impl VisualSettings {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            theme: settings.theme,
+            zoom: settings.zoom,
+            zebra: settings.zebra,
+            column_order: settings.column_order.clone(),
+            hidden_columns: settings.hidden_columns.clone(),
+        }
+    }
+
+    fn apply_to(self, settings: &mut Settings) {
+        settings.theme = self.theme;
+        settings.zoom = self.zoom;
+        settings.zebra = self.zebra;
+        settings.column_order = self.column_order;
+        settings.hidden_columns = self.hidden_columns;
+    }
+}
+
 #[derive(Deserialize)]
 struct SelectionDto {
     cat: Option<String>,
@@ -118,6 +151,7 @@ struct TrackView {
     art: String,
     alb: String,
     cat: String,
+    track_no: Option<u32>,
     duration_secs: u64,
     overridden: bool,
     rating: Option<RatingView>,
@@ -213,6 +247,7 @@ fn browse(
             art: track.art.clone(),
             alb: track.alb.clone(),
             cat: track.cat.clone(),
+            track_no: track.track_no,
             duration_secs: track.duration.as_secs(),
             overridden: track
                 .orig_cat
@@ -567,6 +602,7 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     *state.spotify.lock().expect("spotify mutex poisoned") =
         spotify_provider(&client_id, Arc::clone(&state.token_store))?;
+    set_auto_connect(&app, true)?;
     emit_connection_state(&app)?;
     sync_spotify(&app).await
 }
@@ -574,12 +610,30 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
     app.state::<AppState>().playback.clear().await;
+    set_auto_connect(&app, false)?;
     app.state::<AppState>()
         .token_store
         .clear()
         .map_err(|error| error.to_string())?;
     emit_connection_state(&app)?;
     app.emit("player-state", empty_player_state())
+        .map_err(|error| error.to_string())
+}
+
+fn set_auto_connect(app: &tauri::AppHandle, auto_connect: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    settings.auto_connect = auto_connect;
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    app.emit("settings-changed", settings)
         .map_err(|error| error.to_string())
 }
 
@@ -995,17 +1049,66 @@ fn export_library(app: &tauri::AppHandle, compressed: bool) {
                 let path = path.into_path().map_err(|error| error.to_string())?;
                 let state = handle.state::<AppState>();
                 let library = state.library.lock().expect("library mutex poisoned");
-                let bytes = if compressed {
-                    export_json_gz(&library)
-                } else {
-                    export_json(&library)
-                };
+                let settings = state.settings.lock().expect("settings mutex poisoned");
+                let bytes = export_with_settings(&library, &settings, compressed)?;
                 fs::write(path, bytes).map_err(|error| error.to_string())
             })();
             if let Err(error) = result {
                 notify_error(&handle, error);
             }
         });
+}
+
+fn export_with_settings(
+    library: &Library,
+    settings: &Settings,
+    compressed: bool,
+) -> Result<Vec<u8>, String> {
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&export_json(library)).map_err(|error| error.to_string())?;
+    envelope
+        .as_object_mut()
+        .expect("core export is an object")
+        .insert(
+            "settings".into(),
+            serde_json::to_value(VisualSettings::from_settings(settings))
+                .map_err(|error| error.to_string())?,
+        );
+    let json = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
+    if !compressed {
+        return Ok(json);
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&json)
+        .map_err(|error| error.to_string())?;
+    encoder.finish().map_err(|error| error.to_string())
+}
+
+fn import_with_settings(
+    bytes: &[u8],
+    restore: bool,
+) -> Result<(Library, Option<VisualSettings>), String> {
+    let mut json = Vec::new();
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        GzDecoder::new(bytes)
+            .read_to_end(&mut json)
+            .map_err(|error| error.to_string())?;
+    } else {
+        json.extend_from_slice(bytes);
+    }
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&json).map_err(|error| error.to_string())?;
+    let settings = envelope
+        .as_object_mut()
+        .and_then(|object| object.remove("settings"))
+        .filter(|_| restore)
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let library = import(&serde_json::to_vec(&envelope).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    Ok((library, settings))
 }
 
 fn import_library(app: &tauri::AppHandle, replace: bool) {
@@ -1015,13 +1118,13 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
         .add_filter("Retune Library", &["json", "json.gz", "gz"])
         .pick_file(move |path| {
             let Some(path) = path else { return };
-            let result = (|| -> Result<Library, String> {
+            let result = (|| -> Result<(Library, Option<VisualSettings>), String> {
                 let path = path.into_path().map_err(|error| error.to_string())?;
                 let bytes = fs::read(path).map_err(|error| error.to_string())?;
-                import(&bytes).map_err(|error| error.to_string())
+                import_with_settings(&bytes, replace)
             })();
             match result {
-                Ok(library) if replace => {
+                Ok((library, settings)) if replace => {
                     let confirmed_handle = handle.clone();
                     handle
                         .dialog()
@@ -1032,17 +1135,22 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
                         ))
                         .show(move |confirmed| {
                             if confirmed {
-                                apply_import(&confirmed_handle, library, true);
+                                apply_import(&confirmed_handle, library, settings, true);
                             }
                         });
                 }
-                Ok(library) => apply_import(&handle, library, false),
+                Ok((library, _)) => apply_import(&handle, library, None, false),
                 Err(error) => notify_error(&handle, error),
             }
         });
 }
 
-fn apply_import(app: &tauri::AppHandle, imported: Library, replace: bool) {
+fn apply_import(
+    app: &tauri::AppHandle,
+    imported: Library,
+    visual_settings: Option<VisualSettings>,
+    replace: bool,
+) {
     let state = app.state::<AppState>();
     let result = mutate_library(&state, |library| {
         if replace {
@@ -1054,10 +1162,40 @@ fn apply_import(app: &tauri::AppHandle, imported: Library, replace: bool) {
     });
     match result {
         Ok(()) => {
+            if let Some(visual_settings) = visual_settings {
+                if let Err(error) = apply_visual_settings(app, visual_settings) {
+                    notify_error(app, error);
+                    return;
+                }
+            }
             let _ = app.emit("library-changed", ());
         }
         Err(error) => notify_error(app, error),
     }
+}
+
+fn apply_visual_settings(
+    app: &tauri::AppHandle,
+    visual_settings: VisualSettings,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    visual_settings.apply_to(&mut settings);
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    state
+        .menu_checks
+        .sync(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    app.emit("settings-changed", settings)
+        .map_err(|error| error.to_string())
 }
 
 fn notify_error(app: &tauri::AppHandle, error: String) {
@@ -1149,7 +1287,11 @@ pub fn run() {
             menu_checks.sync_connection(connected)?;
             let spotify = spotify_provider(&settings.spotify_client_id, Arc::clone(&token_store))
                 .map_err(std::io::Error::other)?;
-            let startup_sync = should_startup_sync(connected, &settings);
+            let startup_action = startup_action(
+                connected,
+                &settings.spotify_client_id,
+                settings.auto_connect,
+            );
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -1162,10 +1304,15 @@ pub fn run() {
                 playback: Arc::new(Playback::default()),
                 syncing: tokio::sync::Mutex::new(()),
             });
-            if startup_sync {
+            if startup_action != StartupAction::Nothing {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(error) = sync_spotify(&handle).await {
+                    let result = match startup_action {
+                        StartupAction::Sync => sync_spotify(&handle).await,
+                        StartupAction::Connect => connect_spotify(handle.clone()).await,
+                        StartupAction::Nothing => Ok(()),
+                    };
+                    if let Err(error) = result {
                         notify_error(&handle, error);
                     }
                 });
@@ -1176,8 +1323,21 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn should_startup_sync(connected: bool, settings: &Settings) -> bool {
-    connected && settings.auto_add_spotify_library
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupAction {
+    Sync,
+    Connect,
+    Nothing,
+}
+
+fn startup_action(connected: bool, client_id: &str, auto_connect: bool) -> StartupAction {
+    if connected {
+        StartupAction::Sync
+    } else if auto_connect && !client_id.trim().is_empty() {
+        StartupAction::Connect
+    } else {
+        StartupAction::Nothing
+    }
 }
 
 #[cfg(test)]
@@ -1191,15 +1351,64 @@ mod tests {
     }
 
     #[test]
-    fn startup_sync_runs_only_when_connected_and_enabled() {
-        let enabled = Settings::default();
-        assert!(should_startup_sync(true, &enabled));
-        assert!(!should_startup_sync(false, &enabled));
-        let disabled = Settings {
+    fn startup_action_syncs_connects_or_does_nothing() {
+        assert_eq!(startup_action(true, "", false), StartupAction::Sync);
+        assert_eq!(
+            startup_action(false, "client-id", true),
+            StartupAction::Connect
+        );
+        assert_eq!(startup_action(false, "", true), StartupAction::Nothing);
+        assert_eq!(
+            startup_action(false, "client-id", false),
+            StartupAction::Nothing
+        );
+    }
+
+    #[test]
+    fn export_restore_round_trips_visual_settings_only() {
+        let library = fixture::library();
+        let exported = Settings {
+            theme: Theme::Dark,
+            zoom: 1.4,
+            zebra: false,
+            column_order: [
+                "name", "track", "rating", "artist", "album", "genre", "time",
+            ]
+            .map(String::from)
+            .to_vec(),
+            hidden_columns: vec!["genre".into()],
             auto_add_spotify_library: false,
-            ..enabled
+            auto_connect: false,
+            spotify_client_id: "exported-machine".into(),
+            spotify_sync_completed: true,
         };
-        assert!(!should_startup_sync(true, &disabled));
+        let bytes = export_with_settings(&library, &exported, true).unwrap();
+        let (restored_library, visual) = import_with_settings(&bytes, true).unwrap();
+        let mut restored = Settings {
+            spotify_client_id: "local-machine".into(),
+            auto_add_spotify_library: true,
+            auto_connect: true,
+            spotify_sync_completed: false,
+            ..Settings::default()
+        };
+        visual.unwrap().apply_to(&mut restored);
+
+        assert_eq!(restored_library, library);
+        assert_eq!(restored.theme, Theme::Dark);
+        assert_eq!(restored.hidden_columns, ["genre"]);
+        assert_eq!(restored.spotify_client_id, "local-machine");
+        assert!(restored.auto_add_spotify_library);
+        assert!(restored.auto_connect);
+        assert!(!restored.spotify_sync_completed);
+    }
+
+    #[test]
+    fn merge_ignores_exported_visual_settings() {
+        let library = fixture::library();
+        let bytes = export_with_settings(&library, &Settings::default(), false).unwrap();
+        let (merged, visual) = import_with_settings(&bytes, false).unwrap();
+        assert_eq!(merged, library);
+        assert_eq!(visual, None);
     }
 
     #[test]

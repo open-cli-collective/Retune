@@ -61,7 +61,7 @@ button { color: inherit; }
 .rating-stars.explicit { color: var(--gold); }
 .rating-stars.inherited { color: rgba(150, 150, 150, .7); }
 .rating-stars.empty { color: rgba(150, 150, 150, .4); }
-.track-list { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.track-list { position: relative; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .track-scroll { min-height: 0; overflow-y: auto; }
 .track-row { min-width: 720px; height: 18px; display: grid; grid-template-columns: 22px minmax(160px, 1.6fr) 52px 1.1fr 1.1fr .9fr 84px; align-items: center; padding: 0 6px; white-space: nowrap; }
 .zebra .track-scroll .track-row:nth-child(even) { background: var(--alt); }
@@ -71,6 +71,9 @@ button { color: inherit; }
 .track-header { flex: 0 0 20px; height: 20px; border-bottom: 1px solid var(--border); color: var(--dim); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; }
 .track-header [draggable="true"] { cursor: grab; }
 .track-header .dragging { opacity: .35; }
+.column-menu { position: absolute; z-index: 10; min-width: 130px; padding: 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--control); box-shadow: 0 3px 10px #0004; }
+.column-menu label { display: block; padding: 2px 5px; }
+.column-menu input { margin-right: 6px; }
 .track-row.selected { color: #fff; background: var(--accent); }
 .playing-marker { color: var(--accent); }
 .selected .playing-marker { color: #fff; }

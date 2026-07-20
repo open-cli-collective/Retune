@@ -137,6 +137,8 @@ mod tests {
             alb: "Album".into(),
             name: name.into(),
             duration: Duration::from_secs(1),
+            track_no: None,
+            disc_no: None,
         }
     }
 

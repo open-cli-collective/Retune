@@ -603,6 +603,10 @@ pub struct Track {
     #[serde(default)]
     pub duration_ms: Option<u64>,
     #[serde(default)]
+    pub track_number: Option<u32>,
+    #[serde(default)]
+    pub disc_number: Option<u32>,
+    #[serde(default)]
     pub artists: Vec<SimplifiedArtist>,
     pub album: Option<AlbumSummary>,
 }
@@ -686,6 +690,8 @@ pub struct Chapter {
     /// Null in some live payloads (e.g. unplayable episodes).
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub chapter_number: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

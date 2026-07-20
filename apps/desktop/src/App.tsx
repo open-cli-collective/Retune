@@ -5,7 +5,7 @@ import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
-type ColumnKey = 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
+type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
 type Selection = { cat?: string; art?: string; alb?: string }
 
 type Settings = {
@@ -13,7 +13,9 @@ type Settings = {
   zoom: number
   zebra: boolean
   columnOrder: ColumnKey[]
+  hiddenColumns: ColumnKey[]
   autoAddSpotifyLibrary: boolean
+  autoConnect: boolean
   spotifyClientId: string
   spotifySyncCompleted: boolean
 }
@@ -31,6 +33,7 @@ type Track = {
   art: string
   alb: string
   cat: string
+  trackNo: number | null
   durationSecs: number
   overridden: boolean
   rating: { stars: number; explicit: boolean } | null
@@ -134,8 +137,10 @@ const defaultSettings: Settings = {
   theme: 'system',
   zoom: 1,
   zebra: true,
-  columnOrder: ['name', 'time', 'artist', 'album', 'genre', 'rating'],
+  columnOrder: ['track', 'name', 'time', 'artist', 'album', 'genre', 'rating'],
+  hiddenColumns: [],
   autoAddSpotifyLibrary: true,
+  autoConnect: true,
   spotifyClientId: '',
   spotifySyncCompleted: false,
 }
@@ -371,11 +376,13 @@ function App() {
     const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
     const failed = listen<string>('operation-error', ({ payload }) => dispatch({ type: 'error', error: payload }))
     const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connected: payload.connected }))
+    const settings = listen<Settings>('settings-changed', ({ payload }) => dispatch({ type: 'hydrateSettings', settings: payload }))
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
       void connection.then((stop) => stop())
+      void settings.then((stop) => stop())
       void progress.then((stop) => stop())
     }
   }, [])
@@ -574,11 +581,13 @@ function App() {
               selectedId={state.selectedTrackId}
               playing={state.playing}
               columnOrder={state.settings.columnOrder}
+              hiddenColumns={state.settings.hiddenColumns}
               onSelect={(id) => dispatch({ type: 'selectTrack', id })}
               onPlay={(id) => player.start(id, tracks)}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
               onInfo={openInfo}
               onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
+              onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
             />
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
@@ -589,8 +598,8 @@ function App() {
         dispatch({ type: 'info' })
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(autoAddSpotifyLibrary, spotifyClientId) => {
-        dispatch({ type: 'settings', settings: { autoAddSpotifyLibrary, spotifyClientId } })
+      {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(autoAddSpotifyLibrary, autoConnect, spotifyClientId) => {
+        dispatch({ type: 'settings', settings: { autoAddSpotifyLibrary, autoConnect, spotifyClientId } })
         dispatch({ type: 'preferences', open: false })
       }} />}
     </main>
@@ -687,13 +696,17 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /><span>· applies to all tracks unless individually overridden</span></div>
 }
 
-function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, onPlay, onRate, onInfo, onReorder }: {
+function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColumns, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedId?: number; playing: State['playing']
-  columnOrder: ColumnKey[]; onSelect: (id: number) => void; onPlay: (id: number) => void
+  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; onSelect: (id: number) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
+  onHiddenColumns: (columns: ColumnKey[]) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
+  const [menu, setMenu] = useState<{ x: number; y: number }>()
+  const list = useRef<HTMLDivElement>(null)
   const headings: Record<ColumnKey, string> = {
+    track: '#',
     name: label.item[0].toUpperCase() + label.item.slice(1),
     time: 'Time',
     artist: label.facets[1],
@@ -701,8 +714,22 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, 
     genre: label.facets[0],
     rating: 'Rating',
   }
-  const widths: Record<ColumnKey, string> = { name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px' }
-  const columns = `22px ${columnOrder.map((column) => widths[column]).join(' ')}`
+  const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px' }
+  const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
+  const columns = `22px ${visibleColumns.map((column) => widths[column]).join(' ')}`
+  useEffect(() => {
+    if (!menu) return
+    const close = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement).closest('.column-menu')) setMenu(undefined)
+    }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenu(undefined) }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [menu])
   const drop = (target: ColumnKey) => {
     if (!dragging || dragging === target) return
     const next = columnOrder.filter((column) => column !== dragging)
@@ -710,6 +737,7 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, 
     onReorder(next)
   }
   const cell = (track: Track, column: ColumnKey) => {
+    if (column === 'track') return <span key={column}>{track.trackNo ?? ''}</span>
     if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.name}{selectedId === track.id && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
     if (column === 'time') return <span key={column}>{formatTime(track.durationSecs)}</span>
     if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
@@ -717,8 +745,12 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, 
     if (column === 'genre') return <span key={column} title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
     return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
   }
-  return <div className="track-list">
-    <div className="track-row track-header" style={{ gridTemplateColumns: columns }}><span />{columnOrder.map((column) => <span key={column} draggable className={dragging === column ? 'dragging' : ''} onDragStart={(event) => {
+  return <div className="track-list" ref={list}>
+    <div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
+      event.preventDefault()
+      const bounds = list.current?.getBoundingClientRect()
+      setMenu({ x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0) })
+    }}><span />{visibleColumns.map((column) => <span key={column} draggable className={dragging === column ? 'dragging' : ''} onDragStart={(event) => {
       setDragging(column)
       event.dataTransfer.effectAllowed = 'move'
     }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}>{headings[column]}</span>)}</div>
@@ -727,10 +759,15 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, onSelect, 
         const isPlaying = playing?.trackId === track.id
         return <div key={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
-          {columnOrder.map((column) => cell(track, column))}
+          {visibleColumns.map((column) => cell(track, column))}
         </div>
       })}
     </div>
+    {menu && <div className="column-menu" style={{ left: menu.x, top: menu.y }}>
+      {columnOrder.map((column) => <label key={column}><input type="checkbox" checked={!hiddenColumns.includes(column)} disabled={column === 'name'} onChange={(event) => onHiddenColumns(event.target.checked
+        ? hiddenColumns.filter((hidden) => hidden !== column)
+        : [...hiddenColumns, column])} />{headings[column]}</label>)}
+    </div>}
   </div>
 }
 
@@ -790,8 +827,9 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
   </div>
 }
 
-function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (autoAdd: boolean, clientId: string) => void }) {
+function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCancel: () => void; onSave: (autoAdd: boolean, autoConnect: boolean, clientId: string) => void }) {
   const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
+  const [autoConnect, setAutoConnect] = useState(settings.autoConnect)
   const [clientId, setClientId] = useState(settings.spotifyClientId)
   const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => { dialog.current?.focus() }, [])
@@ -802,9 +840,10 @@ function Preferences({ settings, onCancel, onSave }: { settings: Settings; onCan
         <legend>Library</legend>
         <label>Spotify Client ID<input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
         <label className="checkbox"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} />Automatically add my entire Spotify library</label>
+        <label className="checkbox"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} />Connect to Spotify automatically at launch</label>
         <p>Keep pulling in music you add on Spotify each time Retune starts.</p>
       </fieldset>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd, clientId.trim())}>Save</button></div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(autoAdd, autoConnect, clientId.trim())}>Save</button></div>
     </div>
   </div>
 }

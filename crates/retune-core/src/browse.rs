@@ -83,8 +83,7 @@ pub fn facets(library: &Library, source: SourceId, selection: &Selection) -> Fac
 }
 
 /// The track list for the current intersection of selections, in stable
-/// browse order: artist, then album, then library insertion order (proxy for
-/// track number until providers supply one).
+/// browse order: artist, album, disc, track, then library insertion order.
 pub fn tracks<'a>(
     library: &'a Library,
     source: SourceId,
@@ -105,6 +104,10 @@ pub fn tracks<'a>(
             .to_lowercase()
             .cmp(&right.art.to_lowercase())
             .then_with(|| left.alb.to_lowercase().cmp(&right.alb.to_lowercase()))
+            .then_with(|| left.disc_no.is_none().cmp(&right.disc_no.is_none()))
+            .then_with(|| left.disc_no.cmp(&right.disc_no))
+            .then_with(|| left.track_no.is_none().cmp(&right.track_no.is_none()))
+            .then_with(|| left.track_no.cmp(&right.track_no))
     });
     tracks
 }
@@ -141,6 +144,8 @@ mod tests {
             alb: alb.into(),
             name: uri.into(),
             duration: Duration::ZERO,
+            track_no: None,
+            disc_no: None,
         });
     }
 
@@ -228,5 +233,34 @@ mod tests {
             .map(|track| track.uri.as_str())
             .collect();
         assert_eq!(uris, ["4", "5"]);
+    }
+
+    #[test]
+    fn tracks_sort_by_disc_and_track_with_missing_numbers_last() {
+        let mut library = Library::new();
+        for (uri, disc_no, track_no) in [
+            ("missing", None, None),
+            ("d2t1", Some(2), Some(1)),
+            ("d1t2", Some(1), Some(2)),
+            ("d1t1", Some(1), Some(1)),
+        ] {
+            library.add(NewTrack {
+                uri: uri.into(),
+                source: SourceId::Music,
+                cat: "Rock".into(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                name: uri.into(),
+                duration: Duration::ZERO,
+                track_no,
+                disc_no,
+            });
+        }
+
+        let uris: Vec<_> = tracks(&library, SourceId::Music, &Selection::default())
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect();
+        assert_eq!(uris, ["d1t1", "d1t2", "d2t1", "missing"]);
     }
 }

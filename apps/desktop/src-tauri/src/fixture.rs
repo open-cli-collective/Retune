@@ -249,6 +249,8 @@ fn add(
         alb: alb.into(),
         name: name.into(),
         duration: Duration::from_secs(seconds),
+        track_no: None,
+        disc_no: None,
     })
 }
 
