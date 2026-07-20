@@ -189,3 +189,41 @@ Codex (`gpt-5.6-sol` medium) implements per-phase work orders with tests; smalle
 models (`terra`/`luna`) take mechanical tasks (CI yaml, fixtures, docs). Claude is the
 architect: writes/reviews every boundary, owns merges into `attempt-1`, and runs the
 verification checks — doers never self-certify.
+
+## Librespot playback backend (amendment, 2026-07-20)
+
+User decision: embed librespot so Retune plays audio itself — no Spotify desktop
+app required. Connect-based remote control stays as a fallback backend.
+
+### Boundary
+`PlayerBackend` trait in the app layer (playback module) with the async command
+surface `play(snapshot, start_index) / toggle / next / prev / seek / set_volume`.
+Each backend owns emitting `player-state` events; the frontend contract is
+unchanged. Two impls:
+- `ConnectBackend`: today's engine (snapshot queue, 1s poll authority, epoch
+  guard, `resolve()` decision fn). Machinery is Connect-specific and stays here.
+- `LocalBackend`: librespot Session + Player. Authoritative *push* events
+  (EndOfTrack, position, pause) replace polling entirely. Queue advance is our
+  explicit call on EndOfTrack — same snapshot semantics, no Spotify queue.
+
+### Auth
+librespot cannot use our Web API app token: it needs streaming credentials via
+its own OAuth client (librespot-oauth, localhost redirect). One extra consent in
+the browser, then librespot's credential cache (under app_data_dir/librespot/)
+makes it silent forever. Fully separate from the Keychain/dev-token story.
+Premium is required; surface a clear error otherwise.
+
+### Selection & risk posture
+`Settings.playback_backend: "connect" | "local"`. librespot is a
+reverse-engineered protocol Spotify does not sanction: auth paths have broken
+before and account risk is nonzero — this is why Connect fallback is retained
+and why the toggle is explicit in Preferences.
+
+### Phases
+- L-A Spike: oauth consent → Session → play one hardcoded URI to default
+  output, behind a debug-only menu item. Proves auth + audio on macOS.
+- L-B Full LocalBackend: command surface, queue advance, volume (softvol),
+  position ticks → `player-state` events; Preferences toggle; Connect remains
+  default.
+- L-C Default flip to local once L-B is verified empirically; Connect stays
+  selectable.
