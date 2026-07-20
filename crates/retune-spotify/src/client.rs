@@ -326,14 +326,43 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             .map(|response| response.devices)
     }
 
-    pub async fn play(&self, device_id: Option<&str>, uris: &[String]) -> Result<()> {
+    pub async fn play(
+        &self,
+        device_id: Option<&str>,
+        uris: &[String],
+        offset: usize,
+    ) -> Result<()> {
+        if offset >= uris.len() {
+            return Err(Error::InvalidRequest(
+                "play offset is outside the queue".into(),
+            ));
+        }
         let path = device_path("/me/player/play", device_id);
         self.empty(
             Method::Put,
             &path,
-            serde_json::to_vec(&serde_json::json!({ "uris": uris })).expect("play body serializes"),
+            serde_json::to_vec(&serde_json::json!({
+                "uris": uris,
+                "offset": { "position": offset }
+            }))
+            .expect("play body serializes"),
         )
         .await
+    }
+
+    pub async fn set_repeat(&self, state: &str, device_id: Option<&str>) -> Result<()> {
+        if !matches!(state, "off" | "context" | "track") {
+            return Err(Error::InvalidRequest("invalid repeat state".into()));
+        }
+        let path = {
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("state", state);
+            if let Some(device_id) = device_id {
+                query.append_pair("device_id", device_id);
+            }
+            format!("/me/player/repeat?{}", query.finish())
+        };
+        self.empty(Method::Put, &path, Vec::new()).await
     }
 
     pub async fn resume(&self, device_id: Option<&str>) -> Result<()> {
@@ -1021,6 +1050,7 @@ mod tests {
             Response::json(204, serde_json::json!(null)),
             Response::json(204, serde_json::json!(null)),
             Response::json(200, serde_json::json!(null)),
+            Response::json(200, serde_json::json!(null)),
         ]);
         let client = SpotifyClient::new("client", transport, tokens());
         let devices = client.devices().await.unwrap();
@@ -1028,7 +1058,15 @@ mod tests {
         assert!(devices[0].is_active);
         assert!(!devices[0].is_restricted);
         client
-            .play(Some("desk & one"), &["spotify:track:1".into()])
+            .play(
+                Some("desk & one"),
+                &["spotify:track:1".into(), "spotify:track:2".into()],
+                1,
+            )
+            .await
+            .unwrap();
+        client
+            .set_repeat("context", Some("desk & one"))
             .await
             .unwrap();
         client.resume(None).await.unwrap();
@@ -1045,21 +1083,33 @@ mod tests {
                 .url
                 .ends_with("/me/player/play?device_id=desk+%26+one")
         );
-        assert_eq!(requests[2].body, Vec::<u8>::new());
-        assert!(requests[3].url.ends_with("/me/player/pause"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap(),
+            serde_json::json!({
+                "uris": ["spotify:track:1", "spotify:track:2"],
+                "offset": { "position": 1 }
+            })
+        );
         assert!(
-            requests[4]
+            requests[2]
+                .url
+                .ends_with("/me/player/repeat?state=context&device_id=desk+%26+one")
+        );
+        assert_eq!(requests[3].body, Vec::<u8>::new());
+        assert!(requests[4].url.ends_with("/me/player/pause"));
+        assert!(
+            requests[5]
                 .url
                 .ends_with("/me/player/volume?volume_percent=42&device_id=desk+%26+one")
         );
-        assert_eq!(requests[5].url, format!("{API_BASE}/me/player"));
-        let url = url::Url::parse(&requests[6].url).unwrap();
+        assert_eq!(requests[6].url, format!("{API_BASE}/me/player"));
+        let url = url::Url::parse(&requests[7].url).unwrap();
         assert_eq!(url.path(), "/v1/me/library");
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
             [("uris".into(), "spotify:album:1".into())]
         );
-        assert!(requests[6].body.is_empty());
+        assert!(requests[7].body.is_empty());
     }
 
     #[tokio::test]

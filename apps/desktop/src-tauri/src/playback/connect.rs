@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use retune_spotify::{
     client::{Device, PlayerState, SpotifyClient, Transport},
@@ -7,6 +7,9 @@ use retune_spotify::{
 use tokio::sync::mpsc;
 
 use super::{LiveClient, NeutralEvent, NeutralState, Snapshot, SnapshotTrack};
+
+const MAX_QUEUE_URIS: usize = 200;
+static QUEUE_CAP_WARNING: Once = Once::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolledState {
@@ -49,6 +52,17 @@ pub fn resolve(prev: PolledState, now: PolledState, expected: &Snapshot) -> Play
     }
     if now.track_id.as_deref() == Some(expected.current().uri.as_str()) {
         return PlaybackDecision::Tick;
+    }
+    if now.track_id.as_ref().is_some_and(|uri| {
+        expected
+            .tracks
+            .iter()
+            .any(|track| track.uri.as_str() == uri)
+    }) {
+        return PlaybackDecision::Advance;
+    }
+    if now.track_id.is_some() {
+        return PlaybackDecision::Takeover;
     }
     if near_end(&prev) {
         terminal()
@@ -99,9 +113,10 @@ impl ConnectBackend {
         &self,
         client: Arc<LiveClient>,
         snapshot: Snapshot,
+        repeat: &str,
     ) -> Result<(), String> {
         let event = self
-            .begin(client.as_ref(), snapshot.tracks, snapshot.index)
+            .begin(client.as_ref(), snapshot.tracks, snapshot.index, repeat)
             .await?;
         let generation = self
             .state
@@ -124,6 +139,7 @@ impl ConnectBackend {
         client: &SpotifyClient<T, S>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
+        repeat: &str,
     ) -> Result<NeutralState, String> {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
@@ -131,9 +147,10 @@ impl ConnectBackend {
         let device = select_device(client.devices().await.map_err(|error| error.to_string())?)?;
         let device_id = device.id.expect("selected devices have ids");
         client
-            .play(Some(&device_id), &[tracks[index].uri.clone()])
+            .set_repeat(connect_repeat(repeat)?, Some(&device_id))
             .await
             .map_err(|error| error.to_string())?;
+        play_snapshot(client, &device_id, &tracks, index).await?;
         let mut state = self.state.lock().await;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
@@ -223,13 +240,13 @@ impl ConnectBackend {
             return Ok(empty_state());
         }
         context.snapshot.index = next;
-        client
-            .play(
-                Some(&context.device_id),
-                &[context.snapshot.current().uri.clone()],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        play_snapshot(
+            client,
+            &context.device_id,
+            &context.snapshot.tracks,
+            context.snapshot.index,
+        )
+        .await?;
         context.epoch = context.epoch.wrapping_add(1);
         context.previous = PolledState {
             track_id: Some(context.snapshot.current().uri.clone()),
@@ -277,6 +294,25 @@ impl ConnectBackend {
             .map_err(|error| error.to_string())
     }
 
+    async fn set_repeat_state<T: Transport, S: TokenStore>(
+        &self,
+        client: &SpotifyClient<T, S>,
+        repeat: &str,
+    ) -> Result<(), String> {
+        let state = self.state.lock().await;
+        let Some(context) = state
+            .context
+            .as_ref()
+            .filter(|context| context.previous.is_playing)
+        else {
+            return Ok(());
+        };
+        client
+            .set_repeat(connect_repeat(repeat)?, Some(&context.device_id))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn clear(&self) {
         self.state.lock().await.context = None;
     }
@@ -305,6 +341,14 @@ impl ConnectBackend {
         volume: u8,
     ) -> Result<(), String> {
         self.set_volume(client, volume).await
+    }
+
+    pub(super) async fn set_live_repeat(
+        &self,
+        client: &LiveClient,
+        repeat: &str,
+    ) -> Result<(), String> {
+        self.set_repeat_state(client, repeat).await
     }
 
     pub(super) async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
@@ -376,28 +420,48 @@ impl ConnectBackend {
                     )
                 }
                 PlaybackDecision::Advance => {
-                    context.snapshot.index += 1;
-                    if let Err(error) = client
-                        .play(
-                            Some(&context.device_id),
-                            &[context.snapshot.current().uri.clone()],
+                    let previous_index = context.snapshot.index;
+                    let polled_index = now.track_id.as_ref().and_then(|uri| {
+                        context
+                            .snapshot
+                            .tracks
+                            .iter()
+                            .position(|track| &track.uri == uri)
+                    });
+                    context.snapshot.index = polled_index
+                        .filter(|index| *index != previous_index)
+                        .unwrap_or(previous_index + 1);
+                    if polled_index == Some(previous_index) || polled_index.is_none() {
+                        if let Err(error) = play_snapshot(
+                            client.as_ref(),
+                            &context.device_id,
+                            &context.snapshot.tracks,
+                            context.snapshot.index,
                         )
                         .await
-                    {
-                        let _ = self.events.send(NeutralEvent::Error {
-                            generation: self.backend_generation,
-                            message: error.to_string(),
-                        });
-                        state.context = None;
-                        return;
+                        {
+                            let _ = self.events.send(NeutralEvent::Error {
+                                generation: self.backend_generation,
+                                message: error,
+                            });
+                            state.context = None;
+                            return;
+                        }
+                        context.previous = PolledState {
+                            track_id: Some(context.snapshot.current().uri.clone()),
+                            elapsed: 0,
+                            is_playing: true,
+                            device_present: true,
+                        };
+                    } else {
+                        context.previous = now;
                     }
-                    context.previous = PolledState {
-                        track_id: Some(context.snapshot.current().uri.clone()),
-                        elapsed: 0,
-                        is_playing: true,
-                        device_present: true,
-                    };
-                    local_state(&context.snapshot, 0, true, context.volume_supported)
+                    local_state(
+                        &context.snapshot,
+                        context.previous.elapsed,
+                        context.previous.is_playing,
+                        context.volume_supported,
+                    )
                 }
                 PlaybackDecision::Stop => {
                     let _ = client.pause(Some(&context.device_id)).await;
@@ -419,6 +483,47 @@ impl ConnectBackend {
             }
         }
     }
+}
+
+fn connect_repeat(repeat: &str) -> Result<&'static str, String> {
+    match repeat {
+        "off" => Ok("off"),
+        "all" => Ok("context"),
+        "one" => Ok("track"),
+        _ => Err("repeat must be off, all, or one".into()),
+    }
+}
+
+fn queue_request(tracks: &[SnapshotTrack], index: usize) -> (Vec<String>, usize) {
+    let start = if tracks.len() > MAX_QUEUE_URIS {
+        index
+    } else {
+        0
+    };
+    let uris = tracks[start..]
+        .iter()
+        .take(MAX_QUEUE_URIS)
+        .map(|track| track.uri.clone())
+        .collect();
+    (uris, index - start)
+}
+
+async fn play_snapshot<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    device_id: &str,
+    tracks: &[SnapshotTrack],
+    index: usize,
+) -> Result<(), String> {
+    if tracks.len() > MAX_QUEUE_URIS {
+        QUEUE_CAP_WARNING.call_once(|| {
+            log::warn!("Spotify Connect queue capped at {MAX_QUEUE_URIS} tracks");
+        });
+    }
+    let (uris, offset) = queue_request(tracks, index);
+    client
+        .play(Some(device_id), &uris, offset)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn select_device(devices: Vec<Device>) -> Result<Device, String> {
@@ -552,7 +657,7 @@ mod tests {
         assert_eq!(
             resolve(
                 polled(Some("spotify:track:1"), 96, true),
-                polled(Some("spotify:track:else"), 0, true),
+                polled(Some("spotify:track:2"), 0, true),
                 &snapshot(0),
             ),
             PlaybackDecision::Advance
@@ -649,15 +754,30 @@ mod tests {
     }
 
     #[test]
-    fn end_of_snapshot_stops() {
+    fn end_of_snapshot_takeover_is_external() {
         assert_eq!(
             resolve(
                 polled(Some("spotify:track:2"), 99, true),
                 polled(Some("spotify:track:else"), 0, true),
                 &snapshot(1),
             ),
-            PlaybackDecision::Stop
+            PlaybackDecision::Takeover
         );
+    }
+
+    #[test]
+    fn capped_queue_starts_at_selected_track_and_resets_offset() {
+        let tracks = (0..250).map(|id| track(id, 100)).collect::<Vec<_>>();
+        let (uris, offset) = queue_request(&tracks, 25);
+        assert_eq!(uris.len(), 200);
+        assert_eq!(uris.first().map(String::as_str), Some("spotify:track:25"));
+        assert_eq!(uris.last().map(String::as_str), Some("spotify:track:224"));
+        assert_eq!(offset, 0);
+
+        let short = &tracks[..100];
+        let (uris, offset) = queue_request(short, 25);
+        assert_eq!(uris.len(), 100);
+        assert_eq!(offset, 25);
     }
 
     #[test]
@@ -671,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_prefers_active_desktop_and_plays_explicit_track() {
+    async fn start_prefers_active_desktop_and_plays_full_queue_at_offset() {
         let transport = FakeTransport::new([
             Response::json(
                 200,
@@ -680,6 +800,7 @@ mod tests {
                     {"id": "active", "name": "Active", "is_restricted": false, "type": "Computer", "is_active": true, "supports_volume": true}
                 ]}),
             ),
+            Response::json(204, serde_json::Value::Null),
             Response::json(204, serde_json::Value::Null),
         ]);
         let client = SpotifyClient::new(
@@ -694,7 +815,7 @@ mod tests {
         );
         let playback = Playback::default();
         let event = playback
-            .begin(&client, vec![track(1, 100)], 0)
+            .begin(&client, vec![track(1, 100), track(2, 100)], 1, "all")
             .await
             .unwrap();
 
@@ -702,10 +823,16 @@ mod tests {
         let requests = client.transport().requests();
         assert!(requests[1]
             .url
+            .ends_with("/me/player/repeat?state=context&device_id=active"));
+        assert!(requests[2]
+            .url
             .ends_with("/me/player/play?device_id=active"));
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap(),
-            serde_json::json!({"uris": ["spotify:track:1"]})
+            serde_json::from_slice::<serde_json::Value>(&requests[2].body).unwrap(),
+            serde_json::json!({
+                "uris": ["spotify:track:1", "spotify:track:2"],
+                "offset": {"position": 1}
+            })
         );
     }
 
@@ -730,7 +857,7 @@ mod tests {
         );
 
         let error = Playback::default()
-            .begin(&client, vec![track(1, 100)], 0)
+            .begin(&client, vec![track(1, 100)], 0, "off")
             .await
             .unwrap_err();
         assert_eq!(error, "Open Spotify on your desktop");
@@ -745,7 +872,7 @@ mod tests {
                 "type": "Computer", "is_active": true, "supports_volume": true
             }]}),
         )];
-        responses.extend((0..8).map(|_| Response::json(204, serde_json::Value::Null)));
+        responses.extend((0..9).map(|_| Response::json(204, serde_json::Value::Null)));
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new(responses),
@@ -758,7 +885,7 @@ mod tests {
         );
         let playback = Playback::default();
         playback
-            .begin(&client, vec![track(1, 100), track(2, 100)], 0)
+            .begin(&client, vec![track(1, 100), track(2, 100)], 0, "off")
             .await
             .unwrap();
 
@@ -780,13 +907,30 @@ mod tests {
         assert_eq!(playback.next(&client).await.unwrap().uri, None);
 
         let requests = client.transport().requests();
-        assert!(requests[2].url.ends_with("/me/player/pause?device_id=desk"));
-        assert!(requests[3].url.ends_with("/me/player/play?device_id=desk"));
-        assert_eq!(requests[3].body, Vec::<u8>::new());
+        assert!(requests[1]
+            .url
+            .ends_with("/me/player/repeat?state=off&device_id=desk"));
+        assert!(requests[3].url.ends_with("/me/player/pause?device_id=desk"));
         assert!(requests[4].url.ends_with("/me/player/play?device_id=desk"));
-        assert!(requests[6]
+        assert_eq!(requests[4].body, Vec::<u8>::new());
+        assert!(requests[5].url.ends_with("/me/player/play?device_id=desk"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[5].body).unwrap(),
+            serde_json::json!({
+                "uris": ["spotify:track:1", "spotify:track:2"],
+                "offset": {"position": 1}
+            })
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[6].body).unwrap(),
+            serde_json::json!({
+                "uris": ["spotify:track:1", "spotify:track:2"],
+                "offset": {"position": 0}
+            })
+        );
+        assert!(requests[7]
             .url
             .ends_with("/me/player/volume?volume_percent=42&device_id=desk"));
-        assert!(requests[8].url.ends_with("/me/player/pause?device_id=desk"));
+        assert!(requests[9].url.ends_with("/me/player/pause?device_id=desk"));
     }
 }

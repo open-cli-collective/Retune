@@ -90,6 +90,8 @@ pub struct Settings {
     pub last_full_sync: Option<u64>,
     #[serde(default = "default_playback_backend")]
     pub playback_backend: String,
+    #[serde(default = "default_repeat")]
+    pub repeat: String,
     #[serde(default = "default_volume")]
     pub volume: u8,
 }
@@ -104,6 +106,10 @@ fn default_playback_backend() -> String {
 
 fn default_volume() -> u8 {
     62
+}
+
+fn default_repeat() -> String {
+    "off".into()
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -132,6 +138,7 @@ impl Default for Settings {
             spotify_sync_completed: false,
             last_full_sync: None,
             playback_backend: default_playback_backend(),
+            repeat: default_repeat(),
             volume: default_volume(),
         }
     }
@@ -177,6 +184,11 @@ impl Settings {
         if !matches!(self.playback_backend.as_str(), "connect" | "local") {
             return Err(StoreError::InvalidSettings(
                 "settings playbackBackend must be connect or local",
+            ));
+        }
+        if !matches!(self.repeat.as_str(), "off" | "all" | "one") {
+            return Err(StoreError::InvalidSettings(
+                "settings repeat must be off, all, or one",
             ));
         }
         if self.volume > 100 {
@@ -421,6 +433,7 @@ mod tests {
             spotify_sync_completed: true,
             last_full_sync: Some(42),
             playback_backend: "local".into(),
+            repeat: "all".into(),
             volume: 40,
         };
 
@@ -486,6 +499,7 @@ mod tests {
         assert_eq!(settings.column_order[0], "track");
         assert_eq!(settings.column_order.len(), 7);
         assert_eq!(settings.playback_backend, "connect");
+        assert_eq!(settings.repeat, "off");
         assert_eq!(settings.volume, 62);
     }
 
@@ -500,6 +514,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(settings.playback_backend, "connect");
+        assert_eq!(settings.repeat, "off");
+    }
+
+    #[test]
+    fn invalid_repeat_is_rejected() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.repeat, "off");
+        settings.repeat = "sometimes".into();
+        assert!(settings.validate().is_err());
     }
 
     #[test]

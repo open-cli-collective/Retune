@@ -7,6 +7,7 @@ import './App.css'
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
 type PlaybackBackend = 'connect' | 'local'
+type RepeatMode = 'off' | 'all' | 'one'
 type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
 type Selection = { cat?: string; art?: string; alb?: string }
 type ActivePane = 'track' | keyof Selection
@@ -22,6 +23,7 @@ type Settings = {
   spotifyClientId: string
   spotifySyncCompleted: boolean
   playbackBackend: PlaybackBackend
+  repeat: RepeatMode
   volume: number
 }
 
@@ -155,6 +157,7 @@ const defaultSettings: Settings = {
   spotifyClientId: '',
   spotifySyncCompleted: false,
   playbackBackend: 'connect',
+  repeat: 'off',
   volume: 62,
 }
 
@@ -350,6 +353,12 @@ function App() {
   const tracklistVisible = state.scope !== 'spotify' || !state.query.trim()
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
+  const cycleRepeat = () => {
+    const repeat: RepeatMode = state.settings.repeat === 'off' ? 'all' : state.settings.repeat === 'all' ? 'one' : 'off'
+    invoke('set_repeat', { mode: repeat })
+      .then(() => dispatch({ type: 'settings', settings: { repeat } }))
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }
   const openInfo = (id?: number) => {
     if (selectedTracks.length > 1) {
       dispatch({ type: 'info', info: { kind: 'multiple', tracks: selectedTracks } })
@@ -389,7 +398,20 @@ function App() {
     if (!state.settingsHydrated) return
     invoke('set_settings', { settings: state.settings })
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
-  }, [state.settings, state.settingsHydrated])
+  }, [
+    state.settings.theme,
+    state.settings.zoom,
+    state.settings.zebra,
+    state.settings.columnOrder,
+    state.settings.hiddenColumns,
+    state.settings.autoAddSpotifyLibrary,
+    state.settings.autoConnect,
+    state.settings.spotifyClientId,
+    state.settings.spotifySyncCompleted,
+    state.settings.playbackBackend,
+    state.settings.volume,
+    state.settingsHydrated,
+  ])
 
   useEffect(() => {
     const unlisten = listen('get-info', () => openInfo())
@@ -583,12 +605,14 @@ function App() {
         theme={state.settings.theme}
         connected={state.connected}
         volume={state.settings.volume}
+        repeat={state.settings.repeat}
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
         onScope={(scope) => dispatch({ type: 'scope', scope })}
         onPlay={player.toggle}
         onPrev={() => player.step(-1)}
         onNext={() => player.step(1)}
+        onRepeat={cycleRepeat}
         onVolume={player.setVolume}
         onSeek={player.seek}
         onTheme={cycleTheme}
@@ -680,12 +704,12 @@ function App() {
   )
 }
 
-function TransportBar({ playing, track, query, scope, theme, connected, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onTheme }: {
+function TransportBar({ playing, track, query, scope, theme, connected, volume, repeat, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onRepeat, onVolume, onSeek, onTheme }: {
   playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
-  connected: boolean; volume: number
+  connected: boolean; volume: number; repeat: RepeatMode
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
-  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onTheme: () => void
+  onPlay: () => void; onPrev: () => void; onNext: () => void; onRepeat: () => void; onVolume: (volume: number) => void; onTheme: () => void
 }) {
   const elapsed = playing?.elapsed ?? 0
   const shown = playing?.external ? {
@@ -701,6 +725,7 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
       <button aria-label="Previous track" onClick={onPrev}>◀◀</button>
       <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '❚❚' : '▶'}</button>
       <button aria-label="Next track" onClick={onNext}>▶▶</button>
+      <button className={`repeat-button ${repeat !== 'off' ? 'active' : ''}`} aria-label={`Repeat: ${repeat}`} title={`Repeat: ${repeat}`} onClick={onRepeat}>⟳{repeat === 'one' && <sup>1</sup>}</button>
       {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" defaultValue={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
     </div>
     <div className="lcd">

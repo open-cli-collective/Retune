@@ -7,6 +7,7 @@ pub(super) enum ReducerAction {
     Emit(PlayerStateEvent),
     Error(String),
     Advance,
+    Reload,
     Invalidate,
 }
 
@@ -25,6 +26,7 @@ pub(super) struct EventReducer {
     latest_intent: Option<u64>,
     pending: VecDeque<LoadIntent>,
     bindings: HashMap<u64, LoadIntent>,
+    repeat: String,
 }
 
 impl Default for EventReducer {
@@ -37,6 +39,7 @@ impl Default for EventReducer {
             latest_intent: None,
             pending: VecDeque::new(),
             bindings: HashMap::new(),
+            repeat: "off".into(),
         }
     }
 }
@@ -63,6 +66,14 @@ impl EventReducer {
 
     pub(super) fn state(&self) -> &PlayerStateEvent {
         &self.state
+    }
+
+    pub(super) fn repeat(&self) -> &str {
+        &self.repeat
+    }
+
+    pub(super) fn set_repeat(&mut self, repeat: &str) {
+        self.repeat = repeat.to_owned();
     }
 
     pub(super) fn queue_load(&mut self, uri: &str, playing: bool) {
@@ -181,7 +192,11 @@ impl EventReducer {
                 request_id, uri, ..
             } => self
                 .accepts(request_id, &uri)
-                .then_some(vec![ReducerAction::Advance])
+                .then_some(vec![if self.repeat == "one" {
+                    ReducerAction::Reload
+                } else {
+                    ReducerAction::Advance
+                }])
                 .unwrap_or_default(),
         }
     }
@@ -388,6 +403,38 @@ mod tests {
             }),
             [ReducerAction::Advance]
         );
+    }
+
+    #[test]
+    fn repeat_one_reloads_same_track_on_end() {
+        let mut reducer = reducer();
+        reducer.set_repeat("one");
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        assert_eq!(
+            reducer.handle(NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            }),
+            [ReducerAction::Reload]
+        );
+    }
+
+    #[test]
+    fn unavailable_advances_under_repeat_one() {
+        let mut reducer = reducer();
+        reducer.set_repeat("one");
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::Unavailable {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                })
+                .as_slice(),
+            [ReducerAction::Error(_), ReducerAction::Advance]
+        ));
     }
 
     #[test]

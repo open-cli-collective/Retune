@@ -1076,6 +1076,25 @@ async fn player_set_volume(app: tauri::AppHandle, volume: u8) -> Result<(), Stri
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn set_repeat(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state).ok();
+    state.playback.set_repeat(client.as_deref(), &mode).await?;
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    settings.repeat = mode;
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings;
+    Ok(())
+}
+
 fn mutate_library<T>(
     state: &AppState,
     mutation: impl FnOnce(&mut Library) -> Result<T, String>,
@@ -1420,7 +1439,8 @@ pub fn run() {
             player_next,
             player_prev,
             player_seek,
-            player_set_volume
+            player_set_volume,
+            set_repeat
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -1492,7 +1512,7 @@ pub fn run() {
             }
             let activate_local = connected && settings.playback_backend == "local";
             let initial_volume = settings.volume;
-            let playback = Arc::new(Playback::default());
+            let playback = Arc::new(Playback::new(&settings.repeat));
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -1639,6 +1659,7 @@ mod tests {
             spotify_sync_completed: true,
             last_full_sync: Some(42),
             playback_backend: "local".into(),
+            repeat: "all".into(),
             volume: 40,
         };
         let bytes = export_with_settings(&library, &exported, true).unwrap();

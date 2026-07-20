@@ -170,9 +170,14 @@ impl PlayerBackend {
         matches!(self, Self::Local(_))
     }
 
-    async fn play(&mut self, client: Arc<LiveClient>, snapshot: Snapshot) -> Result<(), String> {
+    async fn play(
+        &mut self,
+        client: Arc<LiveClient>,
+        snapshot: Snapshot,
+        repeat: &str,
+    ) -> Result<(), String> {
         match self {
-            Self::Connect(backend) => backend.play(client, snapshot).await,
+            Self::Connect(backend) => backend.play(client, snapshot, repeat).await,
             Self::Local(backend) => backend.play(snapshot, true, 0),
         }
     }
@@ -184,27 +189,12 @@ impl PlayerBackend {
         }
     }
 
-    async fn next(
-        &mut self,
-        client: &LiveClient,
-        reducer: &mut EventReducer,
-    ) -> Result<(), String> {
-        self.step(client, reducer, 1).await
-    }
-
-    async fn prev(
-        &mut self,
-        client: &LiveClient,
-        reducer: &mut EventReducer,
-    ) -> Result<(), String> {
-        self.step(client, reducer, -1).await
-    }
-
     async fn step(
         &mut self,
         client: &LiveClient,
         reducer: &mut EventReducer,
         direction: i8,
+        wrap: bool,
     ) -> Result<(), String> {
         match self {
             Self::Connect(backend) => backend.step(client, direction).await,
@@ -212,15 +202,11 @@ impl PlayerBackend {
                 let Some(snapshot) = reducer.snapshot_mut() else {
                     return Err("Nothing is playing".into());
                 };
-                let next = if direction < 0 {
-                    snapshot.index.saturating_sub(1)
-                } else {
-                    snapshot.index + 1
-                };
-                if next >= snapshot.tracks.len() {
+                let Some(next) = step_index(snapshot.index, snapshot.tracks.len(), direction, wrap)
+                else {
                     backend.stop();
                     return Ok(());
-                }
+                };
                 if reject_chapter(&snapshot.tracks[next].uri) {
                     return Err(AUDIOBOOK_ERROR.into());
                 }
@@ -244,6 +230,27 @@ impl PlayerBackend {
         match self {
             Self::Connect(backend) => backend.set_live_volume(client, volume).await,
             Self::Local(backend) => backend.set_volume(volume),
+        }
+    }
+
+    async fn set_repeat(
+        &mut self,
+        client: Option<&LiveClient>,
+        repeat: &str,
+    ) -> Result<(), String> {
+        match (self, client) {
+            (Self::Connect(backend), Some(client)) => backend.set_live_repeat(client, repeat).await,
+            _ => Ok(()),
+        }
+    }
+
+    fn reload(&mut self, reducer: &mut EventReducer) -> Result<(), String> {
+        let snapshot = reducer.snapshot().cloned().ok_or("Nothing is playing")?;
+        let uri = snapshot.current().uri.clone();
+        reducer.queue_load(&uri, true);
+        match self {
+            Self::Local(backend) => backend.play(snapshot, true, 0),
+            Self::Connect(_) => Err("Connect repeat is controlled by Spotify".into()),
         }
     }
 
@@ -273,10 +280,17 @@ pub struct Playback {
 
 impl Default for Playback {
     fn default() -> Self {
+        Self::new("off")
+    }
+}
+
+impl Playback {
+    pub fn new(repeat: &str) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
         let generation = 1;
         let mut reducer = EventReducer::default();
         reducer.activate(generation);
+        reducer.set_repeat(repeat);
         Self {
             state: tokio::sync::Mutex::new(ControllerState {
                 backend: PlayerBackend::Connect(ConnectBackend::new(events.clone(), generation)),
@@ -288,9 +302,7 @@ impl Default for Playback {
             receiver: Mutex::new(Some(receiver)),
         }
     }
-}
 
-impl Playback {
     pub fn listen(self: &Arc<Self>, app: tauri::AppHandle) {
         let mut receiver = self
             .receiver
@@ -329,9 +341,13 @@ impl Playback {
         if matches!(state.backend, PlayerBackend::Local(_)) {
             state.reducer.set_snapshot(Some(snapshot.clone()));
             state.reducer.queue_load(&snapshot.current().uri, true);
-            state.backend.play(client, snapshot).await
+            state.backend.play(client, snapshot, "off").await
         } else {
-            state.backend.play(client, snapshot.clone()).await?;
+            let repeat = state.reducer.repeat().to_owned();
+            state
+                .backend
+                .play(client, snapshot.clone(), &repeat)
+                .await?;
             state.reducer.set_snapshot(Some(snapshot));
             Ok(())
         }
@@ -371,6 +387,20 @@ impl Playback {
         self.ensure_valid(&mut state, client).await?;
         state.backend.set_volume(client, volume).await?;
         state.volume = volume;
+        Ok(())
+    }
+
+    pub async fn set_repeat(
+        &self,
+        client: Option<&LiveClient>,
+        repeat: &str,
+    ) -> Result<(), String> {
+        if !matches!(repeat, "off" | "all" | "one") {
+            return Err("repeat must be off, all, or one".into());
+        }
+        let mut state = self.state.lock().await;
+        state.backend.set_repeat(client, repeat).await?;
+        state.reducer.set_repeat(repeat);
         Ok(())
     }
 
@@ -486,14 +516,11 @@ impl Playback {
         client: &LiveClient,
         direction: i8,
     ) -> Result<(), String> {
+        let wrap = direction > 0 && state.reducer.repeat() == "all";
         let ControllerState {
             backend, reducer, ..
         } = state;
-        if direction < 0 {
-            backend.prev(client, reducer).await
-        } else {
-            backend.next(client, reducer).await
-        }
+        backend.step(client, reducer, direction, wrap).await
     }
 
     async fn handle_event(&self, app: &tauri::AppHandle, event: NeutralEvent) {
@@ -519,6 +546,14 @@ impl Playback {
                         let _ = app.emit("operation-error", error);
                     }
                 }
+                ReducerAction::Reload => {
+                    let ControllerState {
+                        backend, reducer, ..
+                    } = &mut *state;
+                    if let Err(error) = backend.reload(reducer) {
+                        let _ = app.emit("operation-error", error);
+                    }
+                }
                 ReducerAction::Invalidate => {
                     state.generation = state.generation.wrapping_add(1);
                     let generation = state.generation;
@@ -529,6 +564,16 @@ impl Playback {
                 }
             }
         }
+    }
+}
+
+fn step_index(index: usize, len: usize, direction: i8, wrap: bool) -> Option<usize> {
+    if direction < 0 {
+        Some(index.saturating_sub(1))
+    } else if index + 1 < len {
+        Some(index + 1)
+    } else {
+        wrap.then_some(0)
     }
 }
 
@@ -587,5 +632,11 @@ mod tests {
     fn volume_mapping_endpoints_are_exact() {
         assert_eq!(local::soft_volume(0), 0);
         assert_eq!(local::soft_volume(100), u16::MAX);
+    }
+
+    #[test]
+    fn repeat_all_wraps_and_off_stops_at_queue_end() {
+        assert_eq!(step_index(1, 2, 1, true), Some(0));
+        assert_eq!(step_index(1, 2, 1, false), None);
     }
 }
