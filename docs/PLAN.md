@@ -220,18 +220,28 @@ prompts one re-consent. No librespot credential cache at all (no plaintext
 blob): a Session is created per run from our token, refresh stays in
 `SpotifyClient`.
 
-**Premium preflight is mandatory and fails closed**: librespot 0.8
-`process::exit(1)`s on non-Premium accounts, which embedded would kill Retune.
-`GET /me` product gates Session creation, but `product` is deprecated — treat
-missing/unknown as NOT premium (fail closed). The preflight is a stopgap, not
-the protection: before L-C, pin/patch librespot so a non-Premium session
-returns an error instead of exiting. Messaging: playback requires Premium on
-BOTH backends (Connect playback is Premium-only too) — a free account gets one
-honest error, not a fallback suggestion.
+**process::exit is a library-wide hazard, patched before L-B**:
+librespot-playback contains MULTIPLE `process::exit(1)` paths — non-Premium
+sessions, sink failures, internal-state errors — any of which would terminate
+Retune from a library thread; `Player::is_invalid` cannot observe a dead
+process. Before the local backend is EXPOSED at all (L-B, not L-C), we carry a
+maintained patch (git fork + `[patch.crates-io]`) that audits every reachable
+`process::exit` in librespot-core/-playback and converts them to error
+returns/events. L-A may run unpatched only because it is debug-gated and
+disposable.
+
+**Premium preflight is mandatory and fails closed**: `GET /me` product gates
+Session creation, but `product` is deprecated — treat missing/unknown as NOT
+premium (fail closed). Messaging: playback requires Premium on BOTH backends
+(Connect playback is Premium-only too) — a free account gets one honest
+error, not a fallback suggestion.
 
 Token records gain a `scopes` field (serde default empty = legacy grant) so
 the app can tell an old consent from an upgraded one; enabling the local
-backend with a legacy token triggers the one re-consent.
+backend with a legacy token triggers the one re-consent. The refresh path
+(client.rs `refresh_token` reconstructs the stored record) must carry
+`stored.scopes` forward — the canonical requested scope set is written at
+authorization and preserved verbatim on every refresh.
 
 ### Dependencies & lifecycle
 - `librespot-core` + `librespot-playback` only (NOT the umbrella crate —
@@ -249,22 +259,28 @@ backend with a legacy token triggers the one re-consent.
 ### Event mapping (L-B contract)
 Set `PlayerConfig.position_update_interval` (else `PositionChanged` never
 fires). Map `SpotifyUri` back to the snapshot URI then to the snapshot's local
-u64 id (never parse base62). Transition table (librespot event → emitted
-`PlayerStateEvent`), applied only when `play_request_id` matches the current
-generation — anything stale is discarded:
+u64 id (never parse base62). Staleness is a TWO-stage filter with independent
+counters: first the backend generation captured when the session was created
+(drops events from torn-down sessions), then librespot's own latest
+`PlayRequestIdChanged` value (drops events from superseded loads within the
+live session). Transition table (librespot event → emitted
+`PlayerStateEvent`) applied only to events passing both filters:
 
 | librespot event        | emitted state                                        |
 |------------------------|------------------------------------------------------|
-| Loading{uri}           | trackId=local(uri), elapsed=0, isPlaying=true        |
+| Loading{uri, position_ms} | trackId=local(uri), elapsed=position_ms, isPlaying preserves the requested intent (play vs paused-load) |
 | Playing{uri, pos}      | trackId=local(uri), elapsed=pos, isPlaying=true      |
 | Paused{uri, pos}       | same but isPlaying=false                             |
+| PositionChanged{pos}   | elapsed=pos, playing state unchanged                 |
 | Seeked{pos} / PositionCorrection{pos} | elapsed=pos, playing state unchanged  |
 | Unavailable{uri}       | `operation-error` for the track, then advance the queue (identical to EndOfTrack) — optimistic UI state reverts to the next track or empty |
 | Stopped                | empty player state                                   |
 | EndOfTrack             | backend advances the queue FIRST (loads next, same generation); no intermediate empty emission — the next Loading/Playing drives the UI; queue exhausted → empty state |
 
-Reducer tests cover: stale-generation discard, Unavailable advance + error,
-Stopped clear, natural advance ordering (no flicker-empty between tracks).
+Reducer tests cover: stale-generation discard, stale play_request_id discard
+within a live session, Unavailable advance + error, Stopped clear, natural
+advance ordering (no flicker-empty between tracks), Loading position
+preservation, and PositionChanged ticks.
 Volume: Retune 0..=100 → softmixer 0..=65535, initial volume applied from
 settings and persisted on change; soft volume attenuates in-app audio, not
 macOS system volume.
