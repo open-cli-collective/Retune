@@ -830,7 +830,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
             |deadline| {
                 format!(
                     "Partial import — will finish automatically after {}.",
-                    provider::format_resume_time(deadline)
+                    provider::format_resume_time(deadline, chrono::Local::now())
                 )
             },
         );
