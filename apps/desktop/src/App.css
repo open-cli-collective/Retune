@@ -103,6 +103,8 @@ button.spotify-row { cursor: default; }
 .genre-hint { margin: -3px 0 9px 86px; color: var(--dim); font-style: italic; }
 .info-rating { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
 .info-rating > span:first-child { width: 78px; }
+.bulk-rating > button { padding: 3px 7px; border: 1px solid var(--border); border-radius: 3px; color: var(--text); background: var(--control); }
+.bulk-rating > button.active { border-color: var(--accent); color: #fff; background: var(--accent); }
 .override-banner { margin: 10px 0; padding: 7px 9px; border: 1px solid #8bb4e9; border-radius: 3px; background: color-mix(in srgb, var(--accent) 13%, var(--list)); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .modal-actions button { min-width: 76px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--control); }

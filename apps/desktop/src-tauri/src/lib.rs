@@ -174,7 +174,7 @@ struct TrackInfoView {
     genres: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackEditDto {
     name: Option<String>,
@@ -439,31 +439,77 @@ fn edit_track(
     id: u64,
     edit: TrackEditDto,
 ) -> Result<(), String> {
+    let rating_change = rating_change(&edit)?;
     mutate_library(&state, |library| {
-        library
-            .edit(
-                TrackId(id),
-                TrackEdit {
-                    name: edit.name,
-                    art: edit.art,
-                    alb: edit.alb,
-                    cat: edit.cat,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        if let Some(change) = edit.rating_change {
-            let rating = change
+        apply_track_info(library, id, &edit, rating_change)
+    })
+}
+
+#[tauri::command]
+fn set_track_infos(app: tauri::AppHandle, ids: Vec<u64>, edit: TrackEditDto) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    mutate_library(&state, |library| apply_track_infos(library, &ids, &edit))?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+fn rating_change(edit: &TrackEditDto) -> Result<Option<Option<Rating>>, String> {
+    edit.rating_change
+        .as_ref()
+        .map(|change| {
+            change
                 .stars
                 .map(|stars| {
                     Rating::new(stars).ok_or_else(|| format!("invalid star rating {stars}"))
                 })
-                .transpose()?;
-            library
-                .set_track_rating(TrackId(id), rating)
-                .map_err(|error| error.to_string())?;
+                .transpose()
+        })
+        .transpose()
+}
+
+fn apply_track_info(
+    library: &mut Library,
+    id: u64,
+    edit: &TrackEditDto,
+    rating_change: Option<Option<Rating>>,
+) -> Result<(), String> {
+    library
+        .edit(
+            TrackId(id),
+            TrackEdit {
+                name: edit.name.clone(),
+                art: edit.art.clone(),
+                alb: edit.alb.clone(),
+                cat: edit.cat.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(rating) = rating_change {
+        library
+            .set_track_rating(TrackId(id), rating)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn apply_track_infos(
+    library: &mut Library,
+    ids: &[u64],
+    edit: &TrackEditDto,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("at least one track id is required".into());
+    }
+    for &id in ids {
+        if library.get(TrackId(id)).is_none() {
+            return Err(format!("unknown track id {id}"));
         }
-        Ok(())
-    })
+    }
+    let rating_change = rating_change(edit)?;
+    for &id in ids {
+        apply_track_info(library, id, edit, rating_change)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1358,6 +1404,7 @@ pub fn run() {
             set_album_rating,
             get_track,
             edit_track,
+            set_track_infos,
             startup_notice,
             get_settings,
             set_settings,
@@ -1635,6 +1682,92 @@ mod tests {
 
         let filtered = counts(&library, SourceId::Music, &Selection::default(), "bohemian");
         assert_eq!(filtered.tracks, 1);
+    }
+
+    #[test]
+    fn batch_edit_applies_category_and_preserves_each_original() {
+        let mut library = fixture::library();
+        let ids = library
+            .tracks()
+            .iter()
+            .take(2)
+            .map(|track| track.id.0)
+            .collect::<Vec<_>>();
+
+        apply_track_infos(
+            &mut library,
+            &ids,
+            &TrackEditDto {
+                cat: Some("Personal".into()),
+                ..TrackEditDto::default()
+            },
+        )
+        .unwrap();
+
+        for id in ids {
+            let track = library.get(TrackId(id)).unwrap();
+            assert_eq!(track.cat, "Personal");
+            assert_eq!(track.orig_cat.as_deref(), Some("Rock"));
+        }
+    }
+
+    #[test]
+    fn batch_edit_without_rating_change_leaves_ratings_unchanged() {
+        let mut library = fixture::library();
+        let ids = library
+            .tracks()
+            .iter()
+            .take(2)
+            .map(|track| track.id.0)
+            .collect::<Vec<_>>();
+        library
+            .set_track_rating(TrackId(ids[0]), Rating::new(2))
+            .unwrap();
+        library
+            .set_track_rating(TrackId(ids[1]), Rating::new(5))
+            .unwrap();
+
+        apply_track_infos(
+            &mut library,
+            &ids,
+            &TrackEditDto {
+                art: Some("Various Artists".into()),
+                ..TrackEditDto::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(library.get(TrackId(ids[0])).unwrap().rating, Rating::new(2));
+        assert_eq!(library.get(TrackId(ids[1])).unwrap().rating, Rating::new(5));
+    }
+
+    #[test]
+    fn batch_edit_with_unknown_id_is_atomic() {
+        let mut library = fixture::library();
+        let before = library.clone();
+        let known = library.tracks()[0].id.0;
+
+        let error = apply_track_infos(
+            &mut library,
+            &[known, u64::MAX],
+            &TrackEditDto {
+                cat: Some("Personal".into()),
+                ..TrackEditDto::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains(&u64::MAX.to_string()));
+        assert_eq!(library, before);
+    }
+
+    #[test]
+    fn batch_edit_rejects_empty_ids() {
+        let mut library = fixture::library();
+        let before = library.clone();
+
+        assert!(apply_track_infos(&mut library, &[], &TrackEditDto::default()).is_err());
+        assert_eq!(library, before);
     }
 
     #[test]

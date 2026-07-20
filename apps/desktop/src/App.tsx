@@ -88,6 +88,10 @@ type TrackInfo = {
   genres: string[]
 }
 
+type InfoDialog =
+  | { kind: 'single'; track: TrackInfo }
+  | { kind: 'multiple'; tracks: Track[] }
+
 const emptyTracks: Track[] = []
 
 type State = {
@@ -95,7 +99,8 @@ type State = {
   sel: Selection
   query: string
   scope: 'library' | 'spotify'
-  selectedTrackId?: number
+  selectedTrackIds: Set<number>
+  selectionAnchor?: number
   playing: Playing | null
   settings: Settings
   settingsHydrated: boolean
@@ -104,7 +109,7 @@ type State = {
   revision: number
   error?: string
   notice?: string
-  info?: TrackInfo
+  info?: InfoDialog
   preferences: boolean
   connected: boolean
   spotifyResults: SpotifyResults | null
@@ -120,6 +125,7 @@ type Action =
   | { type: 'query'; query: string }
   | { type: 'scope'; scope: State['scope'] }
   | { type: 'selectTrack'; id: number }
+  | { type: 'selection'; ids: Set<number>; anchor?: number }
   | { type: 'play'; id: number; queue: readonly Track[] }
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
@@ -131,7 +137,7 @@ type Action =
   | { type: 'systemTheme'; dark: boolean }
   | { type: 'refresh' }
   | { type: 'notice'; notice?: string }
-  | { type: 'info'; info?: TrackInfo }
+  | { type: 'info'; info?: InfoDialog }
   | { type: 'preferences'; open: boolean }
   | { type: 'connection'; connected: boolean }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
@@ -157,6 +163,7 @@ const initialState: State = {
   sel: {},
   query: '',
   scope: 'library',
+  selectedTrackIds: new Set(),
   playing: null,
   settings: defaultSettings,
   settingsHydrated: false,
@@ -176,25 +183,28 @@ function reducer(state: State, action: Action): State {
     case 'error':
       return { ...state, error: action.error }
     case 'source':
-      return { ...state, source: action.source, sel: {}, query: '', selectedTrackId: undefined }
+      return { ...state, source: action.source, sel: {}, query: '', selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
       const sel = action.facet === 'cat'
         ? { cat: action.value }
         : action.facet === 'art'
           ? { cat: state.sel.cat, art: action.value }
           : { ...state.sel, alb: action.value }
-      return { ...state, sel, selectedTrackId: undefined }
+      return { ...state, sel, selectedTrackIds: new Set(), selectionAnchor: undefined }
     }
     case 'query':
-      return { ...state, query: action.query, selectedTrackId: undefined }
+      return { ...state, query: action.query, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'scope':
       return { ...state, scope: action.scope }
     case 'selectTrack':
-      return { ...state, selectedTrackId: action.id }
+      return { ...state, selectedTrackIds: new Set([action.id]), selectionAnchor: action.id }
+    case 'selection':
+      return { ...state, selectedTrackIds: action.ids, selectionAnchor: action.anchor }
     case 'play':
       return {
         ...state,
-        selectedTrackId: action.id,
+        selectedTrackIds: new Set([action.id]),
+        selectionAnchor: action.id,
         playing: {
           trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
           external: false, name: null, art: null, alb: null, durationSecs: null,
@@ -207,7 +217,7 @@ function reducer(state: State, action: Action): State {
         : state
     case 'step':
       return state.playing
-        ? { ...state, selectedTrackId: action.id, playing: { ...state.playing, trackId: action.id, elapsed: 0, isPlaying: true } }
+        ? { ...state, selectedTrackIds: new Set([action.id]), selectionAnchor: action.id, playing: { ...state.playing, trackId: action.id, elapsed: 0, isPlaying: true } }
         : state
     case 'tick':
       if (!state.playing?.isPlaying) return state
@@ -219,7 +229,8 @@ function reducer(state: State, action: Action): State {
         ? { ...state, playing: null }
         : {
             ...state,
-            selectedTrackId: action.player.trackId ?? state.selectedTrackId,
+            selectedTrackIds: action.player.trackId === null ? state.selectedTrackIds : new Set([action.player.trackId]),
+            selectionAnchor: action.player.trackId ?? state.selectionAnchor,
             playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue },
           }
     case 'seek':
@@ -337,12 +348,19 @@ function App() {
   const search = useRef<HTMLInputElement>(null)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
+  const selectedTracks = tracks.filter((track) => state.selectedTrackIds.has(track.id))
+  const tracklistVisible = state.scope !== 'spotify' || !state.query.trim()
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
   const openInfo = (id?: number) => {
-    if (id === undefined) return
-    invoke<TrackInfo>('get_track', { id })
-      .then((info) => dispatch({ type: 'info', info }))
+    if (selectedTracks.length > 1) {
+      dispatch({ type: 'info', info: { kind: 'multiple', tracks: selectedTracks } })
+      return
+    }
+    const target = id ?? selectedTracks[0]?.id
+    if (target === undefined) return
+    invoke<TrackInfo>('get_track', { id: target })
+      .then((track) => dispatch({ type: 'info', info: { kind: 'single', track } }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }
 
@@ -376,9 +394,9 @@ function App() {
   }, [state.settings, state.settingsHydrated])
 
   useEffect(() => {
-    const unlisten = listen('get-info', () => openInfo(state.selectedTrackId))
+    const unlisten = listen('get-info', () => openInfo())
     return () => { void unlisten.then((stop) => stop()) }
-  }, [state.selectedTrackId])
+  }, [state.selectedTrackIds, tracks])
 
   useEffect(() => {
     const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
@@ -499,9 +517,15 @@ function App() {
       if (command && ['=', '+', '-', '0'].includes(event.key)) {
         event.preventDefault()
         setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
+      } else if (command && event.key.toLowerCase() === 'a' && activePane === 'track' && tracklistVisible) {
+        event.preventDefault()
+        const anchor = tracks.some((track) => track.id === state.selectionAnchor)
+          ? state.selectionAnchor
+          : tracks[0]?.id
+        dispatch({ type: 'selection', ids: new Set(tracks.map((track) => track.id)), anchor })
       } else if (command && event.key.toLowerCase() === 'i') {
         event.preventDefault()
-        openInfo(state.selectedTrackId)
+        openInfo()
       } else if (command && event.key.toLowerCase() === 'l') {
         event.preventDefault()
         dispatch({ type: 'scope', scope: 'library' })
@@ -523,7 +547,7 @@ function App() {
         const direction = event.key === 'ArrowUp' ? -1 : 1
         if (activePane === 'track') {
           if (!tracks.length) return
-          const current = tracks.findIndex((track) => track.id === state.selectedTrackId)
+          const current = tracks.findIndex((track) => track.id === state.selectionAnchor)
           const index = current < 0 ? 0 : Math.max(0, Math.min(tracks.length - 1, current + direction))
           dispatch({ type: 'selectTrack', id: tracks[index].id })
           window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${tracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
@@ -539,7 +563,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackId, state.settings.zoom, state.view, tracks, player])
+  }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -608,12 +632,32 @@ function App() {
             <TrackList
               tracks={tracks}
               label={labels[state.source]}
-              selectedId={state.selectedTrackId}
+              selectedIds={state.selectedTrackIds}
               playing={state.playing}
               columnOrder={state.settings.columnOrder}
               hiddenColumns={state.settings.hiddenColumns}
               onActivate={() => setActivePane('track')}
-              onSelect={(id) => dispatch({ type: 'selectTrack', id })}
+              onSelect={(id, event) => {
+                if (event.shiftKey && state.selectionAnchor !== undefined) {
+                  const anchor = tracks.findIndex((track) => track.id === state.selectionAnchor)
+                  const row = tracks.findIndex((track) => track.id === id)
+                  if (anchor >= 0 && row >= 0) {
+                    dispatch({
+                      type: 'selection',
+                      ids: new Set(tracks.slice(Math.min(anchor, row), Math.max(anchor, row) + 1).map((track) => track.id)),
+                      anchor: state.selectionAnchor,
+                    })
+                    return
+                  }
+                }
+                if (event.metaKey || event.ctrlKey) {
+                  const ids = new Set(state.selectedTrackIds)
+                  if (!ids.delete(id)) ids.add(id)
+                  dispatch({ type: 'selection', ids, anchor: id })
+                } else {
+                  dispatch({ type: 'selectTrack', id })
+                }
+              }}
               onPlay={(id) => player.start(id, tracks)}
               onRate={(id, stars) => mutate('click_track_star', { id, stars })}
               onInfo={openInfo}
@@ -625,10 +669,11 @@ function App() {
           <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} />
         </section>
       </div>
-      {state.info && <GetInfo key={state.info.id} track={state.info} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
+      {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
         dispatch({ type: 'info' })
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
+      {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={() => dispatch({ type: 'info' })} onSaved={() => dispatch({ type: 'info' })} onError={(error) => dispatch({ type: 'error', error })} />}
       {state.preferences && <Preferences settings={state.settings} onCancel={() => dispatch({ type: 'preferences', open: false })} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend) => {
         dispatch({ type: 'settings', settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend } })
         dispatch({ type: 'preferences', open: false })
@@ -727,9 +772,9 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /><span>· applies to all tracks unless individually overridden</span></div>
 }
 
-function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColumns, onActivate, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
-  tracks: Track[]; label: (typeof labels)[Source]; selectedId?: number; playing: State['playing']
-  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; onSelect: (id: number) => void; onPlay: (id: number) => void
+function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, onActivate, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
+  tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: State['playing']
+  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
   onActivate: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
 }) {
@@ -769,7 +814,7 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColu
   }
   const cell = (track: Track, column: ColumnKey) => {
     if (column === 'track') return <span key={column}>{track.trackNo ?? ''}</span>
-    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.name}{selectedId === track.id && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
+    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.name}{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
     if (column === 'time') return <span key={column}>{formatTime(track.durationSecs)}</span>
     if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
     if (column === 'album') return <span key={column} title={track.alb}>{track.alb}</span>
@@ -788,7 +833,7 @@ function TrackList({ tracks, label, selectedId, playing, columnOrder, hiddenColu
     <div className="track-scroll">
       {tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
-        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedId === track.id ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={() => onSelect(track.id)} onDoubleClick={() => onPlay(track.id)}>
+        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
         </div>
@@ -853,6 +898,41 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
       <div className="genre-hint">normalize freely, e.g. “Operatic Rock” → “Rock”</div>
       <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /></div>
       {track.origCat && draft.cat !== track.origCat && <div className="override-banner">Spotify reports this as “{track.origCat}”. Your overlay wins in Retune.</div>}
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
+    </div>
+  </div>
+}
+
+function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: { tracks: Track[]; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
+  type Field = 'art' | 'alb' | 'cat'
+  const [draft, setDraft] = useState<Partial<Record<Field, string>>>({})
+  const [rating, setRating] = useState<number | null | undefined>(undefined)
+  const dialog = useRef<HTMLDivElement>(null)
+  useEffect(() => { dialog.current?.focus() }, [])
+  const placeholder = (key: Field) => tracks.every((track) => track[key] === tracks[0][key]) ? tracks[0][key] : 'Mixed'
+  const save = async () => {
+    try {
+      await invoke('set_track_infos', {
+        ids: tracks.map((track) => track.id),
+        edit: { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) },
+      })
+      onSaved()
+    } catch (error) {
+      onError(String(error))
+    }
+  }
+  const field = (key: Field) => ({
+    value: draft[key] ?? '',
+    placeholder: placeholder(key),
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, [key]: event.target.value }),
+  })
+  return <div className="modal-backdrop" role="presentation">
+    <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="multiple-item-information-title" tabIndex={-1} ref={dialog}>
+      <h2 id="multiple-item-information-title">Editing {tracks.length} items</h2>
+      <label>Artist<input {...field('art')} /></label>
+      <label>Album<input {...field('alb')} /></label>
+      <label>Genre<input {...field('cat')} /></label>
+      <div className="info-rating bulk-rating"><span>Rating</span><RatingStars rating={rating ?? null} explicit={rating !== undefined && rating !== null} onRate={setRating} /><button className={rating === undefined ? 'active' : ''} onClick={() => setRating(undefined)}>No Change</button><button className={rating === null ? 'active' : ''} onClick={() => setRating(null)}>Clear</button></div>
       <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
     </div>
   </div>
