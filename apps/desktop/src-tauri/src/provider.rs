@@ -93,6 +93,13 @@ impl SyncHealth {
                 }
                 Ok(None)
             }
+            // Live payloads stray from the documented shapes; a page we cannot
+            // decode should cost its section, not the whole import.
+            Err(error @ retune_spotify::Error::Json { .. }) => {
+                self.partial.store(true, Ordering::Relaxed);
+                log::error!("Skipping rest of section, page failed to decode: {error}");
+                Ok(None)
+            }
             Err(error) => Err(error.to_string()),
         }
     }
@@ -769,6 +776,24 @@ mod tests {
         assert!(client.transport().requests()[0]
             .url
             .contains("/artists/artist-1/albums?"));
+    }
+
+    #[tokio::test]
+    async fn undecodable_page_degrades_to_partial_instead_of_failing() {
+        let client = client([Response::json(
+            200,
+            serde_json::json!({"items": [{"episode": {
+                "uri": "spotify:episode:1", "name": "Ep", "duration_ms": "bogus"
+            }}], "next": null}),
+        )]);
+
+        let snapshot = client
+            .library_snapshot(LibraryKind::Episodes)
+            .await
+            .unwrap();
+
+        assert!(snapshot.partial);
+        assert!(snapshot.batches.iter().all(|batch| batch.is_empty()));
     }
 
     #[tokio::test]

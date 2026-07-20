@@ -455,7 +455,7 @@ fn external_event(player: Option<&PlayerState>) -> PlayerStateEvent {
         name: item.map(|track| track.name.clone()),
         art: item.and_then(|track| track.artists.first().map(|artist| artist.name.clone())),
         alb: item.and_then(|track| track.album.as_ref().map(|album| album.name.clone())),
-        duration_secs: item.map(|track| track.duration_ms / 1000),
+        duration_secs: item.and_then(|track| track.duration_ms).map(|ms| ms / 1000),
         volume_supported: false,
     }
 }

@@ -31,7 +31,7 @@ pub fn track(
             .or_else(|| parent_album.map(|album| album.name.clone()))
             .unwrap_or_default(),
         name: value.name.clone(),
-        duration: Duration::from_millis(value.duration_ms),
+        duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
     }
 }
 
@@ -49,7 +49,7 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
             .unwrap_or_else(|| "Unknown".into()),
         alb: show.map(|show| show.name.clone()).unwrap_or_default(),
         name: value.name.clone(),
-        duration: Duration::from_millis(value.duration_ms),
+        duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
     }
 }
 
@@ -69,7 +69,7 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
             .unwrap_or_default(),
         alb: book.name.clone(),
         name: value.name.clone(),
-        duration: Duration::from_millis(value.duration_ms),
+        duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
     }
 }
 
@@ -83,7 +83,7 @@ mod tests {
         Track {
             uri: "spotify:track:1".into(),
             name: "Song".into(),
-            duration_ms: 1234,
+            duration_ms: Some(1234),
             artists: vec![SimplifiedArtist {
                 id: "artist-1".into(),
                 name: "Primary".into(),
@@ -159,7 +159,7 @@ mod tests {
         let value = Episode {
             uri: "spotify:episode:1".into(),
             name: "Episode".into(),
-            duration_ms: 2000,
+            duration_ms: Some(2000),
             show: None,
         };
         let mapped = episode(&value, Some(&show));
@@ -187,10 +187,21 @@ mod tests {
         let value = Episode {
             uri: "spotify:episode:1".into(),
             name: "Episode".into(),
-            duration_ms: 2000,
+            duration_ms: Some(2000),
             show: None,
         };
         assert_eq!(episode(&value, Some(&show)).art, "Unknown");
+    }
+
+    #[test]
+    fn episode_with_null_duration_decodes_to_zero() {
+        // Live /me/episodes payloads can carry duration_ms: null.
+        let value: Episode = serde_json::from_value(serde_json::json!({
+            "uri": "spotify:episode:9", "name": "Ep", "duration_ms": null, "show": null
+        }))
+        .unwrap();
+        assert_eq!(value.duration_ms, None);
+        assert_eq!(episode(&value, None).duration.as_millis(), 0);
     }
 
     #[test]
@@ -198,7 +209,7 @@ mod tests {
         let value = Chapter {
             uri: "spotify:chapter:1".into(),
             name: "Chapter One".into(),
-            duration_ms: 3000,
+            duration_ms: Some(3000),
         };
         let book = Audiobook {
             id: "book-1".into(),

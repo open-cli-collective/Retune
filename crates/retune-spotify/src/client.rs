@@ -566,7 +566,9 @@ pub struct AlbumSummary {
 pub struct Track {
     pub uri: String,
     pub name: String,
-    pub duration_ms: u64,
+    /// Null in some live payloads (e.g. unplayable episodes).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     #[serde(default)]
     pub artists: Vec<SimplifiedArtist>,
     pub album: Option<AlbumSummary>,
@@ -615,7 +617,9 @@ pub struct SavedShow {
 pub struct Episode {
     pub uri: String,
     pub name: String,
-    pub duration_ms: u64,
+    /// Null in some live payloads (e.g. unplayable episodes).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub show: Option<Show>,
 }
 
@@ -646,7 +650,9 @@ pub struct Audiobook {
 pub struct Chapter {
     pub uri: String,
     pub name: String,
-    pub duration_ms: u64,
+    /// Null in some live payloads (e.g. unplayable episodes).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
