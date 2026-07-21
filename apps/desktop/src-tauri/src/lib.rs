@@ -857,6 +857,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         tracks,
         genres_degraded,
         partial,
+        progress,
         earliest_cooldown,
         request_counts,
     } = outcome;
@@ -876,13 +877,29 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         );
     }
     if partial {
+        let detail = progress
+            .iter()
+            .map(|progress| match progress.total {
+                Some(total) => format!("{} of {total} {}", progress.done, progress.label),
+                None => format!("{} pending", progress.label),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let message = earliest_cooldown.map_or_else(
-            || "Partial import (Spotify rate limit) — run File → Sync later to finish.".into(),
+            || {
+                if detail.is_empty() {
+                    "Partial import (Spotify rate limit) — run File → Sync later to finish.".into()
+                } else {
+                    format!("Partial import ({detail}) — run File → Sync later to finish.")
+                }
+            },
             |deadline| {
-                format!(
-                    "Partial import — will finish automatically after {}.",
-                    provider::format_resume_time(deadline, chrono::Local::now())
-                )
+                let time = provider::format_resume_time(deadline, chrono::Local::now());
+                if detail.is_empty() {
+                    format!("Partial import — will finish automatically after {time}.")
+                } else {
+                    format!("Partial import — {detail} — will finish automatically after {time}.")
+                }
             },
         );
         log::warn!("{message}");

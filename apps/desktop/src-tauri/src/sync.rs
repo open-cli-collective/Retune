@@ -5,7 +5,10 @@ use retune_core::{
     model::Library,
 };
 
-use crate::{provider::MediaProvider, store::OverlayStore};
+use crate::{
+    provider::{MediaProvider, SectionProgress},
+    store::OverlayStore,
+};
 
 #[cfg(test)]
 pub async fn reconcile<P: MediaProvider, S: OverlayStore>(
@@ -23,6 +26,7 @@ pub struct SnapshotOutcome {
     pub tracks: Vec<retune_core::model::NewTrack>,
     pub genres_degraded: bool,
     pub partial: bool,
+    pub progress: Vec<SectionProgress>,
     pub earliest_cooldown: Option<u64>,
     pub request_counts: std::collections::BTreeMap<String, u64>,
 }
@@ -34,11 +38,15 @@ pub async fn snapshot<P: MediaProvider>(
     let mut incoming = vec![];
     let mut genres_degraded = false;
     let mut partial = false;
+    let mut section_progress = vec![];
     for kind in crate::provider::LibraryKind::ALL {
         progress(kind.phase());
         let snapshot = provider.library_snapshot(kind).await?;
         genres_degraded |= snapshot.genres_degraded;
         partial |= snapshot.partial;
+        if let Some(progress) = snapshot.progress {
+            section_progress.push(progress);
+        }
         for batch in snapshot.batches {
             incoming.extend(batch);
         }
@@ -47,6 +55,7 @@ pub async fn snapshot<P: MediaProvider>(
         tracks: incoming,
         genres_degraded,
         partial,
+        progress: section_progress,
         earliest_cooldown: provider.earliest_cooldown(),
         request_counts: provider.request_counts(),
     })

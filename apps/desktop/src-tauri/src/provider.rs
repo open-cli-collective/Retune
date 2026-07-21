@@ -76,6 +76,14 @@ pub struct Snapshot {
     pub batches: Vec<Vec<NewTrack>>,
     pub genres_degraded: bool,
     pub partial: bool,
+    pub progress: Option<SectionProgress>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SectionProgress {
+    pub label: &'static str,
+    pub done: u32,
+    pub total: Option<u32>,
 }
 
 pub trait MediaProvider: Send + Sync {
@@ -484,12 +492,12 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
 ) -> Result<Snapshot, String> {
     let health = SyncHealth::new(run);
     let genres = GenreSource::new(client, &health);
-    let family = match kind {
-        LibraryKind::Tracks => "/me/tracks",
-        LibraryKind::Albums => "/me/albums",
-        LibraryKind::Shows => "/me/shows",
-        LibraryKind::Episodes => "/me/episodes",
-        LibraryKind::Audiobooks => "/me/audiobooks",
+    let (family, label) = match kind {
+        LibraryKind::Tracks => ("/me/tracks", "tracks"),
+        LibraryKind::Albums => ("/me/albums", "albums"),
+        LibraryKind::Shows => ("/me/shows", "podcasts"),
+        LibraryKind::Episodes => ("/me/episodes", "episodes"),
+        LibraryKind::Audiobooks => ("/me/audiobooks", "audiobooks"),
     };
     if health.skip_content_family(family) {
         let batches = if kind == LibraryKind::Audiobooks {
@@ -504,9 +512,16 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
             batches,
             genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
             partial: true,
+            progress: Some(SectionProgress {
+                label,
+                done: 0,
+                total: None,
+            }),
         });
     }
     let mut offset = 0;
+    let mut done = 0;
+    let mut total = None;
     let mut batches = vec![];
     let mut music_batches = vec![];
     'pages: loop {
@@ -517,6 +532,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let batch = page
                     .items
@@ -524,6 +540,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                     .map(|saved| normalized_track(&saved.track, None))
                     .collect();
                 music_batches.push(batch);
+                done += count;
                 (vec![], count, page.next.is_some())
             }
             LibraryKind::Albums => {
@@ -532,6 +549,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
                 for saved in page.items {
@@ -542,6 +560,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                         music_batches.push(batch);
                         break 'pages;
                     }
+                    done += 1;
                 }
                 music_batches.push(batch);
                 (vec![], count, page.next.is_some())
@@ -552,6 +571,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
                 for saved in page.items {
@@ -565,6 +585,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                         batches.push(batch);
                         break 'pages;
                     };
+                    done += 1;
                     batch.extend(
                         episodes
                             .items
@@ -580,12 +601,14 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let batch = page
                     .items
                     .iter()
                     .map(|saved| normalize::episode(&saved.episode, None))
                     .collect();
+                done += count;
                 (batch, count, page.next.is_some())
             }
             LibraryKind::Audiobooks => {
@@ -594,6 +617,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
                 for book in page.items {
@@ -607,6 +631,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                         batches.push(batch);
                         break 'pages;
                     };
+                    done += 1;
                     batch.extend(
                         chapters
                             .items
@@ -637,10 +662,12 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
         music.append(&mut batches);
         batches = music;
     }
+    let partial = health.partial.load(Ordering::Relaxed);
     Ok(Snapshot {
         batches,
         genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
-        partial: health.partial.load(Ordering::Relaxed),
+        partial,
+        progress: partial.then_some(SectionProgress { label, done, total }),
     })
 }
 
@@ -785,6 +812,7 @@ impl MediaProvider for FakeProvider {
             batches: self.snapshots.get(&kind).cloned().unwrap_or_default(),
             genres_degraded: self.genres_degraded,
             partial: self.partial,
+            progress: None,
         })
     }
 
@@ -1036,6 +1064,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn album_progress_counts_only_fully_ingested_albums() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [
+                    {"album": {
+                        "id": "album-1", "uri": "spotify:album:1", "name": "One",
+                        "artists": [], "images": []
+                    }},
+                    {"album": {
+                        "id": "album-2", "uri": "spotify:album:2", "name": "Two",
+                        "artists": [], "images": []
+                    }}
+                ], "next": null, "total": 2}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [], "next": null, "total": 0}),
+            ),
+            rate_limited(),
+        ]);
+
+        let snapshot = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+
+        assert_eq!(
+            snapshot.progress,
+            Some(SectionProgress {
+                label: "albums",
+                done: 1,
+                total: Some(2),
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn first_saved_tracks_rate_limit_returns_empty_partial_snapshot() {
         let client = client([rate_limited()]);
 
@@ -1063,6 +1126,14 @@ mod tests {
 
         assert!(snapshot.partial);
         assert!(snapshot.batches.is_empty());
+        assert_eq!(
+            snapshot.progress,
+            Some(SectionProgress {
+                label: "tracks",
+                done: 0,
+                total: None,
+            })
+        );
         assert_eq!(provider.earliest_cooldown(), Some(deadline));
         assert!(client.transport().requests().is_empty());
     }
@@ -1089,6 +1160,7 @@ mod tests {
             .unwrap();
 
         assert!(!snapshot.partial);
+        assert!(snapshot.progress.is_none());
         assert_eq!(client.transport().requests().len(), 1);
         assert!(store.cooldowns(unix_now()).unwrap().is_empty());
     }

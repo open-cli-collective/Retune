@@ -71,7 +71,6 @@ type BrowseView = {
   counts: {
     tracks: number
     totalSecs: number
-    overlayEdits: number
     perSource: Record<Source, number>
   }
 }
@@ -827,7 +826,6 @@ function Sidebar({ state, onSource }: { state: State; onSource: (source: Source)
     <div className="section-label playlists-label">Playlists</div>
     <div className="playlist-placeholder">Recently Added</div>
     <div className="playlist-placeholder">Smart Playlist…</div>
-    <div className="overlay-note">🔒 Overlay edits stay local.<br />Never written back to Spotify.</div>
   </aside>
 }
 
@@ -1063,7 +1061,7 @@ function StatusBar({ view, unit, syncPhase }: { view: BrowseView | null; unit: s
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
-  return <footer className="status-bar"><button aria-label="Add">+</button><span>{syncPhase ?? `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`}</span><span>{view?.counts.overlayEdits ?? 0} overlay edits</span></footer>
+  return <footer className="status-bar"><button aria-label="Add">+</button><span>{syncPhase ?? `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`}</span></footer>
 }
 
 export default App
