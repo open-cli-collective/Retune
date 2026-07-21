@@ -10,39 +10,39 @@ use crate::model::{Library, SourceId, TrackRecord};
 /// narrower ones; selecting a narrower level never clears a broader one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selection {
-    cat: Option<String>,
-    art: Option<String>,
-    alb: Option<String>,
+    cat: Vec<String>,
+    art: Vec<String>,
+    alb: Vec<String>,
 }
 
 impl Selection {
-    pub fn cat(&self) -> Option<&str> {
-        self.cat.as_deref()
+    pub fn cat(&self) -> &[String] {
+        &self.cat
     }
 
-    pub fn art(&self) -> Option<&str> {
-        self.art.as_deref()
+    pub fn art(&self) -> &[String] {
+        &self.art
     }
 
-    pub fn alb(&self) -> Option<&str> {
-        self.alb.as_deref()
+    pub fn alb(&self) -> &[String] {
+        &self.alb
     }
 
-    /// Select a category (`None` = the "All" row). Resets artist and album.
-    pub fn select_cat(&mut self, cat: Option<String>) {
+    /// Select categories (empty = the "All" row). Resets artist and album.
+    pub fn select_cat(&mut self, cat: Vec<String>) {
         self.cat = cat;
-        self.art = None;
-        self.alb = None;
+        self.art.clear();
+        self.alb.clear();
     }
 
-    /// Select an artist (`None` = "All"). Resets album, keeps category.
-    pub fn select_art(&mut self, art: Option<String>) {
+    /// Select artists (empty = "All"). Resets album, keeps category.
+    pub fn select_art(&mut self, art: Vec<String>) {
         self.art = art;
-        self.alb = None;
+        self.alb.clear();
     }
 
-    /// Select an album (`None` = "All"). Keeps category and artist.
-    pub fn select_alb(&mut self, alb: Option<String>) {
+    /// Select albums (empty = "All"). Keeps category and artist.
+    pub fn select_alb(&mut self, alb: Vec<String>) {
         self.alb = alb;
     }
 }
@@ -112,10 +112,8 @@ pub fn tracks<'a>(
     tracks
 }
 
-fn selected(selection: &Option<String>, value: &str) -> bool {
-    selection
-        .as_deref()
-        .is_none_or(|selected| selected == value)
+fn selected(selection: &[String], value: &str) -> bool {
+    selection.is_empty() || selection.iter().any(|selected| selected == value)
 }
 
 fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
@@ -177,32 +175,32 @@ mod tests {
     #[test]
     fn selection_transitions_reset_only_narrower_facets() {
         let mut selection = Selection::default();
-        selection.select_cat(Some("Rock".into()));
-        selection.select_art(Some("Artist".into()));
-        selection.select_alb(Some("Album".into()));
-        assert_eq!(selection.cat(), Some("Rock"));
-        assert_eq!(selection.art(), Some("Artist"));
-        assert_eq!(selection.alb(), Some("Album"));
+        selection.select_cat(vec!["Rock".into()]);
+        selection.select_art(vec!["Artist".into()]);
+        selection.select_alb(vec!["Album".into()]);
+        assert_eq!(selection.cat(), ["Rock"]);
+        assert_eq!(selection.art(), ["Artist"]);
+        assert_eq!(selection.alb(), ["Album"]);
 
-        selection.select_art(None);
-        assert_eq!(selection.cat(), Some("Rock"));
-        assert_eq!(selection.art(), None);
-        assert_eq!(selection.alb(), None);
+        selection.select_art(vec![]);
+        assert_eq!(selection.cat(), ["Rock"]);
+        assert!(selection.art().is_empty());
+        assert!(selection.alb().is_empty());
 
-        selection.select_alb(Some("Album".into()));
-        selection.select_cat(None);
-        assert_eq!(selection.cat(), None);
-        assert_eq!(selection.art(), None);
-        assert_eq!(selection.alb(), None);
+        selection.select_alb(vec!["Album".into()]);
+        selection.select_cat(vec![]);
+        assert!(selection.cat().is_empty());
+        assert!(selection.art().is_empty());
+        assert!(selection.alb().is_empty());
     }
 
     #[test]
     fn facets_use_only_broader_selections_and_the_requested_source() {
         let library = library();
         let mut selection = Selection::default();
-        selection.select_cat(Some("Rock".into()));
-        selection.select_art(Some("beta".into()));
-        selection.select_alb(Some("Zoo".into()));
+        selection.select_cat(vec!["Rock".into()]);
+        selection.select_art(vec!["beta".into()]);
+        selection.select_alb(vec!["Zoo".into()]);
 
         assert_eq!(
             facets(&library, SourceId::Music, &selection),
@@ -218,7 +216,7 @@ mod tests {
     fn tracks_intersect_selections_and_sort_artist_album_then_insertion() {
         let library = library();
         let mut selection = Selection::default();
-        selection.select_cat(Some("Rock".into()));
+        selection.select_cat(vec!["Rock".into()]);
 
         let uris: Vec<_> = tracks(&library, SourceId::Music, &selection)
             .into_iter()
@@ -226,13 +224,42 @@ mod tests {
             .collect();
         assert_eq!(uris, ["3", "4", "5", "1"]);
 
-        selection.select_art(Some("beta".into()));
-        selection.select_alb(Some("Able".into()));
+        selection.select_art(vec!["beta".into()]);
+        selection.select_alb(vec!["Able".into()]);
         let uris: Vec<_> = tracks(&library, SourceId::Music, &selection)
             .into_iter()
             .map(|track| track.uri.as_str())
             .collect();
         assert_eq!(uris, ["4", "5"]);
+    }
+
+    #[test]
+    fn multiple_categories_union_artist_facets_and_tracks() {
+        let library = library();
+        let mut selection = Selection::default();
+        selection.select_cat(vec!["Jazz".into(), "Rock".into()]);
+
+        assert_eq!(
+            facets(&library, SourceId::Music, &selection).arts,
+            ["Alpha", "alpha", "beta"]
+        );
+        let uris: Vec<_> = tracks(&library, SourceId::Music, &selection)
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect();
+        assert_eq!(uris, ["2", "3", "4", "5", "1"]);
+    }
+
+    #[test]
+    fn selecting_narrower_facets_keeps_broader_multi_values() {
+        let mut selection = Selection::default();
+        selection.select_cat(vec!["Jazz".into(), "Rock".into()]);
+        selection.select_art(vec!["Alpha".into(), "beta".into()]);
+        selection.select_alb(vec!["First".into(), "Zoo".into()]);
+
+        assert_eq!(selection.cat(), ["Jazz", "Rock"]);
+        assert_eq!(selection.art(), ["Alpha", "beta"]);
+        assert_eq!(selection.alb(), ["First", "Zoo"]);
     }
 
     #[test]

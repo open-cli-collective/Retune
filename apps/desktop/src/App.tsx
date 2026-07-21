@@ -9,7 +9,7 @@ type Theme = 'light' | 'dark' | 'system'
 type PlaybackBackend = 'connect' | 'local'
 type RepeatMode = 'off' | 'all' | 'one'
 type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
-type Selection = { cat?: string; art?: string; alb?: string }
+type Selection = { cat?: string[]; art?: string[]; alb?: string[] }
 type ActivePane = 'track' | keyof Selection
 
 type Settings = {
@@ -124,7 +124,7 @@ type Action =
   | { type: 'view'; view: BrowseView }
   | { type: 'error'; error: string }
   | { type: 'source'; source: Source }
-  | { type: 'select'; facet: keyof Selection; value?: string }
+  | { type: 'select'; facet: keyof Selection; values: string[] }
   | { type: 'query'; query: string }
   | { type: 'scope'; scope: State['scope'] }
   | { type: 'selectTrack'; id: number }
@@ -190,10 +190,10 @@ function reducer(state: State, action: Action): State {
       return { ...state, source: action.source, sel: {}, query: '', selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
       const sel = action.facet === 'cat'
-        ? { cat: action.value }
+        ? { cat: action.values }
         : action.facet === 'art'
-          ? { cat: state.sel.cat, art: action.value }
-          : { ...state.sel, alb: action.value }
+          ? { cat: state.sel.cat, art: action.values }
+          : { ...state.sel, alb: action.values }
       return { ...state, sel, selectedTrackIds: new Set(), selectionAnchor: undefined }
     }
     case 'query':
@@ -364,6 +364,7 @@ function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const search = useRef<HTMLInputElement>(null)
+  const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
   const typeaheadExpires = useRef(0)
   const view = state.view
@@ -372,6 +373,16 @@ function App() {
   const tracklistVisible = state.scope !== 'spotify' || !state.query.trim()
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
+  const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
+    facetAnchors.current[facet] = anchor
+    if (facet === 'cat') {
+      delete facetAnchors.current.art
+      delete facetAnchors.current.alb
+    } else if (facet === 'art') {
+      delete facetAnchors.current.alb
+    }
+    dispatch({ type: 'select', facet, values })
+  }, [])
   const cycleRepeat = () => {
     const repeat: RepeatMode = state.settings.repeat === 'off' ? 'all' : state.settings.repeat === 'all' ? 'one' : 'off'
     invoke('set_repeat', { mode: repeat })
@@ -394,7 +405,7 @@ function App() {
     let active = true
     invoke<BrowseView>('browse', {
       source: state.source,
-      sel: state.sel,
+      sel: { cat: state.sel.cat ?? [], art: state.sel.art ?? [], alb: state.sel.alb ?? [] },
       query: state.scope === 'library' && state.query.trim() ? state.query : undefined,
     }).then((next) => active && dispatch({ type: 'view', view: next }))
       .catch((error) => active && dispatch({ type: 'error', error: String(error) }))
@@ -521,6 +532,7 @@ function App() {
     settings: { theme: state.settings.theme === 'system' ? 'light' : state.settings.theme === 'light' ? 'dark' : 'system' },
   })
   const playingTrack = playbackTracks.find((track) => track.id === state.playing?.trackId)
+  const selectedAlbum = state.sel.alb?.length === 1 ? state.sel.alb[0] : undefined
 
   useEffect(() => {
     const viewActions = listen<string>('view-action', ({ payload }) => {
@@ -596,7 +608,7 @@ function App() {
           const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
           const index = facetValues.findIndex((value) => value.toLocaleLowerCase().startsWith(prefix))
           if (index < 0) return
-          dispatch({ type: 'select', facet: activePane, value: facetValues[index] })
+          selectFacet(activePane, [facetValues[index]], facetValues[index])
           window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index + 1}"]`)?.scrollIntoView({ block: 'nearest' }))
         }
       } else if (!command && event.key === 'ArrowLeft') {
@@ -617,9 +629,9 @@ function App() {
         } else {
           const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
           const values: (string | undefined)[] = [undefined, ...facetValues]
-          const current = values.indexOf(state.sel[activePane])
+          const current = values.indexOf(facetAnchors.current[activePane] ?? state.sel[activePane]?.[0])
           const index = Math.max(0, Math.min(values.length - 1, current + direction))
-          dispatch({ type: 'select', facet: activePane, value: values[index] })
+          selectFacet(activePane, values[index] === undefined ? [] : [values[index]], values[index])
           window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index}"]`)?.scrollIntoView({ block: 'nearest' }))
         }
       }
@@ -629,7 +641,7 @@ function App() {
       window.clearTimeout(typeahead.current.timer)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player])
+  }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player, selectFacet])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -664,17 +676,17 @@ function App() {
         onTheme={cycleTheme}
       />
       <div className="body-grid">
-        <Sidebar state={state} onSource={(source) => dispatch({ type: 'source', source })} />
+        <Sidebar state={state} onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }} />
         <section className="content">
-          <BrowserPane state={state} onActivate={setActivePane} onSelect={(facet, value) => dispatch({ type: 'select', facet, value })} />
-          {state.sel.alb && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
+          <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} />
+          {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
             <AlbumRatingStrip
-              album={state.sel.alb}
+              album={selectedAlbum}
               rating={view?.albumRating ?? null}
               onRate={(stars) => mutate('set_album_rating', {
                 source: state.source,
                 art: view.albumRatingArtist,
-                alb: state.sel.alb,
+                alb: selectedAlbum,
                 stars,
               })}
             />
@@ -834,21 +846,45 @@ function Sidebar({ state, onSource }: { state: State; onSource: (source: Source)
   </aside>
 }
 
-function BrowserPane({ state, onActivate, onSelect }: { state: State; onActivate: (facet: keyof Selection) => void; onSelect: (facet: keyof Selection, value?: string) => void }) {
+function BrowserPane({ state, anchors, onActivate, onSelect }: {
+  state: State
+  anchors: { current: Partial<Record<keyof Selection, string>> }
+  onActivate: (facet: keyof Selection) => void
+  onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
+}) {
   const sourceLabels = labels[state.source].facets
   const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
   return <div className="browser-pane">
-    {facets.map((facet, index) => <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} onActivate={() => onActivate(facet)} onSelect={(value) => onSelect(facet, value)} />)}
+    {facets.map((facet, index) => <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} />)}
   </div>
 }
 
-function FacetColumn({ facet, title, values, selected, onActivate, onSelect }: { facet: keyof Selection; title: string; values: string[]; selected?: string; onActivate: () => void; onSelect: (value?: string) => void }) {
+function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect }: {
+  facet: keyof Selection
+  title: string
+  values: string[]
+  selected?: string[]
+  anchor?: string
+  onActivate: () => void
+  onSelect: (values: string[], anchor?: string) => void
+}) {
+  const select = (value: string, event: React.MouseEvent) => {
+    if (event.shiftKey) {
+      const start = Math.max(0, values.indexOf(anchor ?? values[0]))
+      const end = values.indexOf(value)
+      onSelect(values.slice(Math.min(start, end), Math.max(start, end) + 1), anchor)
+    } else if (event.metaKey || event.ctrlKey) {
+      onSelect(selected?.includes(value) ? selected.filter((item) => item !== value) : [...(selected ?? []), value], value)
+    } else {
+      onSelect([value], value)
+    }
+  }
   return <div className="facet-column" data-facet={facet} onMouseDown={onActivate}>
     <div className="column-header">{title}</div>
     <div className="facet-list">
-      <button data-row-index={0} className={!selected ? 'active' : ''} onClick={() => onSelect(undefined)}>All ({values.length} {title}s)</button>
-      {values.map((value, index) => <button key={value} data-row-index={index + 1} className={selected === value ? 'active' : ''} onClick={() => onSelect(value)} title={value}>{value}</button>)}
+      <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)}>All ({values.length} {title}s)</button>
+      {values.map((value, index) => <button key={value} data-row-index={index + 1} className={selected?.includes(value) ? 'active' : ''} onClick={(event) => select(value, event)} title={value}>{value}</button>)}
     </div>
   </div>
 }

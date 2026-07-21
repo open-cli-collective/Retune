@@ -121,9 +121,12 @@ impl VisualSettings {
 
 #[derive(Deserialize)]
 struct SelectionDto {
-    cat: Option<String>,
-    art: Option<String>,
-    alb: Option<String>,
+    #[serde(default)]
+    cat: Vec<String>,
+    #[serde(default)]
+    art: Vec<String>,
+    #[serde(default)]
+    alb: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -330,7 +333,7 @@ fn album_rating_view(
     selection: &Selection,
     tracks: &[&TrackRecord],
 ) -> (Option<u8>, Option<String>, bool) {
-    if selection.alb().is_none() {
+    if selection.alb().len() != 1 {
         return (None, None, false);
     }
     let albums = tracks
@@ -1919,7 +1922,7 @@ mod tests {
             )
             .expect("fixture track exists");
         let mut selection = Selection::default();
-        selection.select_alb(Some("Hotel California".into()));
+        selection.select_alb(vec!["Hotel California".into()]);
         let tracks = browse::tracks(&library, SourceId::Music, &selection);
 
         assert_eq!(
