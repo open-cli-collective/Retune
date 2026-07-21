@@ -1,6 +1,7 @@
 mod fixture;
 #[cfg(debug_assertions)]
 mod local_spike;
+mod media_keys;
 mod playback;
 mod provider;
 mod store;
@@ -58,6 +59,7 @@ struct AppState {
     token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     playback: Arc<Playback>,
+    media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
 }
 
@@ -1594,6 +1596,7 @@ pub fn run() {
             let activate_local = connected && settings.playback_backend == "local";
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(&settings.repeat));
+            let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -1605,6 +1608,7 @@ pub fn run() {
                 token_store,
                 spotify: Mutex::new(spotify),
                 playback: Arc::clone(&playback),
+                media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
             });
             playback.listen(app.handle().clone());

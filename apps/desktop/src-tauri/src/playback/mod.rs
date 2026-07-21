@@ -530,7 +530,8 @@ impl Playback {
         for action in actions {
             match action {
                 ReducerAction::Emit(event) => {
-                    let _ = app.emit("player-state", event);
+                    let _ = app.emit("player-state", &event);
+                    app.state::<crate::AppState>().media_keys.update(&event);
                 }
                 ReducerAction::Error(error) => {
                     let _ = app.emit("operation-error", error);
