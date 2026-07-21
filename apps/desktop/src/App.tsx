@@ -692,7 +692,10 @@ function App() {
                   .catch((error) => dispatch({ type: 'error', error: String(error) }))
               }}
               onAdd={(album) => invoke('add_spotify_album', album)
-                .catch((error) => dispatch({ type: 'error', error: String(error) }))}
+                .catch((error) => {
+                  dispatch({ type: 'error', error: String(error) })
+                  throw error
+                })}
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
           ) : (
             <TrackList
@@ -940,14 +943,18 @@ function SpotifySearch({ searching, results, onArtist, onAdd }: {
   onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
 }) {
   const [adding, setAdding] = useState<string>()
+  const [added, setAdded] = useState<ReadonlySet<string>>(new Set())
   const add = (album: SpotifyResults['albums'][number]) => {
     setAdding(album.uri)
-    void onAdd(album).finally(() => setAdding(undefined))
+    onAdd(album)
+      .then(() => setAdded((previous) => new Set(previous).add(album.uri)))
+      .catch(() => {})
+      .finally(() => setAdding(undefined))
   }
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
   return <div className="spotify-results">
     <section><h2>Artists</h2>{results?.artists.map((artist) => <button className="spotify-row" key={artist.uri} onClick={() => onArtist(artist)}><span>{artist.name}</span><span>View albums ›</span></button>)}{!results?.artists.length && <p>No artists found.</p>}</section>
-    <section><h2>Albums</h2>{results?.albums.map((album) => <div className="spotify-row" key={album.uri}><span><strong>{album.name}</strong><small>{album.artist}{album.trackCount ? ` · ${album.trackCount} tracks` : ''}</small></span><button disabled={adding === album.uri} onClick={() => add(album)}>{adding === album.uri ? 'Adding…' : '+ Add'}</button></div>)}{!results?.albums.length && <p>No albums found.</p>}</section>
+    <section><h2>Albums</h2>{results?.albums.map((album) => <div className="spotify-row" key={album.uri}><span><strong>{album.name}</strong><small>{album.artist}{album.trackCount ? ` · ${album.trackCount} tracks` : ''}</small></span><button disabled={adding === album.uri || added.has(album.uri)} onClick={() => add(album)}>{added.has(album.uri) ? '✓ Added' : adding === album.uri ? 'Adding…' : '+ Add'}</button></div>)}{!results?.albums.length && <p>No albums found.</p>}</section>
   </div>
 }
 
