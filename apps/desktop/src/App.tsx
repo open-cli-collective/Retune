@@ -363,6 +363,8 @@ function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const search = useRef<HTMLInputElement>(null)
+  const typeahead = useRef({ buffer: '', timer: 0 })
+  const typeaheadExpires = useRef(0)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
   const selectedTracks = tracks.filter((track) => state.selectedTrackIds.has(track.id))
@@ -539,6 +541,11 @@ function App() {
   }, [state.settings, player])
 
   useEffect(() => {
+    if (typeahead.current.buffer) {
+      const remaining = typeaheadExpires.current - Date.now()
+      if (remaining > 0) typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, remaining)
+      else typeahead.current.buffer = ''
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       const modalOpen = Boolean(state.info || state.preferences)
       if (event.key === 'Escape' && modalOpen) {
@@ -569,9 +576,28 @@ function App() {
       } else if (command && event.key === ',') {
         event.preventDefault()
         dispatch({ type: 'preferences', open: true })
-      } else if (!command && event.key === ' ') {
+      } else if (!command && event.key === ' ' && !typeahead.current.buffer) {
         event.preventDefault()
         player.toggle()
+      } else if (!command && event.key.length === 1) {
+        event.preventDefault()
+        typeahead.current.buffer += event.key
+        window.clearTimeout(typeahead.current.timer)
+        typeaheadExpires.current = Date.now() + 1000
+        typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, 1000)
+        const prefix = typeahead.current.buffer.toLocaleLowerCase()
+        if (activePane === 'track') {
+          const track = tracks.find((track) => track.name.toLocaleLowerCase().startsWith(prefix))
+          if (!track) return
+          dispatch({ type: 'selectTrack', id: track.id })
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${track.id}"]`)?.scrollIntoView({ block: 'nearest' }))
+        } else {
+          const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+          const index = facetValues.findIndex((value) => value.toLocaleLowerCase().startsWith(prefix))
+          if (index < 0) return
+          dispatch({ type: 'select', facet: activePane, value: facetValues[index] })
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index + 1}"]`)?.scrollIntoView({ block: 'nearest' }))
+        }
       } else if (!command && event.key === 'ArrowLeft') {
         event.preventDefault()
         player.step(-1)
@@ -598,7 +624,10 @@ function App() {
       }
     }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    return () => {
+      window.clearTimeout(typeahead.current.timer)
+      window.removeEventListener('keydown', onKeyDown)
+    }
   }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player])
 
   useEffect(() => {
