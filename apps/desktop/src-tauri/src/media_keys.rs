@@ -1,13 +1,22 @@
 use std::{sync::Mutex, time::Duration};
 
-use souvlaki::{MediaControlEvent, MediaControls, MediaPlayback, MediaPosition, PlatformConfig};
+use souvlaki::{
+    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
+};
 use tauri::{Emitter, Manager};
 
 use crate::{playback::PlayerStateEvent, AppState};
 
 pub struct MediaKeys {
-    controls: Option<Mutex<MediaControls>>,
+    controls: Option<Mutex<MediaControlsState>>,
 }
+
+struct MediaControlsState {
+    controls: MediaControls,
+    metadata_key: Option<MetadataKey>,
+}
+
+type MetadataKey = (Option<String>, Option<String>, Option<String>, Option<u64>);
 
 impl MediaKeys {
     pub fn spawn(app: tauri::AppHandle) -> Self {
@@ -23,7 +32,10 @@ impl MediaKeys {
 
         match result {
             Ok(controls) => Self {
-                controls: Some(Mutex::new(controls)),
+                controls: Some(Mutex::new(MediaControlsState {
+                    controls,
+                    metadata_key: None,
+                })),
             },
             Err(error) => {
                 log::warn!("Media key setup failed: {error}");
@@ -36,11 +48,27 @@ impl MediaKeys {
         let Some(controls) = &self.controls else {
             return;
         };
-        if let Err(error) = controls
-            .lock()
-            .expect("media controls mutex poisoned")
-            .set_playback(media_playback(event))
-        {
+        let mut state = controls.lock().expect("media controls mutex poisoned");
+        let metadata_key = metadata_key(event);
+        if state.metadata_key != metadata_key {
+            let metadata = if metadata_key.is_some() {
+                MediaMetadata {
+                    title: event.name.as_deref(),
+                    artist: event.art.as_deref(),
+                    album: event.alb.as_deref(),
+                    duration: event.duration_secs.map(Duration::from_secs),
+                    cover_url: None,
+                }
+            } else {
+                MediaMetadata::default()
+            };
+            if let Err(error) = state.controls.set_metadata(metadata) {
+                log::warn!("Media metadata update failed: {error}");
+            } else {
+                state.metadata_key = metadata_key;
+            }
+        }
+        if let Err(error) = state.controls.set_playback(media_playback(event)) {
             log::warn!("Media playback state update failed: {error}");
         }
     }
@@ -51,6 +79,7 @@ enum PlaybackCommand {
     Toggle,
     Next,
     Previous,
+    Seek(u64),
 }
 
 fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
@@ -60,6 +89,9 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
         }
         MediaControlEvent::Next => PlaybackCommand::Next,
         MediaControlEvent::Previous => PlaybackCommand::Previous,
+        MediaControlEvent::SetPosition(MediaPosition(position)) => {
+            PlaybackCommand::Seek(position.as_secs())
+        }
         _ => return,
     };
     let app = app.clone();
@@ -76,6 +108,7 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
             PlaybackCommand::Toggle => state.playback.toggle(client.as_ref()).await,
             PlaybackCommand::Next => state.playback.next(client.as_ref()).await,
             PlaybackCommand::Previous => state.playback.prev(client.as_ref()).await,
+            PlaybackCommand::Seek(seconds) => state.playback.seek(client.as_ref(), seconds).await,
         };
         if let Err(error) = result {
             let _ = app.emit("operation-error", error);
@@ -83,8 +116,23 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
     });
 }
 
+fn metadata_key(event: &PlayerStateEvent) -> Option<MetadataKey> {
+    has_track(event).then(|| {
+        (
+            event.name.clone(),
+            event.art.clone(),
+            event.alb.clone(),
+            event.duration_secs,
+        )
+    })
+}
+
+fn has_track(event: &PlayerStateEvent) -> bool {
+    event.track_id.is_some() || event.name.is_some()
+}
+
 fn media_playback(event: &PlayerStateEvent) -> MediaPlayback {
-    if event.track_id.is_none() && event.name.is_none() {
+    if !has_track(event) {
         return MediaPlayback::Stopped;
     }
     let progress = Some(MediaPosition(Duration::from_secs(event.elapsed)));
@@ -131,5 +179,18 @@ mod tests {
                 progress: Some(MediaPosition(Duration::from_secs(42)))
             }
         );
+    }
+
+    #[test]
+    fn keys_metadata_by_track_fields() {
+        assert_eq!(metadata_key(&event(None, None, false)), None);
+
+        let first = event(Some(1), Some("Track"), true);
+        let renamed = event(Some(1), Some("Renamed"), true);
+        let mut progressed = first.clone();
+        progressed.elapsed += 1;
+
+        assert_ne!(metadata_key(&first), metadata_key(&renamed));
+        assert_eq!(metadata_key(&first), metadata_key(&progressed));
     }
 }
