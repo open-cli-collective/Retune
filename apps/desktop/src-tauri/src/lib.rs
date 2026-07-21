@@ -29,6 +29,7 @@ use retune_core::{
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
     client::{HttpTransport, SpotifyClient},
+    normalize::UNCATEGORIZED,
     tokens::{CachedTokenStore, KeychainTokenStore, TokenStore, Tokens},
 };
 use serde::{Deserialize, Serialize};
@@ -141,6 +142,14 @@ struct FacetsView {
     cats: Vec<String>,
     arts: Vec<String>,
     albs: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataValues {
+    arts: Vec<String>,
+    albs: Vec<String>,
+    cats: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -280,6 +289,39 @@ fn browse(
         album_rating_artist,
         album_rating_ambiguous,
         counts: counts(&library, source, &selection, &query),
+    }
+}
+
+#[tauri::command]
+fn metadata_values(state: tauri::State<'_, AppState>) -> MetadataValues {
+    let library = state.library.lock().expect("library mutex poisoned");
+    collect_metadata_values(&library)
+}
+
+fn collect_metadata_values(library: &Library) -> MetadataValues {
+    let mut arts = BTreeSet::new();
+    let mut albs = BTreeSet::new();
+    let mut cats = BTreeSet::new();
+    for track in library.tracks() {
+        if !track.art.is_empty() {
+            arts.insert(track.art.clone());
+        }
+        if !track.alb.is_empty() {
+            albs.insert(track.alb.clone());
+        }
+        if !track.cat.is_empty() && track.cat != UNCATEGORIZED {
+            cats.insert(track.cat.clone());
+        }
+    }
+    let sort = |values: BTreeSet<String>| {
+        let mut values = values.into_iter().collect::<Vec<_>>();
+        values.sort_by_key(|value| value.to_lowercase());
+        values
+    };
+    MetadataValues {
+        arts: sort(arts),
+        albs: sort(albs),
+        cats: sort(cats),
     }
 }
 
@@ -1454,6 +1496,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             browse,
+            metadata_values,
             click_track_star,
             set_album_rating,
             get_track,
@@ -1627,7 +1670,38 @@ fn startup_action(
 
 #[cfg(test)]
 mod tests {
+    use retune_core::model::NewTrack;
+
     use super::*;
+
+    fn metadata_track(uri: &str, cat: &str, art: &str, alb: &str) -> NewTrack {
+        NewTrack {
+            uri: uri.into(),
+            source: SourceId::Music,
+            cat: cat.into(),
+            art: art.into(),
+            alb: alb.into(),
+            name: uri.into(),
+            duration: Duration::from_secs(1),
+            track_no: None,
+            disc_no: None,
+        }
+    }
+
+    #[test]
+    fn metadata_values_are_distinct_sorted_and_categorized() {
+        let mut library = Library::new();
+        library.add(metadata_track("one", "rock", "zebra", "Yellow"));
+        library.add(metadata_track("two", "Jazz", "Alpha", "beta"));
+        library.add(metadata_track("three", UNCATEGORIZED, "Alpha", "Yellow"));
+        library.add(metadata_track("empty", "", "", ""));
+
+        let values = collect_metadata_values(&library);
+
+        assert_eq!(values.arts, ["Alpha", "zebra"]);
+        assert_eq!(values.albs, ["beta", "Yellow"]);
+        assert_eq!(values.cats, ["Jazz", "rock"]);
+    }
 
     #[test]
     fn release_first_run_starts_empty() {

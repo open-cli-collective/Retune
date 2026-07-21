@@ -89,6 +89,8 @@ type TrackInfo = {
   genres: string[]
 }
 
+type MetadataValues = { arts: string[]; albs: string[]; cats: string[] }
+
 type InfoDialog =
   | { kind: 'single'; track: TrackInfo }
   | { kind: 'multiple'; tracks: Track[] }
@@ -967,18 +969,44 @@ function SpotifySearch({ searching, results, onArtist, onAdd }: {
   </div>
 }
 
+function AutocompleteInput({ suggestions, value, onValue, placeholder }: {
+  suggestions: string[]
+  value: string
+  onValue: (value: string) => void
+  placeholder?: string
+}) {
+  return <input value={value} placeholder={placeholder} onChange={(event) => {
+    const input = event.target
+    const typed = input.value
+    const insertion = (event.nativeEvent as InputEvent).inputType === 'insertText' && input.selectionStart === typed.length
+    const suggestion = insertion && suggestions.find((candidate) => candidate.length > typed.length && candidate.toLowerCase().startsWith(typed.toLowerCase()))
+    if (suggestion) {
+      input.value = suggestion
+      input.setSelectionRange(typed.length, suggestion.length)
+    }
+    onValue(suggestion || typed)
+  }} />
+}
+
 function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
-  const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat })
+  const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat === 'Uncategorized' ? '' : track.cat })
+  const [suggestions, setSuggestions] = useState<MetadataValues>({ arts: [], albs: [], cats: [] })
   const [rating, setRating] = useState(track.rating)
   const dialog = useRef<HTMLDivElement>(null)
-  useEffect(() => { dialog.current?.focus() }, [])
+  useEffect(() => {
+    dialog.current?.focus()
+    invoke<MetadataValues>('metadata_values').then(setSuggestions).catch((error) => onError(String(error)))
+  }, [])
+  const genres = useMemo(() => [...new Map([...suggestions.cats, ...track.genres].filter((genre) => genre && genre !== 'Uncategorized').map((genre) => [genre.toLowerCase(), genre] as const)).values()]
+    .sort((left, right) => left.toLowerCase().localeCompare(right.toLowerCase())), [suggestions.cats, track.genres])
   const rate = (stars: number) => setRating((current) => current?.explicit && current.stars === stars
     ? track.inheritedRating === null ? null : { stars: track.inheritedRating, explicit: false }
     : { stars, explicit: true })
   const save = async () => {
     try {
       const ratingChange = { stars: rating?.explicit ? rating.stars : null }
-      await invoke('edit_track', { id: track.id, edit: { ...draft, ratingChange } })
+      const edit = Object.fromEntries(Object.entries(draft).filter(([, value]) => value.trim() !== ''))
+      await invoke('edit_track', { id: track.id, edit: { ...edit, ratingChange } })
       onSaved()
     } catch (error) {
       onError(String(error))
@@ -993,10 +1021,9 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
       <h2 id="get-info-title">Get Info</h2>
       <label>Spotify ID<input value={track.uri} readOnly /></label>
       <label>Name<input {...field('name')} /></label>
-      <label>Artist<input {...field('art')} /></label>
-      <label>Album<input {...field('alb')} /></label>
-      <label>Genre<input {...field('cat')} list={`genres-${track.id}`} /></label>
-      <datalist id={`genres-${track.id}`}>{track.genres.map((genre) => <option key={genre} value={genre} />)}</datalist>
+      <label>Artist<AutocompleteInput suggestions={suggestions.arts} value={draft.art} onValue={(art) => setDraft({ ...draft, art })} /></label>
+      <label>Album<AutocompleteInput suggestions={suggestions.albs} value={draft.alb} onValue={(alb) => setDraft({ ...draft, alb })} /></label>
+      <label>Genre<AutocompleteInput suggestions={genres} value={draft.cat} onValue={(cat) => setDraft({ ...draft, cat })} placeholder={track.cat === 'Uncategorized' ? 'Uncategorized' : undefined} /></label>
       <div className="genre-hint">normalize freely, e.g. “Operatic Rock” → “Rock”</div>
       <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /></div>
       {track.origCat && draft.cat !== track.origCat && <div className="override-banner">Spotify reports this as “{track.origCat}”. Your overlay wins in Retune.</div>}
@@ -1008,9 +1035,13 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
 function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: { tracks: Track[]; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
   type Field = 'art' | 'alb' | 'cat'
   const [draft, setDraft] = useState<Partial<Record<Field, string>>>({})
+  const [suggestions, setSuggestions] = useState<MetadataValues>({ arts: [], albs: [], cats: [] })
   const [rating, setRating] = useState<number | null | undefined>(undefined)
   const dialog = useRef<HTMLDivElement>(null)
-  useEffect(() => { dialog.current?.focus() }, [])
+  useEffect(() => {
+    dialog.current?.focus()
+    invoke<MetadataValues>('metadata_values').then(setSuggestions).catch((error) => onError(String(error)))
+  }, [])
   const placeholder = (key: Field) => tracks.every((track) => track[key] === tracks[0][key]) ? tracks[0][key] : 'Mixed'
   const save = async () => {
     try {
@@ -1023,17 +1054,23 @@ function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: { track
       onError(String(error))
     }
   }
-  const field = (key: Field) => ({
+  const field = (key: Field, values: string[]) => ({
+    suggestions: values,
     value: draft[key] ?? '',
     placeholder: placeholder(key),
-    onChange: (event: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, [key]: event.target.value }),
+    onValue: (value: string) => setDraft((current) => {
+      const next = { ...current }
+      if (value.trim()) next[key] = value
+      else delete next[key]
+      return next
+    }),
   })
   return <div className="modal-backdrop" role="presentation">
     <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="multiple-item-information-title" tabIndex={-1} ref={dialog}>
       <h2 id="multiple-item-information-title">Editing {tracks.length} items</h2>
-      <label>Artist<input {...field('art')} /></label>
-      <label>Album<input {...field('alb')} /></label>
-      <label>Genre<input {...field('cat')} /></label>
+      <label>Artist<AutocompleteInput {...field('art', suggestions.arts)} /></label>
+      <label>Album<AutocompleteInput {...field('alb', suggestions.albs)} /></label>
+      <label>Genre<AutocompleteInput {...field('cat', suggestions.cats)} /></label>
       <div className="info-rating bulk-rating"><span>Rating</span><RatingStars rating={rating ?? null} explicit={rating !== undefined && rating !== null} onRate={setRating} /><button className={rating === undefined ? 'active' : ''} onClick={() => setRating(undefined)}>No Change</button><button className={rating === null ? 'active' : ''} onClick={() => setRating(null)}>Clear</button></div>
       <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
     </div>
