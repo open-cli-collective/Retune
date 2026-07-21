@@ -868,7 +868,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
   onActivate: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
-  const [menu, setMenu] = useState<{ x: number; y: number }>()
+  const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
   const list = useRef<HTMLDivElement>(null)
   const headings: Record<ColumnKey, string> = {
     track: '#',
@@ -922,17 +922,26 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     <div className="track-scroll">
       {tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
-        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)}>
+        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onContextMenu={(event) => {
+          event.preventDefault()
+          if (!selectedIds.has(track.id)) onSelect(track.id, event)
+          const bounds = list.current?.getBoundingClientRect()
+          setMenu({ x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0), trackId: track.id })
+        }}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
         </div>
       })}
     </div>
-    {menu && <div className="column-menu" style={{ left: menu.x, top: menu.y }}>
-      {columnOrder.map((column) => <label key={column}><input type="checkbox" checked={!hiddenColumns.includes(column)} disabled={column === 'name'} onChange={(event) => onHiddenColumns(event.target.checked
-        ? hiddenColumns.filter((hidden) => hidden !== column)
-        : [...hiddenColumns, column])} />{headings[column]}</label>)}
-    </div>}
+    {menu && (menu.trackId === undefined
+      ? <div className="column-menu" style={{ left: menu.x, top: menu.y }}>
+        {columnOrder.map((column) => <label key={column}><input type="checkbox" checked={!hiddenColumns.includes(column)} disabled={column === 'name'} onChange={(event) => onHiddenColumns(event.target.checked
+          ? hiddenColumns.filter((hidden) => hidden !== column)
+          : [...hiddenColumns, column])} />{headings[column]}</label>)}
+      </div>
+      : <div className="column-menu context-menu" style={{ left: menu.x, top: menu.y }}>
+        <button onClick={() => { const id = menu.trackId; setMenu(undefined); if (id !== undefined) onInfo(id) }}>Get Info</button>
+      </div>)}
   </div>
 }
 
