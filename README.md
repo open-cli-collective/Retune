@@ -50,9 +50,13 @@ platform conventions for chrome instead.
 **Spotify integration rules**
 - The user must have the **Spotify desktop app installed and be logged in** — that
   is acceptable.
-- **The overlay never writes back to Spotify.** Overlay data (custom genre/artist/
-  album tags, ratings) is local-only. "Read-only" refers to Spotify's backend, not
-  to the overlay itself — the overlay is fully user-editable locally.
+- **The overlay never writes back to Spotify; content operations do.** Overlay
+  *metadata* (custom genre/artist/album tags, ratings) is local-only — "read-only"
+  refers to Spotify's backend, and the overlay is fully user-editable locally.
+  *Content* operations are the deliberate exception and treat Spotify as the
+  canonical store: adding to the library, adding tracks/albums to a playlist, and
+  reordering playlist tracks all make real Spotify API writes. (Updated 2026-07-24
+  with the playlist workstream.)
 - **Everything in the user's Spotify library populates the local library.** Using
   Spotify's own "Add to library" should also add to the local overlay library.
 - **Play counts**: librespot cannot expose Spotify play counts, so this feature

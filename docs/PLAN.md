@@ -129,7 +129,16 @@ struct AlbumKey { source: SourceId, art: String, alb: String }
   is navigation — it expands to that artist's albums (never a bulk import). An
   *album* row's "+ Add" fetches the album's track listing (paged) and adds every
   track. Where individual tracks are shown, they add singly. Every add also saves
-  the corresponding URI to the user's Spotify library (the one write-back).
+  the corresponding URI to the user's Spotify library.
+- **Write-back policy (guardrail).** Overlay *metadata* — tags, ratings, genre
+  normalizations — NEVER writes to Spotify under any circumstances. *Content*
+  operations deliberately do, treating Spotify as the canonical store: add to
+  library (above), add track/album to playlist, and playlist reordering (via
+  `snapshot_id` optimistic concurrency; a stale snapshot re-syncs rather than
+  clobbers). Playlist writes require the playlist-read-private +
+  playlist-modify-public/private scopes — a scope expansion beyond the original
+  grant, so connections made before it must detect stale scopes and prompt a
+  reconnect instead of failing on a 403.
 - Spotify tracks have **no genre**; artists do. Initial `cat` = first genre of the
   track's **first-listed (primary) artist**, else `"Unknown"`; artist lookups use
   **cached individual `/artists/{id}` requests** (the batch `?ids=` endpoint was
