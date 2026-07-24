@@ -521,11 +521,22 @@ mod tests {
     fn playlists_persist_across_reloads() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsPlaylistStore::new(dir.path());
-        let playlists = PlaylistCache::default();
+        let playlists = PlaylistCache {
+            playlists: vec![crate::playlists::CachedPlaylist {
+                id: "playlist".into(),
+                name: "Playlist".into(),
+                snapshot_id: "snapshot".into(),
+                owned: false,
+                owner: Some("Owner Name".into()),
+                tracks: vec![],
+                non_library_tracks: vec![],
+            }],
+        };
 
-        assert_eq!(store.load().unwrap(), playlists);
         store.save(&playlists).unwrap();
-        assert_eq!(FsPlaylistStore::new(dir.path()).load().unwrap(), playlists);
+        let reloaded = FsPlaylistStore::new(dir.path()).load().unwrap();
+        assert_eq!(reloaded, playlists);
+        assert_eq!(reloaded.playlists[0].owner.as_deref(), Some("Owner Name"));
         assert!(dir.path().join("playlists.json").is_file());
     }
 

@@ -24,6 +24,8 @@ pub struct CachedPlaylist {
     pub name: String,
     pub snapshot_id: String,
     pub owned: bool,
+    #[serde(default)]
+    pub owner: Option<String>,
     pub tracks: Vec<String>,
     #[serde(default)]
     pub non_library_tracks: Vec<CachedTrack>,
@@ -61,6 +63,7 @@ pub async fn sync<T: Transport, S: TokenStore>(
                     let mut cached = cached.expect("checked above").clone();
                     cached.name = summary.name;
                     cached.owned = summary.owned;
+                    cached.owner = Some(summary.owner.display_name.unwrap_or(summary.owner.id));
                     cached.non_library_tracks.retain(|track| {
                         !library
                             .tracks()
@@ -79,6 +82,70 @@ pub async fn sync<T: Transport, S: TokenStore>(
         }
     }
     Ok(PlaylistCache { playlists })
+}
+
+pub async fn create<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    cache: &mut PlaylistCache,
+    name: &str,
+) -> retune_spotify::Result<()> {
+    let user_id = client.me().await?.id;
+    let created = client.create_playlist(&user_id, name).await?;
+    cache.playlists.push(CachedPlaylist {
+        id: created.id,
+        name: created.name,
+        snapshot_id: created.snapshot_id,
+        owned: true,
+        owner: None,
+        tracks: vec![],
+        non_library_tracks: vec![],
+    });
+    Ok(())
+}
+
+pub async fn add<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    cache: &mut PlaylistCache,
+    library: &Library,
+    id: &str,
+    uris: Vec<String>,
+    meta: Vec<CachedTrack>,
+) -> Result<(), PlaylistAddError> {
+    let playlist = cache
+        .playlists
+        .iter_mut()
+        .find(|playlist| playlist.id == id)
+        .ok_or_else(|| PlaylistAddError::Unknown(id.into()))?;
+    playlist.snapshot_id = client.add_playlist_tracks(id, &uris, None).await?;
+    // Our own add bumps the cached snapshot_id, so the next sync will not
+    // re-fetch this playlist — metadata for tracks outside the library must
+    // be captured here or it never will be.
+    for uri in &uris {
+        let in_library = library.tracks().iter().any(|track| &track.uri == uri);
+        let known = playlist
+            .non_library_tracks
+            .iter()
+            .any(|track| &track.uri == uri);
+        if !in_library && !known {
+            if let Some(track) = meta.iter().find(|track| &track.uri == uri) {
+                playlist.non_library_tracks.push(track.clone());
+            }
+        }
+    }
+    playlist.tracks.extend(uris);
+    Ok(())
+}
+
+#[derive(Debug)]
+pub enum PlaylistAddError {
+    Unknown(String),
+    Spotify(Error),
+}
+
+impl From<Error> for PlaylistAddError {
+    fn from(error: Error) -> Self {
+        Self::Spotify(error)
+    }
 }
 
 pub async fn reorder<T: Transport, S: TokenStore>(
@@ -217,6 +284,7 @@ async fn fetch<T: Transport, S: TokenStore>(
         name: summary.name,
         snapshot_id: summary.snapshot_id,
         owned: summary.owned,
+        owner: Some(summary.owner.display_name.unwrap_or(summary.owner.id)),
         tracks,
         non_library_tracks,
     })
@@ -271,6 +339,7 @@ fn reorder_uris(uris: &mut Vec<String>, start: usize, insert_before: usize, leng
 
 #[cfg(test)]
 mod tests {
+    use crate::store::FsPlaylistStore;
     use retune_spotify::{
         client::{FakeTransport, Response},
         tokens::InMemoryTokenStore,
@@ -294,10 +363,38 @@ mod tests {
                 name: "Old name".into(),
                 snapshot_id: "same".into(),
                 owned: true,
+                owner: None,
                 tracks: vec!["spotify:track:1".into(), "spotify:track:2".into()],
                 non_library_tracks: vec![],
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn create_inserts_empty_owned_playlist_and_persists() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(200, serde_json::json!({"id": "user"})),
+                Response::json(
+                    201,
+                    serde_json::json!({
+                        "id": "new", "name": "Road Trip", "snapshot_id": "snapshot"
+                    }),
+                ),
+            ]),
+            tokens(retune_spotify::auth::SCOPES),
+        );
+        let mut cache = PlaylistCache::default();
+
+        create(&client, &mut cache, "Road Trip").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsPlaylistStore::new(dir.path());
+        store.save(&cache).unwrap();
+
+        assert_eq!(store.load().unwrap(), cache);
+        assert_eq!(cache.playlists[0].tracks, Vec::<String>::new());
+        assert!(cache.playlists[0].owned);
     }
 
     #[tokio::test]
@@ -311,7 +408,8 @@ mod tests {
                     serde_json::json!({
                         "items": [{
                             "id": "playlist", "name": "New name", "snapshot_id": "same",
-                            "owner": {"id": "user"}, "tracks": {"total": 2}
+                            "owner": {"id": "user", "display_name": "Owner Name"},
+                            "tracks": {"total": 2}
                         }],
                         "next": null
                     }),
@@ -323,6 +421,7 @@ mod tests {
         let synced = sync(&client, &cached(), &Library::new()).await.unwrap();
 
         assert_eq!(synced.playlists[0].name, "New name");
+        assert_eq!(synced.playlists[0].owner.as_deref(), Some("Owner Name"));
         assert_eq!(synced.playlists[0].tracks.len(), 2);
         assert_eq!(client.transport().requests().len(), 2);
     }
@@ -368,6 +467,7 @@ mod tests {
 
         assert!(matches!(error, PlaylistReorderError::Reloaded));
         assert_eq!(cache.playlists[0].snapshot_id, "fresh");
+        assert_eq!(cache.playlists[0].owner.as_deref(), Some("user"));
         assert_eq!(cache.playlists[0].tracks, ["spotify:track:fresh"]);
     }
 

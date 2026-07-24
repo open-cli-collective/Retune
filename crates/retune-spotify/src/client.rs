@@ -233,6 +233,19 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         Ok(page)
     }
 
+    pub async fn create_playlist(&self, user_id: &str, name: &str) -> Result<CreatedPlaylist> {
+        self.json(
+            Method::Post,
+            &format!("/users/{user_id}/playlists"),
+            serde_json::to_vec(&CreatePlaylist {
+                name,
+                public: false,
+            })
+            .expect("playlist create body serializes"),
+        )
+        .await
+    }
+
     pub async fn playlist_tracks(
         &self,
         playlist_id: &str,
@@ -926,6 +939,8 @@ pub struct Track {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PlaylistOwner {
     pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -944,11 +959,24 @@ pub struct Playlist {
     pub owned: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CreatedPlaylist {
+    pub id: String,
+    pub name: String,
+    pub snapshot_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct PlaylistTrackItem {
     #[serde(default)]
     is_local: bool,
     track: Option<Track>,
+}
+
+#[derive(serde::Serialize)]
+struct CreatePlaylist<'a> {
+    name: &'a str,
+    public: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1570,6 +1598,31 @@ mod tests {
                 .unwrap()
                 .1
                 .contains("is_local")
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_create_posts_private_playlist() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(
+                201,
+                serde_json::json!({
+                    "id": "playlist", "name": "Road Trip", "snapshot_id": "snapshot"
+                }),
+            )]),
+            tokens(),
+        );
+
+        let created = client.create_playlist("user", "Road Trip").await.unwrap();
+
+        assert_eq!(created.id, "playlist");
+        let request = &client.transport().requests()[0];
+        assert_eq!(request.method, Method::Post);
+        assert!(request.url.ends_with("/users/user/playlists"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+            serde_json::json!({"name": "Road Trip", "public": false})
         );
     }
 

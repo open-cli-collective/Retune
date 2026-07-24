@@ -31,6 +31,14 @@ type Settings = {
 }
 
 type ConnectionState = { connected: boolean }
+export type PlaylistListView = {
+  id: string
+  name: string
+  owned: boolean
+  owner: string | null
+  contains: boolean
+  trackCount: number
+}
 type RatingView = { stars: number; explicit: boolean }
 type SearchAlbum = {
   uri: string
