@@ -384,7 +384,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     pub async fn search(&self, query: &str, offset: u32, limit: u32) -> Result<SearchResults> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", query)
-            .append_pair("type", "artist,album")
+            .append_pair("type", "artist,album,track")
             .append_pair("offset", &offset.to_string())
             .append_pair("limit", &limit.to_string())
             .finish();
@@ -809,6 +809,8 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for Page<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Image {
     pub url: String,
+    #[serde(default)]
+    pub width: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -823,6 +825,15 @@ pub struct Artist {
     pub name: String,
     #[serde(default)]
     pub genres: Vec<String>,
+    #[serde(default)]
+    pub followers: Option<Followers>,
+    #[serde(default)]
+    pub images: Vec<Image>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Followers {
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -916,6 +927,8 @@ pub struct Album {
     #[serde(default)]
     pub images: Vec<Image>,
     #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
     pub tracks: Option<Page<AlbumTrack>>,
 }
 
@@ -990,6 +1003,7 @@ pub struct Chapter {
 pub struct SearchResults {
     pub artists: Page<Artist>,
     pub albums: Page<Album>,
+    pub tracks: Page<Track>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

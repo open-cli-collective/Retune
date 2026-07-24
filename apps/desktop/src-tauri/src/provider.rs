@@ -1,6 +1,6 @@
 use retune_core::model::NewTrack;
 use retune_spotify::{
-    client::{endpoint_family, Album, Artist, SpotifyClient, Transport},
+    client::{endpoint_family, Album, Artist, Image, SpotifyClient, Transport},
     normalize,
     tokens::TokenStore,
 };
@@ -63,23 +63,39 @@ impl LibraryKind {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchArtist {
+    pub id: String,
     pub name: String,
-    pub uri: String,
+    pub descriptor: String,
+    pub image_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchAlbum {
+    pub uri: String,
     pub name: String,
     pub artist: String,
+    pub year: Option<String>,
+    pub image_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchTrack {
     pub uri: String,
-    pub track_count: Option<u32>,
+    pub name: String,
+    pub artist: String,
+    pub alb: String,
+    pub duration_secs: u64,
+    pub image_url: Option<String>,
+    pub album_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct SearchResults {
     pub artists: Vec<SearchArtist>,
     pub albums: Vec<SearchAlbum>,
+    pub tracks: Vec<SearchTrack>,
 }
 
 pub struct Snapshot {
@@ -210,6 +226,8 @@ impl SyncRun<'_> {
                 id: id.into(),
                 name: String::new(),
                 genres,
+                followers: None,
+                images: vec![],
             })
     }
 
@@ -253,6 +271,59 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn compact_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        let value = count as f64 / 1_000_000.0;
+        if count % 1_000_000 < 100_000 {
+            format!("{value:.0}M")
+        } else {
+            format!("{value:.1}M")
+        }
+    } else if count >= 1_000 {
+        format!("{}K", count / 1_000)
+    } else {
+        count.to_string()
+    }
+}
+
+fn title_case(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn artist_descriptor(artist: &Artist) -> String {
+    let mut parts = vec![];
+    if let Some(genre) = artist.genres.first() {
+        parts.push(title_case(genre));
+    }
+    if let Some(followers) = &artist.followers {
+        parts.push(format!("{} followers", compact_count(followers.total)));
+    }
+    if parts.is_empty() {
+        "Artist".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+fn image_url(images: &[Image]) -> Option<String> {
+    images
+        .iter()
+        .filter(|image| image.width.is_some_and(|width| width >= 64))
+        .min_by_key(|image| image.width)
+        .or_else(|| images.last())
+        .map(|image| image.url.clone())
 }
 
 pub fn format_resume_time(deadline: u64, now: chrono::DateTime<chrono::Local>) -> String {
@@ -762,7 +833,9 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                 .items
                 .into_iter()
                 .map(|artist| SearchArtist {
-                    uri: format!("spotify:artist:{}", artist.id),
+                    id: artist.id.clone(),
+                    descriptor: artist_descriptor(&artist),
+                    image_url: image_url(&artist.images),
                     name: artist.name,
                 })
                 .collect(),
@@ -776,9 +849,39 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .first()
                         .map(|artist| artist.name.clone())
                         .unwrap_or_default(),
-                    name: album.name,
+                    year: album
+                        .release_date
+                        .as_deref()
+                        .and_then(|date| date.get(..4))
+                        .map(str::to_owned),
+                    image_url: image_url(&album.images),
                     uri: album.uri,
-                    track_count: None,
+                    name: album.name,
+                })
+                .collect(),
+            tracks: results
+                .tracks
+                .items
+                .into_iter()
+                .map(|track| SearchTrack {
+                    uri: track.uri,
+                    name: track.name,
+                    artist: track
+                        .artists
+                        .first()
+                        .map(|artist| artist.name.clone())
+                        .unwrap_or_default(),
+                    alb: track
+                        .album
+                        .as_ref()
+                        .map(|album| album.name.clone())
+                        .unwrap_or_default(),
+                    duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+                    image_url: track
+                        .album
+                        .as_ref()
+                        .and_then(|album| image_url(&album.images)),
+                    album_uri: track.album.map(|album| album.uri),
                 })
                 .collect(),
         })
@@ -800,9 +903,14 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .first()
                         .map(|artist| artist.name.clone())
                         .unwrap_or_default(),
-                    name: album.name,
+                    year: album
+                        .release_date
+                        .as_deref()
+                        .and_then(|date| date.get(..4))
+                        .map(str::to_owned),
+                    image_url: image_url(&album.images),
                     uri: album.uri,
-                    track_count: None,
+                    name: album.name,
                 }
             }));
             if page.next.is_none() || count == 0 {
@@ -914,6 +1022,7 @@ impl MediaProvider for FakeProvider {
         Ok(SearchResults {
             artists: vec![],
             albums: vec![],
+            tracks: vec![],
         })
     }
 
@@ -1530,9 +1639,16 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({
-                "artists": {"items": [{"id": "artist-1", "name": "Artist", "genres": []}], "next": null},
+                "artists": {"items": [{"id": "artist-1", "name": "Artist", "genres": ["modern classical"],
+                    "followers": {"total": 1234567},
+                    "images": [{"url": "large", "width": 300}, {"url": "small", "width": 64}]}], "next": null},
                 "albums": {"items": [{"id": "album-1", "uri": "spotify:album:1", "name": "Album",
-                    "artists": [{"id": "artist-1", "name": "Artist"}], "images": []}], "next": null}
+                    "artists": [{"id": "artist-1", "name": "Artist"}], "release_date": "2024-03-01",
+                    "images": [{"url": "album", "width": 64}]}], "next": null},
+                "tracks": {"items": [{"uri": "spotify:track:1", "name": "Track", "duration_ms": 123456,
+                    "artists": [{"id": "artist-1", "name": "Artist"}],
+                    "album": {"id": "album-1", "uri": "spotify:album:1", "name": "Album",
+                        "images": [{"url": "track", "width": 64}]}}], "next": null}
             }),
         )]);
 
@@ -1541,14 +1657,65 @@ mod tests {
         assert_eq!(
             results.artists[0],
             SearchArtist {
+                id: "artist-1".into(),
                 name: "Artist".into(),
-                uri: "spotify:artist:artist-1".into()
+                descriptor: "Modern Classical · 1.2M followers".into(),
+                image_url: Some("small".into()),
             }
         );
-        assert_eq!(results.albums[0].uri, "spotify:album:1");
-        assert!(client.transport().requests()[0]
-            .url
-            .ends_with("offset=0&limit=10"));
+        assert_eq!(results.albums[0].year.as_deref(), Some("2024"));
+        assert_eq!(
+            results.tracks[0],
+            SearchTrack {
+                uri: "spotify:track:1".into(),
+                name: "Track".into(),
+                artist: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 123,
+                image_url: Some("track".into()),
+                album_uri: Some("spotify:album:1".into()),
+            }
+        );
+        let url = url::Url::parse(&client.transport().requests()[0].url).unwrap();
+        assert_eq!(
+            url.query_pairs().find(|(key, _)| key == "type").unwrap().1,
+            "artist,album,track"
+        );
+        assert_eq!(
+            url.query_pairs().find(|(key, _)| key == "limit").unwrap().1,
+            "10"
+        );
+    }
+
+    #[test]
+    fn formats_compact_counts() {
+        assert_eq!(compact_count(1_234_567), "1.2M");
+        assert_eq!(compact_count(903_400), "903K");
+        assert_eq!(compact_count(999), "999");
+    }
+
+    #[test]
+    fn picks_smallest_image_at_least_64_pixels_or_last() {
+        let images = [
+            Image {
+                url: "large".into(),
+                width: Some(300),
+            },
+            Image {
+                url: "small".into(),
+                width: Some(64),
+            },
+        ];
+        assert_eq!(image_url(&images).as_deref(), Some("small"));
+        assert_eq!(
+            image_url(&[Image {
+                url: "fallback".into(),
+                width: Some(32),
+            }])
+            .as_deref(),
+            Some("fallback")
+        );
+        assert_eq!(image_url(&[]), None);
     }
 
     #[tokio::test]

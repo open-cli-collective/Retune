@@ -111,6 +111,8 @@ mod tests {
             id: "artist-1".into(),
             name: "Primary".into(),
             genres: vec!["indie".into(), "rock".into()],
+            followers: None,
+            images: vec![],
         };
         let mapped = track(&music(), Some(&artist), None);
         assert_eq!(mapped.uri, "spotify:track:1");
@@ -149,6 +151,7 @@ mod tests {
                 name: "Parent Artist".into(),
             }],
             images: vec![],
+            release_date: None,
             tracks: None,
         };
         let mapped = track(&value, None, Some(&album));

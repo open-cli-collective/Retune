@@ -1166,6 +1166,7 @@ async fn spotify_search(
         return Ok(SearchResults {
             artists: vec![],
             albums: vec![],
+            tracks: vec![],
         });
     }
     if !stored_connection_state(&state.token_store)?.connected {
