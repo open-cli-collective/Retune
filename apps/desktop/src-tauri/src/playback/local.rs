@@ -7,13 +7,13 @@ use librespot_core::{
 };
 use librespot_playback::{
     audio_backend,
-    config::{AudioFormat, PlayerConfig, VolumeCtrl},
+    config::{AudioFormat, Bitrate, PlayerConfig, VolumeCtrl},
     mixer::{self, Mixer, MixerConfig},
     player::{Player, PlayerEvent},
 };
 use tokio::sync::mpsc;
 
-use super::{LiveClient, NeutralEvent, Snapshot};
+use super::{AudioSettings, LiveClient, NeutralEvent, Snapshot};
 
 struct Runtime {
     session: Session,
@@ -36,6 +36,7 @@ impl LocalBackend {
         generation: u64,
         volume: u8,
         cache_dir: Option<&Path>,
+        audio: AudioSettings,
     ) -> Result<Self, String> {
         let access = client
             .access_token()
@@ -67,6 +68,9 @@ impl LocalBackend {
             .ok_or_else(|| "librespot rodio output is unavailable.".to_string())?;
         let player = Player::new(
             PlayerConfig {
+                bitrate: bitrate(audio.bitrate),
+                gapless: audio.gapless,
+                normalisation: audio.normalize,
                 position_update_interval: Some(Duration::from_secs(1)),
                 ..PlayerConfig::default()
             },
@@ -188,6 +192,14 @@ impl LocalBackend {
             runtime.session.shutdown();
         }
         self.playing = false;
+    }
+}
+
+fn bitrate(value: u16) -> Bitrate {
+    match value {
+        96 => Bitrate::Bitrate96,
+        160 => Bitrate::Bitrate160,
+        _ => Bitrate::Bitrate320,
     }
 }
 
@@ -339,5 +351,18 @@ fn neutral_event(event: PlayerEvent, generation: u64) -> Option<NeutralEvent> {
             uri: uri(track_id)?,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_streaming_bitrate() {
+        assert_eq!(bitrate(96), Bitrate::Bitrate96);
+        assert_eq!(bitrate(160), Bitrate::Bitrate160);
+        assert_eq!(bitrate(320), Bitrate::Bitrate320);
+        assert_eq!(bitrate(0), Bitrate::Bitrate320);
     }
 }

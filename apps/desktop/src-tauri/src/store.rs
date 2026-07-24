@@ -94,6 +94,12 @@ pub struct Settings {
     pub repeat: String,
     #[serde(default = "default_volume")]
     pub volume: u8,
+    #[serde(default = "default_streaming_bitrate")]
+    pub streaming_bitrate: u16,
+    #[serde(default)]
+    pub normalize_volume: bool,
+    #[serde(default = "default_true")]
+    pub gapless: bool,
 }
 
 fn default_true() -> bool {
@@ -106,6 +112,10 @@ fn default_playback_backend() -> String {
 
 fn default_volume() -> u8 {
     62
+}
+
+fn default_streaming_bitrate() -> u16 {
+    320
 }
 
 fn default_repeat() -> String {
@@ -140,6 +150,9 @@ impl Default for Settings {
             playback_backend: default_playback_backend(),
             repeat: default_repeat(),
             volume: default_volume(),
+            streaming_bitrate: default_streaming_bitrate(),
+            normalize_volume: false,
+            gapless: true,
         }
     }
 }
@@ -194,6 +207,11 @@ impl Settings {
         if self.volume > 100 {
             return Err(StoreError::InvalidSettings(
                 "settings volume must be between 0 and 100",
+            ));
+        }
+        if !matches!(self.streaming_bitrate, 96 | 160 | 320) {
+            return Err(StoreError::InvalidSettings(
+                "settings streamingBitrate must be 96, 160, or 320",
             ));
         }
         Ok(())
@@ -435,6 +453,9 @@ mod tests {
             playback_backend: "local".into(),
             repeat: "all".into(),
             volume: 40,
+            streaming_bitrate: 160,
+            normalize_volume: true,
+            gapless: false,
         };
 
         assert!(store.load().unwrap().is_none());
@@ -501,6 +522,9 @@ mod tests {
         assert_eq!(settings.playback_backend, "connect");
         assert_eq!(settings.repeat, "off");
         assert_eq!(settings.volume, 62);
+        assert_eq!(settings.streaming_bitrate, 320);
+        assert!(!settings.normalize_volume);
+        assert!(settings.gapless);
     }
 
     #[test]
@@ -515,6 +539,9 @@ mod tests {
         .unwrap();
         assert_eq!(settings.playback_backend, "connect");
         assert_eq!(settings.repeat, "off");
+        assert_eq!(settings.streaming_bitrate, 320);
+        assert!(!settings.normalize_volume);
+        assert!(settings.gapless);
     }
 
     #[test]

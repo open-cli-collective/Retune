@@ -25,6 +25,9 @@ type Settings = {
   playbackBackend: PlaybackBackend
   repeat: RepeatMode
   volume: number
+  streamingBitrate: number
+  normalizeVolume: boolean
+  gapless: boolean
 }
 
 type ConnectionState = { connected: boolean }
@@ -161,6 +164,9 @@ const defaultSettings: Settings = {
   playbackBackend: 'connect',
   repeat: 'off',
   volume: 62,
+  streamingBitrate: 320,
+  normalizeVolume: false,
+  gapless: true,
 }
 
 const initialState: State = {

@@ -18,7 +18,7 @@ use std::{
 
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
-use playback::{Playback, PlayerStateEvent, SnapshotTrack};
+use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{MediaProvider, SearchAlbum, SearchResults, SpotifySyncProvider};
 use retune_core::{
     browse::{self, Selection},
@@ -1161,6 +1161,48 @@ async fn set_repeat(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn set_audio_settings(
+    app: tauri::AppHandle,
+    streaming_bitrate: u16,
+    normalize_volume: bool,
+    gapless: bool,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    let changed = settings.streaming_bitrate != streaming_bitrate
+        || settings.normalize_volume != normalize_volume
+        || settings.gapless != gapless;
+    settings.streaming_bitrate = streaming_bitrate;
+    settings.normalize_volume = normalize_volume;
+    settings.gapless = gapless;
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    app.emit("settings-changed", settings)
+        .map_err(|error| error.to_string())?;
+    state.playback.set_audio(AudioSettings {
+        bitrate: streaming_bitrate,
+        normalize: normalize_volume,
+        gapless,
+    });
+    if changed && state.playback.is_local_active().await {
+        state.playback.invalidate_local().await;
+        if let Ok(client) = provider_from(&state) {
+            if let Err(error) = state.playback.revalidate(client.as_ref()).await {
+                log::warn!("Audio settings applied; session recreation deferred: {error}");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn mutate_library<T>(
     state: &AppState,
     mutation: impl FnOnce(&mut Library) -> Result<T, String>,
@@ -1523,7 +1565,8 @@ pub fn run() {
             player_prev,
             player_seek,
             player_set_volume,
-            set_repeat
+            set_repeat,
+            set_audio_settings
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -1595,7 +1638,15 @@ pub fn run() {
             }
             let activate_local = connected && settings.playback_backend == "local";
             let initial_volume = settings.volume;
-            let playback = Arc::new(Playback::new(&settings.repeat, Some(app_data_dir.clone())));
+            let playback = Arc::new(Playback::new(
+                &settings.repeat,
+                AudioSettings {
+                    bitrate: settings.streaming_bitrate,
+                    normalize: settings.normalize_volume,
+                    gapless: settings.gapless,
+                },
+                Some(app_data_dir.clone()),
+            ));
             let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
             app.manage(AppState {
                 library: Mutex::new(library),
@@ -1777,6 +1828,9 @@ mod tests {
             playback_backend: "local".into(),
             repeat: "all".into(),
             volume: 40,
+            streaming_bitrate: 160,
+            normalize_volume: true,
+            gapless: false,
         };
         let bytes = export_with_settings(&library, &exported, true).unwrap();
         let (restored_library, visual) = import_with_settings(&bytes, true).unwrap();

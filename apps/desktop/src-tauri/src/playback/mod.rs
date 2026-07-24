@@ -21,6 +21,13 @@ type LiveClient = SpotifyClient<HttpTransport, crate::SharedTokenStore>;
 const AUDIOBOOK_ERROR: &str = "Audiobook playback isn't supported yet.";
 const RECONNECT_DELAYS: &[u64] = &[0, 1, 2, 4, 8, 15, 30];
 
+#[derive(Clone, Copy)]
+pub struct AudioSettings {
+    pub bitrate: u16,
+    pub normalize: bool,
+    pub gapless: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotTrack {
@@ -282,16 +289,25 @@ pub struct Playback {
     events: mpsc::UnboundedSender<NeutralEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<NeutralEvent>>>,
     cache_dir: Option<PathBuf>,
+    audio: Mutex<AudioSettings>,
 }
 
 impl Default for Playback {
     fn default() -> Self {
-        Self::new("off", None)
+        Self::new(
+            "off",
+            AudioSettings {
+                bitrate: 320,
+                normalize: false,
+                gapless: true,
+            },
+            None,
+        )
     }
 }
 
 impl Playback {
-    pub fn new(repeat: &str, cache_dir: Option<PathBuf>) -> Self {
+    pub fn new(repeat: &str, audio: AudioSettings, cache_dir: Option<PathBuf>) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
         let generation = 1;
         let mut reducer = EventReducer::default();
@@ -307,7 +323,12 @@ impl Playback {
             events,
             receiver: Mutex::new(Some(receiver)),
             cache_dir,
+            audio: Mutex::new(audio),
         }
+    }
+
+    pub fn set_audio(&self, audio: AudioSettings) {
+        *self.audio.lock().expect("audio settings mutex poisoned") = audio;
     }
 
     pub fn listen(self: &Arc<Self>, app: tauri::AppHandle) {
@@ -419,6 +440,7 @@ impl Playback {
     }
 
     pub async fn switch_to_local(&self, client: &LiveClient, volume: u8) -> Result<(), String> {
+        let audio = *self.audio.lock().expect("audio settings mutex poisoned");
         self.switch_to_local_with(Some(client), || async {
             let state = self.state.lock().await;
             let generation = state.generation.wrapping_add(1);
@@ -429,6 +451,7 @@ impl Playback {
                 generation,
                 volume,
                 self.cache_dir.as_deref(),
+                audio,
             )
             .await
         })
@@ -489,6 +512,16 @@ impl Playback {
         self.state.lock().await.backend.is_local()
     }
 
+    /// Recreate an invalidated local session now rather than lazily on the
+    /// next command, so playback resumes on its own after a config change.
+    pub async fn revalidate(&self, client: &LiveClient) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if !state.backend.is_local() || state.reducer.snapshot().is_none() {
+            return Ok(());
+        }
+        self.ensure_valid(&mut state, client).await
+    }
+
     async fn ensure_valid(
         &self,
         state: &mut ControllerState,
@@ -500,12 +533,14 @@ impl Playback {
         }
         log::info!("Recreating local playback session");
         let generation = state.generation.wrapping_add(1);
+        let audio = *self.audio.lock().expect("audio settings mutex poisoned");
         let mut local = LocalBackend::activate(
             client,
             self.events.clone(),
             generation,
             state.volume,
             self.cache_dir.as_deref(),
+            audio,
         )
         .await?;
         let restore = state.reducer.snapshot().cloned().map(|snapshot| {
