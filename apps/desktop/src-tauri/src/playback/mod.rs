@@ -2,7 +2,10 @@ mod connect;
 mod local;
 mod reducer;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use connect::ConnectBackend;
 use local::LocalBackend;
@@ -276,16 +279,17 @@ pub struct Playback {
     state: tokio::sync::Mutex<ControllerState>,
     events: mpsc::UnboundedSender<NeutralEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<NeutralEvent>>>,
+    cache_dir: Option<PathBuf>,
 }
 
 impl Default for Playback {
     fn default() -> Self {
-        Self::new("off")
+        Self::new("off", None)
     }
 }
 
 impl Playback {
-    pub fn new(repeat: &str) -> Self {
+    pub fn new(repeat: &str, cache_dir: Option<PathBuf>) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
         let generation = 1;
         let mut reducer = EventReducer::default();
@@ -300,6 +304,7 @@ impl Playback {
             }),
             events,
             receiver: Mutex::new(Some(receiver)),
+            cache_dir,
         }
     }
 
@@ -416,7 +421,14 @@ impl Playback {
             let state = self.state.lock().await;
             let generation = state.generation.wrapping_add(1);
             drop(state);
-            LocalBackend::activate(client, self.events.clone(), generation, volume).await
+            LocalBackend::activate(
+                client,
+                self.events.clone(),
+                generation,
+                volume,
+                self.cache_dir.as_deref(),
+            )
+            .await
         })
         .await
     }
@@ -486,15 +498,20 @@ impl Playback {
         }
         log::info!("Recreating local playback session");
         let generation = state.generation.wrapping_add(1);
-        let mut local =
-            LocalBackend::activate(client, self.events.clone(), generation, state.volume)
-                .await
-                .inspect_err(|error| {
-                    let _ = self.events.send(NeutralEvent::Error {
-                        generation: state.generation,
-                        message: error.clone(),
-                    });
-                })?;
+        let mut local = LocalBackend::activate(
+            client,
+            self.events.clone(),
+            generation,
+            state.volume,
+            self.cache_dir.as_deref(),
+        )
+        .await
+        .inspect_err(|error| {
+            let _ = self.events.send(NeutralEvent::Error {
+                generation: state.generation,
+                message: error.clone(),
+            });
+        })?;
         let restore = state.reducer.snapshot().cloned().map(|snapshot| {
             let playing = state.reducer.state().is_playing;
             let position_ms = u32::try_from(state.reducer.state().elapsed.saturating_mul(1000))

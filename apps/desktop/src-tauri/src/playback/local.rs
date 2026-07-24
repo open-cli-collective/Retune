@@ -1,7 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
+use librespot_audio::AudioFetchParams;
 use librespot_core::{
-    authentication::Credentials, config::SessionConfig, session::Session, spotify_uri::SpotifyUri,
+    authentication::Credentials, cache::Cache, config::SessionConfig, session::Session,
+    spotify_uri::SpotifyUri,
 };
 use librespot_playback::{
     audio_backend,
@@ -33,12 +35,19 @@ impl LocalBackend {
         events: mpsc::UnboundedSender<NeutralEvent>,
         generation: u64,
         volume: u8,
+        cache_dir: Option<&Path>,
     ) -> Result<Self, String> {
         let access = client
             .access_token()
             .await
             .map_err(|error| error.to_string())?;
-        let session = Session::new(SessionConfig::default(), None);
+        // Read farther ahead to survive short network stalls.
+        let _ = AudioFetchParams::set(AudioFetchParams {
+            read_ahead_during_playback: Duration::from_secs(30),
+            ..AudioFetchParams::default()
+        });
+        let cache = cache_dir.and_then(audio_cache);
+        let session = Session::new(SessionConfig::default(), cache);
         session
             .connect(Credentials::with_access_token(access), false)
             .await
@@ -179,6 +188,22 @@ impl LocalBackend {
             runtime.session.shutdown();
         }
         self.playing = false;
+    }
+}
+
+fn audio_cache(app_data_dir: &Path) -> Option<Cache> {
+    let audio_path = app_data_dir.join("audio-cache");
+    match Cache::new(
+        None::<&Path>,
+        None::<&Path>,
+        Some(audio_path.as_path()),
+        Some(2 * 1024 * 1024 * 1024),
+    ) {
+        Ok(cache) => Some(cache),
+        Err(error) => {
+            log::warn!("Audio cache unavailable: {error}");
+            None
+        }
     }
 }
 

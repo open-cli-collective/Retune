@@ -1595,7 +1595,7 @@ pub fn run() {
             }
             let activate_local = connected && settings.playback_backend == "local";
             let initial_volume = settings.volume;
-            let playback = Arc::new(Playback::new(&settings.repeat));
+            let playback = Arc::new(Playback::new(&settings.repeat, Some(app_data_dir.clone())));
             let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
             app.manage(AppState {
                 library: Mutex::new(library),

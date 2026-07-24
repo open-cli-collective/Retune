@@ -3994,6 +3994,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "librespot-audio",
  "librespot-core",
  "librespot-playback",
  "log",
