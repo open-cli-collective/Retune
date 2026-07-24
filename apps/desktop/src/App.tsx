@@ -129,6 +129,7 @@ type State = {
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
   syncPhase?: string
+  syncProgress?: { tracks: number; fraction: number }
 }
 
 type Action =
@@ -159,6 +160,7 @@ type Action =
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'syncPhase'; phase?: string }
+  | { type: 'syncProgress'; progress: { tracks: number; fraction: number } }
 
 const defaultSettings: Settings = {
   theme: 'system',
@@ -202,7 +204,7 @@ function reducer(state: State, action: Action): State {
     case 'view':
       return { ...state, view: action.view, error: undefined }
     case 'error':
-      return { ...state, error: action.error }
+      return { ...state, error: action.error, syncProgress: undefined }
     case 'clear-error':
       return { ...state, error: undefined }
     case 'source':
@@ -281,7 +283,9 @@ function reducer(state: State, action: Action): State {
     case 'spotifySearching':
       return { ...state, spotifySearching: action.searching }
     case 'syncPhase':
-      return { ...state, syncPhase: action.phase }
+      return { ...state, syncPhase: action.phase, syncProgress: action.phase ? state.syncProgress : undefined }
+    case 'syncProgress':
+      return { ...state, syncProgress: action.progress.fraction < 1 ? action.progress : undefined }
   }
 }
 
@@ -394,7 +398,7 @@ function App() {
   const tracks = view?.tracks ?? emptyTracks
   const selectedTracks = tracks.filter((track) => state.selectedTrackIds.has(track.id))
   const tracklistVisible = state.scope !== 'spotify' || !state.query.trim()
-  const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase
+  const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
   const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
@@ -484,6 +488,7 @@ function App() {
     const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connected: payload.connected }))
     const settings = listen<Settings>('settings-changed', ({ payload }) => dispatch({ type: 'hydrateSettings', settings: payload }))
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
+    const progressCount = listen<{ tracks: number; fraction: number }>('sync-progress-count', ({ payload }) => dispatch({ type: 'syncProgress', progress: payload }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
@@ -491,6 +496,7 @@ function App() {
       void connection.then((stop) => stop())
       void settings.then((stop) => stop())
       void progress.then((stop) => stop())
+      void progressCount.then((stop) => stop())
     }
   }, [])
 
@@ -800,7 +806,7 @@ function App() {
             />
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} empty={libraryEmpty} />
+          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
@@ -1293,12 +1299,14 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   </div>
 }
 
-function StatusBar({ view, unit, syncPhase, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; empty: boolean }) {
+function StatusBar({ view, unit, syncPhase, syncProgress, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
-  return <footer className="status-bar"><button aria-label="Add">+</button><span>{syncPhase ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span></footer>
+  return <footer className="status-bar"><button aria-label="Add">+</button>{syncProgress
+    ? <span className="sync-status"><span>⟳ Syncing from Spotify…</span><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></span>
+    : <span>{syncPhase ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span>}</footer>
 }
 
 export default App

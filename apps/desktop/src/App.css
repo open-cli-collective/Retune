@@ -103,7 +103,9 @@ button.spotify-row { cursor: default; }
 .spotify-row small { display: block; margin-top: 2px; color: var(--dim); font-weight: 400; }
 .status-bar { height: 26px; flex: 0 0 26px; display: grid; grid-template-columns: 40px 1fr; align-items: center; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); }
 .status-bar button { justify-self: start; height: 19px; margin-left: 7px; border: 1px solid var(--border); border-radius: 2px; background: var(--control); }
-.status-bar span:nth-child(2) { text-align: center; }
+.status-bar > span { text-align: center; }
+.sync-status { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.sync-meter { width: 120px; height: 5px; accent-color: var(--accent); }
 .error-banner { position: absolute; right: 10px; bottom: 30px; max-width: 430px; padding: 5px 8px; border: 1px solid #b33; color: #fff; background: #8d2d2d; }
 .startup-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-bottom: 1px solid #c59627; color: #553c00; background: #fff3c8; }
 .startup-notice button { border: 0; color: inherit; background: transparent; font-size: 16px; }

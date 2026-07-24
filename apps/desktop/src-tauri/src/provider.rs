@@ -48,6 +48,16 @@ impl LibraryKind {
             Self::Audiobooks => "Syncing saved audiobooks…",
         }
     }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tracks => "tracks",
+            Self::Albums => "albums",
+            Self::Shows => "podcasts",
+            Self::Episodes => "episodes",
+            Self::Audiobooks => "audiobooks",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -86,8 +96,19 @@ pub struct SectionProgress {
     pub total: Option<u32>,
 }
 
+pub struct SyncBatch {
+    pub tracks: Vec<NewTrack>,
+    pub done: u32,
+    pub total: Option<u32>,
+    pub section: &'static str,
+}
+
 pub trait MediaProvider: Send + Sync {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String>;
+    async fn library_snapshot(
+        &self,
+        kind: LibraryKind,
+        on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
+    ) -> Result<Snapshot, String>;
     fn earliest_cooldown(&self) -> Option<u64> {
         None
     }
@@ -389,6 +410,7 @@ async fn pace_artist_lookup(lookup: usize) {
 #[cfg(test)]
 async fn pace_artist_lookup(_lookup: usize) {}
 
+#[derive(Clone)]
 struct PendingTrack {
     track: NewTrack,
     artist_id: Option<String>,
@@ -489,16 +511,18 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
     client: &'a SpotifyClient<T, S>,
     kind: LibraryKind,
     run: Option<&'a SyncRun<'a>>,
+    on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
 ) -> Result<Snapshot, String> {
     let health = SyncHealth::new(run);
     let genres = GenreSource::new(client, &health);
-    let (family, label) = match kind {
-        LibraryKind::Tracks => ("/me/tracks", "tracks"),
-        LibraryKind::Albums => ("/me/albums", "albums"),
-        LibraryKind::Shows => ("/me/shows", "podcasts"),
-        LibraryKind::Episodes => ("/me/episodes", "episodes"),
-        LibraryKind::Audiobooks => ("/me/audiobooks", "audiobooks"),
+    let family = match kind {
+        LibraryKind::Tracks => "/me/tracks",
+        LibraryKind::Albums => "/me/albums",
+        LibraryKind::Shows => "/me/shows",
+        LibraryKind::Episodes => "/me/episodes",
+        LibraryKind::Audiobooks => "/me/audiobooks",
     };
+    let label = kind.label();
     if health.skip_content_family(family) {
         let batches = if kind == LibraryKind::Audiobooks {
             match run {
@@ -538,9 +562,15 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                     .items
                     .into_iter()
                     .map(|saved| normalized_track(&saved.track, None))
-                    .collect();
-                music_batches.push(batch);
+                    .collect::<Vec<_>>();
                 done += count;
+                on_batch(SyncBatch {
+                    tracks: batch.iter().map(|pending| pending.track.clone()).collect(),
+                    done,
+                    total,
+                    section: label,
+                });
+                music_batches.push(batch);
                 (vec![], count, page.next.is_some())
             }
             LibraryKind::Albums => {
@@ -557,11 +587,23 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                         normalized_album_tracks(client, &health, &saved.album).await?;
                     batch.extend(tracks);
                     if partial {
+                        on_batch(SyncBatch {
+                            tracks: batch.iter().map(|pending| pending.track.clone()).collect(),
+                            done,
+                            total,
+                            section: label,
+                        });
                         music_batches.push(batch);
                         break 'pages;
                     }
                     done += 1;
                 }
+                on_batch(SyncBatch {
+                    tracks: batch.iter().map(|pending| pending.track.clone()).collect(),
+                    done,
+                    total,
+                    section: label,
+                });
                 music_batches.push(batch);
                 (vec![], count, page.next.is_some())
             }
@@ -576,12 +618,24 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 let mut batch = vec![];
                 for saved in page.items {
                     if health.skip_content_family("/shows") {
+                        on_batch(SyncBatch {
+                            tracks: batch.clone(),
+                            done,
+                            total,
+                            section: label,
+                        });
                         batches.push(batch);
                         break 'pages;
                     }
                     let Some(episodes) = health
                         .snapshot_page(client.show_episodes(&saved.show.id, 0, PAGE_SIZE).await)?
                     else {
+                        on_batch(SyncBatch {
+                            tracks: batch.clone(),
+                            done,
+                            total,
+                            section: label,
+                        });
                         batches.push(batch);
                         break 'pages;
                     };
@@ -622,12 +676,24 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 let mut batch = vec![];
                 for book in page.items {
                     if health.skip_content_family("/audiobooks") {
+                        on_batch(SyncBatch {
+                            tracks: batch.clone(),
+                            done,
+                            total,
+                            section: label,
+                        });
                         batches.push(batch);
                         break 'pages;
                     }
                     let Some(chapters) = health
                         .snapshot_page(client.audiobook_chapters(&book.id, 0, PAGE_SIZE).await)?
                     else {
+                        on_batch(SyncBatch {
+                            tracks: batch.clone(),
+                            done,
+                            total,
+                            section: label,
+                        });
                         batches.push(batch);
                         break 'pages;
                     };
@@ -643,6 +709,12 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
             }
         };
         if !matches!(kind, LibraryKind::Tracks | LibraryKind::Albums) {
+            on_batch(SyncBatch {
+                tracks: batch.clone(),
+                done,
+                total,
+                section: label,
+            });
             batches.push(batch);
         }
         if !has_next || count == 0 {
@@ -672,8 +744,12 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
 }
 
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String> {
-        spotify_library_snapshot(self, kind, None).await
+    async fn library_snapshot(
+        &self,
+        kind: LibraryKind,
+        on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
+    ) -> Result<Snapshot, String> {
+        spotify_library_snapshot(self, kind, None, on_batch).await
     }
 
     async fn search(&self, query: &str) -> Result<SearchResults, String> {
@@ -768,8 +844,12 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
 }
 
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifySyncProvider<'_, T, S> {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String> {
-        spotify_library_snapshot(self.client, kind, Some(&self.run)).await
+    async fn library_snapshot(
+        &self,
+        kind: LibraryKind,
+        on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
+    ) -> Result<Snapshot, String> {
+        spotify_library_snapshot(self.client, kind, Some(&self.run), on_batch).await
     }
 
     fn earliest_cooldown(&self) -> Option<u64> {
@@ -807,9 +887,23 @@ pub struct FakeProvider {
 
 #[cfg(test)]
 impl MediaProvider for FakeProvider {
-    async fn library_snapshot(&self, kind: LibraryKind) -> Result<Snapshot, String> {
+    async fn library_snapshot(
+        &self,
+        kind: LibraryKind,
+        on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
+    ) -> Result<Snapshot, String> {
+        let batches = self.snapshots.get(&kind).cloned().unwrap_or_default();
+        let total = batches.len() as u32;
+        for (index, tracks) in batches.iter().enumerate() {
+            on_batch(SyncBatch {
+                tracks: tracks.clone(),
+                done: index as u32 + 1,
+                total: Some(total),
+                section: kind.label(),
+            });
+        }
         Ok(Snapshot {
-            batches: self.snapshots.get(&kind).cloned().unwrap_or_default(),
+            batches,
             genres_degraded: self.genres_degraded,
             partial: self.partial,
             progress: None,
@@ -901,14 +995,22 @@ mod tests {
                 serde_json::json!({"id": "artist-1", "name": "Artist", "genres": ["rock"]}),
             ),
         ]);
-        let snapshot = MediaProvider::library_snapshot(&client, LibraryKind::Tracks)
-            .await
-            .unwrap();
+        let tapped = Mutex::new(vec![]);
+        let snapshot = MediaProvider::library_snapshot(&client, LibraryKind::Tracks, &|batch| {
+            tapped.lock().unwrap().push(batch)
+        })
+        .await
+        .unwrap();
         let batches = snapshot.batches;
+        let tapped = tapped.into_inner().unwrap();
 
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0][0].cat, "rock");
         assert_eq!(batches[0][0].alb, "Album");
+        assert_eq!(tapped.len(), 2);
+        assert_eq!(tapped[0].tracks[0].uri, "spotify:track:1");
+        assert_eq!(tapped[0].done, 1);
+        assert_eq!(tapped[0].section, "tracks");
         assert!(client.transport().requests()[1]
             .url
             .ends_with("offset=1&limit=50"));
@@ -940,7 +1042,7 @@ mod tests {
         ]);
 
         let batches = client
-            .library_snapshot(LibraryKind::Albums)
+            .library_snapshot(LibraryKind::Albums, &|_| {})
             .await
             .unwrap()
             .batches;
@@ -971,7 +1073,10 @@ mod tests {
             }}], "next": null}),
         )]);
 
-        let snapshot = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+        let snapshot = client
+            .library_snapshot(LibraryKind::Albums, &|_| {})
+            .await
+            .unwrap();
 
         assert_eq!(snapshot.batches[0].len(), 1);
         assert_eq!(client.transport().requests().len(), 1);
@@ -1009,7 +1114,10 @@ mod tests {
             ),
         ]);
 
-        let snapshot = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+        let snapshot = client
+            .library_snapshot(LibraryKind::Albums, &|_| {})
+            .await
+            .unwrap();
         let album_requests = client
             .transport()
             .requests()
@@ -1045,8 +1153,14 @@ mod tests {
             rate_limited(),
         ]);
 
-        let tracks = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
-        let albums = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+        let tracks = client
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
+            .await
+            .unwrap();
+        let albums = client
+            .library_snapshot(LibraryKind::Albums, &|_| {})
+            .await
+            .unwrap();
 
         assert_eq!(tracks.batches[0].len(), 2);
         assert!(!tracks.partial);
@@ -1086,7 +1200,10 @@ mod tests {
             rate_limited(),
         ]);
 
-        let snapshot = client.library_snapshot(LibraryKind::Albums).await.unwrap();
+        let snapshot = client
+            .library_snapshot(LibraryKind::Albums, &|_| {})
+            .await
+            .unwrap();
 
         assert_eq!(
             snapshot.progress,
@@ -1102,7 +1219,10 @@ mod tests {
     async fn first_saved_tracks_rate_limit_returns_empty_partial_snapshot() {
         let client = client([rate_limited()]);
 
-        let snapshot = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+        let snapshot = client
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
+            .await
+            .unwrap();
 
         assert!(snapshot.batches.is_empty());
         assert!(snapshot.partial);
@@ -1120,7 +1240,7 @@ mod tests {
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
 
         let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks)
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
             .await
             .unwrap();
 
@@ -1155,7 +1275,7 @@ mod tests {
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
 
         let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks)
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
             .await
             .unwrap();
 
@@ -1173,7 +1293,7 @@ mod tests {
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
 
         let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks)
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
             .await
             .unwrap();
         let cooldowns = FsSyncStore::new(dir.path()).cooldowns(unix_now()).unwrap();
@@ -1250,7 +1370,7 @@ mod tests {
 
         let mut snapshot = None;
         for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind).await.unwrap());
+            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
         }
         let snapshot = snapshot.unwrap();
 
@@ -1284,7 +1404,7 @@ mod tests {
 
         let mut snapshot = None;
         for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind).await.unwrap());
+            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
         }
 
         assert_eq!(snapshot.unwrap().batches[0][0].cat, "rock");
@@ -1321,7 +1441,7 @@ mod tests {
         ]);
 
         let batches = client
-            .library_snapshot(LibraryKind::Shows)
+            .library_snapshot(LibraryKind::Shows, &|_| {})
             .await
             .unwrap()
             .batches;
@@ -1351,7 +1471,7 @@ mod tests {
         )]);
 
         let batches = client
-            .library_snapshot(LibraryKind::Episodes)
+            .library_snapshot(LibraryKind::Episodes, &|_| {})
             .await
             .unwrap()
             .batches;
@@ -1387,7 +1507,7 @@ mod tests {
         ]);
 
         let batches = client
-            .library_snapshot(LibraryKind::Audiobooks)
+            .library_snapshot(LibraryKind::Audiobooks, &|_| {})
             .await
             .unwrap()
             .batches;
@@ -1464,7 +1584,7 @@ mod tests {
         )]);
 
         let snapshot = client
-            .library_snapshot(LibraryKind::Episodes)
+            .library_snapshot(LibraryKind::Episodes, &|_| {})
             .await
             .unwrap();
 
@@ -1479,7 +1599,7 @@ mod tests {
         let client = client([Response::json(200, serde_json::json!({"items": "bogus"}))]);
 
         let snapshot = client
-            .library_snapshot(LibraryKind::Episodes)
+            .library_snapshot(LibraryKind::Episodes, &|_| {})
             .await
             .unwrap();
 
@@ -1524,7 +1644,7 @@ mod tests {
         let client = client(responses);
 
         let batches = client
-            .library_snapshot(LibraryKind::Tracks)
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
             .await
             .unwrap()
             .batches;
@@ -1576,7 +1696,7 @@ mod tests {
 
         let mut snapshot = None;
         for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind).await.unwrap());
+            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
         }
         let snapshot = snapshot.unwrap();
 
@@ -1639,7 +1759,7 @@ mod tests {
 
         let mut snapshot = None;
         for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind).await.unwrap());
+            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
         }
         let snapshot = snapshot.unwrap();
 
@@ -1698,7 +1818,10 @@ mod tests {
             rate_limited(),
         ]);
 
-        let snapshot = client.library_snapshot(LibraryKind::Tracks).await.unwrap();
+        let snapshot = client
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
+            .await
+            .unwrap();
 
         assert!(snapshot.genres_degraded);
         assert_eq!(snapshot.batches[0].len(), 3);

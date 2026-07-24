@@ -6,7 +6,7 @@ use retune_core::{
 };
 
 use crate::{
-    provider::{MediaProvider, SectionProgress},
+    provider::{MediaProvider, SectionProgress, SyncBatch},
     store::OverlayStore,
 };
 
@@ -18,7 +18,7 @@ pub async fn reconcile<P: MediaProvider, S: OverlayStore>(
     first_sync: bool,
     mut progress: impl FnMut(&str),
 ) -> Result<(), String> {
-    let outcome = snapshot(provider, &mut progress).await?;
+    let outcome = snapshot(provider, &mut progress, &|_| {}).await?;
     apply(library, store, first_sync, outcome.tracks)
 }
 
@@ -34,6 +34,7 @@ pub struct SnapshotOutcome {
 pub async fn snapshot<P: MediaProvider>(
     provider: &P,
     mut progress: impl FnMut(&str),
+    on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
 ) -> Result<SnapshotOutcome, String> {
     let mut incoming = vec![];
     let mut genres_degraded = false;
@@ -41,7 +42,7 @@ pub async fn snapshot<P: MediaProvider>(
     let mut section_progress = vec![];
     for kind in crate::provider::LibraryKind::ALL {
         progress(kind.phase());
-        let snapshot = provider.library_snapshot(kind).await?;
+        let snapshot = provider.library_snapshot(kind, on_batch).await?;
         genres_degraded |= snapshot.genres_degraded;
         partial |= snapshot.partial;
         if let Some(progress) = snapshot.progress {
@@ -67,6 +68,14 @@ pub fn apply<S: OverlayStore>(
     first_sync: bool,
     incoming: Vec<retune_core::model::NewTrack>,
 ) -> Result<(), String> {
+    if first_sync {
+        *library = without_fixtures(library)?;
+    }
+    apply_in_memory(library, incoming);
+    store.save(library).map_err(|error| error.to_string())
+}
+
+pub fn apply_in_memory(library: &mut Library, incoming: Vec<retune_core::model::NewTrack>) {
     let provider_genres = library
         .tracks()
         .iter()
@@ -77,10 +86,6 @@ pub fn apply<S: OverlayStore>(
             )
         })
         .collect::<HashMap<_, _>>();
-    let mut next = library.clone();
-    if first_sync {
-        next = without_fixtures(&next)?;
-    }
     for mut track in incoming {
         if track.cat == retune_spotify::normalize::UNCATEGORIZED {
             if let Some(existing) = provider_genres
@@ -90,14 +95,11 @@ pub fn apply<S: OverlayStore>(
                 track.cat.clone_from(existing);
             }
         }
-        next.upsert(track);
+        library.upsert(track);
     }
-    store.save(&next).map_err(|error| error.to_string())?;
-    *library = next;
-    Ok(())
 }
 
-fn without_fixtures(library: &Library) -> Result<Library, String> {
+pub fn without_fixtures(library: &Library) -> Result<Library, String> {
     let mut value: serde_json::Value =
         serde_json::from_slice(&export_json(library)).map_err(|error| error.to_string())?;
     let tracks = value
@@ -232,7 +234,7 @@ mod tests {
         let store = RecordingStore::default();
         let mut library = Library::new();
 
-        let outcome = snapshot(&provider, |_| {}).await.unwrap();
+        let outcome = snapshot(&provider, |_| {}, &|_| {}).await.unwrap();
         assert!(outcome.partial);
         apply(&mut library, &store, false, outcome.tracks).unwrap();
 
@@ -257,5 +259,35 @@ mod tests {
         healthy.cat = "Metal".into();
         apply(&mut library, &store, false, vec![healthy]).unwrap();
         assert_eq!(library.get(id).unwrap().cat, "Metal");
+    }
+
+    #[test]
+    fn incremental_batches_then_final_apply_match_single_apply() {
+        let mut base = Library::new();
+        let id = base.add(track("spotify:track:one", "Provider name"));
+        base.edit(
+            id,
+            TrackEdit {
+                name: Some("Local name".into()),
+                ..TrackEdit::default()
+            },
+        )
+        .unwrap();
+        let mut degraded = track("spotify:track:one", "Changed upstream");
+        degraded.cat = retune_spotify::normalize::UNCATEGORIZED.into();
+        let incoming = vec![degraded, track("spotify:track:two", "Two")];
+        let store = RecordingStore::default();
+
+        let mut incremental = base.clone();
+        for batch in incoming.chunks(1) {
+            apply_in_memory(&mut incremental, batch.to_vec());
+        }
+        apply(&mut incremental, &store, false, incoming.clone()).unwrap();
+
+        let mut single = base;
+        apply(&mut single, &store, false, incoming).unwrap();
+
+        assert_eq!(export_json(&incremental), export_json(&single));
+        assert_eq!(incremental.get(id).unwrap().name, "Local name");
     }
 }

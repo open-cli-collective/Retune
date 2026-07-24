@@ -19,7 +19,7 @@ use std::{
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
-use provider::{MediaProvider, SearchAlbum, SearchResults, SpotifySyncProvider};
+use provider::{MediaProvider, SearchAlbum, SearchResults, SpotifySyncProvider, SyncBatch};
 use retune_core::{
     browse::{self, Selection},
     io::{export_json, import},
@@ -877,6 +877,54 @@ struct SyncCompletion {
     auto_resume: Option<u64>,
 }
 
+#[derive(Clone, Copy, Serialize)]
+struct SyncProgressCount {
+    tracks: u64,
+    fraction: f64,
+}
+
+#[derive(Default)]
+struct SyncProgressState {
+    tracks: u64,
+    sections: [(u32, Option<u32>); 5],
+    high_water: f64,
+}
+
+impl SyncProgressState {
+    fn update(&mut self, batch: &SyncBatch) -> SyncProgressCount {
+        self.tracks += batch.tracks.len() as u64;
+        let index = provider::LibraryKind::ALL
+            .iter()
+            .position(|kind| kind.label() == batch.section)
+            .expect("unknown sync section");
+        self.sections[index] = (batch.done, batch.total);
+        let fraction = self
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(section, (done, total))| {
+                if section < index {
+                    1.0
+                } else {
+                    total.map_or(0.0, |total| {
+                        if total == 0 {
+                            1.0
+                        } else {
+                            f64::from(*done) / f64::from(total)
+                        }
+                    })
+                }
+            })
+            .sum::<f64>()
+            / provider::LibraryKind::ALL.len() as f64;
+        self.high_water = self.high_water.max(fraction.clamp(0.0, 1.0));
+        SyncProgressCount {
+            tracks: self.tracks,
+            fraction: self.high_water,
+        }
+    }
+}
+
 async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, String> {
     log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
@@ -895,10 +943,37 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         })?;
     *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
     let sync_provider = SpotifySyncProvider::new(provider.as_ref(), &state.sync_store)?;
-    let outcome = sync::snapshot(&sync_provider, |phase| {
-        log::info!("{phase}");
-        let _ = app.emit("sync-progress", phase);
-    })
+    let first_sync = !state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .spotify_sync_completed;
+    if first_sync {
+        let mut library = state.library.lock().expect("library mutex poisoned");
+        *library = sync::without_fixtures(&library)?;
+        drop(library);
+        app.emit("library-changed", ())
+            .map_err(|error| error.to_string())?;
+    }
+    let sync_progress = Mutex::new(SyncProgressState::default());
+    let on_batch = |batch: SyncBatch| {
+        let mut counts = sync_progress.lock().expect("sync progress mutex poisoned");
+        let payload = counts.update(&batch);
+        drop(counts);
+        let mut library = state.library.lock().expect("library mutex poisoned");
+        sync::apply_in_memory(&mut library, batch.tracks);
+        drop(library);
+        let _ = app.emit("library-changed", ());
+        let _ = app.emit("sync-progress-count", payload);
+    };
+    let outcome = sync::snapshot(
+        &sync_provider,
+        |phase| {
+            log::info!("{phase}");
+            let _ = app.emit("sync-progress", phase);
+        },
+        &on_batch,
+    )
     .await?;
     let sync::SnapshotOutcome {
         tracks,
@@ -908,13 +983,20 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         earliest_cooldown,
         request_counts,
     } = outcome;
+    let tracks_synced = sync_progress
+        .lock()
+        .expect("sync progress mutex poisoned")
+        .tracks;
+    app.emit(
+        "sync-progress-count",
+        SyncProgressCount {
+            tracks: tracks_synced,
+            fraction: 1.0,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     app.emit("sync-progress", "Saving library…")
         .map_err(|error| error.to_string())?;
-    let first_sync = !state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .spotify_sync_completed;
     {
         let mut library = state.library.lock().expect("library mutex poisoned");
         sync::apply(&mut library, &state.store, first_sync, tracks)?;
@@ -1764,6 +1846,30 @@ mod tests {
         assert_eq!(values.arts, ["Alpha", "zebra"]);
         assert_eq!(values.albs, ["beta", "Yellow"]);
         assert_eq!(values.cats, ["Jazz", "rock"]);
+    }
+
+    #[test]
+    fn sync_progress_is_section_weighted_and_never_moves_backwards() {
+        let mut progress = SyncProgressState::default();
+        let first = progress.update(&SyncBatch {
+            tracks: vec![
+                metadata_track("one", "rock", "Artist", "Album"),
+                metadata_track("two", "rock", "Artist", "Album"),
+            ],
+            done: 1,
+            total: Some(2),
+            section: "albums",
+        });
+        let second = progress.update(&SyncBatch {
+            tracks: vec![],
+            done: 0,
+            total: None,
+            section: "albums",
+        });
+
+        assert_eq!(first.tracks, 2);
+        assert!((first.fraction - 0.3).abs() < f64::EPSILON);
+        assert_eq!(second.fraction, first.fraction);
     }
 
     #[test]
