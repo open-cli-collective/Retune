@@ -20,7 +20,10 @@ use std::{
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
-use provider::{MediaProvider, SearchAlbum, SearchResults, SpotifySyncProvider, SyncBatch};
+use provider::{
+    artist_descriptor, image_url, spotify_id, title_case, MediaProvider, SearchAlbum,
+    SearchResults, SpotifySyncProvider, SyncBatch,
+};
 use retune_core::{
     browse::{self, Selection},
     io::{export_json, import},
@@ -30,7 +33,7 @@ use retune_core::{
 };
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
-    client::{HttpTransport, SpotifyClient},
+    client::{Album, HttpTransport, SpotifyClient},
     normalize::UNCATEGORIZED,
     tokens::{CachedTokenStore, KeychainTokenStore, TokenStore, Tokens},
 };
@@ -209,10 +212,59 @@ struct RatingChangeDto {
     stars: Option<u8>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 struct RatingView {
     stars: u8,
     explicit: bool,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumPageTrackView {
+    uri: String,
+    name: String,
+    track_no: Option<u32>,
+    duration_secs: u64,
+    track_id: Option<u64>,
+    rating: Option<RatingView>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumPageView {
+    uri: String,
+    name: String,
+    artist: String,
+    artist_id: String,
+    album_type: String,
+    year: Option<String>,
+    image_url: Option<String>,
+    total_duration_secs: u64,
+    in_library: bool,
+    tracks: Vec<AlbumPageTrackView>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtistTopTrackView {
+    uri: String,
+    name: String,
+    alb: String,
+    duration_secs: u64,
+    image_url: Option<String>,
+    album_uri: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtistPageView {
+    id: String,
+    name: String,
+    descriptor: String,
+    image_url: Option<String>,
+    following: bool,
+    albums: Vec<SearchAlbum>,
+    top_tracks: Vec<ArtistTopTrackView>,
 }
 
 #[derive(Serialize)]
@@ -1176,6 +1228,144 @@ async fn spotify_search(
     MediaProvider::search(provider.as_ref(), query.trim()).await
 }
 
+fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
+    let artist = album.artists.first();
+    let total_duration_secs = album
+        .tracks
+        .as_ref()
+        .into_iter()
+        .flat_map(|page| &page.items)
+        .map(|track| track.duration_ms.unwrap_or_default())
+        .sum::<u64>()
+        / 1_000;
+    let tracks = album
+        .tracks
+        .map(|page| {
+            page.items
+                .into_iter()
+                .map(|track| {
+                    let local = library
+                        .tracks()
+                        .iter()
+                        .find(|candidate| candidate.uri == track.uri);
+                    AlbumPageTrackView {
+                        uri: track.uri,
+                        name: track.name,
+                        track_no: track.track_number,
+                        duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+                        track_id: local.map(|track| track.id.0),
+                        rating: local
+                            .and_then(|track| library.effective_rating(track.id).map(rating_view)),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    AlbumPageView {
+        uri: album.uri,
+        name: album.name,
+        artist: artist.map(|artist| artist.name.clone()).unwrap_or_default(),
+        artist_id: artist.map(|artist| artist.id.clone()).unwrap_or_default(),
+        album_type: title_case(album.album_type.as_deref().unwrap_or("album")),
+        year: album
+            .release_date
+            .as_deref()
+            .and_then(|date| date.get(..4))
+            .map(str::to_owned),
+        image_url: image_url(&album.images),
+        total_duration_secs,
+        in_library: tracks.iter().all(|track| track.track_id.is_some()),
+        tracks,
+    }
+}
+
+fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
+    let uris = album
+        .tracks
+        .as_ref()
+        .into_iter()
+        .flat_map(|page| &page.items)
+        .map(|track| track.uri.clone())
+        .collect::<Vec<_>>();
+    library.remove_uris(&uris)
+}
+
+#[tauri::command]
+async fn spotify_album_page(
+    state: tauri::State<'_, AppState>,
+    uri: String,
+) -> Result<AlbumPageView, String> {
+    let provider = provider_from(&state)?;
+    let album = provider
+        .album(spotify_id(&uri))
+        .await
+        .map_err(|error| error.to_string())?;
+    let library = state.library.lock().expect("library mutex poisoned");
+    Ok(album_page_view(&library, album))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn spotify_artist_page(
+    state: tauri::State<'_, AppState>,
+    artist_id: String,
+) -> Result<ArtistPageView, String> {
+    let provider = provider_from(&state)?;
+    let id = spotify_id(&artist_id);
+    let artist = provider
+        .artist(id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let following = match provider.is_following_artist(id).await {
+        Ok(following) => following,
+        Err(error) => {
+            log::warn!("Could not read Spotify follow state for artist {id}: {error}");
+            false
+        }
+    };
+    let albums = MediaProvider::artist_albums(provider.as_ref(), id).await?;
+    let top_tracks = provider
+        .artist_top_tracks(id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|track| {
+            let album = track.album;
+            ArtistTopTrackView {
+                uri: track.uri,
+                name: track.name,
+                alb: album
+                    .as_ref()
+                    .map(|album| album.name.clone())
+                    .unwrap_or_default(),
+                duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+                image_url: album.as_ref().and_then(|album| image_url(&album.images)),
+                album_uri: album.map(|album| album.uri).unwrap_or_default(),
+            }
+        })
+        .collect();
+    Ok(ArtistPageView {
+        id: artist.id.clone(),
+        name: artist.name.clone(),
+        descriptor: artist_descriptor(&artist),
+        image_url: image_url(&artist.images),
+        following,
+        albums,
+        top_tracks,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn spotify_follow_artist(
+    state: tauri::State<'_, AppState>,
+    artist_id: String,
+    follow: bool,
+) -> Result<(), String> {
+    provider_from(&state)?
+        .follow_artist(spotify_id(&artist_id), follow)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn spotify_artist_albums(
     state: tauri::State<'_, AppState>,
@@ -1212,6 +1402,27 @@ async fn add_spotify_album(
         for track in tracks {
             library.add(track);
         }
+        Ok(())
+    })?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn remove_spotify_album(app: tauri::AppHandle, uri: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let provider = provider_from(&state)?;
+    let id = spotify_id(&uri);
+    let album = provider
+        .album(id)
+        .await
+        .map_err(|error| error.to_string())?;
+    provider
+        .remove_saved_album(id)
+        .await
+        .map_err(|error| error.to_string())?;
+    mutate_library(&state, |library| {
+        remove_album_tracks(library, &album);
         Ok(())
     })?;
     app.emit("library-changed", ())
@@ -1854,8 +2065,12 @@ pub fn run() {
             disconnect_spotify,
             sync_from_spotify,
             spotify_search,
+            spotify_album_page,
+            spotify_artist_page,
+            spotify_follow_artist,
             spotify_artist_albums,
             add_spotify_album,
+            remove_spotify_album,
             playlists_list,
             playlist_tracks,
             playlist_add,
@@ -2045,6 +2260,7 @@ fn startup_action(
 #[cfg(test)]
 mod tests {
     use retune_core::model::NewTrack;
+    use retune_spotify::client::{Image, Page, SimplifiedArtist, Track};
 
     use super::*;
 
@@ -2060,6 +2276,110 @@ mod tests {
             track_no: None,
             disc_no: None,
         }
+    }
+
+    fn spotify_album() -> Album {
+        Album {
+            id: "album".into(),
+            uri: "spotify:album:album".into(),
+            name: "Album".into(),
+            artists: vec![SimplifiedArtist {
+                id: "artist".into(),
+                name: "Artist".into(),
+            }],
+            images: vec![Image {
+                url: "cover".into(),
+                width: Some(300),
+            }],
+            release_date: Some("2024-02-03".into()),
+            album_type: Some("compilation".into()),
+            tracks: Some(Page {
+                items: vec![
+                    Track {
+                        uri: "spotify:track:one".into(),
+                        name: "One".into(),
+                        duration_ms: Some(1_500),
+                        track_number: Some(1),
+                        disc_number: Some(1),
+                        artists: vec![],
+                        album: None,
+                    },
+                    Track {
+                        uri: "spotify:track:two".into(),
+                        name: "Two".into(),
+                        duration_ms: Some(2_500),
+                        track_number: Some(2),
+                        disc_number: Some(1),
+                        artists: vec![],
+                        album: None,
+                    },
+                ],
+                next: None,
+                skipped: 0,
+                total: 2,
+            }),
+        }
+    }
+
+    #[test]
+    fn album_page_resolves_library_ids_ratings_and_completeness() {
+        let mut library = Library::new();
+        let id = library.add(metadata_track(
+            "spotify:track:one",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        library.set_track_rating(id, Rating::new(4)).unwrap();
+
+        let page = album_page_view(&library, spotify_album());
+
+        assert_eq!(page.album_type, "Compilation");
+        assert_eq!(page.year.as_deref(), Some("2024"));
+        assert_eq!(page.total_duration_secs, 4);
+        assert!(!page.in_library);
+        assert_eq!(page.tracks[0].track_id, Some(id.0));
+        assert_eq!(
+            page.tracks[0].rating,
+            Some(RatingView {
+                stars: 4,
+                explicit: true
+            })
+        );
+        assert_eq!(page.tracks[1].track_id, None);
+    }
+
+    #[test]
+    fn remove_album_tracks_removes_exactly_the_album_uris() {
+        let mut library = Library::new();
+        library.add(metadata_track(
+            "spotify:track:one",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        library.add(metadata_track(
+            "spotify:track:two",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        library.add(metadata_track(
+            "spotify:track:other",
+            "Rock",
+            "Artist",
+            "Other",
+        ));
+
+        assert_eq!(remove_album_tracks(&mut library, &spotify_album()), 2);
+        assert_eq!(
+            library
+                .tracks()
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["spotify:track:other"]
+        );
     }
 
     #[test]

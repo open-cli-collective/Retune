@@ -291,6 +291,30 @@ impl Library {
         }
     }
 
+    pub fn remove_uris(&mut self, uris: &[String]) -> usize {
+        let uris = uris
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let albums = self
+            .tracks
+            .iter()
+            .filter(|track| uris.contains(track.uri.as_str()))
+            .map(AlbumKey::of)
+            .collect::<std::collections::BTreeSet<_>>();
+        let before = self.tracks.len();
+        self.tracks
+            .retain(|track| !uris.contains(track.uri.as_str()));
+        self.album_ratings.retain(|album, _| {
+            !albums.contains(album)
+                || self
+                    .tracks
+                    .iter()
+                    .any(|track| AlbumKey::of(track) == *album)
+        });
+        before - self.tracks.len()
+    }
+
     /// Restores invariants on a freshly deserialized library. Duplicate ids
     /// or URIs mean a corrupt or hand-tampered file; `next_id` is recomputed
     /// so a stale stored value can never mint colliding ids.
@@ -316,8 +340,8 @@ impl Library {
                     .ok_or_else(|| format!("track id {} exhausts the id space", track.id.0))
             })
             .try_fold(0u64, |acc, next| next.map(|n| acc.max(n)))?;
-        // Recomputed outright: with no delete API, max(id)+1 is exactly
-        // right, and it neutralizes a hostile stored value like u64::MAX.
+        // Recomputed outright so deleted ids can be skipped safely and a
+        // hostile stored value like u64::MAX is neutralized.
         self.next_id = past_max;
         Ok(())
     }
@@ -602,5 +626,28 @@ mod tests {
 
         existing.restore(imported.clone());
         assert_eq!(existing, imported);
+    }
+
+    #[test]
+    fn remove_uris_removes_tracks_and_only_orphaned_album_ratings() {
+        let mut library = Library::new();
+        let first = library.add(track("one", "Rock", "Artist", "Album"));
+        library.add(track("two", "Rock", "Artist", "Album"));
+        library.add(track("other", "Rock", "Artist", "Other"));
+        let album = AlbumKey::of(library.get(first).unwrap());
+        library.set_album_rating(album.clone(), Some(rating(5)));
+
+        assert_eq!(library.remove_uris(&["one".into()]), 1);
+        assert_eq!(library.album_rating(&album), Some(rating(5)));
+        assert_eq!(library.remove_uris(&["two".into()]), 1);
+        assert_eq!(library.album_rating(&album), None);
+        assert_eq!(
+            library
+                .tracks()
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["other"]
+        );
     }
 }

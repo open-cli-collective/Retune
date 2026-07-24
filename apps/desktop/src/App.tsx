@@ -31,10 +31,56 @@ type Settings = {
 }
 
 type ConnectionState = { connected: boolean }
+type RatingView = { stars: number; explicit: boolean }
+type SearchAlbum = {
+  uri: string
+  name: string
+  artist: string
+  year: string | null
+  imageUrl: string | null
+  albumType: string | null
+}
 type SpotifyResults = {
   artists: { id: string; name: string; descriptor: string; imageUrl: string | null }[]
-  albums: { uri: string; name: string; artist: string; year: string | null; imageUrl: string | null }[]
+  albums: SearchAlbum[]
   tracks: { uri: string; name: string; artist: string; alb: string; durationSecs: number; imageUrl: string | null; albumUri: string | null }[]
+}
+
+export type AlbumPageView = {
+  uri: string
+  name: string
+  artist: string
+  artistId: string
+  albumType: string
+  year: string | null
+  imageUrl: string | null
+  totalDurationSecs: number
+  inLibrary: boolean
+  tracks: {
+    uri: string
+    name: string
+    trackNo: number | null
+    durationSecs: number
+    trackId: number | null
+    rating: RatingView | null
+  }[]
+}
+
+export type ArtistPageView = {
+  id: string
+  name: string
+  descriptor: string
+  imageUrl: string | null
+  following: boolean
+  albums: SearchAlbum[]
+  topTracks: {
+    uri: string
+    name: string
+    alb: string
+    durationSecs: number
+    imageUrl: string | null
+    albumUri: string
+  }[]
 }
 
 type Track = {
@@ -47,7 +93,7 @@ type Track = {
   trackNo: number | null
   durationSecs: number
   overridden: boolean
-  rating: { stars: number; explicit: boolean } | null
+  rating: RatingView | null
 }
 
 type PlayerState = {
@@ -88,7 +134,7 @@ type TrackInfo = {
   alb: string
   cat: string
   origCat: string | null
-  rating: { stars: number; explicit: boolean } | null
+  rating: RatingView | null
   inheritedRating: number | null
   genres: string[]
 }

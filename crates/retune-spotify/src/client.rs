@@ -24,6 +24,7 @@ pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<Response>> + Send +
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
+    Delete,
     Get,
     Put,
     Post,
@@ -83,6 +84,7 @@ impl Transport for HttpTransport {
     fn send(&self, request: Request) -> SendFuture<'_> {
         Box::pin(async move {
             let method = match request.method {
+                Method::Delete => reqwest::Method::DELETE,
                 Method::Get => reqwest::Method::GET,
                 Method::Put => reqwest::Method::PUT,
                 Method::Post => reqwest::Method::POST,
@@ -379,6 +381,65 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             .map_err(|error| Error::Transport(error.to_string()))?
             .insert(id.into(), artist.clone());
         Ok(artist)
+    }
+
+    pub async fn album(&self, id: &str) -> Result<Album> {
+        let mut album: Album = self.get(&format!("/albums/{id}")).await?;
+        let Some(mut tracks) = album.tracks.take() else {
+            return Ok(album);
+        };
+        let mut offset = (tracks.items.len() + tracks.skipped) as u32;
+        while tracks.next.is_some() && offset < tracks.total {
+            let page = self.album_tracks(id, offset, 50).await?;
+            let count = (page.items.len() + page.skipped) as u32;
+            tracks.items.extend(page.items);
+            tracks.skipped += page.skipped;
+            tracks.next = page.next;
+            tracks.total = page.total;
+            if count == 0 {
+                break;
+            }
+            offset += count;
+        }
+        album.tracks = Some(tracks);
+        Ok(album)
+    }
+
+    pub async fn artist_top_tracks(&self, id: &str) -> Result<Vec<Track>> {
+        self.get::<TopTracks>(&format!("/artists/{id}/top-tracks"))
+            .await
+            .map(|response| response.tracks)
+    }
+
+    pub async fn is_following_artist(&self, id: &str) -> Result<bool> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("type", "artist")
+            .append_pair("ids", id)
+            .finish();
+        self.get::<Vec<bool>>(&format!("/me/following/contains?{query}"))
+            .await
+            .map(|following| following.first().copied().unwrap_or(false))
+    }
+
+    pub async fn follow_artist(&self, id: &str, follow: bool) -> Result<()> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("type", "artist")
+            .append_pair("ids", id)
+            .finish();
+        self.empty(
+            if follow { Method::Put } else { Method::Delete },
+            &format!("/me/following?{query}"),
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn remove_saved_album(&self, id: &str) -> Result<()> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("ids", id)
+            .finish();
+        self.empty(Method::Delete, &format!("/me/albums?{query}"), Vec::new())
+            .await
     }
 
     pub async fn search(&self, query: &str, offset: u32, limit: u32) -> Result<SearchResults> {
@@ -929,6 +990,8 @@ pub struct Album {
     #[serde(default)]
     pub release_date: Option<String>,
     #[serde(default)]
+    pub album_type: Option<String>,
+    #[serde(default)]
     pub tracks: Option<Page<AlbumTrack>>,
 }
 
@@ -1004,6 +1067,11 @@ pub struct SearchResults {
     pub artists: Page<Artist>,
     pub albums: Page<Album>,
     pub tracks: Page<Track>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopTracks {
+    tracks: Vec<Track>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1210,6 +1278,105 @@ mod tests {
         assert_eq!(client.artist("a").await.unwrap().genres, ["rock"]);
         assert_eq!(client.artist("a").await.unwrap().name, "Artist");
         assert_eq!(client.transport().requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn album_pages_inline_tracks_past_the_first_page() {
+        let transport = FakeTransport::new([
+            Response::json(
+                200,
+                serde_json::json!({
+                    "id": "album", "uri": "spotify:album:album", "name": "Album",
+                    "album_type": "album", "release_date": "2024-01-02",
+                    "artists": [{"id": "artist", "name": "Artist"}], "images": [],
+                    "tracks": {
+                        "items": [{
+                            "uri": "spotify:track:1", "name": "One",
+                            "track_number": 1, "duration_ms": 1000
+                        }],
+                        "next": "next", "total": 2
+                    }
+                }),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [{
+                        "uri": "spotify:track:2", "name": "Two",
+                        "track_number": 2, "duration_ms": 2000
+                    }],
+                    "next": null, "total": 2
+                }),
+            ),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+
+        let album = client.album("album").await.unwrap();
+
+        assert_eq!(
+            album
+                .tracks
+                .unwrap()
+                .items
+                .iter()
+                .map(|track| track.name.as_str())
+                .collect::<Vec<_>>(),
+            ["One", "Two"]
+        );
+        let requests = client.transport().requests();
+        assert!(requests[0].url.ends_with("/albums/album"));
+        assert!(
+            requests[1]
+                .url
+                .ends_with("/albums/album/tracks?offset=1&limit=50")
+        );
+    }
+
+    #[tokio::test]
+    async fn artist_follow_contains_and_writes_use_query_parameters() {
+        let transport = FakeTransport::new([
+            Response::json(200, serde_json::json!([true])),
+            Response::json(204, serde_json::Value::Null),
+            Response::json(204, serde_json::Value::Null),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+
+        assert!(client.is_following_artist("a & b").await.unwrap());
+        client.follow_artist("a & b", true).await.unwrap();
+        client.follow_artist("a & b", false).await.unwrap();
+
+        let requests = client.transport().requests();
+        assert_eq!(requests[0].method, Method::Get);
+        assert_eq!(requests[1].method, Method::Put);
+        assert_eq!(requests[2].method, Method::Delete);
+        assert!(requests.iter().all(|request| {
+            let url = url::Url::parse(&request.url).unwrap();
+            url.query_pairs()
+                .any(|pair| pair == ("type".into(), "artist".into()))
+                && url
+                    .query_pairs()
+                    .any(|pair| pair == ("ids".into(), "a & b".into()))
+        }));
+    }
+
+    #[tokio::test]
+    async fn remove_saved_album_sends_delete() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(204, serde_json::Value::Null)]),
+            tokens(),
+        );
+
+        client.remove_saved_album("album").await.unwrap();
+
+        let request = &client.transport().requests()[0];
+        assert_eq!(request.method, Method::Delete);
+        let url = url::Url::parse(&request.url).unwrap();
+        assert_eq!(url.path(), "/v1/me/albums");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            [("ids".into(), "album".into())]
+        );
     }
 
     #[tokio::test]

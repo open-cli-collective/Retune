@@ -152,6 +152,7 @@ mod tests {
             }],
             images: vec![],
             release_date: None,
+            album_type: None,
             tracks: None,
         };
         let mapped = track(&value, None, Some(&album));

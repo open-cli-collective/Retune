@@ -77,6 +77,7 @@ pub struct SearchAlbum {
     pub artist: String,
     pub year: Option<String>,
     pub image_url: Option<String>,
+    pub album_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -288,7 +289,7 @@ fn compact_count(count: u64) -> String {
     }
 }
 
-fn title_case(value: &str) -> String {
+pub(crate) fn title_case(value: &str) -> String {
     value
         .split_whitespace()
         .map(|word| {
@@ -302,7 +303,7 @@ fn title_case(value: &str) -> String {
         .join(" ")
 }
 
-fn artist_descriptor(artist: &Artist) -> String {
+pub(crate) fn artist_descriptor(artist: &Artist) -> String {
     let mut parts = vec![];
     if let Some(genre) = artist.genres.first() {
         parts.push(title_case(genre));
@@ -317,13 +318,17 @@ fn artist_descriptor(artist: &Artist) -> String {
     }
 }
 
-fn image_url(images: &[Image]) -> Option<String> {
+pub(crate) fn image_url(images: &[Image]) -> Option<String> {
     images
         .iter()
         .filter(|image| image.width.is_some_and(|width| width >= 64))
         .min_by_key(|image| image.width)
         .or_else(|| images.last())
         .map(|image| image.url.clone())
+}
+
+pub(crate) fn spotify_id(value: &str) -> &str {
+    value.rsplit(':').next().unwrap_or(value)
 }
 
 pub fn format_resume_time(deadline: u64, now: chrono::DateTime<chrono::Local>) -> String {
@@ -855,6 +860,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .and_then(|date| date.get(..4))
                         .map(str::to_owned),
                     image_url: image_url(&album.images),
+                    album_type: album.album_type.as_deref().map(title_case),
                     uri: album.uri,
                     name: album.name,
                 })
@@ -888,7 +894,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 
     async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String> {
-        let id = artist.rsplit(':').next().unwrap_or(artist);
+        let id = spotify_id(artist);
         let mut offset = 0;
         let mut albums = vec![];
         loop {
@@ -909,6 +915,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .and_then(|date| date.get(..4))
                         .map(str::to_owned),
                     image_url: image_url(&album.images),
+                    album_type: album.album_type.as_deref().map(title_case),
                     uri: album.uri,
                     name: album.name,
                 }
@@ -923,7 +930,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
         let health = SyncHealth::new(None);
         let genres = GenreSource::new(self, &health);
-        let id = album.rsplit(':').next().unwrap_or(album);
+        let id = spotify_id(album);
         let mut offset = 0;
         let mut normalized = vec![];
         loop {
