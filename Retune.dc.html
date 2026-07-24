@@ -122,9 +122,14 @@
             <span style="font-size:10px; color:{{ s.countColor }};">{{ s.count }}</span>
           </div>
         </sc-for>
-        <div style="padding:14px 12px 4px; font-size:10px; font-weight:700; letter-spacing:.04em; color:var(--sub,#8a93a1); text-transform:uppercase;">Playlists</div>
-        <div style="padding:4px 14px; font-size:12px; color:var(--sub,#b0b6c0); font-style:italic;">Recently Added</div>
-        <div style="padding:4px 14px; font-size:12px; color:var(--sub,#b0b6c0); font-style:italic;">▸ Smart Playlist…</div>
+        <div style="padding:14px 12px 4px; display:flex; align-items:center; justify-content:space-between; font-size:10px; font-weight:700; letter-spacing:.04em; color:var(--sub,#8a93a1); text-transform:uppercase;"><span>Playlists</span><span onClick="{{ onNewPlaylist }}" title="New playlist" style="cursor:default; font-size:13px; color:var(--sub,#9aa2ac);">+</span></div>
+        <sc-for list="{{ playlists }}" as="p" hint-placeholder-count="5">
+          <div onClick="{{ p.onClick }}" onDragOver="{{ p.onDragOver }}" onDragLeave="{{ p.onDragLeave }}" onDrop="{{ p.onDrop }}" style="{{ p.style }}">
+            <span style="{{ p.iconStyle }}">{{ p.icon }}</span>
+            <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ p.name }}</span>
+            <span style="font-size:10px; color:{{ p.countColor }};">{{ p.count }}</span>
+          </div>
+        </sc-for>
         <div style="flex:1;"></div>
         <div style="padding:10px 12px; font-size:10.5px; color:var(--sub,#8a93a1); border-top:1px solid var(--border,#cdd3dc); line-height:1.5;">🔒 Overlay edits stay local.<br/>Never written back to Spotify.</div>
       </div>
@@ -133,6 +138,7 @@
       <div style="display:flex; flex-direction:column; min-height:0; background:var(--list,#fff);">
 
         <!-- Browser: 3 columns -->
+        <sc-if value="{{ showBrowser }}" hint-placeholder-val="{{ true }}">
         <div style="height:200px; flex:0 0 auto; display:grid; grid-template-columns:1fr 1fr 1fr; border-bottom:1px solid var(--border,#b7b7b7);">
           <div style="display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border,#d6d6d6);">
             <div style="height:20px; background:linear-gradient(var(--head1,#f0f0f0),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#cfcfcf); font-size:11px; font-weight:600; color:var(--dim,#4a4a4a); display:flex; align-items:center; padding:0 8px;">{{ colGenre }}</div>
@@ -159,6 +165,7 @@
             </div>
           </div>
         </div>
+        </sc-if>
 
         <!-- Album rating context strip -->
         <sc-if value="{{ showAlbumStrip }}" hint-placeholder-val="{{ false }}">
@@ -175,16 +182,118 @@
 
         <!-- Track list -->
         <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+          <sc-if value="{{ showTrackHeader }}" hint-placeholder-val="{{ true }}">
           <div style="height:20px; flex:0 0 auto; background:linear-gradient(var(--head1,#f4f4f4),var(--head2,#e6e6e6)); border-bottom:1px solid var(--border,#cfcfcf); display:grid; grid-template-columns:22px minmax(160px,1.6fr) 52px 1.1fr 1.1fr 0.9fr 84px; align-items:center; font-size:11px; font-weight:600; color:var(--dim,#5a5a5a); padding:0 6px;">
             <span></span><span>{{ hName }}</span><span>Time</span><span>{{ hArtist }}</span><span>{{ hAlbum }}</span><span>{{ hGenre }}</span><span style="text-align:center;">Rating</span>
           </div>
+          </sc-if>
+
+          <!-- Spotify results filter tabs -->
+          <sc-if value="{{ showSpotifyTabs }}" hint-placeholder-val="{{ false }}">
+          <div style="height:32px; flex:0 0 auto; background:var(--menu,#f4f4f4); border-bottom:1px solid var(--border,#dcdcdc); display:flex; align-items:center; gap:4px; padding:0 10px;">
+            <sc-for list="{{ spotifyTabs }}" as="tb" hint-placeholder-count="4">
+              <div onClick="{{ tb.onClick }}" style="{{ tb.style }}">{{ tb.label }}</div>
+            </sc-for>
+            <span style="margin-left:auto; font-size:11px; color:var(--sub,#9a9a9a);">{{ spotifyCountLabel }}</span>
+          </div>
+          </sc-if>
+
           <div style="flex:1; overflow:auto;">
-            <sc-if value="{{ showSpotifyStub }}" hint-placeholder-val="{{ false }}">
-              <div style="padding:40px; text-align:center; color:var(--sub,#9a9a9a); font-size:12.5px; line-height:1.7;">🔎 Searching <b>Spotify</b> for "{{ query }}"<br/>Global results appear here. Use <b>+ Add to Library</b> on a result to pull it — and its metadata — into your local overlay.</div>
+            <!-- Artist page -->
+            <sc-if value="{{ showArtistPage }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div onClick="{{ navBack }}" style="padding:9px 16px; font-size:12px; color:#3f7fd6; cursor:default; border-bottom:1px solid var(--border,#eee);">{{ backLabel }}</div>
+                <div style="display:flex; gap:20px; padding:22px 20px; align-items:center;">
+                  <div style="width:118px; height:118px; flex:0 0 auto; border-radius:50%; background:repeating-linear-gradient(45deg,var(--head1,#e6e6e6),var(--head1,#e6e6e6) 9px,var(--head2,#dadada) 9px,var(--head2,#dadada) 18px); border:1px solid var(--border,#cfcfcf); display:flex; align-items:center; justify-content:center; font-size:40px; color:var(--sub,#b0b0b0);">♫</div>
+                  <div style="flex:1; min-width:0; display:flex; flex-direction:column;">
+                    <div style="font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--sub,#9a9a9a);">Artist</div>
+                    <div style="font-size:24px; font-weight:700; color:var(--txt,#1a1a1a); line-height:1.15; margin-top:1px;">{{ apName }}</div>
+                    <div style="font-size:12px; color:var(--sub,#9a9a9a); margin-top:5px;">{{ apMeta }}</div>
+                    <div style="display:flex; gap:10px; margin-top:14px;">
+                      <span onClick="{{ apPlay }}" style="height:30px; line-height:30px; padding:0 18px; border-radius:15px; background:#3f7fd6; color:#fff; font-size:12px; font-weight:600; cursor:default;">▶ Play</span>
+                      <span onClick="{{ apFollow }}" style="{{ apFollowStyle }}">{{ apFollowLabel }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="padding:6px 16px 4px; font-size:13px; font-weight:700; color:var(--txt,#2a2a2a); border-top:1px solid var(--border,#eee);">Discography</div>
+                <sc-for list="{{ apAlbums }}" as="al" hint-placeholder-count="4">
+                  <div onClick="{{ al.onOpen }}" draggable="true" onDragStart="{{ al.onDragStart }}" onContextMenu="{{ al.onContextMenu }}" style="{{ al.style }}">
+                    <div style="{{ al.thumbStyle }}">♪</div>
+                    <div style="flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center;">
+                      <span style="font-size:12.5px; font-weight:600; color:var(--txt,#1a1a1a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ al.title }}</span>
+                      <span style="font-size:11px; color:var(--sub,#9a9a9a);">{{ al.meta }}</span>
+                    </div>
+                    <span onClick="{{ al.onAction }}" style="{{ al.actionStyle }}">{{ al.actionLabel }}</span>
+                  </div>
+                </sc-for>
+                <div style="padding:12px 16px 4px; font-size:13px; font-weight:700; color:var(--txt,#2a2a2a);">Top Tracks</div>
+                <sc-for list="{{ apTracks }}" as="t" hint-placeholder-count="4">
+                  <div onDoubleClick="{{ t.onPlay }}" style="{{ t.style }}">
+                    <span style="text-align:center; color:var(--sub,#9a9a9a);">{{ t.num }}</span>
+                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--txt,#1a1a1a);">{{ t.name }}</span>
+                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--sub,#9a9a9a);">{{ t.album }}</span>
+                    <span style="text-align:right; color:var(--sub,#9a9a9a); font-variant-numeric:tabular-nums;">{{ t.time }}</span>
+                  </div>
+                </sc-for>
+                <div style="height:14px;"></div>
+              </div>
             </sc-if>
+
+            <!-- Album page -->
+            <sc-if value="{{ showAlbumPage }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div onClick="{{ navBack }}" style="padding:9px 16px; font-size:12px; color:#3f7fd6; cursor:default; border-bottom:1px solid var(--border,#eee);">{{ backLabel }}</div>
+                <div style="display:flex; gap:18px; padding:18px 20px;">
+                  <div style="width:150px; height:150px; flex:0 0 auto; border-radius:6px; background:repeating-linear-gradient(45deg,var(--head1,#e6e6e6),var(--head1,#e6e6e6) 10px,var(--head2,#dadada) 10px,var(--head2,#dadada) 20px); border:1px solid var(--border,#cfcfcf); display:flex; align-items:center; justify-content:center; font-size:44px; color:var(--sub,#b0b0b0);">♪</div>
+                  <div style="flex:1; min-width:0; display:flex; flex-direction:column;">
+                    <div style="font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--sub,#9a9a9a);">{{ adType }}</div>
+                    <div style="font-size:19px; font-weight:700; color:var(--txt,#1a1a1a); margin-top:2px; line-height:1.2;">{{ adTitle }}</div>
+                    <div style="font-size:13px; margin-top:3px;"><span onClick="{{ adGoArtist }}" style="color:#3f7fd6; cursor:default;">{{ adArtist }}</span></div>
+                    <div style="display:flex; align-items:center; gap:8px; margin-top:5px;">
+                      <span style="display:flex; gap:1px;"><sc-for list="{{ adStars }}" as="st" hint-placeholder-count="5"><span onClick="{{ st.onClick }}" style="{{ st.style }}">{{ st.char }}</span></sc-for></span>
+                      <span style="font-size:11px; color:var(--sub,#9a9a9a);">{{ adMeta }}</span>
+                    </div>
+                    <div style="font-size:11.5px; color:var(--dim,#6a6a6a); margin-top:9px; line-height:1.55; text-wrap:pretty;">{{ adDesc }}</div>
+                    <div style="display:flex; gap:10px; margin-top:auto; padding-top:12px;">
+                      <span onClick="{{ apPlay }}" style="height:30px; line-height:30px; padding:0 16px; border-radius:15px; background:#3f7fd6; color:#fff; font-size:12px; font-weight:600; cursor:default;">▶ Play</span>
+                      <span onClick="{{ adToggle }}" style="{{ adBtnStyle }}">{{ adBtnLabel }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div style="border-top:1px solid var(--border,#eee);">
+                  <sc-for list="{{ adTracks }}" as="t" hint-placeholder-count="6">
+                    <div onDoubleClick="{{ t.onPlay }}" draggable="true" onDragStart="{{ t.onDragStart }}" onContextMenu="{{ t.onContextMenu }}" style="{{ t.style }}">
+                      <span style="text-align:center; color:var(--sub,#9a9a9a);">{{ t.num }}</span>
+                      <span style="overflow:hidden; text-overflow:ellipsis; color:var(--txt,#1a1a1a);">{{ t.name }}</span>
+                      <span style="display:flex; gap:1px; justify-content:flex-end;"><sc-for list="{{ t.stars }}" as="st" hint-placeholder-count="5"><span onClick="{{ st.onClick }}" style="{{ st.style }}">{{ st.char }}</span></sc-for></span>
+                      <span style="text-align:right; color:var(--sub,#9a9a9a); font-variant-numeric:tabular-nums;">{{ t.time }}</span>
+                    </div>
+                  </sc-for>
+                  <div style="padding:8px 16px 16px; font-size:10.5px; color:var(--sub,#a7a7a7);">Double-click a track to preview. Adding the album pulls every track into your local overlay.</div>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- Spotify: results list -->
+            <sc-if value="{{ showSpotifyResults }}" hint-placeholder-val="{{ false }}">
+              <sc-for list="{{ spotifyGroups }}" as="grp" hint-placeholder-count="2">
+                <div style="padding:12px 16px 4px; font-size:13px; font-weight:700; color:var(--txt,#2a2a2a);">{{ grp.title }}</div>
+                <sc-for list="{{ grp.rows }}" as="r" hint-placeholder-count="4">
+                  <div onClick="{{ r.onClick }}" onDoubleClick="{{ r.onOpen }}" draggable="{{ r.draggable }}" onDragStart="{{ r.onDragStart }}" onContextMenu="{{ r.onContextMenu }}" style="{{ r.style }}">
+                    <div style="{{ r.thumbStyle }}">{{ r.thumbGlyph }}</div>
+                    <div style="flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center;">
+                      <span style="font-size:12.5px; color:var(--txt,#1a1a1a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:{{ r.weight }};">{{ r.primary }}</span>
+                      <span style="font-size:11px; color:var(--sub,#9a9a9a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r.secondary }}</span>
+                    </div>
+                    <span onClick="{{ r.onAction }}" style="{{ r.actionStyle }}">{{ r.actionLabel }}</span>
+                  </div>
+                </sc-for>
+              </sc-for>
+            </sc-if>
+
             <sc-if value="{{ showTracks }}" hint-placeholder-val="{{ true }}">
               <sc-for list="{{ trackItems }}" as="t" hint-placeholder-count="12">
-                <div onClick="{{ t.onClick }}" onDoubleClick="{{ t.onPlay }}" style="{{ t.style }}">
+                <div onClick="{{ t.onClick }}" onDoubleClick="{{ t.onPlay }}" draggable="true" onDragStart="{{ t.onDragStart }}" onContextMenu="{{ t.onContextMenu }}" style="{{ t.style }}">
                   <span style="text-align:center; color:{{ t.iconColor }};">{{ t.icon }}</span>
                   <span style="overflow:hidden; text-overflow:ellipsis;">{{ t.name }}</span>
                   <span style="color:{{ t.dim }};">{{ t.time }}</span>
@@ -390,6 +499,42 @@
     </div>
   </sc-if>
 
+  <sc-if value="{{ ctxMenuOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeCtxMenu }}" onContextMenu="{{ closeCtxMenu }}" style="position:fixed; inset:0; z-index:75;">
+      <div onClick="{{ stop }}" style="{{ ctxMenuStyle }}">
+        <div onClick="{{ ctxAddToPlaylist }}" style="padding:5px 16px; font-size:12.5px; cursor:default; white-space:nowrap;">Add to Playlist…</div>
+        <div style="height:1px; background:var(--border,#dcdcdc); margin:4px 8px; opacity:.5;"></div>
+        <div style="padding:5px 16px; font-size:12.5px; color:var(--sub,#a7a7a7); cursor:default;">Go to Album</div>
+        <div style="padding:5px 16px; font-size:12.5px; color:var(--sub,#a7a7a7); cursor:default;">Go to Artist</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ addPlaylistOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeAddToPlaylist }}" style="position:fixed; inset:0; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:76;">
+      <div onClick="{{ stop }}" style="width:340px; max-height:70vh; background:var(--panel,#f2f2f2); border:1px solid var(--border,#9a9a9a); border-radius:9px; box-shadow:0 30px 70px rgba(0,0,0,.4); overflow:hidden; color:var(--txt,#1a1a1a); display:flex; flex-direction:column;">
+        <div style="padding:14px 18px 10px; border-bottom:1px solid var(--border,#dcdcdc);">
+          <div style="font-size:14px; font-weight:700;">Add to Playlist</div>
+          <div style="font-size:11.5px; color:var(--sub,#9a9a9a); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ addPlaylistLabel }}</div>
+        </div>
+        <div style="overflow:auto; padding:6px 0;">
+          <sc-for list="{{ addPlaylistRows }}" as="r" hint-placeholder-count="5">
+            <div onClick="{{ r.onClick }}" style="display:flex; align-items:center; gap:10px; padding:7px 18px; cursor:default; font-size:12.5px;">
+              <span style="width:16px; color:#3f7fd6; font-weight:700;">{{ r.check }}</span>
+              <span style="{{ r.iconStyle }}">{{ r.icon }}</span>
+              <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r.name }}</span>
+              <span style="font-size:10.5px; color:var(--sub,#a7a7a7);">{{ r.sub }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="border-top:1px solid var(--border,#dcdcdc); display:flex; justify-content:space-between; align-items:center; padding:10px 16px;">
+          <span onClick="{{ addPlaylistNew }}" style="font-size:12px; color:#3f7fd6; cursor:default;">+ New Playlist</span>
+          <button onClick="{{ closeAddToPlaylist }}" style="height:28px; padding:0 18px; border-radius:6px; border:1px solid #2f6fd0; background:#3f7fd6; color:#fff; font-size:12.5px; font-weight:600; font-family:inherit; cursor:default;">Done</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
   <input id="retune-import" type="file" accept=".json,.gz,application/json,application/gzip" style="display:none;" onChange="{{ onImportFile }}" />
 </div>
 </x-dc>
@@ -401,6 +546,7 @@ class Component extends DCLogic {
     selectedTrack: null,
     playing: null, isPlaying: false, elapsed: 0,
     query: '', searchScope: 'library',
+    spotifyFilter: 'all', nav: [], addedAlbums: {}, spotAlbumRatings: {}, spotTrackRatings: {},
     theme: 'light', zoom: 1,
     fileMenuOpen: false, viewMenuOpen: false,
     infoOpen: false, infoTrack: null, draft: null, importMode: 'restore',
@@ -408,6 +554,15 @@ class Component extends DCLogic {
     emptyMode: false, setupOpen: false, clientId: '', webApi: true, spotifyOk: true,
     syncing: false, syncDone: 0, syncTotal: 0,
     settings: { autoAdd: true, connectLaunch: true, quality: 3, engine: 'librespot', normalize: true, gapless: true },
+    playlists: [
+      { id: 'pl1', name: 'Morning Coffee', owner: 'me', mine: true, tracks: [] },
+      { id: 'pl2', name: 'Deep Focus', owner: 'me', mine: true, tracks: [] },
+      { id: 'pl3', name: 'Road Trip 2024', owner: 'me', mine: true, tracks: [] },
+      { id: 'pl4', name: 'RapCaviar', owner: 'Spotify', mine: false, tracks: [] },
+      { id: 'pl5', name: "Dad's Vinyl Rips", owner: 'David P.', mine: false, tracks: [] },
+    ],
+    selectedPlaylist: null,
+    addToPlaylistFor: null, ctxMenu: null, dragItem: null, dropTarget: null,
     library: null,
   };
 
@@ -449,7 +604,7 @@ class Component extends DCLogic {
   onKey(e) {
     const tag = (e.target.tagName || '').toLowerCase();
     const typing = tag === 'input' || tag === 'textarea';
-    if (e.key === 'Escape') { this.setState({ infoOpen: false, fileMenuOpen: false, viewMenuOpen: false, prefsOpen: false }); return; }
+    if (e.key === 'Escape') { this.setState({ infoOpen: false, fileMenuOpen: false, viewMenuOpen: false, prefsOpen: false, ctxMenu: null, addToPlaylistFor: null }); return; }
     if (e.metaKey && e.key === ',') { e.preventDefault(); this.setState({ prefsOpen: true }); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); this.zoomBy(0.1); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === '-' || e.key === '_')) { e.preventDefault(); this.zoomBy(-0.1); return; }
@@ -524,6 +679,42 @@ class Component extends DCLogic {
     return m[this.state.source];
   }
   uniq(a) { return [...new Set(a)]; }
+
+  spotifyCatalog() {
+    if (this._cat) return this._cat;
+    const alb = (id, title, artist, year, type, desc, tracks) => ({ id, title, artist, year, type, desc, tracks: tracks.map((t, i) => ({ n: i + 1, name: t[0], time: t[1] })) });
+    this._cat = {
+      artists: [
+        { id: 'ar1', name: 'Andrew Lloyd Webber', kind: 'Composer · 1.2M monthly listeners', albums: ['al1', 'al2', 'al3', 'al4'], top: [['The Music of the Night', 'al1', '5:34'], ['All I Ask of You', 'al1', '4:48'], ['The Phantom of the Opera', 'al1', '4:24'], ['Masquerade', 'al1', '5:26']] },
+        { id: 'ar2', name: 'Original London Cast', kind: 'Cast recording', albums: ['al1'], top: [['The Music of the Night', 'al1', '5:34'], ['The Phantom of the Opera', 'al1', '4:24']] },
+        { id: 'ar3', name: 'Sarah Brightman', kind: 'Artist · 900K monthly listeners', albums: ['al1'], top: [['The Phantom of the Opera', 'al1', '4:24'], ['Wishing You Were Somehow Here Again', 'al4', '4:02']] },
+        { id: 'ar4', name: 'Ramin Karimloo', kind: 'Artist · 210K monthly listeners', albums: ['al3'], top: [['The Music of the Night', 'al3', '5:50'], ['Down Once More', 'al3', '9:10']] },
+      ],
+      albums: [
+        alb('al1', 'The Phantom of the Opera (Original London Cast Recording)', 'Andrew Lloyd Webber', 1987, 'Album · Cast Recording',
+          'The recording that started it all — captured with the original 1986 West End cast led by Michael Crawford and Sarah Brightman. This is the debut London production most listeners mean when they search for "the original".',
+          [['Overture', '2:35'], ['The Phantom of the Opera', '4:24'], ['The Music of the Night', '5:34'], ['All I Ask of You', '4:48'], ['Masquerade', '5:26'], ['The Point of No Return', '6:35']]),
+        alb('al2', 'The Phantom of the Opera (Original Motion Picture Soundtrack)', 'Andrew Lloyd Webber', 2004, 'Album · Soundtrack',
+          'The 2004 Joel Schumacher film soundtrack, with Gerard Butler and Emmy Rossum. Lusher orchestration than the stage recording; not the original cast.',
+          [['Overture / Hannibal', '3:38'], ['Think of Me', '3:29'], ['The Music of the Night', '5:41'], ['All I Ask of You', '4:52'], ['The Point of No Return', '4:19']]),
+        alb('al3', 'The Phantom of the Opera at the Royal Albert Hall', 'Andrew Lloyd Webber', 2011, 'Album · Live',
+          'The 25th-anniversary staged concert with Ramin Karimloo and Sierra Boggess. A live, full-orchestra reading — great, but a modern performance.',
+          [['Overture', '2:48'], ['The Phantom of the Opera', '4:31'], ['The Music of the Night', '5:50'], ['Masquerade', '5:12'], ['Down Once More', '9:10']]),
+        alb('al4', 'The Phantom of the Opera (London Cast Recording 2022)', 'Andrew Lloyd Webber', 2022, 'Album · Cast Recording',
+          'A freshly recorded present-day West End cast. Modern voices and mix — distinct from the 1987 original.',
+          [['Prologue', '2:10'], ['The Phantom of the Opera', '4:20'], ['The Music of the Night', '5:38'], ['Wishing You Were Somehow Here Again', '4:02']]),
+      ],
+      tracks: [
+        { id: 'tr1', name: 'The Music of the Night', artist: 'Michael Crawford', album: 'The Phantom of the Opera (Original London Cast Recording)', albumId: 'al1', time: '5:34' },
+        { id: 'tr2', name: 'The Phantom of the Opera', artist: 'Sarah Brightman, Steve Harley', album: 'The Phantom of the Opera (Original London Cast Recording)', albumId: 'al1', time: '4:24' },
+        { id: 'tr3', name: 'All I Ask of You', artist: 'Cast', album: 'Original London Cast Recording', albumId: 'al1', time: '4:48' },
+      ],
+    };
+    return this._cat;
+  }
+  albumById(id) { return this.spotifyCatalog().albums.find(a => a.id === id); }
+  artistById(id) { return this.spotifyCatalog().artists.find(a => a.id === id); }
+  artistByName(name) { return this.spotifyCatalog().artists.find(a => a.name === name); }
 
   currentTracks() {
     const st = this.state; if (!st.library) return [];
@@ -617,6 +808,8 @@ class Component extends DCLogic {
         onClick: () => this.setState({ selectedTrack: t.id }),
         onPlay: () => this.playTrack(t),
         onInfo: (e) => { e.stopPropagation(); this.openInfo(t); },
+        onDragStart: (e) => { this.setState({ dragItem: { kind: 'track', label: t.name, ids: [t.id] } }); try { e.dataTransfer.setData('text/plain', t.name); e.dataTransfer.effectAllowed = 'copy'; } catch (x) {} },
+        onContextMenu: (e) => this.openCtxMenu(e, { kind: 'track', label: t.name, ids: [t.id] }),
       };
     });
 
@@ -629,6 +822,24 @@ class Component extends DCLogic {
       onClick: () => this.setState({ source: s.key, genre: null, artist: null, album: null, selectedTrack: null, query: '' }),
     }));
 
+    const plBase = 'display:flex; align-items:center; gap:8px; padding:4px 12px; font-size:12.5px; cursor:default;';
+    const playlists = st.playlists.map(p => {
+      const sel = st.selectedPlaylist === p.id;
+      const isDrop = st.dropTarget === p.id;
+      const bg = isDrop ? ('background:' + accent + '; color:#fff;') : (sel ? ('background:' + (theme === 'dark' ? '#33363c' : '#dbe4f2') + ';') : '');
+      return {
+        name: p.name, count: p.tracks.length || '',
+        icon: p.mine ? '' : '🌐', // followed/others get a distinct glyph; mine have none
+        iconStyle: 'width:14px; flex:0 0 auto; text-align:center; font-size:11px;' + (isDrop ? 'color:rgba(255,255,255,.9);' : ''),
+        countColor: isDrop ? 'rgba(255,255,255,.85)' : P.sub,
+        style: plBase + bg + (isDrop ? '' : ('color:' + (theme === 'dark' ? '#c9ccd2' : '#3a4250') + ';')),
+        onClick: () => this.setState({ selectedPlaylist: p.id }),
+        onDragOver: (e) => { e.preventDefault(); if (st.dropTarget !== p.id) this.setState({ dropTarget: p.id }); },
+        onDragLeave: () => { if (st.dropTarget === p.id) this.setState({ dropTarget: null }); },
+        onDrop: (e) => { e.preventDefault(); this.onDropPlaylist(p.id); },
+      };
+    });
+
     const np = st.playing ? this.findTrack(st.playing) : null;
     const dur = np ? this.toSec(np.time) : 0;
     const totalSec = tracks.reduce((a, t) => a + this.toSec(t.time), 0);
@@ -639,8 +850,46 @@ class Component extends DCLogic {
     const scopeSpot = st.searchScope === 'spotify';
     const pill = (on) => 'padding:2px 10px; border-radius:9px; font-size:11px; cursor:default;' + (on ? 'background:' + P.list + '; color:' + P.txt + '; font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.15);' : 'color:' + P.sub + ';');
 
-    const albStrip = !!st.album;
+    const albStrip = !!st.album && !(scopeSpot && q);
     const stripAlbR = albStrip && tracks[0] ? this.albumRating(tracks[0]) : 0;
+
+    // Spotify search results
+    const spotifyMode = scopeSpot && !!q;
+    const cat = this.spotifyCatalog();
+    const ql = q.toLowerCase();
+    const matchArtists = cat.artists.filter(a => a.name.toLowerCase().includes(ql) || ql.length > 2);
+    const matchAlbums = cat.albums.filter(a => (a.title + ' ' + a.artist).toLowerCase().includes(ql) || ql.length > 2);
+    const matchTracks = cat.tracks.filter(t => (t.name + ' ' + t.artist + ' ' + t.album).toLowerCase().includes(ql) || ql.length > 2);
+    const fCounts = { all: matchArtists.length + matchAlbums.length + matchTracks.length, artists: matchArtists.length, albums: matchAlbums.length, tracks: matchTracks.length };
+    const sf = st.spotifyFilter;
+    const tabBase = 'padding:4px 12px; font-size:12px; border-radius:6px; cursor:default;';
+    const spotifyTabs = [['all', 'All'], ['artists', 'Artists'], ['albums', 'Albums'], ['tracks', 'Tracks']].map(([k, l]) => ({ label: l + ' (' + fCounts[k] + ')', onClick: () => this.setState({ spotifyFilter: k }), style: tabBase + (sf === k ? 'background:' + accent + '; color:#fff; font-weight:600;' : 'color:' + P.dim + ';') }));
+    const spotifyCountLabel = 'Spotify · "' + q + '"';
+    const rowBaseS = 'display:flex; align-items:center; gap:12px; padding:7px 16px; cursor:default; border-bottom:1px solid ' + P.alt + ';';
+    const thumb = (glyph, round) => 'width:38px; height:38px; flex:0 0 auto; border-radius:' + (round ? '50%' : '5px') + '; background:repeating-linear-gradient(45deg,' + P.head1 + ',' + P.head1 + ' 5px,' + P.head2 + ' 5px,' + P.head2 + ' 10px); border:1px solid ' + P.border + '; display:flex; align-items:center; justify-content:center; font-size:16px; color:' + P.sub + ';';
+    const albAdded = (id) => !!st.addedAlbums[id];
+    const albumItemIds = (a) => a.tracks.map(t => a.id + ':' + t.n);
+    const albumRow = (a) => ({ primary: a.title, secondary: a.artist + ' · ' + a.year, weight: '600', thumbGlyph: '♪', thumbStyle: thumb('♪', false), style: rowBaseS, draggable: 'true', onDragStart: (e) => { this.setState({ dragItem: { kind: 'album', label: a.title, ids: albumItemIds(a) } }); try { e.dataTransfer.setData('text/plain', a.title); } catch (x) {} }, onContextMenu: (e) => this.openCtxMenu(e, { kind: 'album', label: a.title, ids: albumItemIds(a) }), onClick: () => {}, onOpen: () => this.pushNav({ type: 'album', id: a.id }), onAction: (e) => { e.stopPropagation(); this.toggleAlbum(a.id); }, actionLabel: albAdded(a.id) ? '✓ Added' : '+ Add', actionStyle: 'font-size:11px; font-weight:600; padding:4px 12px; border-radius:5px; cursor:default; flex:0 0 auto; border:1px solid ' + (albAdded(a.id) ? (P.ctlb + '; background:' + P.ctl + '; color:' + P.sub) : (P.ctlb + '; background:' + P.list + '; color:' + P.txt)) + ';' });
+    const trackRow = (t) => ({ primary: t.name, secondary: t.artist + ' · ' + t.album, weight: '400', thumbGlyph: '♪', thumbStyle: thumb('♪', false), style: rowBaseS, onClick: () => {}, onOpen: () => t.albumId && this.pushNav({ type: 'album', id: t.albumId }), onAction: (e) => { e.stopPropagation(); }, actionLabel: t.time, actionStyle: 'font-size:11px; color:' + P.sub + '; cursor:default; flex:0 0 auto;' });
+    const artistRow = (a) => ({ primary: a.name, secondary: a.kind, weight: '600', thumbGlyph: '♫', thumbStyle: thumb('♫', true), style: rowBaseS, onClick: () => {}, onOpen: () => this.pushNav({ type: 'artist', id: a.id }), onAction: (e) => { e.stopPropagation(); this.pushNav({ type: 'artist', id: a.id }); }, actionLabel: 'View albums ›', actionStyle: 'font-size:11.5px; color:#3f7fd6; cursor:default; flex:0 0 auto;' });
+    let spotifyGroups = [];
+    if (sf === 'all' || sf === 'artists') spotifyGroups.push({ title: 'Artists', rows: matchArtists.map(artistRow) });
+    if (sf === 'all' || sf === 'albums') spotifyGroups.push({ title: 'Albums', rows: matchAlbums.map(albumRow) });
+    if (sf === 'all' || sf === 'tracks') spotifyGroups.push({ title: 'Tracks', rows: matchTracks.map(trackRow) });
+    spotifyGroups = spotifyGroups.filter(g => g.rows.length);
+
+    // Navigation stack (artist/album pages)
+    const top = st.nav.length ? st.nav[st.nav.length - 1] : null;
+    const prev = st.nav.length > 1 ? st.nav[st.nav.length - 2] : null;
+    const navBackLabel = !prev ? '‹ Back to results' : (prev.type === 'artist' ? '‹ Back to artist' : '‹ Back to album');
+    const ad = top && top.type === 'album' ? this.albumById(top.id) : null;
+    const adAdded = ad ? albAdded(ad.id) : false;
+    const adDur = ad ? (() => { const s = ad.tracks.reduce((a, t) => a + this.toSec(t.time), 0); return Math.floor(s / 60) + ' min'; })() : '';
+    const ap = top && top.type === 'artist' ? this.artistById(top.id) : null;
+    const albRowStyle = 'display:flex; align-items:center; gap:12px; padding:7px 16px; cursor:default; border-bottom:1px solid ' + P.alt + ';';
+    const apAlbums = ap ? ap.albums.map(id => this.albumById(id)).filter(Boolean).map(a => ({ title: a.title, meta: a.year + ' · ' + a.type.replace('Album · ', ''), thumbStyle: thumb('♪', false), style: albRowStyle, onOpen: () => this.pushNav({ type: 'album', id: a.id }), onAction: (e) => { e.stopPropagation(); this.toggleAlbum(a.id); }, actionLabel: albAdded(a.id) ? '✓ Added' : '+ Add', actionStyle: 'font-size:11px; font-weight:600; padding:4px 12px; border-radius:5px; cursor:default; flex:0 0 auto; border:1px solid ' + (albAdded(a.id) ? (P.ctlb + '; background:' + P.ctl + '; color:' + P.sub) : (P.ctlb + '; background:' + P.list + '; color:' + P.txt)) + ';' })) : [];
+    const apTracks = ap ? ap.top.map((t, i) => ({ num: i + 1, name: t[0], album: (this.albumById(t[1]) || {}).title || '', time: t[2], style: 'display:grid; grid-template-columns:34px minmax(0,1.4fr) minmax(0,1fr) 56px; align-items:center; height:26px; font-size:12px; padding:0 16px; cursor:default;' + (i % 2 ? 'background:' + (zebra ? P.alt : P.list) + ';' : 'background:' + P.list + ';'), onPlay: () => {} })) : [];
+    const apMeta = ap ? (ap.kind + ' · ' + ap.albums.length + ' album' + (ap.albums.length === 1 ? '' : 's')) : '';
 
     const d = st.draft || {};
     const dTrack = st.infoTrack;
@@ -653,8 +902,46 @@ class Component extends DCLogic {
       themeIcon: mode === 'system' ? '🖥' : (mode === 'dark' ? '☾' : '☀'),
       toggleTheme: () => this.setState(s => ({ theme: s.theme === 'light' ? 'dark' : s.theme === 'dark' ? 'system' : 'light' })),
       colGenre: L.g, colArtist: L.a, colAlbum: L.b, hName: L.name, hArtist: L.a, hAlbum: L.b, hGenre: L.g,
-      sources, genreItems: (st.emptyMode && !st.syncing) ? [] : genreItems, artistItems: (st.emptyMode && !st.syncing) ? [] : artistItems, albumItems: (st.emptyMode && !st.syncing) ? [] : albumItems, trackItems: (st.emptyMode && !st.syncing) ? [] : trackItems,
-      showTracks: (!scopeSpot || !q) && (!st.emptyMode || st.syncing), showSpotifyStub: scopeSpot && !!q,
+      sources, genreItems: (st.emptyMode && !st.syncing) ? [] : genreItems, artistItems: (st.emptyMode && !st.syncing) ? [] : artistItems, albumItems: (st.emptyMode && !st.syncing) ? [] : albumItems,
+      playlists, onNewPlaylist: () => this.newPlaylistWith([]),
+      ctxMenuOpen: !!st.ctxMenu,
+      ctxMenuStyle: st.ctxMenu ? ('position:fixed; left:' + st.ctxMenu.x + 'px; top:' + st.ctxMenu.y + 'px; min-width:170px; background:' + P.panel + '; border:1px solid ' + P.border + '; border-radius:6px; box-shadow:0 12px 30px rgba(0,0,0,.3); padding:5px 0; color:' + P.txt + ';') : '',
+      closeCtxMenu: () => this.setState({ ctxMenu: null }),
+      ctxAddToPlaylist: () => this.openAddToPlaylist(st.ctxMenu.item),
+      addPlaylistOpen: !!st.addToPlaylistFor,
+      addPlaylistLabel: st.addToPlaylistFor ? (st.addToPlaylistFor.kind === 'album' ? 'Album · ' : 'Track · ') + st.addToPlaylistFor.label : '',
+      addPlaylistRows: st.playlists.map(p => {
+        const ids = st.addToPlaylistFor ? st.addToPlaylistFor.ids : [];
+        const has = ids.length && ids.every(id => p.tracks.includes(id));
+        return { name: p.name, check: has ? '✓' : '', sub: p.mine ? '' : p.owner, icon: p.mine ? '' : '🌐', iconStyle: 'width:14px; flex:0 0 auto; text-align:center; font-size:11px;', onClick: () => this.togglePlaylistMember(p.id, ids) };
+      }),
+      addPlaylistNew: () => { this.newPlaylistWith(st.addToPlaylistFor ? st.addToPlaylistFor.ids : []); },
+      closeAddToPlaylist: () => this.setState({ addToPlaylistFor: null }), trackItems: (st.emptyMode && !st.syncing) ? [] : trackItems,
+      showTracks: (!scopeSpot || !q) && (!st.emptyMode || st.syncing) && !spotifyMode, showSpotifyStub: false,
+      showBrowser: !spotifyMode, showTrackHeader: !spotifyMode,
+      showSpotifyTabs: spotifyMode && !top,
+      showSpotifyResults: spotifyMode && !top,
+      showArtistPage: spotifyMode && top && top.type === 'artist',
+      showAlbumPage: spotifyMode && top && top.type === 'album',
+      spotifyTabs, spotifyGroups, spotifyCountLabel,
+      navBack: () => this.setState(s => ({ nav: s.nav.slice(0, -1) })),
+      backLabel: navBackLabel,
+      // artist page
+      apName: ap ? ap.name : '', apMeta: apMeta,
+      apPlay: () => {}, apFollow: () => ap && this.toggleAlbum('follow:' + ap.id),
+      apFollowLabel: ap && st.addedAlbums['follow:' + ap.id] ? '✓ Following' : '+ Follow',
+      apFollowStyle: 'height:30px; line-height:28px; padding:0 16px; border-radius:15px; font-size:12px; font-weight:600; cursor:default; border:1px solid ' + P.ctlb + '; background:' + P.list + '; color:' + P.txt + ';',
+      apAlbums, apTracks,
+      // album page
+      adType: ad ? ad.type : '', adTitle: ad ? ad.title : '', adArtist: ad ? ad.artist : '',
+      adMeta: ad ? (ad.year + ' · ' + ad.tracks.length + ' tracks · ' + adDur) : '',
+      adDesc: ad ? ad.desc : '',
+      adGoArtist: () => { const a = ad && this.artistByName(ad.artist); if (a) this.setState(s => ({ nav: [...s.nav, { type: 'artist', id: a.id }] })); },
+      adStars: ad ? this.makeStars(st.spotAlbumRatings[ad.id] || 0, false, (r) => this.setSpotAlbumRating(ad.id, r), false) : [],
+      adBtnLabel: adAdded ? '✓ In Library — Remove' : '+ Add to Library',
+      adBtnStyle: 'display:inline-block; height:30px; line-height:28px; padding:0 16px; border-radius:15px; font-size:12px; font-weight:600; cursor:default; border:1px solid ' + (adAdded ? (P.ctlb + '; background:' + P.ctl + '; color:' + P.txt) : '#2f6fd0; background:#3f7fd6; color:#fff') + ';',
+      adToggle: () => ad && this.toggleAlbum(ad.id),
+      adTracks: ad ? ad.tracks.map(t => { const trk = ad.id + ':' + t.n; const albR = st.spotAlbumRatings[ad.id] || 0; const ov = st.spotTrackRatings[trk]; const eff = ov != null ? ov : albR; return { num: t.n, name: t.name, time: t.time, stars: this.makeStars(eff, ov == null && albR > 0, (r) => this.setSpotTrackRating(trk, r), false), onDragStart: (e) => { this.setState({ dragItem: { kind: 'track', label: t.name, ids: [trk] } }); try { e.dataTransfer.setData('text/plain', t.name); } catch (x) {} }, onContextMenu: (e) => this.openCtxMenu(e, { kind: 'track', label: t.name, ids: [trk] }), style: 'display:grid; grid-template-columns:34px 1fr 80px 56px; align-items:center; height:26px; font-size:12px; padding:0 16px; cursor:default;' + (top && top.highlight === t.n ? 'background:' + accent + '22; box-shadow:inset 3px 0 0 ' + accent + ';' : (t.n % 2 ? 'background:' + (zebra ? P.alt : P.list) + ';' : 'background:' + P.list + ';')), onPlay: () => {} }; }) : [],
       showEmpty: st.emptyMode && !st.syncing,
       emptyMode: st.emptyMode, setupOpen: st.setupOpen,
       openSetup: () => this.setState({ emptyMode: true, setupOpen: true, fileMenuOpen: false }),
@@ -676,10 +963,10 @@ class Component extends DCLogic {
       npProgress: (np && dur ? Math.min(100, st.elapsed / dur * 100) : 0) + '%',
       togglePlay: () => this.setState(s => ({ isPlaying: s.playing ? !s.isPlaying : s.isPlaying })),
       prevTrack: () => this.step(-1), nextTrack: () => this.step(1),
-      query: st.query, onSearch: (e) => this.setState({ query: e.target.value, genre: null, artist: null, album: null }),
+      query: st.query, onSearch: (e) => this.setState({ query: e.target.value, genre: null, artist: null, album: null, nav: [] }),
       searchPlaceholder: scopeSpot ? 'Search Spotify' : 'Search Library',
       scopeLibStyle: pill(!scopeSpot), scopeSpotStyle: pill(scopeSpot),
-      scopeLibrary: () => this.setState({ searchScope: 'library' }), scopeSpotify: () => this.setState({ searchScope: 'spotify' }),
+      scopeLibrary: () => this.setState({ searchScope: 'library', nav: [] }), scopeSpotify: () => this.setState({ searchScope: 'spotify', nav: [] }),
       statusLine: st.emptyMode ? 'No library — set up to begin' : (tracks.length + ' ' + L.unit + ', ' + totalStr), overrideCount: overrides + ' overlay edits',
       addToLibrary: () => { this.setState({ fileMenuOpen: false }); alert('Add to Library — searches Spotify and pulls the track and its metadata into your local overlay. Everything in your Spotify library auto-populates here. (Stubbed in prototype.)'); },
       fileMenuOpen: st.fileMenuOpen,
@@ -753,6 +1040,29 @@ class Component extends DCLogic {
     this.save(lib); this.setState({ library: lib });
   }
   setSetting(k, v) { this.setState(s => ({ settings: { ...s.settings, [k]: v } })); }
+  toggleAlbum(id) { this.setState(s => ({ addedAlbums: { ...s.addedAlbums, [id]: !s.addedAlbums[id] } })); }
+  pushNav(entry) { this.setState(s => ({ nav: [...s.nav, entry] })); }
+  openCtxMenu(e, item) { e.preventDefault(); e.stopPropagation(); this.setState({ ctxMenu: { x: e.clientX, y: e.clientY, item } }); }
+  openAddToPlaylist(item) { this.setState({ addToPlaylistFor: item, ctxMenu: null }); }
+  togglePlaylistMember(plId, ids) {
+    this.setState(s => ({ playlists: s.playlists.map(p => {
+      if (p.id !== plId) return p;
+      const has = ids.every(id => p.tracks.includes(id));
+      const tracks = has ? p.tracks.filter(id => !ids.includes(id)) : [...new Set([...p.tracks, ...ids])];
+      return { ...p, tracks };
+    }) }));
+  }
+  newPlaylistWith(ids) {
+    this.setState(s => { const n = s.playlists.filter(p => p.mine).length + 1; return { playlists: [...s.playlists, { id: 'pl' + Date.now(), name: 'New Playlist ' + n, owner: 'me', mine: true, tracks: [...ids] }] }; });
+  }
+  onDropPlaylist(plId) {
+    const it = this.state.dragItem;
+    if (it) this.setState(s => ({ playlists: s.playlists.map(p => p.id === plId ? { ...p, tracks: [...new Set([...p.tracks, ...it.ids])] } : p) }));
+    this.setState({ dragItem: null, dropTarget: null });
+  }
+  playlistById(id) { return this.state.playlists.find(p => p.id === id); }
+  setSpotAlbumRating(id, r) { this.setState(s => { const m = { ...s.spotAlbumRatings }; if (m[id] === r) delete m[id]; else m[id] = r; return { spotAlbumRatings: m }; }); }
+  setSpotTrackRating(k, r) { this.setState(s => { const m = { ...s.spotTrackRatings }; if (m[k] === r) delete m[k]; else m[k] = r; return { spotTrackRatings: m }; }); }
   openInfo(t) { this.setState({ infoOpen: true, infoTrack: t, draft: { name: t.name, art: t.art, alb: t.alb, cat: t.cat, rating: t.rating } }); }
   edit(k, v) { this.setState(s => ({ draft: { ...s.draft, [k]: v } })); }
   saveInfo() {

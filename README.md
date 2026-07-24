@@ -91,8 +91,8 @@ Fixed layout, top to bottom:
    - Right: **search scope toggle** (Library / Spotify pills) + search field.
 4. **Body** — 2-column grid `190px | 1fr`:
    - **Sidebar** (190px): "Library" section listing the media-type sources
-     (Music / Podcasts / Audiobooks) with per-source counts; a "Playlists"
-     section (placeholder); a footer note about the overlay staying local.
+     (Music / Podcasts / Audiobooks) with per-source counts; a **"Playlists"
+     section** (see Playlists below); a footer note about the overlay staying local.
    - **Content**: the three-column browser, an optional album-rating strip, the
      track list, and a status bar (see below).
 5. **Status bar** (26px) — "+" add button (left), "N songs, H:MM hours" (center),
@@ -171,18 +171,66 @@ app polls the importer for progress and refreshes the visible set each tick.
 
 ## Interactions & Behavior
 - **Search scope toggle**: Library scope filters the local library in place.
-  Spotify scope + a non-empty query hides the local track list and shows a global
-  Spotify results area (stubbed in the mock) with a "+ Add to Library pulls the
-  track and its metadata into your overlay" affordance. **Decision: Spotify-scope
-  search focuses on artist + album results** (mirroring how Spotify's own search
-  works today — clunky but familiar), not the full Genre/Artist/Album browser.
-  Present results grouped by artist and album; adding any result pulls the track
-  and its metadata into the local overlay library.
+  **Spotify scope + a non-empty query replaces the whole content area** (the
+  three-column browser and album strip are hidden) with a dedicated Spotify
+  results view — this is a concrete example of the "one possible layout"
+  architecture: the same window hosts a different projection.
+  - **Filter tabs** across the top: **All · Artists · Albums · Tracks**, each with
+    a live count (All is the default). This is the answer to "how to filter by
+    album vs track vs artist."
+  - **Grouped results**: an Artists section (rows with a round thumbnail + name +
+    descriptor + "View albums ›"), an Albums section (cover thumb + title +
+    "artist · year" + a **+ Add / ✓ Added** toggle), and a Tracks section (thumb +
+    title + "artist · album" + duration). Under All, all three sections stack;
+    a single tab shows just that section.
+  - **Navigation to Artist / Album pages** (the app will wire these to a
+    right-click ▸ *Go to artist / Go to album / Go to track* menu; Go to track
+    opens the album page with that track highlighted). Both are full-content
+    pages reached via a **nav stack** — double-click an album row (or "View
+    albums ›" on an artist) to push a page; a **Back** link at the top pops it,
+    with a context-aware label ("‹ Back to results" / "‹ Back to artist" /
+    "‹ Back to album").
+    - **Album page**: large cover, album type (e.g. "Album · Cast Recording"),
+      title, **clickable artist name** (→ artist page), an **album star rating**
+      (5 stars) + "year · N tracks · duration", a prose **description**, **Play**
+      and **+ Add to Library / ✓ In Library — Remove** buttons, and the full track
+      list with **per-track star ratings** (inheriting the album rating, gold when
+      overridden) and durations. Double-click a track to preview; when arrived via
+      "Go to track", that row is highlighted with an accent bar. The goal is
+      *recognition* — enough to tell the 1987 original London cast from the 2004
+      film or 2022 revival — not a clone of Spotify's product page.
+    - **Artist page**: circular artist image, name, "descriptor · N albums",
+      **Play** and **+ Follow / ✓ Following** buttons, a **Discography** list
+      (cover + title + "year · type" + Add toggle, click → album page), and a
+      **Top Tracks** list (number, title, source album, duration).
+  - Adding an album (from a row, the album page, or an artist's discography) pulls
+    it and its tracks into the local overlay. In the mock this is a stubbed
+    toggle; wire it to the real importer. Search results are a small mock catalog
+    keyed to "phantom of the opera" for demonstration.
 - **Rating inheritance (confirmed precedence)**: effective rating = per-track
   override, else album rating, else unrated. Album rating cascades to its tracks;
   per-track overrides win; re-clicking the set star clears the override.
 - **Genre normalization**: editing a track's genre records the Spotify original
   the first time it diverges, and flags the track with "●".
+- **Playlists** (left sidebar): lists the user's Spotify playlists under a
+  "Playlists" heading with a "+" (new playlist) affordance. **Owned vs. followed
+  playlists are visually distinguished** — the user's own playlists show *no*
+  leading icon; playlists owned by others get a distinct glyph (☍ in the mock) and
+  their owner shown as a subtitle in menus. Each row shows its track count.
+  - **Add to Playlist** works from anywhere a track or album appears — library
+    track rows, Spotify album/track rows, and the album page. Two paths:
+    - **Right-click ▸ Add to Playlist…** opens a small context menu (the mock also
+      lists disabled Go-to-Album/Artist items the app will wire up), which opens
+      an **Add to Playlist popover**: the item's label, every playlist with a ✓
+      when it already contains the item, owner subtitles on others' playlists, and
+      a **+ New Playlist** action.
+    - **Drag-and-drop**: track/album rows are draggable; playlist sidebar rows are
+      drop targets that highlight in the accent color on drag-over and add the
+      dragged item on drop.
+  - In the mock, playlists are seed data and membership is in-memory. The real app
+    wires these to the Spotify playlist API as canonical: adds and reorders write
+    through to Spotify (snapshot_id concurrency), per the write-back guardrail
+    above — superseding the mock's original "never writes back" caveat here.
 - **Playback (prototype-only)**: transport updates the LCD and advances a timer;
   in the real app this drives / reflects the Spotify player.
 - **Keyboard shortcuts**: Space = play/pause, ← / → = prev/next track (within the
@@ -230,6 +278,16 @@ UI state (belongs in the shell):
   the visible library is a `slice(0, round(len * syncDone/syncTotal))` of the
   imported set — replace with the real importer's running progress + partial
   results in the target app.
+- Playlists / add-to-playlist: `playlists` (`{id, name, owner, mine, tracks[]}`),
+  `selectedPlaylist`, `addToPlaylistFor` ({kind:'track'|'album', label, ids} — the
+  popover's subject, null = closed), `ctxMenu` ({x, y, item} — right-click menu),
+  `dragItem` / `dropTarget` (drag-and-drop). Membership is stored as track ids on
+  each playlist; adding an album adds all its track ids.
+- Spotify search / navigation: `searchScope`, `spotifyFilter`
+  (all/artists/albums/tracks), `nav` (a stack of `{type:'artist'|'album', id,
+  highlight?}` — empty = results list, push to drill in, pop to go back),
+  `addedAlbums`, `spotAlbumRatings`, `spotTrackRatings`. The right-click *Go to*
+  actions just push the matching entry onto `nav` (Go to track sets `highlight`).
 
 ## Extensibility (do not design into a corner)
 The mock stores tracks with **generic fields `cat / art / alb`** and a per-source
@@ -276,7 +334,14 @@ should use Spotify artwork.
 ## Files
 - `screenshots/` — light + dark reference renders: playing, File menu, View menu,
   Get Info, Preferences, plus first-run set-up (`setup-*`), empty state
-  (`empty-*`), and mid-sync progressive population (`syncing-*`).
+  (`empty-*`), mid-sync progressive population (`syncing-*`), and the Spotify
+  search experience: results list (`spotify-results-light`), a single filter tab
+  (`spotify-albums-filter-light`), the **Artist page** (`artist-page-{light,dark}`,
+  plus `artist-page-results-light` showing it in context), and the **Album page**
+  (`album-page-{light,dark}`), and the **Playlists** feature: right-click context
+  menu (`playlist-context-menu-{light,dark}`), Add-to-Playlist popover
+  (`playlist-add-popover-{light,dark}`), and a drag-and-drop drop-target highlight
+  (`playlist-drag-drop-light`).
 - `Retune.dc.html` — the full interactive prototype (layout, progressive filter,
   ratings + inheritance, search-scope toggle, theme, JSON/JSON.gz backup/restore/
   merge, Get Info, keyboard shortcuts). Open in a browser to interact.
