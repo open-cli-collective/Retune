@@ -734,33 +734,16 @@ function App() {
       <div className="body-grid">
         <Sidebar state={state} onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }} />
         <section className="content">
-          <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} />
-          {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
-            <AlbumRatingStrip
-              album={selectedAlbum}
-              rating={view?.albumRating ?? null}
-              onRate={(stars) => mutate('set_album_rating', {
-                source: state.source,
-                art: view.albumRatingArtist,
-                alb: selectedAlbum,
-                stars,
-              })}
-            />
-          )}
-          {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
           {state.scope === 'spotify' && state.query.trim() ? (
             state.connected ? <SpotifySearch
+              query={state.query.trim()}
               searching={state.spotifySearching}
               results={state.spotifyResults}
-              onArtist={(artist) => {
-                dispatch({ type: 'spotifySearching', searching: true })
-                invoke<SpotifyResults['albums']>('spotify_artist_albums', { artistId: artist.id })
-                  .then((albums) => dispatch({
-                    type: 'spotifyResults',
-                    results: { artists: state.spotifyResults?.artists ?? [artist], albums, tracks: state.spotifyResults?.tracks ?? [] },
-                  }))
-                  .catch((error) => dispatch({ type: 'error', error: String(error) }))
-              }}
+              onArtist={(artist) => invoke<SpotifyResults['albums']>('spotify_artist_albums', { artistId: artist.id })
+                .catch((error) => {
+                  dispatch({ type: 'error', error: String(error) })
+                  throw error
+                })}
               onAdd={(album) => invoke('add_spotify_album', album)
                 .catch((error) => {
                   dispatch({ type: 'error', error: String(error) })
@@ -768,43 +751,59 @@ function App() {
                 })}
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
           ) : (
-            <TrackList
-              tracks={tracks}
-              label={labels[state.source]}
-              selectedIds={state.selectedTrackIds}
-              playing={state.playing}
-              columnOrder={state.settings.columnOrder}
-              hiddenColumns={state.settings.hiddenColumns}
-              empty={libraryEmpty}
-              onActivate={() => setActivePane('track')}
-              onSetup={() => dispatch({ type: 'setup', open: true })}
-              onSelect={(id, event) => {
-                if (event.shiftKey && state.selectionAnchor !== undefined) {
-                  const anchor = tracks.findIndex((track) => track.id === state.selectionAnchor)
-                  const row = tracks.findIndex((track) => track.id === id)
-                  if (anchor >= 0 && row >= 0) {
-                    dispatch({
-                      type: 'selection',
-                      ids: new Set(tracks.slice(Math.min(anchor, row), Math.max(anchor, row) + 1).map((track) => track.id)),
-                      anchor: state.selectionAnchor,
-                    })
-                    return
+            <>
+              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} />
+              {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
+                <AlbumRatingStrip
+                  album={selectedAlbum}
+                  rating={view?.albumRating ?? null}
+                  onRate={(stars) => mutate('set_album_rating', {
+                    source: state.source,
+                    art: view.albumRatingArtist,
+                    alb: selectedAlbum,
+                    stars,
+                  })}
+                />
+              )}
+              {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
+              <TrackList
+                tracks={tracks}
+                label={labels[state.source]}
+                selectedIds={state.selectedTrackIds}
+                playing={state.playing}
+                columnOrder={state.settings.columnOrder}
+                hiddenColumns={state.settings.hiddenColumns}
+                empty={libraryEmpty}
+                onActivate={() => setActivePane('track')}
+                onSetup={() => dispatch({ type: 'setup', open: true })}
+                onSelect={(id, event) => {
+                  if (event.shiftKey && state.selectionAnchor !== undefined) {
+                    const anchor = tracks.findIndex((track) => track.id === state.selectionAnchor)
+                    const row = tracks.findIndex((track) => track.id === id)
+                    if (anchor >= 0 && row >= 0) {
+                      dispatch({
+                        type: 'selection',
+                        ids: new Set(tracks.slice(Math.min(anchor, row), Math.max(anchor, row) + 1).map((track) => track.id)),
+                        anchor: state.selectionAnchor,
+                      })
+                      return
+                    }
                   }
-                }
-                if (event.metaKey || event.ctrlKey) {
-                  const ids = new Set(state.selectedTrackIds)
-                  if (!ids.delete(id)) ids.add(id)
-                  dispatch({ type: 'selection', ids, anchor: id })
-                } else {
-                  dispatch({ type: 'selectTrack', id })
-                }
-              }}
-              onPlay={(id) => player.start(id, tracks)}
-              onRate={(id, stars) => mutate('click_track_star', { id, stars })}
-              onInfo={openInfo}
-              onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
-              onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
-            />
+                  if (event.metaKey || event.ctrlKey) {
+                    const ids = new Set(state.selectedTrackIds)
+                    if (!ids.delete(id)) ids.add(id)
+                    dispatch({ type: 'selection', ids, anchor: id })
+                  } else {
+                    dispatch({ type: 'selectTrack', id })
+                  }
+                }}
+                onPlay={(id) => player.start(id, tracks)}
+                onRate={(id, stars) => mutate('click_track_star', { id, stars })}
+                onInfo={openInfo}
+                onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
+                onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
+              />
+            </>
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
           <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} empty={libraryEmpty} />
@@ -1057,14 +1056,28 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
   </div>
 }
 
-function SpotifySearch({ searching, results, onArtist, onAdd }: {
+type SpotifyTab = 'all' | keyof SpotifyResults
+
+function SpotifyArtwork({ imageUrl, round = false }: { imageUrl: string | null; round?: boolean }) {
+  return <span className={`spotify-artwork ${round ? 'round' : ''}`}>{imageUrl ? <img src={imageUrl} alt="" /> : <span aria-hidden="true">♪</span>}</span>
+}
+
+function SpotifySearch({ query, searching, results, onArtist, onAdd }: {
+  query: string
   searching: boolean
   results: SpotifyResults | null
-  onArtist: (artist: SpotifyResults['artists'][number]) => void
+  onArtist: (artist: SpotifyResults['artists'][number]) => Promise<SpotifyResults['albums']>
   onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
 }) {
+  const [tab, setTab] = useState<SpotifyTab>('all')
   const [adding, setAdding] = useState<string>()
   const [added, setAdded] = useState<ReadonlySet<string>>(new Set())
+  const [expanding, setExpanding] = useState<string>()
+  const [expanded, setExpanded] = useState<{ artistId: string; albums: SpotifyResults['albums'] }>()
+  useEffect(() => {
+    setTab('all')
+    setExpanded(undefined)
+  }, [query])
   const add = (album: SpotifyResults['albums'][number]) => {
     setAdding(album.uri)
     onAdd(album)
@@ -1072,10 +1085,63 @@ function SpotifySearch({ searching, results, onArtist, onAdd }: {
       .catch(() => {})
       .finally(() => setAdding(undefined))
   }
+  const expand = (artist: SpotifyResults['artists'][number]) => {
+    setExpanding(artist.id)
+    onArtist(artist)
+      .then((albums) => setExpanded({ artistId: artist.id, albums }))
+      .catch(() => {})
+      .finally(() => setExpanding(undefined))
+  }
+  const albumRow = (album: SpotifyResults['albums'][number]) => <div className="spotify-row" key={album.uri}>
+    <SpotifyArtwork imageUrl={album.imageUrl} />
+    <span className="spotify-copy"><strong>{album.name}</strong><small>{album.artist}{album.year && ` · ${album.year}`}</small></span>
+    <button className="spotify-add" disabled={adding === album.uri || added.has(album.uri)} onClick={() => add(album)}>{added.has(album.uri) ? '✓ Added' : adding === album.uri ? 'Adding…' : '+ Add'}</button>
+  </div>
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
-  return <div className="spotify-results">
-    <section><h2>Artists</h2>{results?.artists.map((artist) => <button className="spotify-row" key={artist.id} onClick={() => onArtist(artist)}><span>{artist.name}</span><span>View albums ›</span></button>)}{!results?.artists.length && <p>No artists found.</p>}</section>
-    <section><h2>Albums</h2>{results?.albums.map((album) => <div className="spotify-row" key={album.uri}><span><strong>{album.name}</strong><small>{album.artist}</small></span><button disabled={adding === album.uri || added.has(album.uri)} onClick={() => add(album)}>{added.has(album.uri) ? '✓ Added' : adding === album.uri ? 'Adding…' : '+ Add'}</button></div>)}{!results?.albums.length && <p>No albums found.</p>}</section>
+  const counts = {
+    artists: results?.artists.length ?? 0,
+    albums: results?.albums.length ?? 0,
+    tracks: results?.tracks.length ?? 0,
+  }
+  const tabs: { key: SpotifyTab; label: string; count: number }[] = [
+    { key: 'all', label: 'All', count: counts.artists + counts.albums + counts.tracks },
+    { key: 'artists', label: 'Artists', count: counts.artists },
+    { key: 'albums', label: 'Albums', count: counts.albums },
+    { key: 'tracks', label: 'Tracks', count: counts.tracks },
+  ]
+  return <div className="spotify-results-view">
+    <div className="spotify-tabs" role="tablist" aria-label="Spotify result filters">
+      {tabs.map((item) => <button key={item.key} role="tab" aria-selected={tab === item.key} className={tab === item.key ? 'active' : ''} onClick={() => setTab(item.key)}>{item.label} ({item.count})</button>)}
+      <span>Spotify · &quot;{query}&quot;</span>
+    </div>
+    <div className="spotify-results">
+      {(tab === 'all' || tab === 'artists') && <section>
+        {tab === 'all' && <h2>Artists</h2>}
+        {results?.artists.map((artist) => <div key={artist.id}>
+          <div className="spotify-row">
+            <SpotifyArtwork imageUrl={artist.imageUrl} round />
+            <span className="spotify-copy"><strong>{artist.name}</strong><small>{artist.descriptor}</small></span>
+            <button className="spotify-link" disabled={expanding === artist.id} onClick={() => expand(artist)}>{expanding === artist.id ? 'Loading…' : 'View albums ›'}</button>
+          </div>
+          {expanded?.artistId === artist.id && <div className="spotify-expanded">{expanded.albums.map(albumRow)}{!expanded.albums.length && <p>No albums found.</p>}</div>}
+        </div>)}
+        {!results?.artists.length && <p>No artists found.</p>}
+      </section>}
+      {(tab === 'all' || tab === 'albums') && <section>
+        {tab === 'all' && <h2>Albums</h2>}
+        {results?.albums.map(albumRow)}
+        {!results?.albums.length && <p>No albums found.</p>}
+      </section>}
+      {(tab === 'all' || tab === 'tracks') && <section>
+        {tab === 'all' && <h2>Tracks</h2>}
+        {results?.tracks.map((track) => <div className="spotify-row" key={track.uri}>
+          <SpotifyArtwork imageUrl={track.imageUrl} />
+          <span className="spotify-copy"><strong>{track.name}</strong><small>{track.artist} · {track.alb}</small></span>
+          <time>{Math.floor(track.durationSecs / 60)}:{String(Math.floor(track.durationSecs % 60)).padStart(2, '0')}</time>
+        </div>)}
+        {!results?.tracks.length && <p>No tracks found.</p>}
+      </section>}
+    </div>
   </div>
 }
 
