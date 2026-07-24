@@ -46,6 +46,8 @@
 
       <sc-if value="{{ fileMenuOpen }}" hint-placeholder-val="{{ false }}">
         <div style="position:absolute; top:23px; left:52px; width:250px; background:var(--panel,#f7f7f7); border:1px solid var(--border,#b0b0b0); border-radius:6px; box-shadow:0 12px 30px rgba(0,0,0,.28); padding:5px 0; font-size:12.5px; color:var(--txt,#1a1a1a);">
+          <div onClick="{{ openSetup }}" style="padding:5px 16px; cursor:default;">Set Up Library…</div>
+          <div style="height:1px; background:var(--border,#dcdcdc); margin:5px 10px; opacity:.5;"></div>
           <div onClick="{{ menuGetInfo }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Get Info<span style="color:var(--menudim,#9a9a9a);">⌘I</span></div>
           <div onClick="{{ menuPrefs }}" style="padding:5px 16px; display:flex; justify-content:space-between; cursor:default;">Preferences…<span style="color:var(--menudim,#9a9a9a);">⌘,</span></div>
           <div style="height:1px; background:var(--border,#dcdcdc); margin:5px 10px; opacity:.5;"></div>
@@ -197,13 +199,28 @@
                 </div>
               </sc-for>
             </sc-if>
+            <sc-if value="{{ showEmpty }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:60px 40px; text-align:center; color:var(--sub,#9a9a9a); font-size:13px; line-height:1.7;">
+                <div style="font-size:34px; margin-bottom:10px; opacity:.5;">♪</div>
+                <div style="font-weight:600; color:var(--dim,#6a6a6a); font-size:14px;">Your library is empty</div>
+                <div style="margin-top:4px;">Connect Spotify and sync to pull your saved music into a local overlay.</div>
+                <div onClick="{{ openSetup }}" style="display:inline-block; margin-top:16px; height:30px; line-height:30px; padding:0 18px; border-radius:6px; border:1px solid #2f6fd0; background:#3f7fd6; color:#fff; font-size:12.5px; font-weight:600; cursor:default;">Set Up Library…</div>
+              </div>
+            </sc-if>
           </div>
         </div>
 
         <!-- Status bar -->
         <div style="height:26px; flex:0 0 auto; background:linear-gradient(var(--head1,#eaeaea),var(--head2,#dcdcdc)); border-top:1px solid var(--border,#b7b7b7); display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--dim,#5a5a5a); position:relative;">
           <span onClick="{{ addToLibrary }}" style="position:absolute; left:10px; width:20px; height:20px; border-radius:4px; background:var(--ctl,#f4f4f4); border:1px solid var(--ctlb,#bcbcbc); display:flex; align-items:center; justify-content:center; font-size:14px; color:var(--dim,#666); cursor:default;">+</span>
-          <span>{{ statusLine }}</span>
+          <sc-if value="{{ notSyncing }}" hint-placeholder-val="{{ true }}"><span>{{ statusLine }}</span></sc-if>
+          <sc-if value="{{ syncing }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span style="color:var(--dim,#5a5a5a);">⟳ Syncing from Spotify…</span>
+              <div style="width:200px; height:7px; border-radius:4px; background:var(--ctlb,#cfcfcf); overflow:hidden;"><div style="width:{{ syncPct }}; height:7px; border-radius:4px; background:#3f7fd6;"></div></div>
+              <span style="color:var(--dim,#5a5a5a); font-variant-numeric:tabular-nums;">{{ syncLabel }}</span>
+            </div>
+          </sc-if>
           <span style="position:absolute; right:10px; color:var(--sub,#8a8a8a);">{{ overrideCount }}</span>
         </div>
       </div>
@@ -257,21 +274,117 @@
 
   <sc-if value="{{ prefsOpen }}" hint-placeholder-val="{{ false }}">
     <div onClick="{{ closePrefs }}" style="position:fixed; inset:0; background:rgba(0,0,0,.28); display:flex; align-items:center; justify-content:center; z-index:60;">
-      <div onClick="{{ stop }}" style="width:490px; background:var(--panel,#f2f2f2); border:1px solid var(--border,#9a9a9a); border-radius:9px; box-shadow:0 30px 70px rgba(0,0,0,.4); overflow:hidden; color:var(--txt,#1a1a1a);">
+      <div onClick="{{ stop }}" style="width:520px; background:var(--panel,#f2f2f2); border:1px solid var(--border,#9a9a9a); border-radius:9px; box-shadow:0 30px 70px rgba(0,0,0,.4); overflow:hidden; color:var(--txt,#1a1a1a);">
         <div style="height:46px; background:linear-gradient(var(--head1,#f6f6f6),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#c4c4c4); display:flex; align-items:center; padding:0 18px; font-size:14px; font-weight:700;">Preferences</div>
-        <div style="padding:18px 22px; display:flex; flex-direction:column; gap:18px;">
-          <div style="display:flex; flex-direction:column; gap:14px;">
-            <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--sub,#8a93a1);">Library</div>
-            <sc-for list="{{ libraryToggles }}" as="t" hint-placeholder-count="1">
-              <div onClick="{{ t.onClick }}" style="display:flex; align-items:center; gap:12px; cursor:default;">
-                <div style="{{ t.trackStyle }}"><div style="{{ t.knobStyle }}"></div></div>
-                <div style="display:flex; flex-direction:column;"><span style="font-size:12.5px;">{{ t.label }}</span><span style="font-size:10.5px; color:var(--sub,#9a9a9a);">{{ t.help }}</span></div>
+
+        <!-- Tab bar -->
+        <div style="display:flex; gap:2px; padding:10px 14px 0; background:var(--menu,#f4f4f4); border-bottom:1px solid var(--border,#dcdcdc);">
+          <sc-for list="{{ prefsTabs }}" as="tb" hint-placeholder-count="3">
+            <div onClick="{{ tb.onClick }}" style="{{ tb.style }}"><span style="margin-right:6px;">{{ tb.icon }}</span>{{ tb.label }}</div>
+          </sc-for>
+        </div>
+
+        <div style="padding:20px 22px; min-height:216px;">
+          <!-- Appearance -->
+          <sc-if value="{{ tabAppearance }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex; flex-direction:column; gap:14px;">
+              <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--sub,#8a93a1);">Theme</div>
+              <sc-for list="{{ themeRadios }}" as="r" hint-placeholder-count="3">
+                <div onClick="{{ r.onClick }}" style="display:flex; align-items:flex-start; gap:10px; cursor:default;">
+                  <div style="{{ r.ringStyle }}"><div style="{{ r.dotStyle }}"></div></div>
+                  <div style="display:flex; flex-direction:column;"><span style="font-size:12.5px;">{{ r.label }}</span><span style="font-size:10.5px; color:var(--sub,#9a9a9a);">{{ r.help }}</span></div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <!-- Library -->
+          <sc-if value="{{ tabLibrary }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; flex-direction:column; gap:16px;">
+              <div style="display:flex; flex-direction:column; gap:5px;">
+                <span style="font-size:12.5px; font-weight:600;">Spotify Client ID</span>
+                <input value="{{ clientId }}" onInput="{{ onClientId }}" placeholder="e.g. 5429ca7608ff428ca687b919da3ac056" style="height:30px; border:1px solid var(--ctlb,#bcbcbc); border-radius:5px; padding:0 10px; font-size:12.5px; font-family:inherit; background:var(--list,#fff); color:var(--txt,#1a1a1a);" />
               </div>
-            </sc-for>
+              <sc-for list="{{ libraryToggles }}" as="t" hint-placeholder-count="2">
+                <div onClick="{{ t.onClick }}" style="display:flex; align-items:center; gap:12px; cursor:default;">
+                  <div style="{{ t.trackStyle }}"><div style="{{ t.knobStyle }}"></div></div>
+                  <div style="display:flex; flex-direction:column;"><span style="font-size:12.5px;">{{ t.label }}</span><span style="font-size:10.5px; color:var(--sub,#9a9a9a);">{{ t.help }}</span></div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <!-- Audio -->
+          <sc-if value="{{ tabAudio }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; flex-direction:column; gap:18px;">
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:12.5px; font-weight:600;">Streaming quality</span><span style="font-size:11.5px; color:var(--sub,#7f838c);">{{ qualityLabel }}</span></div>
+                <input type="range" min="0" max="3" step="1" value="{{ quality }}" onInput="{{ onQuality }}" style="width:100%; accent-color:#3f7fd6;" />
+                <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--sub,#9a9a9a);"><span>Low</span><span>Normal</span><span>High</span><span>Very High</span></div>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:10px;">
+                <span style="font-size:12.5px; font-weight:600;">Playback</span>
+                <sc-for list="{{ engineRadios }}" as="r" hint-placeholder-count="2">
+                  <div onClick="{{ r.onClick }}" style="display:flex; align-items:flex-start; gap:10px; cursor:default;">
+                    <div style="{{ r.ringStyle }}"><div style="{{ r.dotStyle }}"></div></div>
+                    <div style="display:flex; flex-direction:column;"><span style="font-size:12.5px;">{{ r.label }}</span><span style="font-size:10.5px; color:var(--sub,#9a9a9a);">{{ r.help }}</span></div>
+                  </div>
+                </sc-for>
+              </div>
+              <sc-for list="{{ audioToggles }}" as="t" hint-placeholder-count="2">
+                <div onClick="{{ t.onClick }}" style="display:flex; align-items:center; gap:12px; cursor:default;">
+                  <div style="{{ t.trackStyle }}"><div style="{{ t.knobStyle }}"></div></div>
+                  <span style="font-size:12.5px;">{{ t.label }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="padding:0 22px 18px; display:flex; justify-content:flex-end; gap:10px;">
+          <button onClick="{{ closePrefs }}" style="height:28px; padding:0 16px; border-radius:6px; border:1px solid var(--ctlb,#bcbcbc); background:var(--ctl,#fafafa); color:var(--txt,#1a1a1a); font-size:12.5px; font-family:inherit; cursor:default;">Cancel</button>
+          <button onClick="{{ closePrefs }}" style="height:28px; padding:0 18px; border-radius:6px; border:1px solid #2f6fd0; background:#3f7fd6; color:#fff; font-size:12.5px; font-weight:600; font-family:inherit; cursor:default;">Save</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ setupOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed; inset:0; background:rgba(0,0,0,.32); display:flex; align-items:center; justify-content:center; z-index:70;">
+      <div style="width:500px; background:var(--panel,#f2f2f2); border:1px solid var(--border,#9a9a9a); border-radius:9px; box-shadow:0 30px 70px rgba(0,0,0,.45); overflow:hidden; color:var(--txt,#1a1a1a);">
+        <div style="height:52px; background:linear-gradient(var(--head1,#f6f6f6),var(--head2,#e2e2e2)); border-bottom:1px solid var(--border,#c4c4c4); display:flex; align-items:center; padding:0 20px; font-size:15px; font-weight:700;">Set Up Your Library</div>
+        <div style="padding:18px 22px; display:flex; flex-direction:column; gap:16px; font-size:12.5px;">
+          <div style="color:var(--dim,#6a6a6a); line-height:1.6;">Retune reads your Spotify library through the Web API and builds a local overlay. Confirm three things, then sync.</div>
+
+          <div style="display:flex; flex-direction:column; gap:5px;">
+            <div style="display:flex; align-items:center; gap:8px;"><span style="width:18px; height:18px; border-radius:50%; background:var(--ctlb,#cfcfcf); color:var(--panel,#f2f2f2); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;">1</span><span style="font-weight:600;">Spotify app Client ID</span></div>
+            <input value="{{ clientId }}" onInput="{{ onClientId }}" placeholder="e.g. 4f9a2c7b8e1d40a3b6c5…" style="height:30px; border:1px solid var(--ctlb,#bcbcbc); border-radius:5px; padding:0 10px; font-size:12.5px; font-family:inherit; background:var(--list,#fff); color:var(--txt,#1a1a1a);" />
+            <span style="font-size:10.5px; color:var(--sub,#9a9a9a);">Create one at developer.spotify.com → Dashboard → your app.</span>
+          </div>
+
+          <div onClick="{{ toggleWebApi }}" style="display:flex; align-items:flex-start; gap:8px; cursor:default;">
+            <span style="width:18px; height:18px; border-radius:50%; background:var(--ctlb,#cfcfcf); color:var(--panel,#f2f2f2); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; flex:0 0 auto;">2</span>
+            <div style="display:flex; flex-direction:column;">
+              <span style="font-weight:600;"><span style="font-size:15px; margin-right:4px;">{{ webApiBox }}</span> Web API enabled</span>
+              <span style="font-size:10.5px; color:var(--sub,#9a9a9a);">The app must have the Web API scope turned on in its dashboard settings.</span>
+            </div>
+          </div>
+
+          <div style="display:flex; align-items:flex-start; gap:8px;">
+            <span style="width:18px; height:18px; border-radius:50%; background:var(--ctlb,#cfcfcf); color:var(--panel,#f2f2f2); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; flex:0 0 auto;">3</span>
+            <div style="display:flex; flex-direction:column; flex:1;">
+              <span style="font-weight:600;">Spotify desktop app</span>
+              <div style="margin-top:5px; display:flex; align-items:center; gap:8px; background:var(--menu,#e9f5ec); border:1px solid #b7dfc2; border-radius:6px; padding:7px 10px;">
+                <span style="width:9px; height:9px; border-radius:50%; background:#28c840; box-shadow:0 0 0 3px rgba(40,200,64,.2);"></span>
+                <span style="color:#1f7a37; font-weight:600;">Running & logged in</span>
+                <span style="margin-left:auto; font-size:10.5px; color:#3a9a55;">✓ auto-detected</span>
+              </div>
+            </div>
           </div>
         </div>
-        <div style="padding:0 22px 18px; display:flex; justify-content:flex-end;">
-          <button onClick="{{ closePrefs }}" style="height:28px; padding:0 18px; border-radius:6px; border:1px solid #2f6fd0; background:#3f7fd6; color:#fff; font-size:12.5px; font-weight:600; font-family:inherit; cursor:default;">Done</button>
+        <div style="padding:2px 22px 18px; display:flex; justify-content:flex-end; gap:10px; align-items:center;">
+          <button onClick="{{ cancelSetup }}" style="height:30px; padding:0 18px; border-radius:6px; border:1px solid var(--ctlb,#bcbcbc); background:var(--ctl,#fafafa); color:var(--txt,#1a1a1a); font-size:12.5px; font-family:inherit; cursor:default;">Cancel</button>
+          <button onClick="{{ startSync }}" style="{{ syncBtnStyle }}">Sync</button>
         </div>
       </div>
     </div>
@@ -291,8 +404,10 @@ class Component extends DCLogic {
     theme: 'light', zoom: 1,
     fileMenuOpen: false, viewMenuOpen: false,
     infoOpen: false, infoTrack: null, draft: null, importMode: 'restore',
-    prefsOpen: false,
-    settings: { autoAdd: true },
+    prefsOpen: false, prefsTab: 'appearance',
+    emptyMode: false, setupOpen: false, clientId: '', webApi: true, spotifyOk: true,
+    syncing: false, syncDone: 0, syncTotal: 0,
+    settings: { autoAdd: true, connectLaunch: true, quality: 3, engine: 'librespot', normalize: true, gapless: true },
     library: null,
   };
 
@@ -316,7 +431,19 @@ class Component extends DCLogic {
     this._onWheel = (e) => { if (e.metaKey || e.ctrlKey) { e.preventDefault(); this.zoomBy(e.deltaY < 0 ? 0.08 : -0.08); } };
     window.addEventListener('wheel', this._onWheel, { passive: false });
   }
-  componentWillUnmount() { clearInterval(this._timer); window.removeEventListener('keydown', this._onKey); if (this._mql) this._mql.removeEventListener('change', this._onScheme); window.removeEventListener('wheel', this._onWheel); }
+  componentWillUnmount() { clearInterval(this._timer); clearInterval(this._sync); window.removeEventListener('keydown', this._onKey); if (this._mql) this._mql.removeEventListener('change', this._onScheme); window.removeEventListener('wheel', this._onWheel); }
+  startSync() {
+    const total = 342;
+    this.setState({ setupOpen: false, syncing: true, syncTotal: total, syncDone: 0 });
+    clearInterval(this._sync);
+    this._sync = setInterval(() => {
+      this.setState(s => {
+        const nd = Math.min(s.syncTotal, s.syncDone + 9);
+        if (nd >= s.syncTotal) { clearInterval(this._sync); return { syncDone: nd, syncing: false, emptyMode: false }; }
+        return { syncDone: nd };
+      });
+    }, 80);
+  }
   zoomBy(d) { this.setState(s => ({ zoom: Math.min(1.8, Math.max(0.7, +(s.zoom + d).toFixed(2))) })); }
 
   onKey(e) {
@@ -400,7 +527,13 @@ class Component extends DCLogic {
 
   currentTracks() {
     const st = this.state; if (!st.library) return [];
-    let items = st.library[st.source];
+    const full = st.library[st.source];
+    let items = full;
+    if (st.emptyMode) {
+      if (!st.syncing) return [];
+      const reveal = st.syncTotal ? Math.max(1, Math.round(full.length * st.syncDone / st.syncTotal)) : full.length;
+      items = full.slice(0, reveal);
+    }
     const q = st.query.trim().toLowerCase();
     if (st.searchScope === 'library' && q) items = items.filter(t => (t.name + ' ' + t.art + ' ' + t.alb + ' ' + t.cat).toLowerCase().includes(q));
     let s = st.genre ? items.filter(t => t.cat === st.genre) : items;
@@ -438,9 +571,13 @@ class Component extends DCLogic {
     const seg = (on) => 'padding:4px 12px; font-size:11.5px; cursor:default; border-radius:5px;' + (on ? 'background:' + accent + '; color:#fff; font-weight:600;' : 'color:' + P.txt + ';');
     const swT = (on) => 'width:36px; height:20px; border-radius:10px; position:relative; cursor:default; flex:0 0 auto; background:' + (on ? accent : P.ctlb) + ';';
     const swK = (on) => 'position:absolute; top:2px; left:' + (on ? '18px' : '2px') + '; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.3);';
+    const radioRing = (on) => 'width:16px; height:16px; border-radius:50%; flex:0 0 auto; margin-top:1px; display:flex; align-items:center; justify-content:center; border:1.5px solid ' + (on ? accent : P.ctlb) + '; background:' + (on ? accent : P.list) + ';';
+    const radioDot = (on) => 'width:6px; height:6px; border-radius:50%; background:' + (on ? '#fff' : 'transparent') + ';';
     const setg = st.settings;
 
-    let items = st.library[st.source];
+    const fullSrc = st.library[st.source];
+    const reveal = st.syncTotal ? Math.max(1, Math.round(fullSrc.length * st.syncDone / st.syncTotal)) : fullSrc.length;
+    let items = st.emptyMode ? (st.syncing ? fullSrc.slice(0, reveal) : []) : fullSrc;
     const q = st.query.trim().toLowerCase();
     if (st.searchScope === 'library' && q) items = items.filter(t => (t.name + ' ' + t.art + ' ' + t.alb + ' ' + t.cat).toLowerCase().includes(q));
 
@@ -516,8 +653,20 @@ class Component extends DCLogic {
       themeIcon: mode === 'system' ? '🖥' : (mode === 'dark' ? '☾' : '☀'),
       toggleTheme: () => this.setState(s => ({ theme: s.theme === 'light' ? 'dark' : s.theme === 'dark' ? 'system' : 'light' })),
       colGenre: L.g, colArtist: L.a, colAlbum: L.b, hName: L.name, hArtist: L.a, hAlbum: L.b, hGenre: L.g,
-      sources, genreItems, artistItems, albumItems, trackItems,
-      showTracks: !scopeSpot || !q, showSpotifyStub: scopeSpot && !!q,
+      sources, genreItems: (st.emptyMode && !st.syncing) ? [] : genreItems, artistItems: (st.emptyMode && !st.syncing) ? [] : artistItems, albumItems: (st.emptyMode && !st.syncing) ? [] : albumItems, trackItems: (st.emptyMode && !st.syncing) ? [] : trackItems,
+      showTracks: (!scopeSpot || !q) && (!st.emptyMode || st.syncing), showSpotifyStub: scopeSpot && !!q,
+      showEmpty: st.emptyMode && !st.syncing,
+      emptyMode: st.emptyMode, setupOpen: st.setupOpen,
+      openSetup: () => this.setState({ emptyMode: true, setupOpen: true, fileMenuOpen: false }),
+      cancelSetup: () => this.setState({ setupOpen: false }),
+      startSync: () => this.startSync(),
+      clientId: st.clientId, onClientId: (e) => this.setState({ clientId: e.target.value }),
+      webApiBox: st.webApi ? '☑' : '☐', toggleWebApi: () => this.setState(s => ({ webApi: !s.webApi })),
+      canSync: st.spotifyOk && st.webApi && st.clientId.trim().length > 0,
+      syncBtnStyle: 'height:30px; padding:0 20px; border-radius:6px; font-size:12.5px; font-weight:600; font-family:inherit; cursor:default; border:1px solid ' + ((st.spotifyOk && st.webApi && st.clientId.trim().length > 0) ? '#2f6fd0; background:#3f7fd6; color:#fff;' : (P.ctlb + '; background:' + P.ctl + '; color:' + P.sub + ';')),
+      syncing: st.syncing, notSyncing: !st.syncing,
+      syncLabel: st.syncDone + ' / ' + st.syncTotal + ' tracks synced',
+      syncPct: (st.syncTotal ? (st.syncDone / st.syncTotal * 100) : 0) + '%',
       showAlbumStrip: albStrip,
       albumStripLabel: st.album, albumStripHint: '· applies to all tracks unless individually overridden',
       albumStars: this.makeStars(stripAlbR, false, (r) => this.setAlbumRating(tracks[0], r), false),
@@ -531,7 +680,7 @@ class Component extends DCLogic {
       searchPlaceholder: scopeSpot ? 'Search Spotify' : 'Search Library',
       scopeLibStyle: pill(!scopeSpot), scopeSpotStyle: pill(scopeSpot),
       scopeLibrary: () => this.setState({ searchScope: 'library' }), scopeSpotify: () => this.setState({ searchScope: 'spotify' }),
-      statusLine: tracks.length + ' ' + L.unit + ', ' + totalStr, overrideCount: overrides + ' overlay edits',
+      statusLine: st.emptyMode ? 'No library — set up to begin' : (tracks.length + ' ' + L.unit + ', ' + totalStr), overrideCount: overrides + ' overlay edits',
       addToLibrary: () => { this.setState({ fileMenuOpen: false }); alert('Add to Library — searches Spotify and pulls the track and its metadata into your local overlay. Everything in your Spotify library auto-populates here. (Stubbed in prototype.)'); },
       fileMenuOpen: st.fileMenuOpen,
       fileMenuStyle: 'padding:2px 8px; border-radius:4px; cursor:default;' + (st.fileMenuOpen ? 'background:' + accent + '; color:#fff;' : ''),
@@ -557,9 +706,20 @@ class Component extends DCLogic {
       closePrefs: () => this.setState({ prefsOpen: false }),
       menuPrefs: () => this.setState({ prefsOpen: true, fileMenuOpen: false }),
       prefsOpen: st.prefsOpen,
+      prefsTabs: [['appearance', 'Appearance', '◑'], ['library', 'Library', '♫'], ['audio', 'Audio', '🔊']].map(([k, l, ic]) => ({ label: l, icon: ic, onClick: () => this.setState({ prefsTab: k }), style: 'padding:7px 14px; font-size:12px; cursor:default; border-radius:6px 6px 0 0; margin-bottom:-1px; border:1px solid transparent;' + (st.prefsTab === k ? 'background:' + P.panel + '; border-color:' + P.border + '; border-bottom-color:' + P.panel + '; font-weight:600; color:' + P.txt + ';' : 'color:' + P.sub + ';') })),
+      tabAppearance: st.prefsTab === 'appearance', tabLibrary: st.prefsTab === 'library', tabAudio: st.prefsTab === 'audio',
+      themeRadios: [['system', 'System', 'Follow the OS appearance, switching automatically.'], ['light', 'Light', 'Always use the light theme.'], ['dark', 'Dark', 'Always use the dark theme.']].map(([k, l, h]) => ({ label: l, help: h, onClick: () => this.setState({ theme: k }), ringStyle: radioRing(mode === k), dotStyle: radioDot(mode === k) })),
+      quality: setg.quality, onQuality: (e) => this.setSetting('quality', +e.target.value),
+      qualityLabel: ['Low · 96 kbps', 'Normal · 160 kbps', 'High · 256 kbps', 'Very High · 320 kbps'][setg.quality],
+      engineRadios: [['connect', 'Spotify app (Connect)', 'Route playback through the running Spotify desktop app.'], ['librespot', 'Built-in (librespot)', 'Play directly inside Retune — no Spotify app window needed.']].map(([k, l, h]) => ({ label: l, help: h, onClick: () => this.setSetting('engine', k), ringStyle: radioRing(setg.engine === k), dotStyle: radioDot(setg.engine === k) })),
       libraryToggles: [
-        { key: 'autoAdd', label: 'Auto-add my entire Spotify library', help: 'Everything you save on Spotify appears here automatically.' },
+        { key: 'autoAdd', label: 'Automatically add my entire Spotify library', help: 'Everything you save on Spotify appears here automatically.' },
+        { key: 'connectLaunch', label: 'Connect to Spotify automatically at launch', help: 'Keep pulling in music you add on Spotify each time Retune starts.' },
       ].map(t => ({ label: t.label, help: t.help, onClick: () => this.setSetting(t.key, !setg[t.key]), trackStyle: swT(setg[t.key]), knobStyle: swK(setg[t.key]) })),
+      audioToggles: [
+        { key: 'normalize', label: 'Normalize volume across tracks' },
+        { key: 'gapless', label: 'Gapless album playback' },
+      ].map(t => ({ label: t.label, onClick: () => this.setSetting(t.key, !setg[t.key]), trackStyle: swT(setg[t.key]), knobStyle: swK(setg[t.key]) })),
       infoOpen: st.infoOpen,
       infoSpotifyId: dTrack ? dTrack.spotifyId : '',
       infoOriginal: dTrack && dTrack.orig ? ('Spotify reports this as "' + dTrack.orig + '". Your overlay wins in Retune.') : 'No conflicting Spotify metadata for this track.',

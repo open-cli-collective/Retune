@@ -135,6 +135,36 @@ control with inherited/override/clear semantics; an info banner that, when the
 track's genre differs from Spotify's, reads 'Spotify reports this as "…". Your
 overlay wins in Retune.' Buttons: Cancel / **Save Overlay**.
 
+### First-run / empty state
+When the library is empty (fresh install, or File → Set Up Library…), the three
+columns and track list render blank and the track area shows a centered prompt:
+♪ glyph, "Your library is empty", a one-line explainer, and a **Set Up Library…**
+button. The status bar reads "No library — set up to begin".
+
+### Set Up / Sync modal
+A blocking dialog with three confirmations, then Sync:
+1. **Spotify app Client ID** — text field (helper: create one at
+   developer.spotify.com → Dashboard → your app).
+2. **Web API enabled** — a checkbox (checked by default) confirming the app's Web
+   API scope is on.
+3. **Spotify desktop app** — an auto-detected status row: green pulsing dot +
+   "Running & logged in" + "✓ auto-detected". The app should actually probe for a
+   running, logged-in Spotify client and reflect it here (green when found; show
+   a red/neutral state + guidance when not).
+Buttons: **Cancel** (dismisses the dialog, leaving the empty state) and **Sync**
+(disabled until a Client ID is present, Web API is checked, and Spotify is
+detected). Sync begins the import.
+
+### Sync / progressive population
+Import runs on a **poll loop** (not event-based): the UI populates incrementally
+as tracks arrive — genres, artists, albums, and the track list all fill in a
+growing slice while the sync runs, so the user watches their library build. The
+status bar switches to an **iTunes↔iPod-style sync indicator**: "⟳ Syncing from
+Spotify…", a progress meter, and an **X / Y tracks synced** counter. When the poll
+reports completion the meter clears and the normal status line returns. The mock
+simulates this with a timer revealing a growing slice of the library; the real
+app polls the importer for progress and refreshes the visible set each tick.
+
 ## Interactions & Behavior
 - **Search scope toggle**: Library scope filters the local library in place.
   Spotify scope + a non-empty query hides the local track list and shows a global
@@ -154,7 +184,7 @@ overlay wins in Retune.' Buttons: Cancel / **Save Overlay**.
 - **Keyboard shortcuts**: Space = play/pause, ← / → = prev/next track (within the
   current filtered list), ⌘I = Get Info on selected track, ⌘L = focus Library
   scope, Esc = close modal/menu. Expand as appropriate for the platform.
-- **File menu**: Get Info · Preferences (⌘,) · Add to Library from Spotify ·
+- **File menu**: Set Up Library… · Get Info · Preferences (⌘,) · Add to Library from Spotify ·
   Back Up (.json) · Export (.json.gz) · Restore · Merge. The "Retune" app menu
   also opens Preferences.
 - **UI zoom / text size**: Cmd/Ctrl + `=`/`-` to grow/shrink, Cmd/Ctrl + `0` to
@@ -162,8 +192,18 @@ overlay wins in Retune.' Buttons: Cancel / **Save Overlay**.
   (clamped ~0.7–1.8) so text and rows scale together; wire an equivalent into the
   View menu in the real app. Native platforms may prefer a dynamic-type / text-
   size setting instead of CSS zoom.
-- **Preferences modal** (⌘, / Retune menu): Library section — "auto-add my entire
-  Spotify library". (A Play Counts section was removed — see Play counts above.)
+- **Preferences modal** (⌘, / Retune menu): a **tabbed** dialog (tabs are the
+  idiom here). Three tabs:
+  - **Appearance** — Theme radio group: System / Light / Dark (System follows
+    the OS; mirrors the title-bar cycle).
+  - **Library** — Spotify Client ID text field; "Automatically add my entire
+    Spotify library" toggle; "Connect to Spotify automatically at launch" toggle.
+  - **Audio** — Streaming quality slider (Low / Normal / High / Very High, with a
+    kbps readout); Playback engine radio (Spotify app (Connect) / Built-in
+    (librespot)); "Normalize volume across tracks" and "Gapless album playback"
+    toggles.
+  Footer buttons: Cancel / Save. (A Play Counts section was removed — see Play
+  counts above.)
 - **Theme**: light, dark, and **system** (follows OS `prefers-color-scheme`, live-
   updating). Cycled via the ☀/☾/🖥 icon in the title bar and the View menu; also a
   prop. (Original iTunes had no dark mode; the user wants one anyway.)
@@ -181,6 +221,11 @@ UI state (belongs in the shell):
 - `source` (active media type), `genre` / `artist` / `album` (filter selections),
   `selectedTrack`, `playing` / `isPlaying` / `elapsed`, `query` / `searchScope`,
   `theme`, and modal/menu open flags.
+- First-run / sync: `emptyMode`, `setupOpen`, `clientId`, `webApi` (bool),
+  `spotifyOk` (detected, bool), `syncing`, `syncDone`, `syncTotal`. During sync
+  the visible library is a `slice(0, round(len * syncDone/syncTotal))` of the
+  imported set — replace with the real importer's running progress + partial
+  results in the target app.
 
 ## Extensibility (do not design into a corner)
 The mock stores tracks with **generic fields `cat / art / alb`** and a per-source
@@ -215,7 +260,8 @@ Each state is provided in both light and dark themes (`screenshots/`):
 - `menu-light.png` / `menu-dark.png` — File menu open.
 - `viewmenu-light.png` / `viewmenu-dark.png` — View menu (text size + theme).
 - `getinfo-light.png` / `getinfo-dark.png` — Get Info overlay editor.
-- `prefs-light.png` / `prefs-dark.png` — Preferences.
+- `prefs-appearance-{light,dark}.png` / `prefs-library-{light,dark}.png` /
+  `prefs-audio-{light,dark}.png` — the three Preferences tabs, each theme.
 Toggle themes via the ☀/☾/🖥 icon in the title bar, the View menu, or the theme prop.
 
 ## Assets
@@ -224,7 +270,9 @@ None. No images, icons, or external fonts — glyphs are Unicode (▶ ❚❚ ⏮
 should use Spotify artwork.
 
 ## Files
-- `screenshots/` — light + dark reference renders (playing, File menu, View menu, Get Info, Preferences).
+- `screenshots/` — light + dark reference renders: playing, File menu, View menu,
+  Get Info, Preferences, plus first-run set-up (`setup-*`), empty state
+  (`empty-*`), and mid-sync progressive population (`syncing-*`).
 - `Retune.dc.html` — the full interactive prototype (layout, progressive filter,
   ratings + inheritance, search-scope toggle, theme, JSON/JSON.gz backup/restore/
   merge, Get Info, keyboard shortcuts). Open in a browser to interact.
