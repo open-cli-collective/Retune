@@ -56,6 +56,7 @@ export type AlbumPageView = {
   imageUrl: string | null
   totalDurationSecs: number
   inLibrary: boolean
+  albumRating: number | null
   tracks: {
     uri: string
     name: string
@@ -96,6 +97,8 @@ type Track = {
   rating: RatingView | null
 }
 
+type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs'>
+
 type PlayerState = {
   trackId: number | null
   elapsed: number
@@ -110,7 +113,7 @@ type PlayerState = {
 
 // `simulated` marks a local prototype session (disconnected, or fixture tracks
 // whose URIs must never reach the real Spotify API).
-type Playing = PlayerState & { queue: readonly Track[]; simulated?: boolean }
+type Playing = PlayerState & { queue: readonly PlaybackTrack[]; simulated?: boolean }
 
 type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }
@@ -189,12 +192,12 @@ type Action =
   | { type: 'scope'; scope: State['scope'] }
   | { type: 'selectTrack'; id: number }
   | { type: 'selection'; ids: Set<number>; anchor?: number }
-  | { type: 'play'; id: number; queue: readonly Track[] }
+  | { type: 'play'; id: number; queue: readonly PlaybackTrack[] }
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
   | { type: 'seek'; elapsed: number }
-  | { type: 'playerState'; player: PlayerState; queue: readonly Track[] }
+  | { type: 'playerState'; player: PlayerState; queue: readonly PlaybackTrack[] }
   | { type: 'hydrateSettings'; settings: Settings }
   | { type: 'settings'; settings: Partial<Settings> }
   | { type: 'systemTheme'; dark: boolean }
@@ -352,8 +355,8 @@ function formatTime(seconds: number) {
 }
 
 function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
-  const queue = useRef<readonly Track[]>(emptyTracks)
-  const pendingPlay = useRef<{ id: number; tracks: readonly Track[] } | null>(null)
+  const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
+  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[] } | null>(null)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
   playingRef.current = playing
@@ -369,7 +372,7 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
     invoke(command, args).catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [dispatch])
 
-  const start = useCallback((id: number, tracks: readonly Track[]) => {
+  const start = useCallback((id: number, tracks: readonly PlaybackTrack[]) => {
     const target = tracks.find((track) => track.id === id)
     if (!target?.uri.startsWith('spotify:')) {
       dispatch({ type: 'play', id, queue: tracks })
@@ -785,16 +788,13 @@ function App() {
               query={state.query.trim()}
               searching={state.spotifySearching}
               results={state.spotifyResults}
-              onArtist={(artist) => invoke<SpotifyResults['albums']>('spotify_artist_albums', { artistId: artist.id })
-                .catch((error) => {
-                  dispatch({ type: 'error', error: String(error) })
-                  throw error
-                })}
               onAdd={(album) => invoke('add_spotify_album', album)
                 .catch((error) => {
                   dispatch({ type: 'error', error: String(error) })
                   throw error
                 })}
+              onPlay={player.start}
+              onError={(error) => dispatch({ type: 'error', error })}
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
           ) : (
             <>
@@ -904,7 +904,7 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
 }
 
 function TransportBar({ playing, track, query, scope, theme, connected, volume, repeat, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onRepeat, onVolume, onSeek, onTheme }: {
-  playing: State['playing']; track?: Track; query: string; scope: State['scope']; theme: Theme
+  playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']; theme: Theme
   connected: boolean; volume: number; repeat: RepeatMode
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
@@ -1008,9 +1008,9 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   </div>
 }
 
-function RatingStars({ rating, explicit = false, onRate }: { rating: number | null; explicit?: boolean; onRate: (stars: number) => void }) {
-  return <span className={`rating-stars ${rating ? explicit ? 'explicit' : 'inherited' : 'empty'}`} aria-label={rating ? `${rating} out of 5 stars` : 'Unrated'}>
-    {[1, 2, 3, 4, 5].map((star) => <button key={star} aria-label={`${star} stars`} onClick={(event) => { event.stopPropagation(); onRate(star) }}>{star <= (rating ?? 0) ? '★' : '☆'}</button>)}
+function RatingStars({ rating, explicit = false, onRate }: { rating: number | null; explicit?: boolean; onRate?: (stars: number) => void }) {
+  return <span className={`rating-stars ${rating ? explicit ? 'explicit' : 'inherited' : 'empty'} ${onRate ? '' : 'inert'}`} aria-label={rating ? `${rating} out of 5 stars` : 'Unrated'}>
+    {[1, 2, 3, 4, 5].map((star) => <button key={star} disabled={!onRate} aria-label={`${star} stars`} onClick={(event) => { event.stopPropagation(); onRate?.(star) }}>{star <= (rating ?? 0) ? '★' : '☆'}</button>)}
   </span>
 }
 
@@ -1103,47 +1103,223 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
 }
 
 type SpotifyTab = 'all' | keyof SpotifyResults
+type SpotifyNavEntry = { kind: 'artist'; id: string } | { kind: 'album'; uri: string; highlight?: string }
+const SYNTHETIC_BASE = 2 ** 40
 
 function SpotifyArtwork({ imageUrl, round = false }: { imageUrl: string | null; round?: boolean }) {
   return <span className={`spotify-artwork ${round ? 'round' : ''}`}>{imageUrl ? <img src={imageUrl} alt="" /> : <span aria-hidden="true">♪</span>}</span>
 }
 
-function SpotifySearch({ query, searching, results, onArtist, onAdd }: {
+function SpotifyAlbumRow({ album, adding, added, onAdd, onOpen, openOnClick = false, showType = false }: {
+  album: SearchAlbum
+  adding: boolean
+  added: boolean
+  onAdd: () => void
+  onOpen: () => void
+  openOnClick?: boolean
+  showType?: boolean
+}) {
+  return <div className="spotify-row" onClick={openOnClick ? onOpen : undefined} onDoubleClick={openOnClick ? undefined : onOpen}>
+    <SpotifyArtwork imageUrl={album.imageUrl} />
+    <span className="spotify-copy"><strong>{album.name}</strong><small>{showType ? [album.year, album.albumType].filter(Boolean).join(' · ') : <>{album.artist}{album.year && ` · ${album.year}`}</>}</small></span>
+    <button className="spotify-add" disabled={adding || added} onClick={(event) => { event.stopPropagation(); onAdd() }} onDoubleClick={(event) => event.stopPropagation()}>{added ? '✓ Added' : adding ? 'Adding…' : '+ Add'}</button>
+  </div>
+}
+
+function SpotifyPageBack({ label, onBack }: { label: string; onBack: () => void }) {
+  return <button className="spotify-page-back" onClick={onBack}>‹ Back to {label}</button>
+}
+
+function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, onPlay, onError }: {
+  entry: Extract<SpotifyNavEntry, { kind: 'album' }>
+  backLabel: string
+  adding: boolean
+  onBack: () => void
+  onArtist: (id: string) => void
+  onAdd: (album: SearchAlbum) => Promise<boolean>
+  onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onError: (error: string) => void
+}) {
+  const [page, setPage] = useState<AlbumPageView>()
+  const [revision, setRevision] = useState(0)
+  const [busy, setBusy] = useState(false)
+  const highlighted = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let active = true
+    setPage(undefined)
+    invoke<AlbumPageView>('spotify_album_page', { uri: entry.uri })
+      .then((view) => active && setPage(view))
+      .catch((error) => active && onError(String(error)))
+    return () => { active = false }
+  }, [entry.uri, revision])
+  useEffect(() => {
+    if (page && entry.highlight) highlighted.current?.scrollIntoView({ block: 'center' })
+  }, [entry.highlight, page])
+  if (!page) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading album…</div></div>
+  const tracks: PlaybackTrack[] = page.tracks.map((track, index) => ({
+    id: track.trackId ?? SYNTHETIC_BASE + index,
+    uri: track.uri,
+    name: track.name,
+    art: page.artist,
+    alb: page.name,
+    durationSecs: track.durationSecs,
+  }))
+  const refresh = () => setRevision((current) => current + 1)
+  const rateAlbum = (stars: number) => invoke('set_album_rating', {
+    source: 'music', art: page.artist, alb: page.name, stars: stars === page.albumRating ? null : stars,
+  }).then(refresh).catch((error) => onError(String(error)))
+  const rateTrack = (id: number, stars: number) => invoke('click_track_star', { id, stars }).then(refresh).catch((error) => onError(String(error)))
+  const remove = async () => {
+    setBusy(true)
+    try {
+      await invoke('remove_spotify_album', { uri: page.uri })
+      refresh()
+    } catch (error) {
+      onError(String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const add = async () => {
+    if (await onAdd({ uri: page.uri, name: page.name, artist: page.artist, year: page.year, imageUrl: page.imageUrl, albumType: page.albumType })) refresh()
+  }
+  return <div className="spotify-page">
+    <SpotifyPageBack label={backLabel} onBack={onBack} />
+    <header className="spotify-page-header album-header">
+      <div className="spotify-page-art album-art"><SpotifyArtwork imageUrl={page.imageUrl} /></div>
+      <div className="spotify-page-copy">
+        <div className="spotify-eyebrow">ALBUM{page.albumType.toLowerCase() !== 'album' && ` · ${page.albumType.toUpperCase()}`}</div>
+        <h1>{page.name}</h1>
+        <button className="spotify-link artist-link" onClick={() => onArtist(page.artistId)}>{page.artist}</button>
+        <div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={page.inLibrary ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span></div>
+        <div className="spotify-page-actions">
+          <button className="primary" onClick={() => onPlay(tracks[0].id, tracks)} disabled={!tracks.length}>▶ Play</button>
+          {page.inLibrary
+            ? <button disabled={busy} onClick={() => void remove()}>{busy ? 'Removing…' : '✓ In Library — Remove'}</button>
+            : <button disabled={adding} onClick={() => void add()}>{adding ? 'Adding…' : '+ Add to Library'}</button>}
+        </div>
+      </div>
+    </header>
+    <section className="spotify-page-section album-tracks">
+      {page.tracks.map((track, index) => <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)}>
+        <span>{track.trackNo ?? index + 1}</span>
+        <strong>{track.name}</strong>
+        <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={track.trackId === null ? undefined : (stars) => rateTrack(track.trackId!, stars)} />
+        <time>{formatTime(track.durationSecs)}</time>
+      </div>)}
+      <p className="spotify-page-hint">Double-click a track to preview. Adding the album pulls every track into your local overlay.</p>
+    </section>
+  </div>
+}
+
+function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAdd, onPlay, onError }: {
+  id: string
+  backLabel: string
+  adding: string | undefined
+  added: ReadonlySet<string>
+  onBack: () => void
+  onAlbum: (uri: string) => void
+  onAdd: (album: SearchAlbum) => Promise<boolean>
+  onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onError: (error: string) => void
+}) {
+  const [page, setPage] = useState<ArtistPageView>()
+  const [toggling, setToggling] = useState(false)
+  useEffect(() => {
+    let active = true
+    setPage(undefined)
+    invoke<ArtistPageView>('spotify_artist_page', { artistId: id })
+      .then((view) => active && setPage(view))
+      .catch((error) => active && onError(String(error)))
+    return () => { active = false }
+  }, [id])
+  if (!page) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading artist…</div></div>
+  const tracks: PlaybackTrack[] = page.topTracks.map((track, index) => ({
+    id: SYNTHETIC_BASE + index,
+    uri: track.uri,
+    name: track.name,
+    art: page.name,
+    alb: track.alb,
+    durationSecs: track.durationSecs,
+  }))
+  const toggleFollow = async () => {
+    const following = !page.following
+    setPage({ ...page, following })
+    setToggling(true)
+    try {
+      await invoke('spotify_follow_artist', { artistId: page.id, follow: following })
+    } catch (error) {
+      setPage((current) => current ? { ...current, following: !following } : current)
+      onError(String(error))
+    } finally {
+      setToggling(false)
+    }
+  }
+  return <div className="spotify-page">
+    <SpotifyPageBack label={backLabel} onBack={onBack} />
+    <header className="spotify-page-header artist-header">
+      <div className="spotify-page-art artist-art"><SpotifyArtwork imageUrl={page.imageUrl} round /></div>
+      <div className="spotify-page-copy">
+        <div className="spotify-eyebrow">ARTIST</div>
+        <h1>{page.name}</h1>
+        <div className="spotify-page-meta">{page.descriptor} · {page.albums.length} {page.albums.length === 1 ? 'album' : 'albums'}</div>
+        <div className="spotify-page-actions">
+          <button className="primary" onClick={() => onPlay(tracks[0].id, tracks)} disabled={!tracks.length}>▶ Play</button>
+          <button disabled={toggling} onClick={() => void toggleFollow()}>{page.following ? '✓ Following' : '+ Follow'}</button>
+        </div>
+      </div>
+    </header>
+    <section className="spotify-page-section">
+      <h2>Discography</h2>
+      {page.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} openOnClick showType />)}
+      {!page.albums.length && <p>No albums found.</p>}
+    </section>
+    <section className="spotify-page-section top-tracks">
+      <h2>Top Tracks</h2>
+      {page.topTracks.map((track, index) => <div className="spotify-top-track-row" key={track.uri} onDoubleClick={() => onPlay(tracks[index].id, tracks)}>
+        <span>{index + 1}</span><strong>{track.name}</strong><span>{track.alb}</span><time>{formatTime(track.durationSecs)}</time>
+      </div>)}
+      {!page.topTracks.length && <p>No top tracks found.</p>}
+    </section>
+  </div>
+}
+
+function SpotifySearch({ query, searching, results, onAdd, onPlay, onError }: {
   query: string
   searching: boolean
   results: SpotifyResults | null
-  onArtist: (artist: SpotifyResults['artists'][number]) => Promise<SpotifyResults['albums']>
   onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
+  onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onError: (error: string) => void
 }) {
   const [tab, setTab] = useState<SpotifyTab>('all')
   const [adding, setAdding] = useState<string>()
   const [added, setAdded] = useState<ReadonlySet<string>>(new Set())
-  const [expanding, setExpanding] = useState<string>()
-  const [expanded, setExpanded] = useState<{ artistId: string; albums: SpotifyResults['albums'] }>()
+  const [nav, setNav] = useState<SpotifyNavEntry[]>([])
   useEffect(() => {
     setTab('all')
-    setExpanded(undefined)
+    setAdded(new Set())
+    setNav([])
   }, [query])
-  const add = (album: SpotifyResults['albums'][number]) => {
+  const add = async (album: SpotifyResults['albums'][number]) => {
     setAdding(album.uri)
-    onAdd(album)
-      .then(() => setAdded((previous) => new Set(previous).add(album.uri)))
-      .catch(() => {})
-      .finally(() => setAdding(undefined))
+    try {
+      await onAdd(album)
+      setAdded((previous) => new Set(previous).add(album.uri))
+      return true
+    } catch {
+      return false
+    } finally {
+      setAdding(undefined)
+    }
   }
-  const expand = (artist: SpotifyResults['artists'][number]) => {
-    setExpanding(artist.id)
-    onArtist(artist)
-      .then((albums) => setExpanded({ artistId: artist.id, albums }))
-      .catch(() => {})
-      .finally(() => setExpanding(undefined))
-  }
-  const albumRow = (album: SpotifyResults['albums'][number]) => <div className="spotify-row" key={album.uri}>
-    <SpotifyArtwork imageUrl={album.imageUrl} />
-    <span className="spotify-copy"><strong>{album.name}</strong><small>{album.artist}{album.year && ` · ${album.year}`}</small></span>
-    <button className="spotify-add" disabled={adding === album.uri || added.has(album.uri)} onClick={() => add(album)}>{added.has(album.uri) ? '✓ Added' : adding === album.uri ? 'Adding…' : '+ Add'}</button>
-  </div>
+  const pushAlbum = (uri: string, highlight?: string) => setNav((current) => [...current, { kind: 'album', uri, highlight }])
+  const top = nav[nav.length - 1]
+  const below = nav[nav.length - 2]
+  const backLabel = below?.kind ?? 'results'
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
+  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} onBack={() => setNav((current) => current.slice(0, -1))} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onPlay={onPlay} onError={onError} />
+  if (top?.kind === 'artist') return <SpotifyArtistPage id={top.id} backLabel={backLabel} adding={adding} added={added} onBack={() => setNav((current) => current.slice(0, -1))} onAlbum={pushAlbum} onAdd={add} onPlay={onPlay} onError={onError} />
   const counts = {
     artists: results?.artists.length ?? 0,
     albums: results?.albums.length ?? 0,
@@ -1163,19 +1339,16 @@ function SpotifySearch({ query, searching, results, onArtist, onAdd }: {
     <div className="spotify-results">
       {(tab === 'all' || tab === 'artists') && <section>
         {tab === 'all' && <h2>Artists</h2>}
-        {results?.artists.map((artist) => <div key={artist.id}>
-          <div className="spotify-row">
-            <SpotifyArtwork imageUrl={artist.imageUrl} round />
-            <span className="spotify-copy"><strong>{artist.name}</strong><small>{artist.descriptor}</small></span>
-            <button className="spotify-link" disabled={expanding === artist.id} onClick={() => expand(artist)}>{expanding === artist.id ? 'Loading…' : 'View albums ›'}</button>
-          </div>
-          {expanded?.artistId === artist.id && <div className="spotify-expanded">{expanded.albums.map(albumRow)}{!expanded.albums.length && <p>No albums found.</p>}</div>}
+        {results?.artists.map((artist) => <div className="spotify-row" key={artist.id}>
+          <SpotifyArtwork imageUrl={artist.imageUrl} round />
+          <span className="spotify-copy"><strong>{artist.name}</strong><small>{artist.descriptor}</small></span>
+          <button className="spotify-link" onClick={() => setNav((current) => [...current, { kind: 'artist', id: artist.id }])}>View albums ›</button>
         </div>)}
         {!results?.artists.length && <p>No artists found.</p>}
       </section>}
       {(tab === 'all' || tab === 'albums') && <section>
         {tab === 'all' && <h2>Albums</h2>}
-        {results?.albums.map(albumRow)}
+        {results?.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void add(album) }} onOpen={() => pushAlbum(album.uri)} />)}
         {!results?.albums.length && <p>No albums found.</p>}
       </section>}
       {(tab === 'all' || tab === 'tracks') && <section>

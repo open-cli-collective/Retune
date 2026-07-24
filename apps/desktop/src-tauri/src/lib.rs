@@ -241,6 +241,7 @@ struct AlbumPageView {
     image_url: Option<String>,
     total_duration_secs: u64,
     in_library: bool,
+    album_rating: Option<u8>,
     tracks: Vec<AlbumPageTrackView>,
 }
 
@@ -1230,6 +1231,7 @@ async fn spotify_search(
 
 fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
     let artist = album.artists.first();
+    let artist_name = artist.map(|artist| artist.name.clone()).unwrap_or_default();
     let total_duration_secs = album
         .tracks
         .as_ref()
@@ -1261,10 +1263,21 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let in_library = !tracks.is_empty() && tracks.iter().all(|track| track.track_id.is_some());
+    let album_rating = in_library
+        .then(|| {
+            library.album_rating(&AlbumKey {
+                source: SourceId::Music,
+                art: artist_name.clone(),
+                alb: album.name.clone(),
+            })
+        })
+        .flatten()
+        .map(Rating::stars);
     AlbumPageView {
         uri: album.uri,
         name: album.name,
-        artist: artist.map(|artist| artist.name.clone()).unwrap_or_default(),
+        artist: artist_name,
         artist_id: artist.map(|artist| artist.id.clone()).unwrap_or_default(),
         album_type: title_case(album.album_type.as_deref().unwrap_or("album")),
         year: album
@@ -1274,7 +1287,8 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
             .map(str::to_owned),
         image_url: image_url(&album.images),
         total_duration_secs,
-        in_library: tracks.iter().all(|track| track.track_id.is_some()),
+        in_library,
+        album_rating,
         tracks,
     }
 }
@@ -2331,6 +2345,14 @@ mod tests {
             "Album",
         ));
         library.set_track_rating(id, Rating::new(4)).unwrap();
+        library.set_album_rating(
+            AlbumKey {
+                source: SourceId::Music,
+                art: "Artist".into(),
+                alb: "Album".into(),
+            },
+            Rating::new(5),
+        );
 
         let page = album_page_view(&library, spotify_album());
 
@@ -2338,6 +2360,7 @@ mod tests {
         assert_eq!(page.year.as_deref(), Some("2024"));
         assert_eq!(page.total_duration_secs, 4);
         assert!(!page.in_library);
+        assert_eq!(page.album_rating, None);
         assert_eq!(page.tracks[0].track_id, Some(id.0));
         assert_eq!(
             page.tracks[0].rating,
@@ -2347,6 +2370,16 @@ mod tests {
             })
         );
         assert_eq!(page.tracks[1].track_id, None);
+
+        library.add(metadata_track(
+            "spotify:track:two",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        let page = album_page_view(&library, spotify_album());
+        assert!(page.in_library);
+        assert_eq!(page.album_rating, Some(5));
     }
 
     #[test]
