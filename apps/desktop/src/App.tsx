@@ -124,6 +124,7 @@ type State = {
   notice?: string
   info?: InfoDialog
   preferences: boolean
+  setup: boolean
   connected: boolean
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
@@ -153,6 +154,7 @@ type Action =
   | { type: 'notice'; notice?: string }
   | { type: 'info'; info?: InfoDialog }
   | { type: 'preferences'; open: boolean }
+  | { type: 'setup'; open: boolean }
   | { type: 'connection'; connected: boolean }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
@@ -189,6 +191,7 @@ const initialState: State = {
   view: null,
   revision: 0,
   preferences: false,
+  setup: false,
   connected: false,
   spotifyResults: null,
   spotifySearching: false,
@@ -266,9 +269,11 @@ function reducer(state: State, action: Action): State {
     case 'notice':
       return { ...state, notice: action.notice }
     case 'info':
-      return { ...state, info: action.info, preferences: false }
+      return { ...state, info: action.info, preferences: false, setup: false }
     case 'preferences':
-      return { ...state, preferences: action.open, info: undefined }
+      return { ...state, preferences: action.open, setup: false, info: undefined }
+    case 'setup':
+      return { ...state, setup: action.open, preferences: false, info: undefined }
     case 'connection':
       return { ...state, connected: action.connected }
     case 'spotifyResults':
@@ -389,6 +394,7 @@ function App() {
   const tracks = view?.tracks ?? emptyTracks
   const selectedTracks = tracks.filter((track) => state.selectedTrackIds.has(track.id))
   const tracklistVisible = state.scope !== 'spotify' || !state.query.trim()
+  const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
   const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
@@ -561,6 +567,12 @@ function App() {
     setZoom(preferenceZoom.current)
     dispatch({ type: 'preferences', open: false })
   }
+  const saveSetupClientId = async (spotifyClientId: string) => {
+    if (spotifyClientId === state.settings.spotifyClientId) return
+    const settings = { ...state.settings, spotifyClientId }
+    dispatch({ type: 'settings', settings: { spotifyClientId } })
+    await invoke('set_settings', { settings })
+  }
   const cycleTheme = () => dispatch({
     type: 'settings',
     settings: { theme: state.settings.theme === 'system' ? 'light' : state.settings.theme === 'light' ? 'dark' : 'system' },
@@ -580,10 +592,12 @@ function App() {
       else player.step(payload === 'previous' ? -1 : 1)
     })
     const preferences = listen('open-preferences', openPreferences)
+    const setup = listen('open-setup', () => dispatch({ type: 'setup', open: true }))
     return () => {
       void viewActions.then((stop) => stop())
       void playerActions.then((stop) => stop())
       void preferences.then((stop) => stop())
+      void setup.then((stop) => stop())
     }
   }, [state.settings, player])
 
@@ -594,11 +608,12 @@ function App() {
       else typeahead.current.buffer = ''
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      const modalOpen = Boolean(state.info || state.preferences)
+      const modalOpen = Boolean(state.info || state.preferences || state.setup)
       if (event.key === 'Escape' && modalOpen) {
         event.preventDefault()
         if (state.info) dispatch({ type: 'info' })
-        else cancelPreferences()
+        else if (state.preferences) cancelPreferences()
+        else dispatch({ type: 'setup', open: false })
         return
       }
       const target = event.target as HTMLElement | null
@@ -675,17 +690,17 @@ function App() {
       window.clearTimeout(typeahead.current.timer)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [activePane, state.info, state.preferences, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player, selectFacet])
+  }, [activePane, state.info, state.preferences, state.setup, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player, selectFacet])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences) return
+      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences || state.setup) return
       event.preventDefault()
       setZoom(state.settings.zoom + (event.deltaY < 0 ? 0.1 : -0.1))
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [state.info, state.preferences, state.settings.zoom])
+  }, [state.info, state.preferences, state.setup, state.settings.zoom])
 
   return (
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: state.settings.zoom }}>
@@ -753,7 +768,9 @@ function App() {
               playing={state.playing}
               columnOrder={state.settings.columnOrder}
               hiddenColumns={state.settings.hiddenColumns}
+              empty={libraryEmpty}
               onActivate={() => setActivePane('track')}
+              onSetup={() => dispatch({ type: 'setup', open: true })}
               onSelect={(id, event) => {
                 if (event.shiftKey && state.selectionAnchor !== undefined) {
                   const anchor = tracks.findIndex((track) => track.id === state.selectionAnchor)
@@ -783,7 +800,7 @@ function App() {
             />
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} />
+          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
@@ -791,6 +808,14 @@ function App() {
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
       {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={() => dispatch({ type: 'info' })} onSaved={() => dispatch({ type: 'info' })} onError={(error) => dispatch({ type: 'error', error })} />}
+      {state.setup && <SetupLibrary settings={state.settings} connected={state.connected} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
+        .then(() => invoke('connect_spotify'))
+        .catch((error) => dispatch({ type: 'error', error: String(error) }))} onSync={(clientId) => saveSetupClientId(clientId)
+        .then(() => {
+          dispatch({ type: 'setup', open: false })
+          return invoke('sync_from_spotify')
+        })
+        .catch((error) => dispatch({ type: 'error', error: String(error) }))} />}
       {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless) => {
         const audioChanged = streamingBitrate !== state.settings.streamingBitrate
           || normalizeVolume !== state.settings.normalizeVolume
@@ -941,11 +966,11 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
-function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, onActivate, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
+function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: State['playing']
-  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
+  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
-  onActivate: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
+  onActivate: () => void; onSetup: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
@@ -999,8 +1024,8 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
       setDragging(column)
       event.dataTransfer.effectAllowed = 'move'
     }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}>{headings[column]}</span>)}</div>
-    <div className="track-scroll">
-      {tracks.map((track) => {
+    <div className={`track-scroll ${empty ? 'empty-library' : ''}`}>
+      {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
         return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onContextMenu={(event) => {
           event.preventDefault()
@@ -1155,6 +1180,32 @@ function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: { track
   </div>
 }
 
+function SetupLibrary({ settings, connected, onCancel, onConnect, onSync }: {
+  settings: Settings
+  connected: boolean
+  onCancel: () => void
+  onConnect: (clientId: string) => void
+  onSync: (clientId: string) => void
+}) {
+  const [clientId, setClientId] = useState(settings.spotifyClientId)
+  const [webApi, setWebApi] = useState(true)
+  const dialog = useRef<HTMLDivElement>(null)
+  useEffect(() => { dialog.current?.focus() }, [])
+  const trimmedClientId = clientId.trim()
+  return <div className="modal-backdrop" role="presentation">
+    <div className="get-info preferences setup-library" role="dialog" aria-modal="true" aria-labelledby="setup-library-title" tabIndex={-1} ref={dialog}>
+      <h2 id="setup-library-title">Set Up Your Library</h2>
+      <div className="setup-content">
+        <p>Retune reads your Spotify library through the Web API and builds a local overlay. Confirm three things, then sync.</p>
+        <div className="setup-step"><span className="step-number">1</span><label><strong>Spotify app Client ID</strong><input value={clientId} onChange={(event) => setClientId(event.target.value)} /><small>Create one at developer.spotify.com → Dashboard → your app.</small></label></div>
+        <div className="setup-step"><span className="step-number">2</span><div><label className="setup-check"><input type="checkbox" checked={webApi} onChange={(event) => setWebApi(event.target.checked)} /><strong>Web API enabled</strong></label><small>The app must have the Web API scope turned on in its dashboard settings.</small></div></div>
+        <div className="setup-step"><span className="step-number">3</span><div><strong>Spotify connection</strong><div className={`setup-status ${connected ? 'connected' : ''}`}><span className="connection-dot" /><span>{connected ? 'Connected' : 'Not connected'}</span>{connected ? <span className="detected">✓ auto-detected</span> : <button onClick={() => onConnect(trimmedClientId)}>Connect…</button>}</div></div></div>
+      </div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" disabled={!trimmedClientId || !webApi || !connected} onClick={() => onSync(trimmedClientId)}>Sync</button></div>
+    </div>
+  </div>
+}
+
 function Preferences({ settings, onZoom, onCancel, onSave }: {
   settings: Settings
   onZoom: (zoom: number) => void
@@ -1242,12 +1293,12 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   </div>
 }
 
-function StatusBar({ view, unit, syncPhase }: { view: BrowseView | null; unit: string; syncPhase?: string }) {
+function StatusBar({ view, unit, syncPhase, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
-  return <footer className="status-bar"><button aria-label="Add">+</button><span>{syncPhase ?? `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`}</span></footer>
+  return <footer className="status-bar"><button aria-label="Add">+</button><span>{syncPhase ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span></footer>
 }
 
 export default App

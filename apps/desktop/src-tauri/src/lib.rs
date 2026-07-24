@@ -1238,6 +1238,8 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         .accelerator("CmdOrCtrl+I")
         .build(app)?;
     let file = SubmenuBuilder::new(app, "File")
+        .text("setup_library", "Set Up Library…")
+        .separator()
         .item(&get_info)
         .separator()
         .text("sync_spotify", "Sync from Spotify")
@@ -1307,6 +1309,9 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     app.on_menu_event(|app, event| match event.id().as_ref() {
         "get_info" => {
             let _ = app.emit("get-info", ());
+        }
+        "setup_library" => {
+            let _ = app.emit("open-setup", ());
         }
         "export_library" => export_library(app, false),
         "restore_library" => import_library(app, true),
