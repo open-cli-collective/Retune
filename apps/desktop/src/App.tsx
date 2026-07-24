@@ -106,6 +106,13 @@ type Track = {
 }
 
 type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs'>
+type PlaylistTrack = Omit<PlaybackTrack, 'id'> & { id: number | null; rating: RatingView | null }
+type TrackMeta = { uri: string; name: string; art: string; alb: string; duration: number }
+type PlaylistSubject =
+  | { kind: 'tracks'; label: string; uris: string[]; meta?: TrackMeta[] }
+  | { kind: 'album'; label: string; albumUri: string }
+
+const DRAG_TYPE = 'application/x-retune'
 
 type PlayerState = {
   trackId: number | null
@@ -186,6 +193,8 @@ type State = {
   connected: boolean
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
+  selectedPlaylist?: string
+  playlistRevision: number
   syncPhase?: string
   syncProgress?: { tracks: number; fraction: number }
 }
@@ -195,6 +204,7 @@ type Action =
   | { type: 'error'; error: string }
   | { type: 'clear-error' }
   | { type: 'source'; source: Source }
+  | { type: 'playlist'; id?: string }
   | { type: 'select'; facet: keyof Selection; values: string[] }
   | { type: 'query'; query: string }
   | { type: 'scope'; scope: State['scope'] }
@@ -219,6 +229,7 @@ type Action =
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'syncPhase'; phase?: string }
   | { type: 'syncProgress'; progress: { tracks: number; fraction: number } }
+  | { type: 'playlistsRefresh' }
 
 const defaultSettings: Settings = {
   theme: 'system',
@@ -255,6 +266,7 @@ const initialState: State = {
   connected: false,
   spotifyResults: null,
   spotifySearching: false,
+  playlistRevision: 0,
 }
 
 function reducer(state: State, action: Action): State {
@@ -266,7 +278,9 @@ function reducer(state: State, action: Action): State {
     case 'clear-error':
       return { ...state, error: undefined }
     case 'source':
-      return { ...state, source: action.source, sel: {}, query: '', selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, source: action.source, sel: {}, query: '', selectedPlaylist: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
+    case 'playlist':
+      return { ...state, selectedPlaylist: action.id, sel: {}, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
       const sel = action.facet === 'cat'
         ? { cat: action.values }
@@ -344,6 +358,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, syncPhase: action.phase, syncProgress: action.phase ? state.syncProgress : undefined }
     case 'syncProgress':
       return { ...state, syncProgress: action.progress.fraction < 1 ? action.progress : undefined }
+    case 'playlistsRefresh':
+      return { ...state, playlistRevision: state.playlistRevision + 1 }
   }
 }
 
@@ -446,6 +462,8 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const [activePane, setActivePane] = useState<ActivePane>('track')
+  const [playlists, setPlaylists] = useState<PlaylistListView[]>()
+  const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
   const skipSettingsSave = useRef(false)
@@ -455,10 +473,14 @@ function App() {
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
   const selectedTracks = tracks.filter((track) => state.selectedTrackIds.has(track.id))
-  const tracklistVisible = state.scope !== 'spotify' || !state.query.trim()
+  const spotifySearchActive = state.scope === 'spotify' && Boolean(state.query.trim())
+  const tracklistVisible = !spotifySearchActive && !state.selectedPlaylist
   const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
+  const addToPlaylist = useCallback((id: string, subject: PlaylistSubject) => subject.kind === 'album'
+    ? invoke('playlist_add_album', { id, albumUri: subject.albumUri })
+    : invoke('playlist_add', { id, uris: subject.uris, meta: subject.meta }), [])
   const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
     facetAnchors.current[facet] = anchor
     if (facet === 'cat') {
@@ -497,6 +519,20 @@ function App() {
       .catch((error) => active && dispatch({ type: 'error', error: String(error) }))
     return () => { active = false }
   }, [state.source, state.sel, state.query, state.scope, state.revision])
+
+  useEffect(() => {
+    let active = true
+    invoke<PlaylistListView[]>('playlists_list')
+      .then((rows) => active && setPlaylists(rows))
+      .catch((error) => active && dispatch({ type: 'error', error: String(error) }))
+    return () => { active = false }
+  }, [state.playlistRevision])
+
+  useEffect(() => {
+    if (playlists && state.selectedPlaylist && !playlists.some((playlist) => playlist.id === state.selectedPlaylist)) {
+      dispatch({ type: 'playlist' })
+    }
+  }, [playlists, state.selectedPlaylist])
 
   useEffect(() => {
     invoke<Settings>('get_settings')
@@ -547,6 +583,7 @@ function App() {
     const settings = listen<Settings>('settings-changed', ({ payload }) => dispatch({ type: 'hydrateSettings', settings: payload }))
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     const progressCount = listen<{ tracks: number; fraction: number }>('sync-progress-count', ({ payload }) => dispatch({ type: 'syncProgress', progress: payload }))
+    const playlistsChanged = listen('playlists-changed', () => dispatch({ type: 'playlistsRefresh' }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
@@ -555,6 +592,7 @@ function App() {
       void settings.then((stop) => stop())
       void progress.then((stop) => stop())
       void progressCount.then((stop) => stop())
+      void playlistsChanged.then((stop) => stop())
     }
   }, [])
 
@@ -672,12 +710,13 @@ function App() {
       else typeahead.current.buffer = ''
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      const modalOpen = Boolean(state.info || state.preferences || state.setup)
+      const modalOpen = Boolean(state.info || state.preferences || state.setup || playlistSubject)
       if (event.key === 'Escape' && modalOpen) {
         event.preventDefault()
         if (state.info) dispatch({ type: 'info' })
         else if (state.preferences) cancelPreferences()
-        else dispatch({ type: 'setup', open: false })
+        else if (state.setup) dispatch({ type: 'setup', open: false })
+        else setPlaylistSubject(undefined)
         return
       }
       const target = event.target as HTMLElement | null
@@ -754,17 +793,19 @@ function App() {
       window.clearTimeout(typeahead.current.timer)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [activePane, state.info, state.preferences, state.setup, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player, selectFacet])
+  }, [activePane, playlistSubject, state.info, state.preferences, state.setup, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player, selectFacet])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences || state.setup) return
+      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences || state.setup || playlistSubject) return
       event.preventDefault()
       setZoom(state.settings.zoom + (event.deltaY < 0 ? 0.1 : -0.1))
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [state.info, state.preferences, state.setup, state.settings.zoom])
+  }, [playlistSubject, state.info, state.preferences, state.setup, state.settings.zoom])
+
+  const selectedPlaylist = playlists?.find((playlist) => playlist.id === state.selectedPlaylist)
 
   return (
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: state.settings.zoom }}>
@@ -789,9 +830,16 @@ function App() {
         onTheme={cycleTheme}
       />
       <div className="body-grid">
-        <Sidebar state={state} onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }} />
+        <Sidebar
+          state={state}
+          playlists={playlists}
+          onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }}
+          onPlaylist={(id) => dispatch({ type: 'playlist', id })}
+          onDrop={(id, subject) => addToPlaylist(id, subject).catch((error) => dispatch({ type: 'error', error: String(error) }))}
+          onError={(error) => dispatch({ type: 'error', error })}
+        />
         <section className="content">
-          {state.scope === 'spotify' && state.query.trim() ? (
+          {spotifySearchActive ? (
             state.connected ? <SpotifySearch
               query={state.query.trim()}
               searching={state.spotifySearching}
@@ -802,9 +850,11 @@ function App() {
                   throw error
                 })}
               onPlay={player.start}
+              onPlaylist={setPlaylistSubject}
               onError={(error) => dispatch({ type: 'error', error })}
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
-          ) : (
+          ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onError={(error) => dispatch({ type: 'error', error })} />
+          : (
             <>
               <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
@@ -854,6 +904,7 @@ function App() {
                 onPlay={(id) => player.start(id, tracks)}
                 onRate={(id, stars) => mutate('click_track_star', { id, stars })}
                 onInfo={openInfo}
+                onPlaylist={setPlaylistSubject}
                 onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
                 onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
               />
@@ -888,6 +939,7 @@ function App() {
           .catch((error) => dispatch({ type: 'error', error: String(error) }))
         dispatch({ type: 'preferences', open: false })
       }} />}
+      {playlistSubject && <AddToPlaylist subject={playlistSubject} revision={state.playlistRevision} onAdd={addToPlaylist} onClose={() => setPlaylistSubject(undefined)} onError={(error) => dispatch({ type: 'error', error })} />}
     </main>
   )
 }
@@ -961,16 +1013,181 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
   </header>
 }
 
-function Sidebar({ state, onSource }: { state: State; onSource: (source: Source) => void }) {
+function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
+  state: State
+  playlists?: PlaylistListView[]
+  onSource: (source: Source) => void
+  onPlaylist: (id: string) => void
+  onDrop: (id: string, subject: PlaylistSubject) => void
+  onError: (error: string) => void
+}) {
+  const [creating, setCreating] = useState(false)
+  const [name, setName] = useState('')
+  const [dropTarget, setDropTarget] = useState<string>()
+  const create = async () => {
+    if (!name.trim()) return
+    try {
+      await invoke('playlist_create', { name })
+      setName('')
+      setCreating(false)
+    } catch (error) {
+      onError(String(error))
+    }
+  }
   return <aside className="sidebar">
     <div className="section-label">Library</div>
-    {(Object.keys(labels) as Source[]).map((source) => <button key={source} className={`source-row ${state.source === source ? 'active' : ''}`} onClick={() => onSource(source)}>
+    {(Object.keys(labels) as Source[]).map((source) => <button key={source} className={`source-row ${state.source === source && !state.selectedPlaylist ? 'active' : ''}`} onClick={() => onSource(source)}>
       <span>{labels[source].icons}</span><span>{labels[source].name}</span><span className="source-count">{state.view?.counts.perSource[source] ?? '—'}</span>
     </button>)}
-    <div className="section-label playlists-label">Playlists</div>
-    <div className="playlist-placeholder">Recently Added</div>
-    <div className="playlist-placeholder">Smart Playlist…</div>
+    <div className="section-label playlists-label"><span>Playlists</span><button aria-label="New playlist" onClick={() => setCreating(true)}>+</button></div>
+    {creating && <div className="playlist-new-row"><input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
+      if (event.key === 'Enter') void create()
+      else if (event.key === 'Escape') { setCreating(false); setName('') }
+    }} /></div>}
+    {playlists?.map((playlist) => <button
+      key={playlist.id}
+      className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''}`}
+      onClick={() => onPlaylist(playlist.id)}
+      onDragOver={playlist.owned ? (event) => {
+        if (!event.dataTransfer.types.includes(DRAG_TYPE)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+        setDropTarget(playlist.id)
+      } : undefined}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(undefined) }}
+      onDrop={playlist.owned ? (event) => {
+        event.preventDefault()
+        setDropTarget(undefined)
+        try { onDrop(playlist.id, JSON.parse(event.dataTransfer.getData(DRAG_TYPE)) as PlaylistSubject) }
+        catch { onError('Could not read the dragged playlist item.') }
+      } : undefined}
+    >
+      <span>{playlist.owned ? '' : '☍'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
+    </button>)}
   </aside>
+}
+
+function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
+  playlist: PlaylistListView
+  revision: number
+  playing: State['playing']
+  onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onError: (error: string) => void
+}) {
+  const [tracks, setTracks] = useState<PlaylistTrack[]>([])
+  const [dragging, setDragging] = useState<number>()
+  const [insertBefore, setInsertBefore] = useState<number>()
+  const [reordering, setReordering] = useState(false)
+  useEffect(() => {
+    let active = true
+    invoke<PlaylistTrack[]>('playlist_tracks', { id: playlist.id })
+      .then((rows) => active && setTracks(rows))
+      .catch((error) => active && onError(String(error)))
+    return () => { active = false }
+  }, [playlist.id, revision])
+  const queue: PlaybackTrack[] = tracks.map((track, index) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + index }))
+  const drop = async (index: number) => {
+    if (dragging === undefined) return
+    setReordering(true)
+    setDragging(undefined)
+    setInsertBefore(undefined)
+    try {
+      await invoke('playlist_reorder', { id: playlist.id, rangeStart: dragging, insertBefore: index, rangeLength: 1 })
+    } catch (error) {
+      onError(String(error))
+    } finally {
+      setReordering(false)
+    }
+  }
+  return <div className="playlist-view">
+    <header className="playlist-header"><strong>{playlist.name}</strong><span>{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span></header>
+    <div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
+    <div className="playlist-track-scroll">
+      {tracks.map((track, index) => <div
+        key={`${track.uri}-${index}`}
+        className={`playlist-track-row ${insertBefore === index ? 'insert-before' : ''} ${playing?.trackId === queue[index].id ? 'playing' : ''}`}
+        draggable={playlist.owned && !reordering}
+        onDoubleClick={() => onPlay(queue[index].id, queue)}
+        onDragStart={playlist.owned ? (event) => {
+          setDragging(index)
+          event.dataTransfer.effectAllowed = 'move'
+          event.dataTransfer.setData('text/plain', String(index))
+        } : undefined}
+        onDragOver={playlist.owned ? (event) => { event.preventDefault(); setInsertBefore(index) } : undefined}
+        onDrop={playlist.owned ? (event) => { event.preventDefault(); void drop(index) } : undefined}
+        onDragEnd={() => { setDragging(undefined); setInsertBefore(undefined) }}
+      ><span>{index + 1}</span><strong title={track.name}>{track.name}</strong><time>{formatTime(track.durationSecs)}</time><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span></div>)}
+      {playlist.owned && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} onDragOver={(event) => { event.preventDefault(); setInsertBefore(tracks.length) }} onDrop={(event) => { event.preventDefault(); void drop(tracks.length) }} />}
+    </div>
+  </div>
+}
+
+function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest('.context-menu')) onClose() }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [onClose])
+  return <div className="column-menu context-menu popup-context-menu" style={{ left: x, top: y }}>{children}</div>
+}
+
+function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
+  subject: PlaylistSubject
+  revision: number
+  onAdd: (id: string, subject: PlaylistSubject) => Promise<unknown>
+  onClose: () => void
+  onError: (error: string) => void
+}) {
+  const [playlists, setPlaylists] = useState<PlaylistListView[]>([])
+  const [busy, setBusy] = useState<string>()
+  const [creating, setCreating] = useState(false)
+  const [name, setName] = useState('')
+  useEffect(() => {
+    let active = true
+    invoke<PlaylistListView[]>('playlists_list', subject.kind === 'tracks' ? { uris: subject.uris } : undefined)
+      .then((rows) => active && setPlaylists(rows))
+      .catch((error) => active && onError(String(error)))
+    return () => { active = false }
+  }, [revision, subject])
+  const add = async (id: string) => {
+    setBusy(id)
+    try { await onAdd(id, subject) }
+    catch (error) { onError(String(error)) }
+    finally { setBusy(undefined) }
+  }
+  const create = async () => {
+    if (!name.trim()) return
+    setBusy('new')
+    try {
+      const playlist = await invoke<PlaylistListView>('playlist_create', { name })
+      await onAdd(playlist.id, subject)
+      setName('')
+      setCreating(false)
+    } catch (error) {
+      onError(String(error))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="playlist-popover" role="dialog" aria-modal="true" aria-labelledby="add-to-playlist-title">
+      <header><h2 id="add-to-playlist-title">Add to Playlist</h2><span>{subject.label}</span></header>
+      <div className="playlist-popover-list">{playlists.map((playlist) => <button key={playlist.id} disabled={!playlist.owned || busy === playlist.id} onClick={() => void add(playlist.id)}>
+        <span>{playlist.contains ? '✓' : ''}</span><span>{playlist.owned ? '' : '☍'}</span><strong>{playlist.name}</strong>{!playlist.owned && <small>{playlist.owner}</small>}
+      </button>)}</div>
+      <footer>{creating
+        ? <input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
+          if (event.key === 'Enter') void create()
+        }} />
+        : <button className="new-playlist-button" onClick={() => setCreating(true)}>+ New Playlist</button>}
+        <button className="done-button" onClick={onClose}>Done</button></footer>
+    </div>
+  </div>
 }
 
 function BrowserPane({ state, anchors, onActivate, onSelect }: {
@@ -1026,10 +1243,11 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
-function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onReorder, onHiddenColumns }: {
+function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onReorder, onHiddenColumns }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: State['playing']
   columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
+  onPlaylist: (subject: PlaylistSubject) => void
   onActivate: () => void; onSetup: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
@@ -1087,7 +1305,11 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     <div className={`track-scroll ${empty ? 'empty-library' : ''}`}>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
-        return <div key={track.id} data-track-id={track.id} className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onContextMenu={(event) => {
+        return <div key={track.id} data-track-id={track.id} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onDragStart={(event) => {
+          const dragged = selectedIds.has(track.id) ? tracks.filter((candidate) => selectedIds.has(candidate.id)) : [track]
+          event.dataTransfer.effectAllowed = 'copy'
+          event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ kind: 'tracks', label: dragged.length === 1 ? `Track · ${dragged[0].name}` : `${dragged.length} tracks`, uris: dragged.map((candidate) => candidate.uri) } satisfies PlaylistSubject))
+        }} onContextMenu={(event) => {
           event.preventDefault()
           if (!selectedIds.has(track.id)) onSelect(track.id, event)
           const bounds = list.current?.getBoundingClientRect()
@@ -1105,6 +1327,15 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
           : [...hiddenColumns, column])} />{headings[column]}</label>)}
       </div>
       : <div className="column-menu context-menu" style={{ left: menu.x, top: menu.y }}>
+        <button onClick={() => {
+          const target = tracks.find((track) => track.id === menu.trackId)
+          if (!target) return
+          const selected = selectedIds.has(target.id) ? tracks.filter((track) => selectedIds.has(track.id)) : [target]
+          setMenu(undefined)
+          onPlaylist({ kind: 'tracks', label: selected.length === 1 ? `Track · ${selected[0].name}` : `${selected.length} tracks`, uris: selected.map((track) => track.uri) })
+        }}>Add to Playlist…</button>
+        <button disabled>Go to Album</button>
+        <button disabled>Go to Artist</button>
         <button onClick={() => { const id = menu.trackId; setMenu(undefined); if (id !== undefined) onInfo(id) }}>Get Info</button>
       </div>)}
   </div>
@@ -1118,19 +1349,26 @@ function SpotifyArtwork({ imageUrl, round = false }: { imageUrl: string | null; 
   return <span className={`spotify-artwork ${round ? 'round' : ''}`}>{imageUrl ? <img src={imageUrl} alt="" /> : <span aria-hidden="true">♪</span>}</span>
 }
 
-function SpotifyAlbumRow({ album, adding, added, onAdd, onOpen, openOnClick = false, showType = false }: {
+function SpotifyAlbumRow({ album, adding, added, onAdd, onOpen, onPlaylist, openOnClick = false, showType = false }: {
   album: SearchAlbum
   adding: boolean
   added: boolean
   onAdd: () => void
   onOpen: () => void
+  onPlaylist: (subject: PlaylistSubject) => void
   openOnClick?: boolean
   showType?: boolean
 }) {
-  return <div className="spotify-row" onClick={openOnClick ? onOpen : undefined} onDoubleClick={openOnClick ? undefined : onOpen}>
+  const [menu, setMenu] = useState<{ x: number; y: number }>()
+  const subject: PlaylistSubject = { kind: 'album', label: `Album · ${album.name}`, albumUri: album.uri }
+  return <div className="spotify-row" draggable onClick={openOnClick ? onOpen : undefined} onDoubleClick={openOnClick ? undefined : onOpen} onDragStart={(event) => {
+    event.dataTransfer.effectAllowed = 'copy'
+    event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(subject))
+  }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }) }}>
     <SpotifyArtwork imageUrl={album.imageUrl} />
     <span className="spotify-copy"><strong>{album.name}</strong><small>{showType ? [album.year, album.albumType].filter(Boolean).join(' · ') : <>{album.artist}{album.year && ` · ${album.year}`}</>}</small></span>
     <button className="spotify-add" disabled={adding || added} onClick={(event) => { event.stopPropagation(); onAdd() }} onDoubleClick={(event) => event.stopPropagation()}>{added ? '✓ Added' : adding ? 'Adding…' : '+ Add'}</button>
+    {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setMenu(undefined); onPlaylist(subject) }}>Add to Playlist…</button></ContextMenu>}
   </div>
 }
 
@@ -1138,7 +1376,7 @@ function SpotifyPageBack({ label, onBack }: { label: string; onBack: () => void 
   return <button className="spotify-page-back" onClick={onBack}>‹ Back to {label}</button>
 }
 
-function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, onPlay, onError }: {
+function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, onPlay, onPlaylist, onError }: {
   entry: Extract<SpotifyNavEntry, { kind: 'album' }>
   backLabel: string
   adding: boolean
@@ -1146,11 +1384,13 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
   onArtist: (id: string) => void
   onAdd: (album: SearchAlbum) => Promise<boolean>
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onPlaylist: (subject: PlaylistSubject) => void
   onError: (error: string) => void
 }) {
   const [page, setPage] = useState<AlbumPageView>()
   const [revision, setRevision] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [menu, setMenu] = useState<{ x: number; y: number; index: number }>()
   const highlighted = useRef<HTMLDivElement>(null)
   useEffect(() => {
     let active = true
@@ -1209,18 +1449,24 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
       </div>
     </header>
     <section className="spotify-page-section album-tracks">
-      {page.tracks.map((track, index) => <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)}>
+      {page.tracks.map((track, index) => {
+        const subject: PlaylistSubject = { kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri], meta: [{ uri: track.uri, name: track.name, art: page.artist, alb: page.name, duration: track.durationSecs * 1000 }] }
+        return <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} draggable className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)} onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = 'copy'
+          event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(subject))
+        }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, index }) }}>
         <span>{track.trackNo ?? index + 1}</span>
         <strong>{track.name}</strong>
         <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={track.trackId === null ? undefined : (stars) => rateTrack(track.trackId!, stars)} />
         <time>{formatTime(track.durationSecs)}</time>
-      </div>)}
+        {menu?.index === index && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setMenu(undefined); onPlaylist(subject) }}>Add to Playlist…</button></ContextMenu>}
+      </div>})}
       <p className="spotify-page-hint">Double-click a track to preview. Adding the album pulls every track into your local overlay.</p>
     </section>
   </div>
 }
 
-function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAdd, onPlay, onError }: {
+function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAdd, onPlay, onPlaylist, onError }: {
   id: string
   backLabel: string
   adding: string | undefined
@@ -1229,6 +1475,7 @@ function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAd
   onAlbum: (uri: string) => void
   onAdd: (album: SearchAlbum) => Promise<boolean>
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onPlaylist: (subject: PlaylistSubject) => void
   onError: (error: string) => void
 }) {
   const [page, setPage] = useState<ArtistPageView>()
@@ -1279,7 +1526,7 @@ function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAd
     </header>
     <section className="spotify-page-section">
       <h2>Discography</h2>
-      {page.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} openOnClick showType />)}
+      {page.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
       {!page.albums.length && <p>No albums found.</p>}
     </section>
     <section className="spotify-page-section top-tracks">
@@ -1292,18 +1539,20 @@ function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAd
   </div>
 }
 
-function SpotifySearch({ query, searching, results, onAdd, onPlay, onError }: {
+function SpotifySearch({ query, searching, results, onAdd, onPlay, onPlaylist, onError }: {
   query: string
   searching: boolean
   results: SpotifyResults | null
   onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onPlaylist: (subject: PlaylistSubject) => void
   onError: (error: string) => void
 }) {
   const [tab, setTab] = useState<SpotifyTab>('all')
   const [adding, setAdding] = useState<string>()
   const [added, setAdded] = useState<ReadonlySet<string>>(new Set())
   const [nav, setNav] = useState<SpotifyNavEntry[]>([])
+  const [menu, setMenu] = useState<{ x: number; y: number; track: SpotifyResults['tracks'][number] }>()
   useEffect(() => {
     setTab('all')
     setAdded(new Set())
@@ -1326,8 +1575,8 @@ function SpotifySearch({ query, searching, results, onAdd, onPlay, onError }: {
   const below = nav[nav.length - 2]
   const backLabel = below?.kind ?? 'results'
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
-  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} onBack={() => setNav((current) => current.slice(0, -1))} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onPlay={onPlay} onError={onError} />
-  if (top?.kind === 'artist') return <SpotifyArtistPage id={top.id} backLabel={backLabel} adding={adding} added={added} onBack={() => setNav((current) => current.slice(0, -1))} onAlbum={pushAlbum} onAdd={add} onPlay={onPlay} onError={onError} />
+  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} onBack={() => setNav((current) => current.slice(0, -1))} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onPlay={onPlay} onPlaylist={onPlaylist} onError={onError} />
+  if (top?.kind === 'artist') return <SpotifyArtistPage id={top.id} backLabel={backLabel} adding={adding} added={added} onBack={() => setNav((current) => current.slice(0, -1))} onAlbum={pushAlbum} onAdd={add} onPlay={onPlay} onPlaylist={onPlaylist} onError={onError} />
   const counts = {
     artists: results?.artists.length ?? 0,
     albums: results?.albums.length ?? 0,
@@ -1356,12 +1605,12 @@ function SpotifySearch({ query, searching, results, onAdd, onPlay, onError }: {
       </section>}
       {(tab === 'all' || tab === 'albums') && <section>
         {tab === 'all' && <h2>Albums</h2>}
-        {results?.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void add(album) }} onOpen={() => pushAlbum(album.uri)} />)}
+        {results?.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void add(album) }} onOpen={() => pushAlbum(album.uri)} onPlaylist={onPlaylist} />)}
         {!results?.albums.length && <p>No albums found.</p>}
       </section>}
       {(tab === 'all' || tab === 'tracks') && <section>
         {tab === 'all' && <h2>Tracks</h2>}
-        {results?.tracks.map((track) => <div className="spotify-row" key={track.uri}>
+        {results?.tracks.map((track) => <div className="spotify-row" key={track.uri} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, track }) }}>
           <SpotifyArtwork imageUrl={track.imageUrl} />
           <span className="spotify-copy"><strong>{track.name}</strong><small>{track.artist} · {track.alb}</small></span>
           <time>{Math.floor(track.durationSecs / 60)}:{String(Math.floor(track.durationSecs % 60)).padStart(2, '0')}</time>
@@ -1369,6 +1618,14 @@ function SpotifySearch({ query, searching, results, onAdd, onPlay, onError }: {
         {!results?.tracks.length && <p>No tracks found.</p>}
       </section>}
     </div>
+    {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
+      <button onClick={() => {
+        const track = menu.track
+        setMenu(undefined)
+        onPlaylist({ kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri], meta: [{ uri: track.uri, name: track.name, art: track.artist, alb: track.alb, duration: track.durationSecs * 1000 }] })
+      }}>Add to Playlist…</button>
+      <button disabled={!menu.track.albumUri} onClick={() => { const track = menu.track; setMenu(undefined); if (track.albumUri) pushAlbum(track.albumUri, track.uri) }}>Go to Album</button>
+    </ContextMenu>}
   </div>
 }
 
