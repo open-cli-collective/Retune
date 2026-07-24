@@ -9,6 +9,7 @@ pub(super) enum ReducerAction {
     Advance,
     Reload,
     Invalidate,
+    Reconnect,
 }
 
 #[derive(Clone, Debug)]
@@ -94,17 +95,12 @@ impl EventReducer {
         match event {
             NeutralEvent::ConnectState { state, .. } => self.connect_state(state),
             NeutralEvent::Error { message, .. } => vec![ReducerAction::Error(message)],
-            // An idle session dropping (Spotify closes quiet connections) is
-            // routine and self-healing; only an interruption the listener can
-            // hear deserves an error surface.
+            // Idle disconnects are routine and recover lazily. Active playback
+            // invalidates first, then retries in the controller so brief drops
+            // stay invisible and only exhausted retries surface a hard error.
             NeutralEvent::Disconnected { .. } => {
                 if self.state.is_playing {
-                    vec![
-                        ReducerAction::Error(
-                            "Spotify playback lost its network connection.".into(),
-                        ),
-                        ReducerAction::Invalidate,
-                    ]
+                    vec![ReducerAction::Invalidate, ReducerAction::Reconnect]
                 } else {
                     vec![ReducerAction::Invalidate]
                 }
@@ -384,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_while_playing_reports_error_and_invalidates() {
+    fn disconnect_while_playing_invalidates_and_reconnects() {
         let mut reducer = reducer();
         bind(&mut reducer, "spotify:track:1", true, 1);
         reducer.handle(NeutralEvent::Playing {
@@ -397,7 +393,7 @@ mod tests {
             reducer
                 .handle(NeutralEvent::Disconnected { generation: 7 })
                 .as_slice(),
-            [ReducerAction::Error(_), ReducerAction::Invalidate]
+            [ReducerAction::Invalidate, ReducerAction::Reconnect]
         ));
     }
 

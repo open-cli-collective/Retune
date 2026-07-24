@@ -5,6 +5,7 @@ mod reducer;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use connect::ConnectBackend;
@@ -18,6 +19,7 @@ use tokio::sync::mpsc;
 type LiveClient = SpotifyClient<HttpTransport, crate::SharedTokenStore>;
 
 const AUDIOBOOK_ERROR: &str = "Audiobook playback isn't supported yet.";
+const RECONNECT_DELAYS: &[u64] = &[0, 1, 2, 4, 8, 15, 30];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -505,13 +507,7 @@ impl Playback {
             state.volume,
             self.cache_dir.as_deref(),
         )
-        .await
-        .inspect_err(|error| {
-            let _ = self.events.send(NeutralEvent::Error {
-                generation: state.generation,
-                message: error.clone(),
-            });
-        })?;
+        .await?;
         let restore = state.reducer.snapshot().cloned().map(|snapshot| {
             let playing = state.reducer.state().is_playing;
             let position_ms = u32::try_from(state.reducer.state().elapsed.saturating_mul(1000))
@@ -526,6 +522,20 @@ impl Playback {
         }
         state.backend = PlayerBackend::Local(local);
         Ok(())
+    }
+
+    /// Outcome of one reconnect attempt. Superseded means a newer
+    /// generation exists or there is nothing to resume — stop retrying.
+    async fn try_reconnect(&self, client: &LiveClient, generation: u64) -> Result<bool, String> {
+        let mut state = self.state.lock().await;
+        if state.generation != generation
+            || !state.backend.is_local()
+            || state.reducer.snapshot().is_none()
+        {
+            return Ok(false);
+        }
+        self.ensure_valid(&mut state, client).await?;
+        Ok(true)
     }
 
     async fn step_locked(
@@ -582,6 +592,55 @@ impl Playback {
                         local.teardown();
                     }
                 }
+                ReducerAction::Reconnect => {
+                    let generation = state.generation;
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        for (attempt, delay) in RECONNECT_DELAYS.iter().enumerate() {
+                            if *delay > 0 {
+                                tokio::time::sleep(Duration::from_secs(*delay)).await;
+                            }
+                            let app_state = app.state::<crate::AppState>();
+                            let playback = Arc::clone(&app_state.playback);
+                            let client = match crate::provider_from(&app_state) {
+                                Ok(client) => client,
+                                Err(error) => {
+                                    log::info!("Stopping playback reconnect: {error}");
+                                    return;
+                                }
+                            };
+                            match playback.try_reconnect(client.as_ref(), generation).await {
+                                Ok(true) => {
+                                    let _ = app.emit("operation-recovered", ());
+                                    log::info!("Local playback session reconnected");
+                                    return;
+                                }
+                                Ok(false) => {
+                                    // A user action took over (play, stop, backend
+                                    // switch) — the reconnect banner no longer
+                                    // describes reality, so clear it.
+                                    let _ = app.emit("operation-recovered", ());
+                                    log::debug!("Playback reconnect superseded");
+                                    return;
+                                }
+                                Err(error) => {
+                                    log::info!(
+                                        "Playback reconnect attempt {} failed: {error}",
+                                        attempt + 1
+                                    );
+                                    if attempt == 0 {
+                                        let _ =
+                                            app.emit("operation-error", "Reconnecting to Spotify…");
+                                    }
+                                }
+                            }
+                        }
+                        let _ = app.emit(
+                            "operation-error",
+                            "Spotify playback lost its network connection.",
+                        );
+                    });
+                }
             }
         }
     }
@@ -637,6 +696,7 @@ pub fn empty_event(external: bool) -> PlayerStateEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use retune_spotify::tokens::{CachedTokenStore, InMemoryTokenStore, TokenStore};
 
     #[tokio::test]
     async fn failed_switch_keeps_connect_backend() {
@@ -646,6 +706,17 @@ mod tests {
             .await;
         assert_eq!(result.unwrap_err(), "preflight failed");
         assert!(!playback.is_local_active().await);
+    }
+
+    #[tokio::test]
+    async fn reconnect_stops_when_generation_is_superseded() {
+        let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(None));
+        let client = SpotifyClient::new(
+            "test",
+            HttpTransport::new(),
+            Arc::new(CachedTokenStore::new(tokens)),
+        );
+        assert!(!Playback::default().try_reconnect(&client, 0).await.unwrap());
     }
 
     #[test]

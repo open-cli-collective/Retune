@@ -123,6 +123,7 @@ type State = {
 type Action =
   | { type: 'view'; view: BrowseView }
   | { type: 'error'; error: string }
+  | { type: 'clear-error' }
   | { type: 'source'; source: Source }
   | { type: 'select'; facet: keyof Selection; values: string[] }
   | { type: 'query'; query: string }
@@ -186,6 +187,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, view: action.view, error: undefined }
     case 'error':
       return { ...state, error: action.error }
+    case 'clear-error':
+      return { ...state, error: undefined }
     case 'source':
       return { ...state, source: action.source, sel: {}, query: '', selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
@@ -451,12 +454,14 @@ function App() {
   useEffect(() => {
     const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
     const failed = listen<string>('operation-error', ({ payload }) => dispatch({ type: 'error', error: payload }))
+    const recovered = listen('operation-recovered', () => dispatch({ type: 'clear-error' }))
     const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connected: payload.connected }))
     const settings = listen<Settings>('settings-changed', ({ payload }) => dispatch({ type: 'hydrateSettings', settings: payload }))
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
+      void recovered.then((stop) => stop())
       void connection.then((stop) => stop())
       void settings.then((stop) => stop())
       void progress.then((stop) => stop())
