@@ -218,6 +218,111 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         self.get("/me").await
     }
 
+    pub async fn playlists(
+        &self,
+        offset: u32,
+        limit: u32,
+        current_user_id: &str,
+    ) -> Result<Page<Playlist>> {
+        let mut page: Page<Playlist> = self.get(&paged("/me/playlists", offset, limit)).await?;
+        for playlist in &mut page.items {
+            playlist.owned = playlist.owner.id == current_user_id;
+        }
+        Ok(page)
+    }
+
+    pub async fn playlist_tracks(
+        &self,
+        playlist_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Page<Track>> {
+        let fields = "items(is_local,track(uri,name,artists(id,name),album(id,uri,name,images(url)),duration_ms)),next,total";
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("offset", &offset.to_string())
+            .append_pair("limit", &limit.to_string())
+            .append_pair("fields", fields)
+            .finish();
+        let page: Page<PlaylistTrackItem> = self
+            .get(&format!("/playlists/{playlist_id}/tracks?{query}"))
+            .await?;
+        let total = page.total;
+        let next = page.next;
+        let mut skipped = page.skipped;
+        let items = page
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                if item.is_local || item.track.is_none() {
+                    skipped += 1;
+                    None
+                } else {
+                    item.track
+                }
+            })
+            .collect();
+        Ok(Page {
+            items,
+            next,
+            skipped,
+            total,
+        })
+    }
+
+    pub async fn add_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        uris: &[String],
+        position: Option<u32>,
+    ) -> Result<String> {
+        if uris.is_empty() {
+            return Err(Error::InvalidRequest(
+                "playlist add requires at least one URI".into(),
+            ));
+        }
+        let mut snapshot_id = String::new();
+        for (chunk_index, chunk) in uris.chunks(100).enumerate() {
+            let position =
+                position.map(|position| position.saturating_add((chunk_index * 100) as u32));
+            let response: SnapshotResponse = self
+                .json(
+                    Method::Post,
+                    &format!("/playlists/{playlist_id}/tracks"),
+                    serde_json::to_vec(&AddPlaylistTracks {
+                        uris: chunk,
+                        position,
+                    })
+                    .expect("playlist add body serializes"),
+                )
+                .await?;
+            snapshot_id = response.snapshot_id;
+        }
+        Ok(snapshot_id)
+    }
+
+    pub async fn reorder_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        range_start: u32,
+        insert_before: u32,
+        range_length: u32,
+        snapshot_id: &str,
+    ) -> Result<String> {
+        self.json::<SnapshotResponse>(
+            Method::Put,
+            &format!("/playlists/{playlist_id}/tracks"),
+            serde_json::to_vec(&ReorderPlaylistTracks {
+                range_start,
+                insert_before,
+                range_length,
+                snapshot_id,
+            })
+            .expect("playlist reorder body serializes"),
+        )
+        .await
+        .map(|response| response.snapshot_id)
+    }
+
     pub async fn saved_albums(&self, offset: u32, limit: u32) -> Result<Page<SavedAlbum>> {
         self.get(&paged("/me/albums", offset, limit)).await
     }
@@ -446,6 +551,16 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         decode(path, &response.body)
     }
 
+    async fn json<R: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<R> {
+        let response = self.api_request(method, path, body).await?;
+        decode(path, &response.body)
+    }
+
     async fn empty(&self, method: Method, path: &str, body: Vec<u8>) -> Result<()> {
         self.api_request(method, path, body).await.map(|_| ())
     }
@@ -647,6 +762,7 @@ pub struct Page<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Profile {
+    pub id: String,
     #[serde(default)]
     pub product: Option<String>,
 }
@@ -733,6 +849,54 @@ pub struct Track {
     pub artists: Vec<SimplifiedArtist>,
     #[serde(default)]
     pub album: Option<AlbumSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PlaylistOwner {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PlaylistTrackCount {
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub snapshot_id: String,
+    pub owner: PlaylistOwner,
+    pub tracks: PlaylistTrackCount,
+    #[serde(skip)]
+    pub owned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistTrackItem {
+    #[serde(default)]
+    is_local: bool,
+    track: Option<Track>,
+}
+
+#[derive(serde::Serialize)]
+struct AddPlaylistTracks<'a> {
+    uris: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<u32>,
+}
+
+#[derive(serde::Serialize)]
+struct ReorderPlaylistTracks<'a> {
+    range_start: u32,
+    insert_before: u32,
+    range_length: u32,
+    snapshot_id: &'a str,
+}
+
+#[derive(Deserialize)]
+struct SnapshotResponse {
+    snapshot_id: String,
 }
 
 pub type AlbumTrack = Track;
@@ -1148,6 +1312,157 @@ mod tests {
                 .1,
             "spotify:track:40"
         );
+    }
+
+    #[tokio::test]
+    async fn playlist_pages_mark_ownership_and_skip_local_or_null_tracks() {
+        let transport = FakeTransport::new([
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [{
+                        "id": "mine", "name": "Mine", "snapshot_id": "s1",
+                        "owner": {"id": "user"}, "tracks": {"total": 3}
+                    }],
+                    "next": "next", "total": 2
+                }),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [{
+                        "id": "theirs", "name": "Theirs", "snapshot_id": "s2",
+                        "owner": {"id": "other"}, "tracks": {"total": 0}
+                    }],
+                    "next": null, "total": 2
+                }),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [
+                        {"is_local": false, "track": {
+                            "uri": "spotify:track:1", "name": "One",
+                            "artists": [{"id": "artist", "name": "Artist"}],
+                            "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "images": []},
+                            "duration_ms": 1234
+                        }},
+                        {"is_local": true, "track": {
+                            "uri": "spotify:local:1", "name": "Local",
+                            "artists": [], "album": null, "duration_ms": 1
+                        }},
+                        {"is_local": false, "track": null}
+                    ],
+                    "next": null, "total": 3
+                }),
+            ),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+
+        let first = client.playlists(0, 1, "user").await.unwrap();
+        let second = client.playlists(1, 1, "user").await.unwrap();
+        assert!(first.items[0].owned);
+        assert!(!second.items[0].owned);
+        assert_eq!(first.items[0].tracks.total, 3);
+
+        let tracks = client.playlist_tracks("mine", 0, 100).await.unwrap();
+        assert_eq!(tracks.items.len(), 1);
+        assert_eq!(tracks.skipped, 2);
+        assert_eq!(tracks.items[0].uri, "spotify:track:1");
+
+        let requests = client.transport().requests();
+        assert!(requests[0].url.ends_with("/me/playlists?offset=0&limit=1"));
+        let tracks_url = url::Url::parse(&requests[2].url).unwrap();
+        assert_eq!(tracks_url.path(), "/v1/playlists/mine/tracks");
+        assert_eq!(
+            tracks_url
+                .query_pairs()
+                .find(|(key, _)| key == "limit")
+                .unwrap()
+                .1,
+            "100"
+        );
+        assert!(
+            tracks_url
+                .query_pairs()
+                .find(|(key, _)| key == "fields")
+                .unwrap()
+                .1
+                .contains("is_local")
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_add_chunks_one_hundred_and_reorder_passes_snapshot() {
+        let transport = FakeTransport::new([
+            Response::json(201, serde_json::json!({"snapshot_id": "first"})),
+            Response::json(201, serde_json::json!({"snapshot_id": "second"})),
+            Response::json(200, serde_json::json!({"snapshot_id": "reordered"})),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+        let uris = (0..101)
+            .map(|index| format!("spotify:track:{index}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            client
+                .add_playlist_tracks("playlist", &uris, Some(5))
+                .await
+                .unwrap(),
+            "second"
+        );
+        assert_eq!(
+            client
+                .reorder_playlist_tracks("playlist", 2, 9, 3, "second")
+                .await
+                .unwrap(),
+            "reordered"
+        );
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[..2]
+                .iter()
+                .all(|request| request.method == Method::Post)
+        );
+        let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(first["uris"].as_array().unwrap().len(), 100);
+        assert_eq!(first["position"], 5);
+        assert_eq!(second["uris"].as_array().unwrap().len(), 1);
+        assert_eq!(second["position"], 105);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[2].body).unwrap(),
+            serde_json::json!({
+                "range_start": 2,
+                "insert_before": 9,
+                "range_length": 3,
+                "snapshot_id": "second"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_write_surfaces_forbidden_status_and_message() {
+        let transport = FakeTransport::new([Response::json(
+            403,
+            serde_json::json!({"error": {"status": 403, "message": "Insufficient client scope"}}),
+        )]);
+        let client = SpotifyClient::new("client", transport, tokens());
+
+        let error = client
+            .add_playlist_tracks("playlist", &["spotify:track:1".into()], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Http {
+                status: 403,
+                ref body,
+                ..
+            } if body.contains("Insufficient client scope")
+        ));
     }
 
     #[tokio::test]

@@ -12,6 +12,8 @@ use retune_core::model::Library;
 use retune_spotify::tokens::{TokenStore, Tokens};
 use serde::{Deserialize, Serialize};
 
+use crate::playlists::PlaylistCache;
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
@@ -225,6 +227,26 @@ pub struct FsSettingsStore {
 pub struct FsSyncStore {
     cooldowns_path: PathBuf,
     artist_genres_path: PathBuf,
+}
+
+pub struct FsPlaylistStore {
+    path: PathBuf,
+}
+
+impl FsPlaylistStore {
+    pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: app_data_dir.as_ref().join("playlists.json"),
+        }
+    }
+
+    pub fn load(&self) -> StoreResult<PlaylistCache> {
+        read_json_or_default(&self.path)
+    }
+
+    pub fn save(&self, playlists: &PlaylistCache) -> StoreResult<()> {
+        atomic_write(&self.path, &serde_json::to_vec(playlists)?)
+    }
 }
 
 impl FsSyncStore {
@@ -493,6 +515,18 @@ mod tests {
             FsSyncStore::new(dir.path()).artist_genres().unwrap()["artist-1"],
             ["rock"]
         );
+    }
+
+    #[test]
+    fn playlists_persist_across_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsPlaylistStore::new(dir.path());
+        let playlists = PlaylistCache::default();
+
+        assert_eq!(store.load().unwrap(), playlists);
+        store.save(&playlists).unwrap();
+        assert_eq!(FsPlaylistStore::new(dir.path()).load().unwrap(), playlists);
+        assert!(dir.path().join("playlists.json").is_file());
     }
 
     #[test]

@@ -17,6 +17,16 @@ pub struct Tokens {
     pub scopes: String,
 }
 
+impl Tokens {
+    pub fn missing_scopes(&self) -> Vec<&'static str> {
+        let granted = self.scopes.split_ascii_whitespace().collect::<Vec<_>>();
+        crate::auth::REQUIRED_SCOPES
+            .into_iter()
+            .filter(|required| !granted.contains(required))
+            .collect()
+    }
+}
+
 pub trait TokenStore: Send + Sync {
     fn load(&self) -> Result<Option<Tokens>>;
     fn save(&self, tokens: &Tokens) -> Result<()>;
@@ -279,5 +289,44 @@ mod tests {
                 .unwrap();
 
         assert!(tokens.scopes.is_empty());
+    }
+
+    #[test]
+    fn legacy_grant_reports_playlist_scopes_missing() {
+        let tokens = Tokens {
+            scopes: "streaming user-read-private user-library-read user-library-modify user-read-playback-state user-modify-playback-state".into(),
+            ..tokens("access")
+        };
+
+        assert_eq!(
+            tokens.missing_scopes(),
+            [
+                "playlist-read-private",
+                "playlist-read-collaborative",
+                "playlist-modify-public",
+                "playlist-modify-private",
+                "user-follow-read",
+                "user-follow-modify",
+            ]
+        );
+    }
+
+    #[test]
+    fn scopes_request_string_matches_required_list() {
+        assert_eq!(crate::auth::SCOPES, crate::auth::REQUIRED_SCOPES.join(" "));
+    }
+
+    #[test]
+    fn current_grant_has_no_missing_scopes_regardless_of_order() {
+        let tokens = Tokens {
+            scopes: crate::auth::REQUIRED_SCOPES
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" "),
+            ..tokens("access")
+        };
+
+        assert!(tokens.missing_scopes().is_empty());
     }
 }

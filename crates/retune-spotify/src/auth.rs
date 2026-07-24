@@ -11,7 +11,21 @@ use url::Url;
 
 use crate::{Error, Result};
 
-pub const SCOPES: &str = "user-library-read user-library-modify user-read-playback-state user-modify-playback-state streaming user-read-private";
+pub const REQUIRED_SCOPES: [&str; 12] = [
+    "user-library-read",
+    "user-library-modify",
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "streaming",
+    "user-read-private",
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "playlist-modify-public",
+    "playlist-modify-private",
+    "user-follow-read",
+    "user-follow-modify",
+];
+pub const SCOPES: &str = "user-library-read user-library-modify user-read-playback-state user-modify-playback-state streaming user-read-private playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-follow-read user-follow-modify";
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 
@@ -67,6 +81,8 @@ pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: u64,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn exchange_code(

@@ -3,6 +3,7 @@ mod fixture;
 mod local_spike;
 mod media_keys;
 mod playback;
+mod playlists;
 mod provider;
 mod store;
 mod sync;
@@ -35,7 +36,8 @@ use retune_spotify::{
 };
 use serde::{Deserialize, Serialize};
 use store::{
-    FsOverlayStore, FsSettingsStore, FsSyncStore, OverlayStore, Settings, StoreError, Theme,
+    FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore, OverlayStore, Settings,
+    StoreError, Theme,
 };
 use sync_orchestrator::SyncOrchestrator;
 use tauri::{
@@ -54,6 +56,8 @@ struct AppState {
     settings: Mutex<Settings>,
     settings_store: FsSettingsStore,
     sync_store: FsSyncStore,
+    playlists: Mutex<playlists::PlaylistCache>,
+    playlist_store: FsPlaylistStore,
     menu_checks: MenuChecks,
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
@@ -225,6 +229,27 @@ struct PerSourceView {
     music: usize,
     podcasts: usize,
     audiobooks: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistListView {
+    id: String,
+    name: String,
+    owned: bool,
+    track_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistTrackView {
+    id: Option<u64>,
+    uri: String,
+    name: String,
+    art: String,
+    alb: String,
+    duration_secs: u64,
+    rating: Option<RatingView>,
 }
 
 #[tauri::command]
@@ -740,13 +765,14 @@ async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .as_secs();
     let state = app.state::<AppState>();
+    let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.into());
     state
         .token_store
         .save(&Tokens {
             access: token.access_token,
             refresh,
             expires_at: now.saturating_add(token.expires_in),
-            scopes: auth::SCOPES.into(),
+            scopes: granted_scopes,
         })
         .map_err(|error| error.to_string())?;
     *state.spotify.lock().expect("spotify mutex poisoned") =
@@ -1046,14 +1072,15 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         app.emit("sync-progress", message)
             .map_err(|error| error.to_string())?;
     }
-    let mut settings = state.settings.lock().expect("settings mutex poisoned");
-    if record_full_sync(&mut settings, partial, unix_now()) {
-        state
-            .settings_store
-            .save(&settings)
-            .map_err(|error| error.to_string())?;
+    {
+        let mut settings = state.settings.lock().expect("settings mutex poisoned");
+        if record_full_sync(&mut settings, partial, unix_now()) {
+            state
+                .settings_store
+                .save(&settings)
+                .map_err(|error| error.to_string())?;
+        }
     }
-    drop(settings);
     log::info!(
         "sync requests:{}",
         request_counts
@@ -1063,10 +1090,42 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
     );
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())?;
+    if let Err(error) = sync_playlists(app, provider.as_ref()).await {
+        log::warn!("Playlist sync failed: {error}");
+    }
     Ok(SyncCompletion {
         partial,
         auto_resume: partial.then_some(earliest_cooldown).flatten(),
     })
+}
+
+async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let current = state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .clone();
+    let library = state
+        .library
+        .lock()
+        .expect("library mutex poisoned")
+        .clone();
+    let synced = playlists::sync(client, &current, &library)
+        .await
+        .map_err(|error| playlist_error(&state, error))?;
+    state
+        .playlist_store
+        .save(&synced)
+        .map_err(|error| error.to_string())?;
+    *state.playlists.lock().expect("playlist mutex poisoned") = synced;
+    app.emit("playlists-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+fn playlist_error(state: &AppState, error: retune_spotify::Error) -> String {
+    let tokens = state.token_store.load().ok().flatten();
+    playlists::map_error(error, tokens.as_ref())
 }
 
 fn unix_now() -> u64 {
@@ -1156,6 +1215,156 @@ async fn add_spotify_album(
     })?;
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn playlists_list(state: tauri::State<'_, AppState>) -> Vec<PlaylistListView> {
+    state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .playlists
+        .iter()
+        .map(|playlist| PlaylistListView {
+            id: playlist.id.clone(),
+            name: playlist.name.clone(),
+            owned: playlist.owned,
+            track_count: playlist.tracks.len(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn playlist_tracks(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<PlaylistTrackView>, String> {
+    let playlists = state.playlists.lock().expect("playlist mutex poisoned");
+    let playlist = playlists
+        .playlists
+        .iter()
+        .find(|playlist| playlist.id == id)
+        .ok_or_else(|| format!("Unknown playlist {id}"))?;
+    let library = state.library.lock().expect("library mutex poisoned");
+    Ok(playlist
+        .tracks
+        .iter()
+        .map(|uri| {
+            if let Some(track) = library.tracks().iter().find(|track| &track.uri == uri) {
+                PlaylistTrackView {
+                    id: Some(track.id.0),
+                    uri: track.uri.clone(),
+                    name: track.name.clone(),
+                    art: track.art.clone(),
+                    alb: track.alb.clone(),
+                    duration_secs: track.duration.as_secs(),
+                    rating: library.effective_rating(track.id).map(rating_view),
+                }
+            } else {
+                let cached = playlist
+                    .non_library_tracks
+                    .iter()
+                    .find(|track| &track.uri == uri);
+                PlaylistTrackView {
+                    id: None,
+                    uri: uri.clone(),
+                    name: cached.map(|track| track.name.clone()).unwrap_or_default(),
+                    art: cached.map(|track| track.art.clone()).unwrap_or_default(),
+                    alb: cached.map(|track| track.alb.clone()).unwrap_or_default(),
+                    duration_secs: cached.map_or(0, |track| track.duration / 1000),
+                    rating: None,
+                }
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn playlist_add(app: tauri::AppHandle, id: String, uris: Vec<String>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut cache = state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .clone();
+    if !cache.playlists.iter().any(|playlist| playlist.id == id) {
+        return Err(format!("Unknown playlist {id}"));
+    }
+    let client = provider_from(&state)?;
+    let snapshot_id = client
+        .add_playlist_tracks(&id, &uris, None)
+        .await
+        .map_err(|error| playlist_error(&state, error))?;
+    let playlist = cache
+        .playlists
+        .iter_mut()
+        .find(|playlist| playlist.id == id)
+        .expect("playlist checked above");
+    playlist.snapshot_id = snapshot_id;
+    playlist.tracks.extend(uris);
+    state
+        .playlist_store
+        .save(&cache)
+        .map_err(|error| error.to_string())?;
+    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+    app.emit("playlists-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn playlist_reorder(
+    app: tauri::AppHandle,
+    id: String,
+    range_start: u32,
+    insert_before: u32,
+    range_length: u32,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let mut cache = state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .clone();
+    let library = state
+        .library
+        .lock()
+        .expect("library mutex poisoned")
+        .clone();
+    let result = playlists::reorder(
+        client.as_ref(),
+        &mut cache,
+        &library,
+        &id,
+        range_start,
+        insert_before,
+        range_length,
+    )
+    .await;
+    match result {
+        Ok(()) => {
+            state
+                .playlist_store
+                .save(&cache)
+                .map_err(|error| error.to_string())?;
+            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+            app.emit("playlists-changed", ())
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        Err(playlists::PlaylistReorderError::Reloaded) => {
+            state
+                .playlist_store
+                .save(&cache)
+                .map_err(|error| error.to_string())?;
+            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+            app.emit("playlists-changed", ())
+                .map_err(|error| error.to_string())?;
+            Err(playlists::STALE_PLAYLIST.into())
+        }
+        Err(playlists::PlaylistReorderError::Spotify(error)) => Err(playlist_error(&state, error)),
+        Err(playlists::PlaylistReorderError::Other(error)) => Err(error),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1646,6 +1855,10 @@ pub fn run() {
             spotify_search,
             spotify_artist_albums,
             add_spotify_album,
+            playlists_list,
+            playlist_tracks,
+            playlist_add,
+            playlist_reorder,
             play_tracks,
             player_toggle,
             player_next,
@@ -1688,6 +1901,8 @@ pub fn run() {
             };
             let settings_store = FsSettingsStore::new(&app_data_dir);
             let sync_store = FsSyncStore::new(&app_data_dir);
+            let playlist_store = FsPlaylistStore::new(&app_data_dir);
+            let playlists = playlist_store.load()?;
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
@@ -1703,8 +1918,19 @@ pub fn run() {
             // Keychain access can fail transiently (e.g. "In dark wake, no UI
             // possible" while the display sleeps); start disconnected rather
             // than abort — the cache retries the Keychain on the next access.
-            let connected = match stored_connection_state(&token_store) {
-                Ok(state) => state.connected,
+            let connected = match token_store.load() {
+                Ok(tokens) => {
+                    if let Some(tokens) = &tokens {
+                        let missing = tokens.missing_scopes();
+                        if !missing.is_empty() {
+                            log::info!(
+                                "Spotify connection is missing playlist scopes: {}",
+                                missing.join(" ")
+                            );
+                        }
+                    }
+                    tokens.is_some()
+                }
                 Err(error) => {
                     log::warn!("Token store unavailable at startup: {error}");
                     false
@@ -1741,6 +1967,8 @@ pub fn run() {
                 settings: Mutex::new(settings),
                 settings_store,
                 sync_store,
+                playlists: Mutex::new(playlists),
+                playlist_store,
                 menu_checks,
                 recovery_notice: Mutex::new(recovery_notice),
                 token_store,
