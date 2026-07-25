@@ -4053,6 +4053,7 @@ dependencies = [
  "rodio",
  "symphonia",
  "symphonia-adapter-libopus",
+ "tempfile",
  "thiserror 2.0.19",
 ]
 
@@ -4077,6 +4078,7 @@ dependencies = [
  "librespot-playback",
  "log",
  "reqwest 0.12.28",
+ "retune-audio",
  "retune-core",
  "retune-spotify",
  "serde",

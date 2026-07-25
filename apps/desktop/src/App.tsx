@@ -31,6 +31,7 @@ type Settings = {
 }
 
 type ConnectionState = { connected: boolean }
+type ImportSummary = { imported: number; duplicates: number; failed: { path: string; reason: string }[] }
 export type PlaylistListView = {
   id: string
   name: string
@@ -197,6 +198,7 @@ type State = {
   playlistRevision: number
   syncPhase?: string
   syncProgress?: { tracks: number; fraction: number }
+  importStatus?: string
 }
 
 type Action =
@@ -229,6 +231,7 @@ type Action =
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'syncPhase'; phase?: string }
   | { type: 'syncProgress'; progress: { tracks: number; fraction: number } }
+  | { type: 'importComplete'; summary: ImportSummary }
   | { type: 'playlistsRefresh' }
 
 const defaultSettings: Settings = {
@@ -359,6 +362,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, syncPhase: action.phase, syncProgress: action.phase ? state.syncProgress : undefined }
     case 'syncProgress':
       return { ...state, syncProgress: action.progress.fraction < 1 ? action.progress : undefined }
+    case 'importComplete':
+      return { ...state, importStatus: `Imported ${action.summary.imported} tracks (${action.summary.duplicates} duplicates skipped, ${action.summary.failed.length} failed)` }
     case 'playlistsRefresh':
       return { ...state, playlistRevision: state.playlistRevision + 1 }
   }
@@ -585,6 +590,7 @@ function App() {
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     const progressCount = listen<{ tracks: number; fraction: number }>('sync-progress-count', ({ payload }) => dispatch({ type: 'syncProgress', progress: payload }))
     const playlistsChanged = listen('playlists-changed', () => dispatch({ type: 'playlistsRefresh' }))
+    const imported = listen<ImportSummary>('local-import-complete', ({ payload }) => dispatch({ type: 'importComplete', summary: payload }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
@@ -594,6 +600,7 @@ function App() {
       void progress.then((stop) => stop())
       void progressCount.then((stop) => stop())
       void playlistsChanged.then((stop) => stop())
+      void imported.then((stop) => stop())
     }
   }, [])
 
@@ -912,7 +919,7 @@ function App() {
             </>
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} empty={libraryEmpty} />
+          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
@@ -1931,14 +1938,14 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   </div>
 }
 
-function StatusBar({ view, unit, syncPhase, syncProgress, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; empty: boolean }) {
+function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
   return <footer className="status-bar"><button aria-label="Add">+</button>{syncProgress
     ? <span className="sync-status"><span>⟳ Syncing from Spotify…</span><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></span>
-    : <span>{syncPhase ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span>}</footer>
+    : <span>{syncPhase ?? importStatus ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span>}</footer>
 }
 
 export default App

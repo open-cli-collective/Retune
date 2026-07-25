@@ -1,5 +1,9 @@
 //! Audio file probing, decoding, seeking, and metadata without an audio device.
 
+mod import;
+
+pub use import::{ImportedFile, import_file, scan_paths};
+
 use std::{fs::File, path::Path, sync::OnceLock, time::Duration};
 
 use lofty::{

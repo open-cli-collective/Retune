@@ -1,6 +1,7 @@
 mod fixture;
 #[cfg(debug_assertions)]
 mod local_spike;
+mod localfiles;
 mod media_keys;
 mod playback;
 mod playlists;
@@ -13,6 +14,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     io::{Read, Write},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1899,6 +1901,73 @@ fn mutate_library<T>(
     Ok(value)
 }
 
+#[tauri::command]
+fn import_local(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> Result<localfiles::ImportSummary, String> {
+    let state = app.state::<AppState>();
+    let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    let mut library = state.library.lock().expect("library mutex poisoned");
+    let summary = localfiles::import_transaction(&state.store, &mut library, &paths)?;
+    drop(library);
+    for failure in &summary.failed {
+        log::warn!(
+            "local import failed for {}: {}",
+            failure.path,
+            failure.reason
+        );
+    }
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())?;
+    app.emit("local-import-complete", summary.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(summary)
+}
+
+fn import_local_files(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    app.dialog()
+        .file()
+        .add_filter(
+            "Audio",
+            &[
+                "aac", "aif", "aiff", "flac", "m4a", "mp3", "mp4", "oga", "ogg", "opus", "wav",
+                "webm",
+            ],
+        )
+        .pick_files(move |paths| {
+            let Some(paths) = paths else { return };
+            let paths = paths
+                .into_iter()
+                .map(|path| {
+                    path.into_path()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match paths.and_then(|paths| import_local(handle.clone(), paths)) {
+                Ok(_) => {}
+                Err(error) => notify_error(&handle, error),
+            }
+        });
+}
+
+fn import_local_folder(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    app.dialog().file().pick_folder(move |path| {
+        let Some(path) = path else { return };
+        let result = path
+            .into_path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|error| error.to_string())
+            .and_then(|path| import_local(handle.clone(), vec![path]));
+        if let Err(error) = result {
+            notify_error(&handle, error);
+        }
+    });
+}
+
 fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<MenuChecks> {
     let preferences = MenuItemBuilder::with_id("preferences", "Preferences…")
         .accelerator("CmdOrCtrl+,")
@@ -1927,6 +1996,9 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         .item(&get_info)
         .separator()
         .text("sync_spotify", "Sync from Spotify")
+        .separator()
+        .text("add_local_files", "Add Local Files…")
+        .text("add_local_folder", "Add Local Folder…")
         .separator()
         .text("export_library", "Export Library…")
         .separator()
@@ -1997,6 +2069,8 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "setup_library" => {
             let _ = app.emit("open-setup", ());
         }
+        "add_local_files" => import_local_files(app),
+        "add_local_folder" => import_local_folder(app),
         "export_library" => export_library(app, false),
         "restore_library" => import_library(app, true),
         "merge_library" => import_library(app, false),
@@ -2238,6 +2312,7 @@ pub fn run() {
             get_track,
             edit_track,
             set_track_infos,
+            import_local,
             startup_notice,
             get_settings,
             set_settings,
