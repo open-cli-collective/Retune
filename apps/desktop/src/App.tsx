@@ -103,6 +103,7 @@ type Track = {
   trackNo: number | null
   durationSecs: number
   overridden: boolean
+  isLocal: boolean
   rating: RatingView | null
 }
 
@@ -146,6 +147,7 @@ type BrowseView = {
 type TrackInfo = {
   id: number
   uri: string
+  localPath: string | null
   source: Source
   name: string
   art: string
@@ -230,7 +232,10 @@ type Action =
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'syncPhase'; phase?: string }
   | { type: 'syncProgress'; progress: { tracks: number; fraction: number } }
+  | { type: 'importStarted' }
   | { type: 'importComplete'; summary: ImportSummary }
+  | { type: 'importFailed' }
+  | { type: 'clearImportStatus' }
   | { type: 'playlistsRefresh' }
 
 const defaultSettings: Settings = {
@@ -361,8 +366,14 @@ function reducer(state: State, action: Action): State {
       return { ...state, syncPhase: action.phase, syncProgress: action.phase ? state.syncProgress : undefined }
     case 'syncProgress':
       return { ...state, syncProgress: action.progress.fraction < 1 ? action.progress : undefined }
+    case 'importStarted':
+      return { ...state, importStatus: 'Importing local files…' }
     case 'importComplete':
       return { ...state, importStatus: `Imported ${action.summary.imported} tracks (${action.summary.duplicates} duplicates skipped, ${action.summary.failed.length} failed)` }
+    case 'importFailed':
+      return { ...state, importStatus: undefined }
+    case 'clearImportStatus':
+      return { ...state, importStatus: undefined }
     case 'playlistsRefresh':
       return { ...state, playlistRevision: state.playlistRevision + 1 }
   }
@@ -597,7 +608,9 @@ function App() {
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     const progressCount = listen<{ tracks: number; fraction: number }>('sync-progress-count', ({ payload }) => dispatch({ type: 'syncProgress', progress: payload }))
     const playlistsChanged = listen('playlists-changed', () => dispatch({ type: 'playlistsRefresh' }))
+    const importing = listen('local-import-started', () => dispatch({ type: 'importStarted' }))
     const imported = listen<ImportSummary>('local-import-complete', ({ payload }) => dispatch({ type: 'importComplete', summary: payload }))
+    const importFailed = listen('local-import-failed', () => dispatch({ type: 'importFailed' }))
     return () => {
       void changed.then((stop) => stop())
       void failed.then((stop) => stop())
@@ -607,9 +620,17 @@ function App() {
       void progress.then((stop) => stop())
       void progressCount.then((stop) => stop())
       void playlistsChanged.then((stop) => stop())
+      void importing.then((stop) => stop())
       void imported.then((stop) => stop())
+      void importFailed.then((stop) => stop())
     }
   }, [])
+
+  useEffect(() => {
+    if (!state.importStatus || state.importStatus === 'Importing local files…') return
+    const timeout = window.setTimeout(() => dispatch({ type: 'clearImportStatus' }), 10_000)
+    return () => window.clearTimeout(timeout)
+  }, [state.importStatus])
 
   useEffect(() => {
     const query = state.query.trim()
@@ -1381,7 +1402,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
   }
   const cell = (track: Track, column: ColumnKey) => {
     if (column === 'track') return <span key={column}>{track.trackNo ?? ''}</span>
-    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.name}{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
+    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
     if (column === 'time') return <span key={column}>{formatTime(track.durationSecs)}</span>
     if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
     if (column === 'album') return <span key={column} title={track.alb}>{track.alb}</span>
@@ -1774,7 +1795,7 @@ function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInfo; onCa
   return <div className="modal-backdrop" role="presentation">
     <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="get-info-title" tabIndex={-1} ref={dialog}>
       <h2 id="get-info-title">Get Info</h2>
-      <label>Spotify ID<input value={track.uri} readOnly /></label>
+      {track.localPath ? <label>File<input className="file-path" value={track.localPath} title={track.localPath} readOnly /></label> : <label>Spotify ID<input value={track.uri} readOnly /></label>}
       <label>Name<input {...field('name')} /></label>
       <label>Artist<AutocompleteInput suggestions={suggestions.arts} value={draft.art} onValue={(art) => setDraft({ ...draft, art })} /></label>
       <label>Album<AutocompleteInput suggestions={suggestions.albs} value={draft.alb} onValue={(alb) => setDraft({ ...draft, alb })} /></label>

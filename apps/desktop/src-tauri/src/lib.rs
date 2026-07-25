@@ -19,6 +19,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
@@ -179,7 +180,29 @@ struct TrackView {
     track_no: Option<u32>,
     duration_secs: u64,
     overridden: bool,
+    is_local: bool,
     rating: Option<RatingView>,
+}
+
+impl TrackView {
+    fn from_track(track: &TrackRecord, rating: Option<EffectiveRating>) -> Self {
+        Self {
+            id: track.id.0,
+            uri: track.uri.clone(),
+            name: track.name.clone(),
+            art: track.art.clone(),
+            alb: track.alb.clone(),
+            cat: track.cat.clone(),
+            track_no: track.track_no,
+            duration_secs: track.duration.as_secs(),
+            overridden: track
+                .orig_cat
+                .as_ref()
+                .is_some_and(|original| original != &track.cat),
+            is_local: track.uri.starts_with("file:"),
+            rating: rating.map(rating_view),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -187,6 +210,7 @@ struct TrackView {
 struct TrackInfoView {
     id: u64,
     uri: String,
+    local_path: Option<String>,
     source: SourceId,
     name: String,
     art: String,
@@ -196,6 +220,36 @@ struct TrackInfoView {
     rating: Option<RatingView>,
     inherited_rating: Option<u8>,
     genres: Vec<String>,
+}
+
+impl TrackInfoView {
+    fn from_track(library: &Library, track: &TrackRecord) -> Self {
+        Self {
+            id: track.id.0,
+            uri: track.uri.clone(),
+            local_path: localfiles::path_from_file_uri(&track.uri)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
+            source: track.source,
+            name: track.name.clone(),
+            art: track.art.clone(),
+            alb: track.alb.clone(),
+            cat: track.cat.clone(),
+            orig_cat: track.orig_cat.clone(),
+            rating: library.effective_rating(track.id).map(rating_view),
+            inherited_rating: library
+                .album_rating(&AlbumKey::of(track))
+                .map(Rating::stars),
+            genres: library
+                .tracks()
+                .iter()
+                .filter(|candidate| candidate.source == track.source)
+                .map(|candidate| candidate.cat.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -338,32 +392,7 @@ fn browse(
         album_rating_view(&library, &selection, &selected_tracks);
     let tracks = selected_tracks
         .into_iter()
-        .map(|track| TrackView {
-            id: track.id.0,
-            uri: track.uri.clone(),
-            name: track.name.clone(),
-            art: track.art.clone(),
-            alb: track.alb.clone(),
-            cat: track.cat.clone(),
-            track_no: track.track_no,
-            duration_secs: track.duration.as_secs(),
-            overridden: track
-                .orig_cat
-                .as_ref()
-                .is_some_and(|original| original != &track.cat),
-            rating: library
-                .effective_rating(track.id)
-                .map(|rating| match rating {
-                    EffectiveRating::Explicit(rating) => RatingView {
-                        stars: rating.stars(),
-                        explicit: true,
-                    },
-                    EffectiveRating::Inherited(rating) => RatingView {
-                        stars: rating.stars(),
-                        explicit: false,
-                    },
-                }),
-        })
+        .map(|track| TrackView::from_track(track, library.effective_rating(track.id)))
         .collect();
 
     BrowseView {
@@ -523,31 +552,7 @@ fn get_track(state: tauri::State<'_, AppState>, id: u64) -> Result<TrackInfoView
     let track = library
         .get(TrackId(id))
         .ok_or_else(|| format!("unknown track id {id}"))?;
-    let rating = library.effective_rating(track.id).map(rating_view);
-    let inherited_rating = library
-        .album_rating(&AlbumKey::of(track))
-        .map(Rating::stars);
-    let genres = library
-        .tracks()
-        .iter()
-        .filter(|candidate| candidate.source == track.source)
-        .map(|candidate| candidate.cat.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(TrackInfoView {
-        id,
-        uri: track.uri.clone(),
-        source: track.source,
-        name: track.name.clone(),
-        art: track.art.clone(),
-        alb: track.alb.clone(),
-        cat: track.cat.clone(),
-        orig_cat: track.orig_cat.clone(),
-        rating,
-        inherited_rating,
-        genres,
-    })
+    Ok(TrackInfoView::from_track(&library, track))
 }
 
 fn rating_view(rating: EffectiveRating) -> RatingView {
@@ -909,11 +914,15 @@ fn track_id(uri: &str) -> Option<&str> {
 }
 
 async fn resolve_track_artwork<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+    client: Option<&SpotifyClient<T, S>>,
     cache: &Mutex<HashMap<String, Option<String>>>,
     uri: &str,
 ) -> Option<String> {
-    let id = track_id(uri)?;
+    let local = uri.starts_with("file:");
+    let id = (!local).then(|| track_id(uri)).flatten();
+    if !local && id.is_none() {
+        return None;
+    }
     if let Some(cached) = cache
         .lock()
         .expect("artwork cache mutex poisoned")
@@ -922,12 +931,29 @@ async fn resolve_track_artwork<T: Transport, S: TokenStore>(
     {
         return cached;
     }
-    let artwork = client
-        .track(id)
-        .await
-        .ok()
-        .and_then(|track| track.album)
-        .and_then(|album| image_url(&album.images));
+    let artwork = if local {
+        localfiles::path_from_file_uri(uri)
+            .ok()
+            .and_then(|path| retune_audio::read_tags(path).ok())
+            .and_then(|tags| tags.artwork)
+            .map(|artwork| {
+                format!(
+                    "data:{};base64,{}",
+                    artwork
+                        .mime
+                        .as_deref()
+                        .unwrap_or("application/octet-stream"),
+                    BASE64_STANDARD.encode(artwork.bytes)
+                )
+            })
+    } else {
+        client?
+            .track(id?)
+            .await
+            .ok()
+            .and_then(|track| track.album)
+            .and_then(|album| image_url(&album.images))
+    };
     let mut cache = cache.lock().expect("artwork cache mutex poisoned");
     if cache.len() >= 512 {
         cache.clear();
@@ -941,19 +967,15 @@ async fn track_artwork(
     state: tauri::State<'_, AppState>,
     uri: String,
 ) -> Result<Option<String>, String> {
-    let Ok(provider) = provider_from(&state) else {
-        return Ok(None);
-    };
-    Ok(resolve_track_artwork(provider.as_ref(), &state.artwork_cache, &uri).await)
+    let provider = provider_from(&state).ok();
+    Ok(resolve_track_artwork(provider.as_deref(), &state.artwork_cache, &uri).await)
 }
 
 pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerStateEvent) {
     let state = app.state::<AppState>();
-    let Ok(provider) = provider_from(&state) else {
-        return;
-    };
+    let provider = provider_from(&state).ok();
     let Some(url) = resolve_track_artwork(
-        provider.as_ref(),
+        provider.as_deref(),
         &state.artwork_cache,
         event.uri.as_deref().unwrap_or_default(),
     )
@@ -1784,14 +1806,14 @@ async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
 async fn player_next(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state).ok();
-    state.playback.next(client.as_deref()).await
+    state.playback.next(client).await
 }
 
 #[tauri::command]
 async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state).ok();
-    state.playback.prev(client.as_deref()).await
+    state.playback.prev(client).await
 }
 
 #[tauri::command]
@@ -1920,9 +1942,31 @@ fn import_local(
     }
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())?;
+    if let Some(error) = format_import_failures(&summary.failed) {
+        app.emit("operation-error", error)
+            .map_err(|error| error.to_string())?;
+    }
     app.emit("local-import-complete", summary.clone())
         .map_err(|error| error.to_string())?;
     Ok(summary)
+}
+
+fn format_import_failures(failures: &[localfiles::FailedImport]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let mut lines = failures
+        .iter()
+        .take(5)
+        .map(|failure| format!("{} — {}", failure.path, failure.reason))
+        .collect::<Vec<_>>();
+    if failures.len() > 5 {
+        lines.push(format!("+ {} more", failures.len() - 5));
+    }
+    Some(format!(
+        "Some files could not be imported:\n{}",
+        lines.join("\n")
+    ))
 }
 
 fn import_local_files(app: &tauri::AppHandle) {
@@ -1938,18 +1982,21 @@ fn import_local_files(app: &tauri::AppHandle) {
         )
         .pick_files(move |paths| {
             let Some(paths) = paths else { return };
-            let paths = paths
-                .into_iter()
-                .map(|path| {
-                    path.into_path()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .map_err(|error| error.to_string())
-                })
-                .collect::<Result<Vec<_>, _>>();
-            match paths.and_then(|paths| import_local(handle.clone(), paths)) {
-                Ok(_) => {}
-                Err(error) => notify_error(&handle, error),
-            }
+            let _ = handle.emit("local-import-started", ());
+            drop(tauri::async_runtime::spawn_blocking(move || {
+                let paths = paths
+                    .into_iter()
+                    .map(|path| {
+                        path.into_path()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                if let Err(error) = paths.and_then(|paths| import_local(handle.clone(), paths)) {
+                    notify_error(&handle, error);
+                    let _ = handle.emit("local-import-failed", ());
+                }
+            }));
         });
 }
 
@@ -1957,14 +2004,18 @@ fn import_local_folder(app: &tauri::AppHandle) {
     let handle = app.clone();
     app.dialog().file().pick_folder(move |path| {
         let Some(path) = path else { return };
-        let result = path
-            .into_path()
-            .map(|path| path.to_string_lossy().into_owned())
-            .map_err(|error| error.to_string())
-            .and_then(|path| import_local(handle.clone(), vec![path]));
-        if let Err(error) = result {
-            notify_error(&handle, error);
-        }
+        let _ = handle.emit("local-import-started", ());
+        drop(tauri::async_runtime::spawn_blocking(move || {
+            let result = path
+                .into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|error| error.to_string())
+                .and_then(|path| import_local(handle.clone(), vec![path]));
+            if let Err(error) = result {
+                notify_error(&handle, error);
+                let _ = handle.emit("local-import-failed", ());
+            }
+        }));
     });
 }
 
@@ -2546,6 +2597,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn track_view_derives_local_state_from_uri() {
+        let mut library = Library::new();
+        let local = library.add(metadata_track(
+            "file:///tmp/song.mp3",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+        let spotify = library.add(metadata_track(
+            "spotify:track:track",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+
+        assert!(TrackView::from_track(library.get(local).unwrap(), None).is_local);
+        assert!(!TrackView::from_track(library.get(spotify).unwrap(), None).is_local);
+    }
+
+    #[test]
+    fn track_info_view_decodes_only_local_file_paths() {
+        let mut library = Library::new();
+        let local = library.add(metadata_track(
+            "file:///tmp/R%C3%A9tune%20song.mp3",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+        let spotify = library.add(metadata_track(
+            "spotify:track:track",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+
+        assert_eq!(
+            TrackInfoView::from_track(&library, library.get(local).unwrap()).local_path,
+            Some("/tmp/Rétune song.mp3".into())
+        );
+        assert_eq!(
+            TrackInfoView::from_track(&library, library.get(spotify).unwrap()).local_path,
+            None
+        );
+    }
+
     fn spotify_album() -> Album {
         Album {
             id: "album".into(),
@@ -2650,28 +2747,96 @@ mod tests {
         assert_eq!(track_id("spotify:album:album"), None);
         assert_eq!(track_id("spotify:track:"), None);
         assert_eq!(
-            resolve_track_artwork(&client, &cache, "spotify:track:track")
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track")
                 .await
                 .as_deref(),
             Some("small")
         );
         assert_eq!(
-            resolve_track_artwork(&client, &cache, "spotify:track:track").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track").await,
             Some("small".into())
         );
         assert_eq!(
-            resolve_track_artwork(&client, &cache, "spotify:album:album").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:album:album").await,
             None
         );
         assert_eq!(
-            resolve_track_artwork(&client, &cache, "spotify:track:missing").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing").await,
             None
         );
         assert_eq!(
-            resolve_track_artwork(&client, &cache, "spotify:track:missing").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing").await,
             None
         );
         assert_eq!(client.transport().requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn local_track_artwork_reads_tags_and_caches_missing_files() {
+        let cache = Mutex::default();
+        let dir = tempfile::tempdir().unwrap();
+        let tagged = dir.path().join("tagged.mp3");
+        let tagged_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/retune-audio/tests/fixtures/cc0-audio-tagged.mp3");
+        fs::copy(&tagged_fixture, &tagged).unwrap();
+        let uri = localfiles::file_uri(&tagged.canonicalize().unwrap());
+
+        let artwork = resolve_track_artwork(
+            None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+            &cache,
+            &uri,
+        )
+        .await
+        .unwrap();
+        assert!(artwork.starts_with("data:image/png;base64,"));
+        let encoded = artwork.split_once(',').unwrap().1;
+        assert_eq!(
+            BASE64_STANDARD.decode(encoded).unwrap(),
+            retune_audio::read_tags(&tagged_fixture)
+                .unwrap()
+                .artwork
+                .unwrap()
+                .bytes
+        );
+        fs::remove_file(&tagged).unwrap();
+        assert_eq!(
+            resolve_track_artwork(
+                None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+                &cache,
+                &uri
+            )
+            .await,
+            Some(artwork)
+        );
+
+        let wav = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/retune-audio/tests/fixtures/cc0-audio.wav");
+        assert_eq!(
+            resolve_track_artwork(
+                None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+                &cache,
+                &localfiles::file_uri(&wav)
+            )
+            .await,
+            None
+        );
+    }
+
+    #[test]
+    fn import_failure_message_is_bounded() {
+        let failures = (1..=7)
+            .map(|index| localfiles::FailedImport {
+                path: format!("file-{index}"),
+                reason: "bad".into(),
+            })
+            .collect::<Vec<_>>();
+
+        let message = format_import_failures(&failures).unwrap();
+        assert!(message.contains("file-1 — bad"));
+        assert!(message.contains("file-5 — bad"));
+        assert!(!message.contains("file-6 — bad"));
+        assert!(message.ends_with("+ 2 more"));
+        assert_eq!(format_import_failures(&[]), None);
     }
 
     #[test]

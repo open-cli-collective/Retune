@@ -98,7 +98,10 @@ button { color: inherit; }
 .zebra .track-scroll .track-row:nth-child(even) { background: var(--alt); }
 .track-row > span { min-width: 0; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; }
 .track-name { display: flex; align-items: center; gap: 4px; }
+.track-name .local-glyph { flex: 0 0 auto; color: var(--dim); font-size: 11px; }
+.track-name .track-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track-name .info-button { margin-left: auto; border: 0; color: inherit; background: transparent; }
+.get-info .file-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track-header { flex: 0 0 20px; height: 20px; border-bottom: 1px solid var(--border); color: var(--dim); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; }
 .track-header [draggable="true"] { cursor: grab; }
 .track-header .dragging { opacity: .35; }
