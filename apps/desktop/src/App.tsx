@@ -114,6 +114,12 @@ type PlaylistSubject =
   | { kind: 'album'; label: string; albumUri: string }
 
 const DRAG_TYPE = 'application/x-retune'
+const DRAG_LOCAL_TYPE = 'application/x-retune-local'
+const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
+
+const hasLocalTracks = (subject: PlaylistSubject) => subject.kind === 'tracks'
+  ? subject.uris.some((uri) => uri.startsWith('file:'))
+  : subject.albumUri.startsWith('file:')
 
 type PlayerState = {
   trackId: number | null
@@ -503,7 +509,7 @@ function App() {
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connected, state.playing, dispatch)
   const addToPlaylist = useCallback((id: string, subject: PlaylistSubject) => subject.kind === 'album'
-    ? invoke('playlist_add_album', { id, albumUri: subject.albumUri })
+    ? invoke('playlist_add_album', { id, albumUri: subject.albumUri, albumLabel: subject.label })
     : invoke('playlist_add', { id, uris: subject.uris }), [])
   const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
     facetAnchors.current[facet] = anchor
@@ -1115,6 +1121,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       onClick={() => onPlaylist(playlist.id)}
       onDragOver={playlist.owned ? (event) => {
         if (!event.dataTransfer.types.includes(DRAG_TYPE)) return
+        if (event.dataTransfer.types.includes(DRAG_LOCAL_TYPE)) { setDropTarget(undefined); return }
         event.preventDefault()
         event.dataTransfer.dropEffect = 'copy'
         setDropTarget(playlist.id)
@@ -1123,7 +1130,11 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       onDrop={playlist.owned ? (event) => {
         event.preventDefault()
         setDropTarget(undefined)
-        try { onDrop(playlist.id, JSON.parse(event.dataTransfer.getData(DRAG_TYPE)) as PlaylistSubject) }
+        try {
+          const subject = JSON.parse(event.dataTransfer.getData(DRAG_TYPE)) as PlaylistSubject
+          if (hasLocalTracks(subject)) onError(LOCAL_PLAYLIST_HINT)
+          else onDrop(playlist.id, subject)
+        }
         catch { onError('Could not read the dragged playlist item.') }
       } : undefined}
     >
@@ -1259,6 +1270,7 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   onClose: () => void
   onError: (error: string) => void
 }) {
+  const local = hasLocalTracks(subject)
   const [playlists, setPlaylists] = useState<PlaylistListView[]>([])
   const [busy, setBusy] = useState<string>()
   const [creating, setCreating] = useState(false)
@@ -1293,14 +1305,15 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <div className="playlist-popover" role="dialog" aria-modal="true" aria-labelledby="add-to-playlist-title">
       <header><h2 id="add-to-playlist-title">Add to Playlist</h2><span>{subject.label}</span></header>
-      <div className="playlist-popover-list">{playlists.map((playlist) => <button key={playlist.id} disabled={!playlist.owned || busy === playlist.id} onClick={() => void add(playlist.id)}>
+      {local && <p className="playlist-local-hint">{LOCAL_PLAYLIST_HINT}</p>}
+      <div className="playlist-popover-list">{playlists.map((playlist) => <button key={playlist.id} disabled={local || !playlist.owned || busy === playlist.id} onClick={() => void add(playlist.id)}>
         <span>{playlist.contains ? '✓' : ''}</span><span>{playlist.owned ? '' : '🌐'}</span><strong>{playlist.name}</strong>{!playlist.owned && <small>{playlist.owner}</small>}
       </button>)}</div>
       <footer>{creating
         ? <input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
           if (event.key === 'Enter') void create()
         }} />
-        : <button className="new-playlist-button" onClick={() => setCreating(true)}>+ New Playlist</button>}
+        : <button className="new-playlist-button" disabled={local} onClick={() => setCreating(true)}>+ New Playlist</button>}
         <button className="done-button" onClick={onClose}>Done</button></footer>
     </div>
   </div>
@@ -1424,7 +1437,9 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
         return <div key={track.id} data-track-id={track.id} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onDragStart={(event) => {
           const dragged = selectedIds.has(track.id) ? tracks.filter((candidate) => selectedIds.has(candidate.id)) : [track]
           event.dataTransfer.effectAllowed = 'copy'
-          event.dataTransfer.setData(DRAG_TYPE, JSON.stringify({ kind: 'tracks', label: dragged.length === 1 ? `Track · ${dragged[0].name}` : `${dragged.length} tracks`, uris: dragged.map((candidate) => candidate.uri) } satisfies PlaylistSubject))
+          const subject = { kind: 'tracks', label: dragged.length === 1 ? `Track · ${dragged[0].name}` : `${dragged.length} tracks`, uris: dragged.map((candidate) => candidate.uri) } satisfies PlaylistSubject
+          event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(subject))
+          if (hasLocalTracks(subject)) event.dataTransfer.setData(DRAG_LOCAL_TYPE, '')
         }} onContextMenu={(event) => {
           event.preventDefault()
           if (!selectedIds.has(track.id)) onSelect(track.id, event)

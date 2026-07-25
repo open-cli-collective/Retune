@@ -7,6 +7,7 @@ use retune_spotify::{
     Error,
 };
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 const PLAYLIST_PAGE_SIZE: u32 = 50;
 const TRACK_PAGE_SIZE: u32 = 50;
@@ -115,6 +116,14 @@ pub async fn add<T: Transport, S: TokenStore>(
     id: &str,
     uris: Vec<String>,
 ) -> Result<(), PlaylistAddError> {
+    reject_local_uris(&uris, |uri| {
+        library
+            .tracks()
+            .iter()
+            .find(|track| track.uri == uri)
+            .map(|track| track.name.clone())
+    })
+    .map_err(PlaylistAddError::Local)?;
     let index = cache
         .playlists
         .iter()
@@ -135,9 +144,47 @@ pub async fn add<T: Transport, S: TokenStore>(
 
 #[derive(Debug)]
 pub enum PlaylistAddError {
+    Local(String),
     Unknown(String),
     ReadOnly,
     Spotify(Error),
+}
+
+pub(crate) fn reject_local_uris(
+    uris: &[String],
+    mut name: impl FnMut(&str) -> Option<String>,
+) -> Result<(), String> {
+    let local = uris
+        .iter()
+        .filter(|uri| uri.starts_with("file:"))
+        .map(|uri| {
+            name(uri).unwrap_or_else(|| {
+                Url::parse(uri)
+                    .ok()
+                    .and_then(|url| url.to_file_path().ok())
+                    .and_then(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| uri.clone())
+            })
+        })
+        .collect::<Vec<_>>();
+    if local.is_empty() {
+        return Ok(());
+    }
+    let count = local.len();
+    let remaining = count.saturating_sub(3);
+    let mut message = format!(
+        "{count} local file track{} can't be added to Spotify: {}",
+        if count == 1 { "" } else { "s" },
+        local.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+    );
+    if remaining > 0 {
+        message.push_str(&format!(" + {remaining} more"));
+    }
+    message.push_str(". Local files stay local.");
+    Err(message)
 }
 
 impl From<Error> for PlaylistAddError {
@@ -469,6 +516,7 @@ fn reorder_uris(uris: &mut Vec<String>, start: usize, insert_before: usize, leng
 #[cfg(test)]
 mod tests {
     use crate::store::FsPlaylistStore;
+    use retune_core::model::{NewTrack, SourceId};
     use retune_spotify::{
         client::{FakeTransport, Response},
         tokens::InMemoryTokenStore,
@@ -498,6 +546,75 @@ mod tests {
                 non_library_tracks: vec![],
             }],
         }
+    }
+
+    fn local_track(uri: &str, name: &str) -> NewTrack {
+        NewTrack {
+            uri: uri.into(),
+            source: SourceId::Music,
+            cat: "Genre".into(),
+            art: "Artist".into(),
+            alb: "Album".into(),
+            name: name.into(),
+            duration: std::time::Duration::from_secs(1),
+            track_no: None,
+            disc_no: None,
+        }
+    }
+
+    #[test]
+    fn local_uri_guard_accepts_spotify_and_names_local_tracks() {
+        assert_eq!(
+            reject_local_uris(&["spotify:track:one".into()], |_| None),
+            Ok(())
+        );
+        assert_eq!(
+            reject_local_uris(&["file:///tmp/Fallback%20name.mp3".into()], |_| {
+                Some("Library name".into())
+            }),
+            Err(
+                "1 local file track can't be added to Spotify: Library name. Local files stay local."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn local_uri_guard_bounds_reported_names() {
+        let uris = (1..=5)
+            .map(|index| format!("file:///tmp/Track%20{index}.mp3"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            reject_local_uris(&uris, |_| None),
+            Err("5 local file tracks can't be added to Spotify: Track 1.mp3, Track 2.mp3, Track 3.mp3 + 2 more. Local files stay local.".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn add_rejects_mixed_local_uris_before_transport_or_playlist_validation() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::default(),
+            tokens(retune_spotify::auth::SCOPES),
+        );
+        let mut library = Library::new();
+        library.add(local_track("file:///tmp/local.mp3", "Local song"));
+
+        let error = add(
+            &client,
+            &mut PlaylistCache::default(),
+            &library,
+            "missing",
+            vec!["spotify:track:one".into(), "file:///tmp/local.mp3".into()],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, PlaylistAddError::Local(message) if message.contains("Local song"))
+        );
+        assert!(client.transport().requests().is_empty());
     }
 
     #[tokio::test]

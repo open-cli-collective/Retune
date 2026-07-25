@@ -57,6 +57,8 @@ platform conventions for chrome instead.
   canonical store: adding to the library, adding tracks/albums to a playlist, and
   reordering playlist tracks all make real Spotify API writes. (Updated 2026-07-24
   with the playlist workstream.)
+  Local files are read-only inputs: any content mutation containing a local track
+  fails atomically before a request reaches Spotify.
 - **Everything in the user's Spotify library populates the local library.** Using
   Spotify's own "Add to library" should also add to the local overlay library.
 - **Play counts**: librespot cannot expose Spotify play counts, so this feature

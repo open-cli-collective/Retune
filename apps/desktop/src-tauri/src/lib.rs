@@ -1485,6 +1485,7 @@ async fn add_spotify_album(
     name: String,
     artist: String,
 ) -> Result<(), String> {
+    playlists::reject_local_uris(std::slice::from_ref(&uri), |_| Some(name.clone()))?;
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
     let mut tracks = MediaProvider::album_tracks(provider.as_ref(), &uri).await?;
@@ -1500,6 +1501,12 @@ async fn add_spotify_album(
         .iter()
         .map(|track| track.uri.clone())
         .collect::<Vec<_>>();
+    playlists::reject_local_uris(&uris, |uri| {
+        tracks
+            .iter()
+            .find(|track| track.uri == uri)
+            .map(|track| track.name.clone())
+    })?;
     provider.save_to_spotify(&uris).await?;
     mutate_library(&state, |library| {
         for track in tracks {
@@ -1653,6 +1660,7 @@ async fn playlist_add_inner(
     playlists::add(client.as_ref(), &mut cache, &library, &id, uris)
         .await
         .map_err(|error| match error {
+            playlists::PlaylistAddError::Local(message) => message,
             playlists::PlaylistAddError::Unknown(id) => format!("Unknown playlist {id}"),
             playlists::PlaylistAddError::ReadOnly => "Only your playlists can be changed.".into(),
             playlists::PlaylistAddError::Spotify(error) => playlist_error(&state, error),
@@ -1676,7 +1684,9 @@ async fn playlist_add_album(
     app: tauri::AppHandle,
     id: String,
     album_uri: String,
+    album_label: Option<String>,
 ) -> Result<(), String> {
+    playlists::reject_local_uris(std::slice::from_ref(&album_uri), |_| album_label.clone())?;
     let provider = provider_from(&app.state::<AppState>())?;
     let tracks = MediaProvider::album_tracks(provider.as_ref(), &album_uri).await?;
     let uris = tracks.into_iter().map(|track| track.uri).collect();

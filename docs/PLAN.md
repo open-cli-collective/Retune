@@ -143,6 +143,8 @@ struct AlbumKey { source: SourceId, art: String, alb: String }
   playlist-modify-public/private scopes — a scope expansion beyond the original
   grant, so connections made before it must detect stale scopes and prompt a
   reconnect instead of failing on a 403.
+  Local files are read-only inputs: any content mutation containing a local track
+  fails atomically before a request reaches Spotify.
 - Spotify tracks have **no genre**; artists do. Initial `cat` = first genre of the
   track's **first-listed (primary) artist**, else `"Unknown"`; artist lookups use
   **cached individual `/artists/{id}` requests** (the batch `?ids=` endpoint was
