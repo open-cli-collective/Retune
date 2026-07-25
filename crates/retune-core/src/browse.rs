@@ -82,8 +82,9 @@ pub fn facets(library: &Library, source: SourceId, selection: &Selection) -> Fac
     Facets { cats, arts, albs }
 }
 
-/// The track list for the current intersection of selections, in stable
-/// browse order: artist, album, disc, track, then library insertion order.
+/// The track list for the current intersection of selections. The narrowest
+/// selected facet keeps selection order; each group then uses stable browse
+/// order: artist, album, disc, track, then library insertion order.
 pub fn tracks<'a>(
     library: &'a Library,
     source: SourceId,
@@ -100,9 +101,9 @@ pub fn tracks<'a>(
         })
         .collect();
     tracks.sort_by(|left, right| {
-        left.art
-            .to_lowercase()
-            .cmp(&right.art.to_lowercase())
+        selection_rank(selection, left)
+            .cmp(&selection_rank(selection, right))
+            .then_with(|| left.art.to_lowercase().cmp(&right.art.to_lowercase()))
             .then_with(|| left.alb.to_lowercase().cmp(&right.alb.to_lowercase()))
             .then_with(|| left.disc_no.is_none().cmp(&right.disc_no.is_none()))
             .then_with(|| left.disc_no.cmp(&right.disc_no))
@@ -110,6 +111,20 @@ pub fn tracks<'a>(
             .then_with(|| left.track_no.cmp(&right.track_no))
     });
     tracks
+}
+
+fn selection_rank(selection: &Selection, track: &TrackRecord) -> usize {
+    let (values, value) = if !selection.alb.is_empty() {
+        (&selection.alb, &track.alb)
+    } else if !selection.art.is_empty() {
+        (&selection.art, &track.art)
+    } else {
+        (&selection.cat, &track.cat)
+    };
+    values
+        .iter()
+        .position(|selected| selected == value)
+        .unwrap_or_default()
 }
 
 fn selected(selection: &[String], value: &str) -> bool {
@@ -237,7 +252,7 @@ mod tests {
     fn multiple_categories_union_artist_facets_and_tracks() {
         let library = library();
         let mut selection = Selection::default();
-        selection.select_cat(vec!["Jazz".into(), "Rock".into()]);
+        selection.select_cat(vec!["Rock".into(), "Jazz".into()]);
 
         assert_eq!(
             facets(&library, SourceId::Music, &selection).arts,
@@ -247,7 +262,28 @@ mod tests {
             .into_iter()
             .map(|track| track.uri.as_str())
             .collect();
-        assert_eq!(uris, ["2", "3", "4", "5", "1"]);
+        assert_eq!(uris, ["3", "4", "5", "1", "2"]);
+    }
+
+    #[test]
+    fn most_specific_facet_preserves_selection_order() {
+        let library = library();
+        let mut selection = Selection::default();
+        selection.select_cat(vec!["Rock".into()]);
+        selection.select_art(vec!["beta".into(), "alpha".into()]);
+
+        let uris = tracks(&library, SourceId::Music, &selection)
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(uris, ["4", "5", "1", "3"]);
+
+        selection.select_alb(vec!["Zoo".into(), "Able".into()]);
+        let uris = tracks(&library, SourceId::Music, &selection)
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(uris, ["1", "4", "5"]);
     }
 
     #[test]
