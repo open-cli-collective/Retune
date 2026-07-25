@@ -107,9 +107,8 @@ type Track = {
 
 type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs'>
 type PlaylistTrack = Omit<PlaybackTrack, 'id'> & { id: number | null; rating: RatingView | null }
-type TrackMeta = { uri: string; name: string; art: string; alb: string; duration: number }
 type PlaylistSubject =
-  | { kind: 'tracks'; label: string; uris: string[]; meta?: TrackMeta[] }
+  | { kind: 'tracks'; label: string; uris: string[] }
   | { kind: 'album'; label: string; albumUri: string }
 
 const DRAG_TYPE = 'application/x-retune'
@@ -482,7 +481,7 @@ function App() {
   const player = usePlayer(state.connected, state.playing, dispatch)
   const addToPlaylist = useCallback((id: string, subject: PlaylistSubject) => subject.kind === 'album'
     ? invoke('playlist_add_album', { id, albumUri: subject.albumUri })
-    : invoke('playlist_add', { id, uris: subject.uris, meta: subject.meta }), [])
+    : invoke('playlist_add', { id, uris: subject.uris }), [])
   const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
     facetAnchors.current[facet] = anchor
     if (facet === 'cat') {
@@ -1093,7 +1092,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
         catch { onError('Could not read the dragged playlist item.') }
       } : undefined}
     >
-      <span>{playlist.owned ? '' : '☍'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
+      <span>{playlist.owned ? '' : '🌐'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
     </button>)}
   </aside>
 }
@@ -1109,6 +1108,7 @@ function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
   const [dragging, setDragging] = useState<number>()
   const [insertBefore, setInsertBefore] = useState<number>()
   const [reordering, setReordering] = useState(false)
+  const canReorder = playlist.owned && tracks.length === playlist.trackCount
   useEffect(() => {
     let active = true
     invoke<PlaylistTrack[]>('playlist_tracks', { id: playlist.id })
@@ -1131,24 +1131,24 @@ function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
     }
   }
   return <div className="playlist-view">
-    <header className="playlist-header"><strong>{playlist.name}</strong><span>{tracks.length} {tracks.length === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span></header>
+    <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span></header>
     <div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
     <div className="playlist-track-scroll">
       {tracks.map((track, index) => <div
         key={`${track.uri}-${index}`}
         className={`playlist-track-row ${insertBefore === index ? 'insert-before' : ''} ${playing?.trackId === queue[index].id ? 'playing' : ''}`}
-        draggable={playlist.owned && !reordering}
+        draggable={canReorder && !reordering}
         onDoubleClick={() => onPlay(queue[index].id, queue)}
-        onDragStart={playlist.owned ? (event) => {
+        onDragStart={canReorder ? (event) => {
           setDragging(index)
           event.dataTransfer.effectAllowed = 'move'
           event.dataTransfer.setData('text/plain', String(index))
         } : undefined}
-        onDragOver={playlist.owned ? (event) => { event.preventDefault(); setInsertBefore(index) } : undefined}
-        onDrop={playlist.owned ? (event) => { event.preventDefault(); void drop(index) } : undefined}
+        onDragOver={canReorder ? (event) => { event.preventDefault(); setInsertBefore(index) } : undefined}
+        onDrop={canReorder ? (event) => { event.preventDefault(); void drop(index) } : undefined}
         onDragEnd={() => { setDragging(undefined); setInsertBefore(undefined) }}
       ><span>{index + 1}</span><strong title={track.name}>{track.name}</strong><time>{formatTime(track.durationSecs)}</time><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span></div>)}
-      {playlist.owned && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} onDragOver={(event) => { event.preventDefault(); setInsertBefore(tracks.length) }} onDrop={(event) => { event.preventDefault(); void drop(tracks.length) }} />}
+      {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} onDragOver={(event) => { event.preventDefault(); setInsertBefore(tracks.length) }} onDrop={(event) => { event.preventDefault(); void drop(tracks.length) }} />}
     </div>
   </div>
 }
@@ -1209,7 +1209,7 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
     <div className="playlist-popover" role="dialog" aria-modal="true" aria-labelledby="add-to-playlist-title">
       <header><h2 id="add-to-playlist-title">Add to Playlist</h2><span>{subject.label}</span></header>
       <div className="playlist-popover-list">{playlists.map((playlist) => <button key={playlist.id} disabled={!playlist.owned || busy === playlist.id} onClick={() => void add(playlist.id)}>
-        <span>{playlist.contains ? '✓' : ''}</span><span>{playlist.owned ? '' : '☍'}</span><strong>{playlist.name}</strong>{!playlist.owned && <small>{playlist.owner}</small>}
+        <span>{playlist.contains ? '✓' : ''}</span><span>{playlist.owned ? '' : '🌐'}</span><strong>{playlist.name}</strong>{!playlist.owned && <small>{playlist.owner}</small>}
       </button>)}</div>
       <footer>{creating
         ? <input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
@@ -1481,7 +1481,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
     </header>
     <section className="spotify-page-section album-tracks">
       {page.tracks.map((track, index) => {
-        const subject: PlaylistSubject = { kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri], meta: [{ uri: track.uri, name: track.name, art: page.artist, alb: page.name, duration: track.durationSecs * 1000 }] }
+        const subject: PlaylistSubject = { kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri] }
         return <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} draggable className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)} onDragStart={(event) => {
           event.dataTransfer.effectAllowed = 'copy'
           event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(subject))
@@ -1653,7 +1653,7 @@ function SpotifySearch({ query, searching, results, onAdd, onPlay, onPlaylist, o
       <button onClick={() => {
         const track = menu.track
         setMenu(undefined)
-        onPlaylist({ kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri], meta: [{ uri: track.uri, name: track.name, art: track.artist, alb: track.alb, duration: track.durationSecs * 1000 }] })
+        onPlaylist({ kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri] })
       }}>Add to Playlist…</button>
       <button disabled={!menu.track.albumUri} onClick={() => { const track = menu.track; setMenu(undefined); if (track.albumUri) pushAlbum(track.albumUri, track.uri) }}>Go to Album</button>
     </ContextMenu>}

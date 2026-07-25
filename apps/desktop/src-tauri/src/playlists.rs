@@ -9,7 +9,7 @@ use retune_spotify::{
 use serde::{Deserialize, Serialize};
 
 const PLAYLIST_PAGE_SIZE: u32 = 50;
-const TRACK_PAGE_SIZE: u32 = 100;
+const TRACK_PAGE_SIZE: u32 = 50;
 pub const RECONNECT_HINT: &str = "Reconnect to Spotify to enable playlists (File → Account).";
 pub const STALE_PLAYLIST: &str = "Playlist changed elsewhere — reloaded.";
 
@@ -26,6 +26,8 @@ pub struct CachedPlaylist {
     pub owned: bool,
     #[serde(default)]
     pub owner: Option<String>,
+    #[serde(default)]
+    pub track_count: usize,
     pub tracks: Vec<String>,
     #[serde(default)]
     pub non_library_tracks: Vec<CachedTrack>,
@@ -64,6 +66,7 @@ pub async fn sync<T: Transport, S: TokenStore>(
                     cached.name = summary.name;
                     cached.owned = summary.owned;
                     cached.owner = Some(summary.owner.display_name.unwrap_or(summary.owner.id));
+                    cached.track_count = summary.tracks.total as usize;
                     cached.non_library_tracks.retain(|track| {
                         !library
                             .tracks()
@@ -71,8 +74,10 @@ pub async fn sync<T: Transport, S: TokenStore>(
                             .any(|library_track| library_track.uri == track.uri)
                     });
                     cached
-                } else {
+                } else if summary.owned {
                     fetch(client, summary, library).await?
+                } else {
+                    summary_only(summary)
                 },
             );
         }
@@ -89,14 +94,14 @@ pub async fn create<T: Transport, S: TokenStore>(
     cache: &mut PlaylistCache,
     name: &str,
 ) -> retune_spotify::Result<()> {
-    let user_id = client.me().await?.id;
-    let created = client.create_playlist(&user_id, name).await?;
+    let created = client.create_playlist(name).await?;
     cache.playlists.push(CachedPlaylist {
         id: created.id,
         name: created.name,
         snapshot_id: created.snapshot_id,
         owned: true,
         owner: None,
+        track_count: 0,
         tracks: vec![],
         non_library_tracks: vec![],
     });
@@ -109,36 +114,29 @@ pub async fn add<T: Transport, S: TokenStore>(
     library: &Library,
     id: &str,
     uris: Vec<String>,
-    meta: Vec<CachedTrack>,
 ) -> Result<(), PlaylistAddError> {
-    let playlist = cache
+    let index = cache
         .playlists
-        .iter_mut()
-        .find(|playlist| playlist.id == id)
+        .iter()
+        .position(|playlist| playlist.id == id)
         .ok_or_else(|| PlaylistAddError::Unknown(id.into()))?;
-    playlist.snapshot_id = client.add_playlist_tracks(id, &uris, None).await?;
-    // Our own add bumps the cached snapshot_id, so the next sync will not
-    // re-fetch this playlist — metadata for tracks outside the library must
-    // be captured here or it never will be.
-    for uri in &uris {
-        let in_library = library.tracks().iter().any(|track| &track.uri == uri);
-        let known = playlist
-            .non_library_tracks
-            .iter()
-            .any(|track| &track.uri == uri);
-        if !in_library && !known {
-            if let Some(track) = meta.iter().find(|track| &track.uri == uri) {
-                playlist.non_library_tracks.push(track.clone());
-            }
-        }
+    if !cache.playlists[index].owned {
+        return Err(PlaylistAddError::ReadOnly);
     }
-    playlist.tracks.extend(uris);
+    let snapshot_id = client.add_playlist_tracks(id, &uris, None).await?;
+    let (track_count, tracks, non_library_tracks) = fetch_tracks(client, id, library).await?;
+    let playlist = &mut cache.playlists[index];
+    playlist.snapshot_id = snapshot_id;
+    playlist.track_count = track_count;
+    playlist.tracks = tracks;
+    playlist.non_library_tracks = non_library_tracks;
     Ok(())
 }
 
 #[derive(Debug)]
 pub enum PlaylistAddError {
     Unknown(String),
+    ReadOnly,
     Spotify(Error),
 }
 
@@ -162,6 +160,16 @@ pub async fn reorder<T: Transport, S: TokenStore>(
         .iter()
         .find(|playlist| playlist.id == id)
         .ok_or_else(|| PlaylistReorderError::Other(format!("Unknown playlist {id}")))?;
+    if !playlist.owned {
+        return Err(PlaylistReorderError::Other(
+            "Only your playlists can be reordered.".into(),
+        ));
+    }
+    if playlist.tracks.len() != playlist.track_count {
+        return Err(PlaylistReorderError::Other(
+            "This playlist contains items Retune cannot safely reorder.".into(),
+        ));
+    }
     validate_reorder(
         playlist.tracks.len(),
         range_start,
@@ -255,6 +263,25 @@ async fn fetch<T: Transport, S: TokenStore>(
     summary: Playlist,
     library: &Library,
 ) -> retune_spotify::Result<CachedPlaylist> {
+    let (track_count, tracks, non_library_tracks) =
+        fetch_tracks(client, &summary.id, library).await?;
+    Ok(CachedPlaylist {
+        id: summary.id,
+        name: summary.name,
+        snapshot_id: summary.snapshot_id,
+        owned: summary.owned,
+        owner: Some(summary.owner.display_name.unwrap_or(summary.owner.id)),
+        track_count,
+        tracks,
+        non_library_tracks,
+    })
+}
+
+async fn fetch_tracks<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    id: &str,
+    library: &Library,
+) -> retune_spotify::Result<(usize, Vec<String>, Vec<CachedTrack>)> {
     let library_uris = library
         .tracks()
         .iter()
@@ -262,11 +289,11 @@ async fn fetch<T: Transport, S: TokenStore>(
         .collect::<HashSet<_>>();
     let mut tracks = vec![];
     let mut non_library_tracks = vec![];
+    let mut track_count = None;
     let mut offset = 0;
     loop {
-        let page = client
-            .playlist_tracks(&summary.id, offset, TRACK_PAGE_SIZE)
-            .await?;
+        let page = client.playlist_tracks(id, offset, TRACK_PAGE_SIZE).await?;
+        track_count.get_or_insert(page.total as usize);
         let count = (page.items.len() + page.skipped) as u32;
         for track in page.items {
             if !library_uris.contains(track.uri.as_str()) {
@@ -279,15 +306,20 @@ async fn fetch<T: Transport, S: TokenStore>(
             break;
         }
     }
-    Ok(CachedPlaylist {
+    Ok((track_count.unwrap_or_default(), tracks, non_library_tracks))
+}
+
+fn summary_only(summary: Playlist) -> CachedPlaylist {
+    CachedPlaylist {
         id: summary.id,
         name: summary.name,
         snapshot_id: summary.snapshot_id,
         owned: summary.owned,
         owner: Some(summary.owner.display_name.unwrap_or(summary.owner.id)),
-        tracks,
-        non_library_tracks,
-    })
+        track_count: summary.tracks.total as usize,
+        tracks: vec![],
+        non_library_tracks: vec![],
+    }
 }
 
 fn cached_track(track: &Track) -> CachedTrack {
@@ -364,6 +396,7 @@ mod tests {
                 snapshot_id: "same".into(),
                 owned: true,
                 owner: None,
+                track_count: 2,
                 tracks: vec!["spotify:track:1".into(), "spotify:track:2".into()],
                 non_library_tracks: vec![],
             }],
@@ -374,15 +407,12 @@ mod tests {
     async fn create_inserts_empty_owned_playlist_and_persists() {
         let client = SpotifyClient::new(
             "client",
-            FakeTransport::new([
-                Response::json(200, serde_json::json!({"id": "user"})),
-                Response::json(
-                    201,
-                    serde_json::json!({
-                        "id": "new", "name": "Road Trip", "snapshot_id": "snapshot"
-                    }),
-                ),
-            ]),
+            FakeTransport::new([Response::json(
+                201,
+                serde_json::json!({
+                    "id": "new", "name": "Road Trip", "snapshot_id": "snapshot"
+                }),
+            )]),
             tokens(retune_spotify::auth::SCOPES),
         );
         let mut cache = PlaylistCache::default();
@@ -395,6 +425,37 @@ mod tests {
         assert_eq!(store.load().unwrap(), cache);
         assert_eq!(cache.playlists[0].tracks, Vec::<String>::new());
         assert!(cache.playlists[0].owned);
+    }
+
+    #[tokio::test]
+    async fn followed_playlist_keeps_summary_without_fetching_inaccessible_items() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(200, serde_json::json!({"id": "user"})),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "items": [{
+                            "id": "followed", "name": "Followed", "snapshot_id": "snapshot",
+                            "owner": {"id": "other", "display_name": "Other"},
+                            "items": {"total": 12}
+                        }],
+                        "next": null
+                    }),
+                ),
+            ]),
+            tokens(retune_spotify::auth::SCOPES),
+        );
+
+        let synced = sync(&client, &PlaylistCache::default(), &Library::new())
+            .await
+            .unwrap();
+
+        assert_eq!(synced.playlists[0].track_count, 12);
+        assert!(!synced.playlists[0].owned);
+        assert!(synced.playlists[0].tracks.is_empty());
+        assert_eq!(client.transport().requests().len(), 2);
     }
 
     #[tokio::test]

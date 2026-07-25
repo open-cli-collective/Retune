@@ -528,6 +528,7 @@ mod tests {
                 snapshot_id: "snapshot".into(),
                 owned: false,
                 owner: Some("Owner Name".into()),
+                track_count: 0,
                 tracks: vec![],
                 non_library_tracks: vec![],
             }],

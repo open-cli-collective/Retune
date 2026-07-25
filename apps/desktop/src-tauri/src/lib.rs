@@ -1518,7 +1518,7 @@ fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec
             owned: playlist.owned,
             owner: playlist.owner.clone(),
             contains: !uris.is_empty() && uris.iter().all(|uri| playlist.tracks.contains(uri)),
-            track_count: playlist.tracks.len(),
+            track_count: playlist.track_count,
         })
         .collect()
 }
@@ -1613,7 +1613,6 @@ async fn playlist_add_inner(
     app: &tauri::AppHandle,
     id: String,
     uris: Vec<String>,
-    meta: Vec<playlists::CachedTrack>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut cache = state
@@ -1627,10 +1626,11 @@ async fn playlist_add_inner(
         .expect("library mutex poisoned")
         .clone();
     let client = provider_from(&state)?;
-    playlists::add(client.as_ref(), &mut cache, &library, &id, uris, meta)
+    playlists::add(client.as_ref(), &mut cache, &library, &id, uris)
         .await
         .map_err(|error| match error {
             playlists::PlaylistAddError::Unknown(id) => format!("Unknown playlist {id}"),
+            playlists::PlaylistAddError::ReadOnly => "Only your playlists can be changed.".into(),
             playlists::PlaylistAddError::Spotify(error) => playlist_error(&state, error),
         })?;
     state
@@ -1643,13 +1643,8 @@ async fn playlist_add_inner(
 }
 
 #[tauri::command]
-async fn playlist_add(
-    app: tauri::AppHandle,
-    id: String,
-    uris: Vec<String>,
-    meta: Option<Vec<playlists::CachedTrack>>,
-) -> Result<(), String> {
-    playlist_add_inner(&app, id, uris, meta.unwrap_or_default()).await
+async fn playlist_add(app: tauri::AppHandle, id: String, uris: Vec<String>) -> Result<(), String> {
+    playlist_add_inner(&app, id, uris).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1660,18 +1655,8 @@ async fn playlist_add_album(
 ) -> Result<(), String> {
     let provider = provider_from(&app.state::<AppState>())?;
     let tracks = MediaProvider::album_tracks(provider.as_ref(), &album_uri).await?;
-    let meta = tracks
-        .iter()
-        .map(|track| playlists::CachedTrack {
-            uri: track.uri.clone(),
-            name: track.name.clone(),
-            art: track.art.clone(),
-            alb: track.alb.clone(),
-            duration: track.duration.as_millis() as u64,
-        })
-        .collect();
     let uris = tracks.into_iter().map(|track| track.uri).collect();
-    playlist_add_inner(&app, id, uris, meta).await
+    playlist_add_inner(&app, id, uris).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2349,7 +2334,7 @@ pub fn run() {
                 sync_orchestrator: SyncOrchestrator::default(),
             });
             playback.listen(app.handle().clone());
-            if activate_local || startup_action != StartupAction::Nothing {
+            if activate_local || connected || startup_action != StartupAction::Nothing {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if activate_local {
@@ -2361,7 +2346,10 @@ pub fn run() {
                     let result = match startup_action {
                         StartupAction::Sync => sync_spotify(&handle).await,
                         StartupAction::Connect => connect_spotify(handle.clone()).await,
-                        StartupAction::Nothing => Ok(()),
+                        StartupAction::Nothing => match provider_from(&handle.state::<AppState>()) {
+                            Ok(client) => sync_playlists(&handle, client.as_ref()).await,
+                            Err(error) => Err(error),
+                        },
                     };
                     if let Err(error) = result {
                         notify_error(&handle, error);
@@ -2488,6 +2476,7 @@ mod tests {
                 snapshot_id: "old".into(),
                 owned: true,
                 owner: None,
+                track_count: 2,
                 tracks: vec!["one".into(), "two".into()],
                 non_library_tracks: vec![],
             }],
@@ -2575,7 +2564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playlist_album_add_caches_every_resolved_track() {
+    async fn playlist_album_add_reloads_canonical_tracks() {
         let client = playlist_client([
             Response::json(
                 200,
@@ -2588,48 +2577,62 @@ mod tests {
                 }),
             ),
             Response::json(201, serde_json::json!({"snapshot_id": "new"})),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [
+                        {"is_local": false, "item": {
+                            "uri": "spotify:track:external", "name": "External", "artists": []
+                        }},
+                        {"is_local": false, "item": {
+                            "uri": "spotify:track:one", "name": "One", "artists": []
+                        }},
+                        {"is_local": false, "item": {
+                            "uri": "spotify:track:two", "name": "Two", "artists": []
+                        }}
+                    ],
+                    "next": null, "total": 3
+                }),
+            ),
         ]);
         let tracks = MediaProvider::album_tracks(&client, "spotify:album:album")
             .await
             .unwrap();
         let mut cache = playlist_cache();
+        cache.playlists[0].track_count = 0;
+        cache.playlists[0].tracks.clear();
 
-        let meta = tracks
-            .iter()
-            .map(|track| playlists::CachedTrack {
-                uri: track.uri.clone(),
-                name: track.name.clone(),
-                art: track.art.clone(),
-                alb: track.alb.clone(),
-                duration: track.duration.as_millis() as u64,
-            })
-            .collect();
         playlists::add(
             &client,
             &mut cache,
             &Library::new(),
             "playlist",
             tracks.into_iter().map(|track| track.uri).collect(),
-            meta,
         )
         .await
         .unwrap();
 
         assert_eq!(
             cache.playlists[0].tracks,
-            ["one", "two", "spotify:track:one", "spotify:track:two"]
+            [
+                "spotify:track:external",
+                "spotify:track:one",
+                "spotify:track:two"
+            ]
         );
-        // Neither track is in the (empty) library, so both must be captured —
-        // the snapshot_id our add stored means sync will never refetch them.
         assert_eq!(
             cache.playlists[0]
                 .non_library_tracks
                 .iter()
                 .map(|track| track.uri.as_str())
                 .collect::<Vec<_>>(),
-            ["spotify:track:one", "spotify:track:two"]
+            [
+                "spotify:track:external",
+                "spotify:track:one",
+                "spotify:track:two"
+            ]
         );
-        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(client.transport().requests().len(), 3);
     }
 
     #[test]

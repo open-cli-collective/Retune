@@ -233,10 +233,10 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         Ok(page)
     }
 
-    pub async fn create_playlist(&self, user_id: &str, name: &str) -> Result<CreatedPlaylist> {
+    pub async fn create_playlist(&self, name: &str) -> Result<CreatedPlaylist> {
         self.json(
             Method::Post,
-            &format!("/users/{user_id}/playlists"),
+            "/me/playlists",
             serde_json::to_vec(&CreatePlaylist {
                 name,
                 public: false,
@@ -252,14 +252,14 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         offset: u32,
         limit: u32,
     ) -> Result<Page<Track>> {
-        let fields = "items(is_local,track(uri,name,artists(id,name),album(id,uri,name,images(url)),duration_ms)),next,total";
+        let fields = "items(is_local,item(uri,name,artists(id,name),album(id,uri,name,images(url)),duration_ms)),next,total";
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("offset", &offset.to_string())
             .append_pair("limit", &limit.to_string())
             .append_pair("fields", fields)
             .finish();
         let page: Page<PlaylistTrackItem> = self
-            .get(&format!("/playlists/{playlist_id}/tracks?{query}"))
+            .get(&format!("/playlists/{playlist_id}/items?{query}"))
             .await?;
         let total = page.total;
         let next = page.next;
@@ -302,7 +302,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             let response: SnapshotResponse = self
                 .json(
                     Method::Post,
-                    &format!("/playlists/{playlist_id}/tracks"),
+                    &format!("/playlists/{playlist_id}/items"),
                     serde_json::to_vec(&AddPlaylistTracks {
                         uris: chunk,
                         position,
@@ -325,7 +325,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     ) -> Result<String> {
         self.json::<SnapshotResponse>(
             Method::Put,
-            &format!("/playlists/{playlist_id}/tracks"),
+            &format!("/playlists/{playlist_id}/items"),
             serde_json::to_vec(&ReorderPlaylistTracks {
                 range_start,
                 insert_before,
@@ -958,6 +958,7 @@ pub struct Playlist {
     pub name: String,
     pub snapshot_id: String,
     pub owner: PlaylistOwner,
+    #[serde(rename = "items", alias = "tracks")]
     pub tracks: PlaylistTrackCount,
     #[serde(skip)]
     pub owned: bool,
@@ -974,6 +975,7 @@ pub struct CreatedPlaylist {
 struct PlaylistTrackItem {
     #[serde(default)]
     is_local: bool,
+    #[serde(rename = "item", alias = "track")]
     track: Option<Track>,
 }
 
@@ -1535,7 +1537,7 @@ mod tests {
                 serde_json::json!({
                     "items": [{
                         "id": "mine", "name": "Mine", "snapshot_id": "s1",
-                        "owner": {"id": "user"}, "tracks": {"total": 3}
+                        "owner": {"id": "user"}, "items": {"total": 3}
                     }],
                     "next": "next", "total": 2
                 }),
@@ -1545,7 +1547,7 @@ mod tests {
                 serde_json::json!({
                     "items": [{
                         "id": "theirs", "name": "Theirs", "snapshot_id": "s2",
-                        "owner": {"id": "other"}, "tracks": {"total": 0}
+                        "owner": {"id": "other"}, "items": {"total": 0}
                     }],
                     "next": null, "total": 2
                 }),
@@ -1554,17 +1556,17 @@ mod tests {
                 200,
                 serde_json::json!({
                     "items": [
-                        {"is_local": false, "track": {
+                        {"is_local": false, "item": {
                             "uri": "spotify:track:1", "name": "One",
                             "artists": [{"id": "artist", "name": "Artist"}],
                             "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "images": []},
                             "duration_ms": 1234
                         }},
-                        {"is_local": true, "track": {
+                        {"is_local": true, "item": {
                             "uri": "spotify:local:1", "name": "Local",
                             "artists": [], "album": null, "duration_ms": 1
                         }},
-                        {"is_local": false, "track": null}
+                        {"is_local": false, "item": null}
                     ],
                     "next": null, "total": 3
                 }),
@@ -1586,7 +1588,7 @@ mod tests {
         let requests = client.transport().requests();
         assert!(requests[0].url.ends_with("/me/playlists?offset=0&limit=1"));
         let tracks_url = url::Url::parse(&requests[2].url).unwrap();
-        assert_eq!(tracks_url.path(), "/v1/playlists/mine/tracks");
+        assert_eq!(tracks_url.path(), "/v1/playlists/mine/items");
         assert_eq!(
             tracks_url
                 .query_pairs()
@@ -1618,12 +1620,12 @@ mod tests {
             tokens(),
         );
 
-        let created = client.create_playlist("user", "Road Trip").await.unwrap();
+        let created = client.create_playlist("Road Trip").await.unwrap();
 
         assert_eq!(created.id, "playlist");
         let request = &client.transport().requests()[0];
         assert_eq!(request.method, Method::Post);
-        assert!(request.url.ends_with("/users/user/playlists"));
+        assert!(request.url.ends_with("/me/playlists"));
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
             serde_json::json!({"name": "Road Trip", "public": false})
@@ -1659,6 +1661,11 @@ mod tests {
 
         let requests = client.transport().requests();
         assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.ends_with("/playlists/playlist/items"))
+        );
         assert!(
             requests[..2]
                 .iter()
