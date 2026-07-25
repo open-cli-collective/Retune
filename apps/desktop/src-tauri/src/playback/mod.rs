@@ -59,6 +59,7 @@ impl Snapshot {
 #[serde(rename_all = "camelCase")]
 pub struct PlayerStateEvent {
     pub track_id: Option<u64>,
+    pub uri: Option<String>,
     pub elapsed: u64,
     pub is_playing: bool,
     pub external: bool,
@@ -593,7 +594,14 @@ impl Playback {
             match action {
                 ReducerAction::Emit(event) => {
                     let _ = app.emit("player-state", &event);
-                    app.state::<crate::AppState>().media_keys.update(&event);
+                    if app.state::<crate::AppState>().media_keys.update(&event)
+                        && event.uri.is_some()
+                    {
+                        tauri::async_runtime::spawn(crate::publish_media_artwork(
+                            app.clone(),
+                            event.clone(),
+                        ));
+                    }
                 }
                 ReducerAction::Error(error) => {
                     let _ = app.emit("operation-error", error);
@@ -703,6 +711,7 @@ fn local_event(
 ) -> PlayerStateEvent {
     PlayerStateEvent {
         track_id: Some(track.id),
+        uri: Some(track.uri.clone()),
         elapsed,
         is_playing,
         external: false,
@@ -717,6 +726,7 @@ fn local_event(
 pub fn empty_event(external: bool) -> PlayerStateEvent {
     PlayerStateEvent {
         track_id: None,
+        uri: None,
         elapsed: 0,
         is_playing: false,
         external,

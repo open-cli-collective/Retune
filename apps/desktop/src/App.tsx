@@ -116,6 +116,7 @@ const DRAG_TYPE = 'application/x-retune'
 
 type PlayerState = {
   trackId: number | null
+  uri: string | null
   elapsed: number
   isPlaying: boolean
   external: boolean
@@ -304,6 +305,7 @@ function reducer(state: State, action: Action): State {
         selectionAnchor: action.id,
         playing: {
           trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
+          uri: action.queue.find((track) => track.id === action.id)?.uri ?? null,
           external: false, name: null, art: null, alb: null, durationSecs: null,
           volumeSupported: false, simulated: true,
         },
@@ -963,6 +965,8 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
   </div>
 }
 
+const artworkCache = new Map<string, string | null>()
+
 function TransportBar({ playing, track, query, scope, theme, connected, volume, repeat, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onRepeat, onVolume, onSeek, onTheme }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']; theme: Theme
   connected: boolean; volume: number; repeat: RepeatMode
@@ -978,6 +982,30 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
     durationSecs: playing.durationSecs ?? 0,
   } : track
   const duration = shown?.durationSecs ?? 0
+  const uri = playing?.external ? playing.uri : track?.uri
+  const [artwork, setArtwork] = useState<string | null>(null)
+  useEffect(() => {
+    let current = true
+    if (!uri) {
+      setArtwork(null)
+      return () => { current = false }
+    }
+    if (artworkCache.has(uri)) {
+      setArtwork(artworkCache.get(uri) ?? null)
+      return () => { current = false }
+    }
+    setArtwork(null)
+    invoke<string | null>('track_artwork', { uri })
+      .then((url) => {
+        artworkCache.set(uri, url)
+        if (current) setArtwork(url)
+      })
+      .catch(() => {
+        artworkCache.set(uri, null)
+        if (current) setArtwork(null)
+      })
+    return () => { current = false }
+  }, [uri])
   const volumeVisible = !connected || playing?.volumeSupported
   return <header className="transport">
     <div className="transport-controls">
@@ -987,19 +1015,22 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
       <button className={`repeat-button ${repeat !== 'off' ? 'active' : ''}`} aria-label={`Repeat: ${repeat}`} title={`Repeat: ${repeat}`} onClick={onRepeat}>⟳{repeat === 'one' && <sup>1</sup>}</button>
       {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
     </div>
-    <div className={`lcd ${playing?.external ? 'external' : ''}`}>
-      <Marquee text={shown?.name ?? 'Retune'} strong />
-      <Marquee text={shown ? `${shown.art} — ${shown.alb}` : 'Not Playing'} />
-      <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress
-        max={duration || 1}
-        value={elapsed}
-        onClick={(event) => {
-          if (!shown || !duration) return
-          const bar = event.currentTarget.getBoundingClientRect()
-          const fraction = Math.min(1, Math.max(0, (event.clientX - bar.left) / bar.width))
-          onSeek(Math.round(fraction * duration))
-        }}
-      /><time>{shown ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
+    <div className={`lcd ${playing?.external ? 'external' : ''} ${shown ? '' : 'idle'}`}>
+      <div className="lcd-artwork">{artwork ? <img src={artwork} alt="" /> : <span aria-hidden="true">♪</span>}</div>
+      <div className="lcd-copy">
+        <Marquee text={shown?.name ?? 'Retune'} strong />
+        <div className="lcd-meta">{shown ? <><span className="lcd-artist">{shown.art}</span><span className="lcd-album"> · {shown.alb}</span></> : 'Not Playing'}</div>
+        <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress
+          max={duration || 1}
+          value={elapsed}
+          onClick={(event) => {
+            if (!shown || !duration) return
+            const bar = event.currentTarget.getBoundingClientRect()
+            const fraction = Math.min(1, Math.max(0, (event.clientX - bar.left) / bar.width))
+            onSeek(Math.round(fraction * duration))
+          }}
+        /><time>{shown ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
+      </div>
     </div>
     <div className="search-area">
       <div className="scope-pills" aria-label="Search scope">

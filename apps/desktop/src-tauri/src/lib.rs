@@ -10,7 +10,7 @@ mod sync;
 mod sync_orchestrator;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{Read, Write},
     sync::{Arc, Mutex},
@@ -33,7 +33,7 @@ use retune_core::{
 };
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
-    client::{Album, HttpTransport, SpotifyClient},
+    client::{Album, HttpTransport, SpotifyClient, Transport},
     normalize::UNCATEGORIZED,
     tokens::{CachedTokenStore, KeychainTokenStore, TokenStore, Tokens},
 };
@@ -65,6 +65,7 @@ struct AppState {
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
+    artwork_cache: Mutex<HashMap<String, Option<String>>>,
     playback: Arc<Playback>,
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
@@ -877,6 +878,7 @@ fn set_auto_connect(app: &tauri::AppHandle, auto_connect: bool) -> Result<(), St
 fn empty_player_state() -> PlayerStateEvent {
     PlayerStateEvent {
         track_id: None,
+        uri: None,
         elapsed: 0,
         is_playing: false,
         external: false,
@@ -897,6 +899,67 @@ fn provider_from(state: &AppState) -> Result<Arc<SpotifyProvider>, String> {
         .ok_or_else(|| {
             "Spotify Client ID is missing. Add it in Preferences, then try again.".into()
         })
+}
+
+fn track_id(uri: &str) -> Option<&str> {
+    uri.strip_prefix("spotify:track:")
+        .filter(|id| !id.is_empty() && !id.contains(':'))
+}
+
+async fn resolve_track_artwork<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    cache: &Mutex<HashMap<String, Option<String>>>,
+    uri: &str,
+) -> Option<String> {
+    let id = track_id(uri)?;
+    if let Some(cached) = cache
+        .lock()
+        .expect("artwork cache mutex poisoned")
+        .get(uri)
+        .cloned()
+    {
+        return cached;
+    }
+    let artwork = client
+        .track(id)
+        .await
+        .ok()
+        .and_then(|track| track.album)
+        .and_then(|album| image_url(&album.images));
+    let mut cache = cache.lock().expect("artwork cache mutex poisoned");
+    if cache.len() >= 512 {
+        cache.clear();
+    }
+    cache.insert(uri.into(), artwork.clone());
+    artwork
+}
+
+#[tauri::command]
+async fn track_artwork(
+    state: tauri::State<'_, AppState>,
+    uri: String,
+) -> Result<Option<String>, String> {
+    let Ok(provider) = provider_from(&state) else {
+        return Ok(None);
+    };
+    Ok(resolve_track_artwork(provider.as_ref(), &state.artwork_cache, &uri).await)
+}
+
+pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerStateEvent) {
+    let state = app.state::<AppState>();
+    let Ok(provider) = provider_from(&state) else {
+        return;
+    };
+    let Some(url) = resolve_track_artwork(
+        provider.as_ref(),
+        &state.artwork_cache,
+        event.uri.as_deref().unwrap_or_default(),
+    )
+    .await
+    else {
+        return;
+    };
+    state.media_keys.update_artwork(&event, &url);
 }
 
 async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
@@ -2172,7 +2235,8 @@ pub fn run() {
             player_seek,
             player_set_volume,
             set_repeat,
-            set_audio_settings
+            set_audio_settings,
+            track_artwork
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -2279,6 +2343,7 @@ pub fn run() {
                 recovery_notice: Mutex::new(recovery_notice),
                 token_store,
                 spotify: Mutex::new(spotify),
+                artwork_cache: Mutex::default(),
                 playback: Arc::clone(&playback),
                 media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
@@ -2442,6 +2507,61 @@ mod tests {
                 scopes: auth::SCOPES.into(),
             })),
         )
+    }
+
+    #[tokio::test]
+    async fn track_artwork_resolves_smallest_usable_image_and_caches() {
+        let client = playlist_client([
+            Response::json(
+                200,
+                serde_json::json!({
+                    "uri": "spotify:track:track",
+                    "name": "Track",
+                    "album": {
+                        "id": "album",
+                        "uri": "spotify:album:album",
+                        "name": "Album",
+                        "images": [
+                            {"url": "large", "width": 300},
+                            {"url": "small", "width": 64},
+                            {"url": "tiny", "width": 63}
+                        ]
+                    }
+                }),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"uri": "spotify:track:missing", "name": "Missing"}),
+            ),
+        ]);
+        let cache = Mutex::default();
+
+        assert_eq!(track_id("spotify:track:track"), Some("track"));
+        assert_eq!(track_id("spotify:album:album"), None);
+        assert_eq!(track_id("spotify:track:"), None);
+        assert_eq!(
+            resolve_track_artwork(&client, &cache, "spotify:track:track")
+                .await
+                .as_deref(),
+            Some("small")
+        );
+        assert_eq!(
+            resolve_track_artwork(&client, &cache, "spotify:track:track").await,
+            Some("small".into())
+        );
+        assert_eq!(
+            resolve_track_artwork(&client, &cache, "spotify:album:album").await,
+            None
+        );
+        assert_eq!(
+            resolve_track_artwork(&client, &cache, "spotify:track:missing").await,
+            None
+        );
+        assert_eq!(
+            resolve_track_artwork(&client, &cache, "spotify:track:missing").await,
+            None
+        );
+        assert_eq!(client.transport().requests().len(), 2);
     }
 
     #[test]

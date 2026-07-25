@@ -242,6 +242,7 @@ impl EventReducer {
         self.state = if state.external {
             PlayerStateEvent {
                 track_id: None,
+                uri: state.uri,
                 elapsed: u64::from(state.position_ms) / 1000,
                 is_playing: state.is_playing,
                 external: true,

@@ -418,6 +418,10 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         Ok(album)
     }
 
+    pub async fn track(&self, id: &str) -> Result<Track> {
+        self.get(&format!("/tracks/{id}")).await
+    }
+
     pub async fn artist_top_tracks(&self, id: &str) -> Result<Vec<Track>> {
         self.get::<TopTracks>(&format!("/artists/{id}/top-tracks"))
             .await

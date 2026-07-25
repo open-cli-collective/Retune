@@ -16,7 +16,13 @@ struct MediaControlsState {
     metadata_key: Option<MetadataKey>,
 }
 
-type MetadataKey = (Option<String>, Option<String>, Option<String>, Option<u64>);
+type MetadataKey = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+);
 
 impl MediaKeys {
     pub fn spawn(app: tauri::AppHandle) -> Self {
@@ -44,12 +50,13 @@ impl MediaKeys {
         }
     }
 
-    pub fn update(&self, event: &PlayerStateEvent) {
+    pub fn update(&self, event: &PlayerStateEvent) -> bool {
         let Some(controls) = &self.controls else {
-            return;
+            return false;
         };
         let mut state = controls.lock().expect("media controls mutex poisoned");
         let metadata_key = metadata_key(event);
+        let mut metadata_changed = false;
         if state.metadata_key != metadata_key {
             let metadata = if metadata_key.is_some() {
                 MediaMetadata {
@@ -66,10 +73,31 @@ impl MediaKeys {
                 log::warn!("Media metadata update failed: {error}");
             } else {
                 state.metadata_key = metadata_key;
+                metadata_changed = true;
             }
         }
         if let Err(error) = state.controls.set_playback(media_playback(event)) {
             log::warn!("Media playback state update failed: {error}");
+        }
+        metadata_changed
+    }
+
+    pub fn update_artwork(&self, event: &PlayerStateEvent, url: &str) {
+        let Some(controls) = &self.controls else {
+            return;
+        };
+        let mut state = controls.lock().expect("media controls mutex poisoned");
+        if state.metadata_key != metadata_key(event) {
+            return;
+        }
+        if let Err(error) = state.controls.set_metadata(MediaMetadata {
+            title: event.name.as_deref(),
+            artist: event.art.as_deref(),
+            album: event.alb.as_deref(),
+            duration: event.duration_secs.map(Duration::from_secs),
+            cover_url: Some(url),
+        }) {
+            log::warn!("Media artwork update failed: {error}");
         }
     }
 }
@@ -119,6 +147,7 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
 fn metadata_key(event: &PlayerStateEvent) -> Option<MetadataKey> {
     has_track(event).then(|| {
         (
+            event.uri.clone(),
             event.name.clone(),
             event.art.clone(),
             event.alb.clone(),
@@ -150,6 +179,7 @@ mod tests {
     fn event(track_id: Option<u64>, name: Option<&str>, is_playing: bool) -> PlayerStateEvent {
         PlayerStateEvent {
             track_id,
+            uri: track_id.map(|id| format!("spotify:track:{id}")),
             elapsed: 42,
             is_playing,
             external: false,
