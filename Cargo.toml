@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/retune-audio",
     "crates/retune-core",
     "crates/retune-spotify",
     "apps/desktop/src-tauri",

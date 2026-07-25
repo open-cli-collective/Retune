@@ -1,0 +1,12 @@
+[package]
+name = "retune-audio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lofty = "0.24"
+log = "0.4"
+rodio = { version = "0.21.1", default-features = false, features = ["playback"] }
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "flac", "vorbis", "ogg", "aac", "isomp4", "alac", "pcm", "wav", "aiff", "mkv"] }
+symphonia-adapter-libopus = "=0.2.5"
+thiserror = "2"
