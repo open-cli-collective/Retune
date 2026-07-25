@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:#141517; font-family:"Lucida Grande","Helvetica Neue",Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased; color:#e9e9ec; }
+  @keyframes lcdmarquee { 0%,8% { transform:translateX(0); } 92%,100% { transform:translateX(calc(-100% + 320px)); } }
+  @keyframes lcdmarquee2 { 0% { transform:translateX(0); } 100% { transform:translateX(-50%); } }
+</style>
+</helmet>
+
+<div style="padding:40px 48px 80px; display:flex; flex-direction:column; gap:14px;">
+  <div style="font-size:20px; font-weight:700;">Now-Playing LCD — layout options</div>
+  <div style="font-size:13px; color:#9aa0a8; max-width:720px; line-height:1.6;">The current single-line LCD truncates both the title and the artist/album. Each option below is shown at realistic transport width (≈560px). Adopting any of the taller ones means growing the transport bar from 60px. Refer to options by their badge id in chat.</div>
+
+  <!-- current, for reference -->
+  <div id="0a" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
+    <div style="display:flex; align-items:center; gap:10px;"><span style="font-size:11px; font-weight:700; background:#3a3c41; color:#c9ccd2; padding:2px 8px; border-radius:5px;">0a</span><span style="font-size:13px; color:#8b909a;">Current — single line (for reference)</span></div>
+    <div style="width:560px; height:40px; background:linear-gradient(#33363c,#282a2e); border:1px solid #45474c; border-radius:6px; box-shadow:inset 0 1px 2px rgba(0,0,0,.3); display:flex; flex-direction:column; justify-content:center; padding:4px 14px;">
+      <div style="display:flex; justify-content:space-between; align-items:baseline; font-size:12px; color:#dfe3ea;">
+        <span style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">On a Good Day (Metropolis) - Extended Mix</span>
+        <span style="color:#8b909a; font-size:11px; flex:0 0 auto; margin-left:12px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Above &amp; Beyond — On A Good Day</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin-top:3px;">
+        <span style="font-size:10px; color:#8b909a; width:30px;">2:29</span>
+        <div style="flex:1; height:4px; border-radius:2px; background:#4a4c52;"><div style="width:46%; height:4px; border-radius:2px; background:#5a86c4;"></div></div>
+        <span style="font-size:10px; color:#8b909a; width:34px; text-align:right;">-5:23</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="height:1px; background:#2a2c30; margin:14px 0;"></div>
+
+  <div style="display:flex; flex-wrap:wrap; gap:36px;">
+
+    <!-- 1a two-line stack -->
+    <div id="1a" style="display:flex; flex-direction:column; gap:10px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="font-size:11px; font-weight:700; background:#3f7fd6; color:#fff; padding:2px 8px; border-radius:5px;">1a</span><span style="font-size:13px; color:#c9ccd2; font-weight:600;">Two-line stack</span></div>
+      <div style="font-size:11.5px; color:#8b909a; max-width:560px; line-height:1.5;">Title owns line one; artist and album share line two, artist emphasized. Times flank the bar. Full title, no fighting for width.</div>
+      <div style="width:560px; height:66px; background:linear-gradient(#33363c,#282a2e); border:1px solid #45474c; border-radius:6px; box-shadow:inset 0 1px 2px rgba(0,0,0,.3); display:flex; flex-direction:column; justify-content:center; padding:8px 14px; gap:4px;">
+        <div style="font-weight:600; font-size:12.5px; line-height:16px; color:#f0f2f6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">On a Good Day (Metropolis) - Extended Mix</div>
+        <div style="font-size:11px; line-height:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="color:#a9c2e8;">Above &amp; Beyond</span><span style="color:#6f757e;"> — On A Good Day</span></div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+          <span style="font-size:10px; color:#8b909a; width:30px;">2:29</span>
+          <div style="flex:1; height:4px; border-radius:2px; background:#4a4c52;"><div style="width:46%; height:4px; border-radius:2px; background:#5a86c4;"></div></div>
+          <span style="font-size:10px; color:#8b909a; width:34px; text-align:right;">-5:23</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1b three-line labeled -->
+    <div id="1b" style="display:flex; flex-direction:column; gap:10px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="font-size:11px; font-weight:700; background:#3f7fd6; color:#fff; padding:2px 8px; border-radius:5px;">1b</span><span style="font-size:13px; color:#c9ccd2; font-weight:600;">Three lines, own rows</span></div>
+      <div style="font-size:11.5px; color:#8b909a; max-width:560px; line-height:1.5;">Each field on its own row with a hair of hierarchy. Progress moves to a slim bar pinned at the bottom edge. Most legible; tallest.</div>
+      <div style="width:560px; height:70px; background:linear-gradient(#33363c,#282a2e); border:1px solid #45474c; border-radius:6px; box-shadow:inset 0 1px 2px rgba(0,0,0,.3); display:flex; flex-direction:column; padding:9px 14px 0; position:relative; overflow:hidden;">
+        <div style="font-weight:600; font-size:12.5px; color:#f0f2f6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">On a Good Day (Metropolis) - Extended Mix</div>
+        <div style="font-size:11px; color:#c1c5cc; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Above &amp; Beyond</div>
+        <div style="font-size:10.5px; color:#7a8089; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">On A Good Day</div>
+        <div style="position:absolute; left:0; right:0; bottom:0; display:flex; align-items:center; gap:8px; padding:0 14px 6px;">
+          <span style="font-size:9.5px; color:#8b909a; width:28px;">2:29</span>
+          <div style="flex:1; height:3px; border-radius:2px; background:#4a4c52;"><div style="width:46%; height:3px; border-radius:2px; background:#5a86c4;"></div></div>
+          <span style="font-size:9.5px; color:#8b909a; width:32px; text-align:right;">-5:23</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1c marquee -->
+    <div id="1c" style="display:flex; flex-direction:column; gap:10px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="font-size:11px; font-weight:700; background:#3f7fd6; color:#fff; padding:2px 8px; border-radius:5px;">1c</span><span style="font-size:13px; color:#c9ccd2; font-weight:600;">Marquee title + static meta</span></div>
+      <div style="font-size:11.5px; color:#8b909a; max-width:560px; line-height:1.5;">Keeps the compact two-row height. The title scrolls (marquee) only when it overflows; artist/album stay put and ellipsis. Nostalgic, space-thrifty.</div>
+      <div style="width:560px; height:40px; background:linear-gradient(#33363c,#282a2e); border:1px solid #45474c; border-radius:6px; box-shadow:inset 0 1px 2px rgba(0,0,0,.3); display:flex; flex-direction:column; justify-content:center; padding:4px 14px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; font-size:12px; gap:12px;">
+          <div style="flex:1; overflow:hidden; white-space:nowrap; -webkit-mask-image:linear-gradient(90deg,transparent,#000 16px,#000 calc(100% - 16px),transparent); mask-image:linear-gradient(90deg,transparent,#000 16px,#000 calc(100% - 16px),transparent);">
+            <span style="display:inline-block; font-weight:600; color:#f0f2f6; animation:lcdmarquee 9s ease-in-out infinite alternate; padding-left:2px;">On a Good Day (Metropolis) - Extended Mix</span>
+          </div>
+          <span style="color:#8b909a; font-size:11px; flex:0 0 auto; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Above &amp; Beyond — On A Good Day</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:3px;">
+          <span style="font-size:10px; color:#8b909a; width:30px;">2:29</span>
+          <div style="flex:1; height:4px; border-radius:2px; background:#4a4c52;"><div style="width:46%; height:4px; border-radius:2px; background:#5a86c4;"></div></div>
+          <span style="font-size:10px; color:#8b909a; width:34px; text-align:right;">-5:23</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1d artwork + stack -->
+    <div id="1d" style="display:flex; flex-direction:column; gap:10px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="font-size:11px; font-weight:700; background:#3f7fd6; color:#fff; padding:2px 8px; border-radius:5px;">1d</span><span style="font-size:13px; color:#c9ccd2; font-weight:600;">Album art + stacked text</span></div>
+      <div style="font-size:11.5px; color:#8b909a; max-width:560px; line-height:1.5;">Album thumbnail anchors the readout (very iTunes/iPod). Title over artist·album, progress spans beneath. Gives the widest text column back to the title.</div>
+      <div style="width:560px; height:62px; background:linear-gradient(#33363c,#282a2e); border:1px solid #45474c; border-radius:6px; box-shadow:inset 0 1px 2px rgba(0,0,0,.3); display:flex; align-items:center; gap:11px; padding:0 14px;">
+        <div style="width:42px; height:42px; border-radius:4px; flex:0 0 auto; background:repeating-linear-gradient(45deg,#3d444d,#3d444d 6px,#333a42 6px,#333a42 12px); border:1px solid #4a525c; display:flex; align-items:center; justify-content:center; font-size:16px; color:#6a727c;">♪</div>
+        <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:3px;">
+          <div style="font-weight:600; font-size:12.5px; line-height:16px; color:#f0f2f6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">On a Good Day (Metropolis) - Extended Mix</div>
+          <div style="font-size:11px; line-height:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="color:#a9c2e8;">Above &amp; Beyond</span><span style="color:#6f757e;"> · On A Good Day</span></div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:9.5px; color:#8b909a; width:28px;">2:29</span>
+            <div style="flex:1; height:3px; border-radius:2px; background:#4a4c52;"><div style="width:46%; height:3px; border-radius:2px; background:#5a86c4;"></div></div>
+            <span style="font-size:9.5px; color:#8b909a; width:32px; text-align:right;">-5:23</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

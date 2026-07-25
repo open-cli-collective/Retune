@@ -1,6 +1,10 @@
 # Retune — Architecture Plan (attempt-1)
 
 Spec: `README.md` (design handoff) + `screenshots/` + `Retune.dc.html` (interaction reference only).
+Design decision records: `docs/LCD Options.dc.html` (now-playing LCD — option **1d**, album art +
+stacked text, chosen) and `docs/Retune Icon Options.dc.html` (app icon — option **4a**, bold
+headphones, chosen; source asset `assets/retune-icon-4a-1024.png`, padded to the Apple 824/1024
+icon grid before `tauri icon` generation).
 
 ## Stack decision
 
