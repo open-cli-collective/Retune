@@ -1765,6 +1765,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playlist_remove_sends_one_exact_request_for_one_chunk() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(
+                200,
+                serde_json::json!({"snapshot_id": "removed"}),
+            )]),
+            tokens(),
+        );
+        let uris = vec!["spotify:track:1".into(), "spotify:track:2".into()];
+
+        client
+            .remove_playlist_tracks("playlist", &uris, "original")
+            .await
+            .unwrap();
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, Method::Delete);
+        assert!(requests[0].url.ends_with("/playlists/playlist/items"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+            serde_json::json!({
+                "items": [
+                    {"uri": "spotify:track:1"},
+                    {"uri": "spotify:track:2"}
+                ],
+                "snapshot_id": "original"
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn playlist_write_surfaces_forbidden_status_and_message() {
         let transport = FakeTransport::new([Response::json(
             403,
