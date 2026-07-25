@@ -1105,12 +1105,16 @@ function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
   onError: (error: string) => void
 }) {
   const [tracks, setTracks] = useState<PlaylistTrack[]>([])
-  const [dragging, setDragging] = useState<number>()
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [selectionAnchor, setSelectionAnchor] = useState<number>()
+  const [dragging, setDragging] = useState<{ start: number; length: number }>()
   const [insertBefore, setInsertBefore] = useState<number>()
-  const [reordering, setReordering] = useState(false)
+  const [mutating, setMutating] = useState(false)
   const canReorder = playlist.owned && tracks.length === playlist.trackCount
   useEffect(() => {
     let active = true
+    setSelected(new Set())
+    setSelectionAnchor(undefined)
     invoke<PlaylistTrack[]>('playlist_tracks', { id: playlist.id })
       .then((rows) => active && setTracks(rows))
       .catch((error) => active && onError(String(error)))
@@ -1119,28 +1123,74 @@ function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
   const queue: PlaybackTrack[] = tracks.map((track, index) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + index }))
   const drop = async (index: number) => {
     if (dragging === undefined) return
-    setReordering(true)
+    if (index >= dragging.start && index <= dragging.start + dragging.length) {
+      setDragging(undefined)
+      setInsertBefore(undefined)
+      return
+    }
+    setMutating(true)
     setDragging(undefined)
     setInsertBefore(undefined)
     try {
-      await invoke('playlist_reorder', { id: playlist.id, rangeStart: dragging, insertBefore: index, rangeLength: 1 })
+      await invoke('playlist_reorder', { id: playlist.id, rangeStart: dragging.start, insertBefore: index, rangeLength: dragging.length })
     } catch (error) {
       onError(String(error))
     } finally {
-      setReordering(false)
+      setSelected(new Set())
+      setSelectionAnchor(undefined)
+      setMutating(false)
+    }
+  }
+  const remove = async () => {
+    const indices = [...selected].sort((left, right) => left - right)
+    if (!indices.length || !window.confirm(`Remove ${indices.length} selected ${indices.length === 1 ? 'track' : 'tracks'} from “${playlist.name}”?`)) return
+    setMutating(true)
+    try {
+      await invoke('playlist_remove', { id: playlist.id, indices })
+    } catch (error) {
+      onError(String(error))
+    } finally {
+      setSelected(new Set())
+      setSelectionAnchor(undefined)
+      setMutating(false)
     }
   }
   return <div className="playlist-view">
-    <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span></header>
+    <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span><button disabled={!canReorder || !selected.size || mutating} onClick={() => void remove()}>Remove</button></header>
     <div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
     <div className="playlist-track-scroll">
       {tracks.map((track, index) => <div
         key={`${track.uri}-${index}`}
-        className={`playlist-track-row ${insertBefore === index ? 'insert-before' : ''} ${playing?.trackId === queue[index].id ? 'playing' : ''}`}
-        draggable={canReorder && !reordering}
+        className={`playlist-track-row ${selected.has(index) ? 'selected' : ''} ${insertBefore === index ? 'insert-before' : ''} ${playing?.trackId === queue[index].id ? 'playing' : ''}`}
+        draggable={canReorder && !mutating}
+        onClick={(event) => {
+          if (event.shiftKey && selectionAnchor !== undefined) {
+            const next = new Set<number>()
+            for (let row = Math.min(selectionAnchor, index); row <= Math.max(selectionAnchor, index); row += 1) next.add(row)
+            setSelected(next)
+          } else if (event.metaKey || event.ctrlKey) {
+            const next = new Set(selected)
+            if (!next.delete(index)) next.add(index)
+            setSelected(next)
+            setSelectionAnchor(index)
+          } else {
+            setSelected(new Set([index]))
+            setSelectionAnchor(index)
+          }
+        }}
         onDoubleClick={() => onPlay(queue[index].id, queue)}
         onDragStart={canReorder ? (event) => {
-          setDragging(index)
+          const rows = selected.has(index) ? [...selected].sort((left, right) => left - right) : [index]
+          if (rows.some((row, offset) => row !== rows[0] + offset)) {
+            event.preventDefault()
+            onError('Select a contiguous block of tracks to reorder.')
+            return
+          }
+          if (!selected.has(index)) {
+            setSelected(new Set([index]))
+            setSelectionAnchor(index)
+          }
+          setDragging({ start: rows[0], length: rows.length })
           event.dataTransfer.effectAllowed = 'move'
           event.dataTransfer.setData('text/plain', String(index))
         } : undefined}
