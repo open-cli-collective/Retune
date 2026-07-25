@@ -1715,6 +1715,51 @@ async fn playlist_reorder(
     }
 }
 
+#[tauri::command]
+async fn playlist_remove(
+    app: tauri::AppHandle,
+    id: String,
+    indices: Vec<u32>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let mut cache = state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .clone();
+    let library = state
+        .library
+        .lock()
+        .expect("library mutex poisoned")
+        .clone();
+    let result = playlists::remove(client.as_ref(), &mut cache, &library, &id, &indices).await;
+    match result {
+        Ok(()) => {
+            state
+                .playlist_store
+                .save(&cache)
+                .map_err(|error| error.to_string())?;
+            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+            app.emit("playlists-changed", ())
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        Err(playlists::PlaylistRemoveError::Reloaded) => {
+            state
+                .playlist_store
+                .save(&cache)
+                .map_err(|error| error.to_string())?;
+            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+            app.emit("playlists-changed", ())
+                .map_err(|error| error.to_string())?;
+            Err(playlists::STALE_PLAYLIST.into())
+        }
+        Err(playlists::PlaylistRemoveError::Spotify(error)) => Err(playlist_error(&state, error)),
+        Err(playlists::PlaylistRemoveError::Other(error)) => Err(error),
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn play_tracks(
     app: tauri::AppHandle,
@@ -2213,6 +2258,7 @@ pub fn run() {
             playlist_add,
             playlist_add_album,
             playlist_reorder,
+            playlist_remove,
             play_tracks,
             player_toggle,
             player_next,

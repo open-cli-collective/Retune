@@ -338,6 +338,35 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         .map(|response| response.snapshot_id)
     }
 
+    pub async fn remove_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        uris: &[String],
+        snapshot_id: &str,
+    ) -> Result<String> {
+        if uris.is_empty() {
+            return Err(Error::InvalidRequest(
+                "playlist remove requires at least one URI".into(),
+            ));
+        }
+        let mut snapshot_id = snapshot_id.to_owned();
+        for chunk in uris.chunks(100) {
+            snapshot_id = self
+                .json::<SnapshotResponse>(
+                    Method::Delete,
+                    &format!("/playlists/{playlist_id}/items"),
+                    serde_json::to_vec(&RemovePlaylistTracks {
+                        items: chunk.iter().map(|uri| PlaylistTrackUri { uri }).collect(),
+                        snapshot_id: &snapshot_id,
+                    })
+                    .expect("playlist remove body serializes"),
+                )
+                .await?
+                .snapshot_id;
+        }
+        Ok(snapshot_id)
+    }
+
     pub async fn saved_albums(&self, offset: u32, limit: u32) -> Result<Page<SavedAlbum>> {
         self.get(&paged("/me/albums", offset, limit)).await
     }
@@ -998,6 +1027,17 @@ struct ReorderPlaylistTracks<'a> {
     insert_before: u32,
     range_length: u32,
     snapshot_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct RemovePlaylistTracks<'a> {
+    items: Vec<PlaylistTrackUri<'a>>,
+    snapshot_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct PlaylistTrackUri<'a> {
+    uri: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -1686,6 +1726,42 @@ mod tests {
                 "snapshot_id": "second"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn playlist_remove_chunks_one_hundred_and_chains_snapshot() {
+        let transport = FakeTransport::new([
+            Response::json(200, serde_json::json!({"snapshot_id": "first"})),
+            Response::json(200, serde_json::json!({"snapshot_id": "second"})),
+        ]);
+        let client = SpotifyClient::new("client", transport, tokens());
+        let uris = (0..101)
+            .map(|index| format!("spotify:track:{index}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            client
+                .remove_playlist_tracks("playlist", &uris, "original")
+                .await
+                .unwrap(),
+            "second"
+        );
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            request.method == Method::Delete && request.url.ends_with("/playlists/playlist/items")
+        }));
+        let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 100);
+        assert_eq!(
+            first["items"][0],
+            serde_json::json!({"uri": "spotify:track:0"})
+        );
+        assert_eq!(first["snapshot_id"], "original");
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second["snapshot_id"], "first");
     }
 
     #[tokio::test]
