@@ -146,6 +146,10 @@ pub(super) enum NeutralEvent {
         request_id: u64,
         uri: String,
     },
+    ConnectBoundary {
+        generation: u64,
+        uri: String,
+    },
     Error {
         generation: u64,
         message: String,
@@ -169,6 +173,7 @@ impl NeutralEvent {
             | Self::Unavailable { generation, .. }
             | Self::Stopped { generation, .. }
             | Self::EndOfTrack { generation, .. }
+            | Self::ConnectBoundary { generation, .. }
             | Self::Error { generation, .. }
             | Self::Disconnected { generation } => *generation,
         }
@@ -256,16 +261,6 @@ impl PlayerBackend {
         match (self, client) {
             (Self::Connect(backend), Some(client)) => backend.set_live_repeat(client, repeat).await,
             _ => Ok(()),
-        }
-    }
-
-    fn reload(&mut self, reducer: &mut EventReducer) -> Result<(), String> {
-        let snapshot = reducer.snapshot().cloned().ok_or("Nothing is playing")?;
-        let uri = snapshot.current().uri.clone();
-        reducer.queue_load(&uri, true);
-        match self {
-            Self::Local(backend) => backend.play(snapshot, true, 0),
-            Self::Connect(_) => Err("Connect repeat is controlled by Spotify".into()),
         }
     }
 
@@ -370,32 +365,8 @@ impl Playback {
         }
         let snapshot = Snapshot { tracks, index };
         let mut state = self.state.lock().await;
-        if is_file_uri(&snapshot.current().uri) {
-            state.backend.stop(client.as_deref()).await?;
-            state.reducer.set_snapshot(Some(snapshot.clone()));
-            state.reducer.queue_load(&snapshot.current().uri, true);
-            let uri = snapshot.current().uri.clone();
-            return state.file.load(&uri, true, 0);
-        }
-        state.file.stop_silently();
-        let client = client.ok_or_else(missing_spotify)?;
-        self.ensure_valid(&mut state, client.as_ref()).await?;
-        if matches!(state.backend, PlayerBackend::Local(_)) {
-            state.reducer.set_snapshot(Some(snapshot.clone()));
-            state.reducer.queue_load(&snapshot.current().uri, true);
-            state
-                .backend
-                .play(Arc::clone(&client), snapshot, "off")
-                .await
-        } else {
-            let repeat = state.reducer.repeat().to_owned();
-            state
-                .backend
-                .play(Arc::clone(&client), snapshot.clone(), &repeat)
-                .await?;
-            state.reducer.set_snapshot(Some(snapshot));
-            Ok(())
-        }
+        state.reducer.set_snapshot(Some(snapshot));
+        self.load_current_locked(&mut state, client, true, 0).await
     }
 
     pub async fn toggle(&self, client: Option<&LiveClient>) -> Result<(), String> {
@@ -408,15 +379,15 @@ impl Playback {
         state.backend.toggle(client).await
     }
 
-    pub async fn next(&self, client: Option<&LiveClient>) -> Result<(), String> {
+    pub async fn next(&self, client: Option<Arc<LiveClient>>) -> Result<(), String> {
         self.step(client, 1).await
     }
 
-    pub async fn prev(&self, client: Option<&LiveClient>) -> Result<(), String> {
+    pub async fn prev(&self, client: Option<Arc<LiveClient>>) -> Result<(), String> {
         self.step(client, -1).await
     }
 
-    async fn step(&self, client: Option<&LiveClient>, direction: i8) -> Result<(), String> {
+    async fn step(&self, client: Option<Arc<LiveClient>>, direction: i8) -> Result<(), String> {
         let mut state = self.state.lock().await;
         self.step_locked(&mut state, client, direction).await
     }
@@ -613,33 +584,57 @@ impl Playback {
     async fn step_locked(
         &self,
         state: &mut ControllerState,
-        client: Option<&LiveClient>,
+        client: Option<Arc<LiveClient>>,
         direction: i8,
     ) -> Result<(), String> {
         let wrap = direction > 0 && state.reducer.repeat() == "all";
-        if state.file.is_active() {
-            let Some(snapshot) = state.reducer.snapshot_mut() else {
-                return Err("Nothing is playing".into());
-            };
-            let Some(next) = step_index(snapshot.index, snapshot.tracks.len(), direction, wrap)
-            else {
+        let Some(snapshot) = state.reducer.snapshot() else {
+            return Err("Nothing is playing".into());
+        };
+        let Some(next) = step_index(snapshot.index, snapshot.tracks.len(), direction, wrap) else {
+            if state.file.is_active() {
                 state.file.stop();
                 return Ok(());
-            };
-            snapshot.index = next;
-            let uri = snapshot.current().uri.clone();
-            if !is_file_uri(&uri) {
-                return Err("Mixed local and Spotify queues aren't supported yet".into());
             }
-            state.reducer.queue_load(&uri, true);
-            return state.file.load(&uri, true, 0);
+            let client = require_spotify(client.as_deref())?;
+            self.ensure_valid(state, client).await?;
+            let ControllerState {
+                backend, reducer, ..
+            } = state;
+            return backend.step(client, reducer, direction, wrap).await;
+        };
+        if reject_chapter(&snapshot.tracks[next].uri) {
+            return Err(AUDIOBOOK_ERROR.into());
         }
-        let client = require_spotify(client)?;
-        self.ensure_valid(state, client).await?;
-        let ControllerState {
-            backend, reducer, ..
-        } = state;
-        backend.step(client, reducer, direction, wrap).await
+        state.reducer.snapshot_mut().unwrap().index = next;
+        self.load_current_locked(state, client, true, 0).await
+    }
+
+    async fn load_current_locked(
+        &self,
+        state: &mut ControllerState,
+        client: Option<Arc<LiveClient>>,
+        playing: bool,
+        position_ms: u32,
+    ) -> Result<(), String> {
+        let snapshot = state
+            .reducer
+            .snapshot()
+            .cloned()
+            .ok_or("Nothing is playing")?;
+        let uri = snapshot.current().uri.clone();
+        if is_file_uri(&uri) {
+            state.backend.stop(client.as_deref()).await?;
+            state.reducer.queue_load(&uri, playing);
+            return state.file.load(&uri, playing, position_ms);
+        }
+
+        state.file.stop_silently();
+        let client = client.ok_or_else(missing_spotify)?;
+        self.ensure_valid(state, client.as_ref()).await?;
+        state.reducer.queue_load(&uri, playing);
+        let repeat = state.reducer.repeat().to_owned();
+        state.backend.play(client, snapshot, &repeat).await
     }
 
     async fn handle_event(&self, app: &tauri::AppHandle, event: NeutralEvent) {
@@ -663,27 +658,13 @@ impl Playback {
                 }
                 ReducerAction::Advance => {
                     let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
-                    if let Err(error) = self.step_locked(&mut state, client.as_deref(), 1).await {
+                    if let Err(error) = self.step_locked(&mut state, client, 1).await {
                         let _ = app.emit("operation-error", error);
                     }
                 }
                 ReducerAction::Reload => {
-                    let result = if state.file.is_active() {
-                        let uri = state
-                            .reducer
-                            .snapshot()
-                            .map(|snapshot| snapshot.current().uri.clone())
-                            .ok_or_else(|| "Nothing is playing".to_string());
-                        uri.and_then(|uri| {
-                            state.reducer.queue_load(&uri, true);
-                            state.file.load(&uri, true, 0)
-                        })
-                    } else {
-                        let ControllerState {
-                            backend, reducer, ..
-                        } = &mut *state;
-                        backend.reload(reducer)
-                    };
+                    let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
+                    let result = self.load_current_locked(&mut state, client, true, 0).await;
                     if let Err(error) = result {
                         let _ = app.emit("operation-error", error);
                     }
@@ -818,6 +799,27 @@ mod tests {
     use super::*;
     use retune_spotify::tokens::{CachedTokenStore, InMemoryTokenStore, TokenStore};
 
+    fn mixed_tracks() -> Vec<SnapshotTrack> {
+        vec![
+            SnapshotTrack {
+                id: 1,
+                uri: "file:///definitely/missing/one.mp3".into(),
+                name: "File".into(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 60,
+            },
+            SnapshotTrack {
+                id: 2,
+                uri: "spotify:track:two".into(),
+                name: "Spotify".into(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 60,
+            },
+        ]
+    }
+
     #[test]
     fn file_volume_uses_squared_percent_curve() {
         assert_eq!(file::sink_volume(0), 0.0);
@@ -880,6 +882,240 @@ mod tests {
         let state = playback.state.lock().await;
         assert!(!state.file.is_active());
         assert!(state.reducer.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn mixed_boundaries_route_by_destination_without_spotify() {
+        let playback = Playback::default();
+        playback.play(None, mixed_tracks(), 0).await.unwrap();
+
+        assert_eq!(playback.next(None).await.unwrap_err(), missing_spotify());
+        {
+            let state = playback.state.lock().await;
+            assert_eq!(state.reducer.snapshot().unwrap().index, 1);
+            assert!(!state.file.is_active());
+        }
+
+        playback.prev(None).await.unwrap();
+        let state = playback.state.lock().await;
+        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        assert!(state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn clientless_spotify_failure_keeps_queue_for_later_file_selection() {
+        let playback = Playback::default();
+
+        assert_eq!(
+            playback.play(None, mixed_tracks(), 1).await.unwrap_err(),
+            missing_spotify()
+        );
+        {
+            let state = playback.state.lock().await;
+            assert_eq!(state.reducer.snapshot().unwrap().index, 1);
+            assert!(!state.file.is_active());
+        }
+
+        playback.prev(None).await.unwrap();
+        let state = playback.state.lock().await;
+        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        assert!(state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn file_boundary_loading_identifies_destination() {
+        let playback = Playback::default();
+        let mut receiver = playback
+            .receiver
+            .lock()
+            .expect("playback receiver mutex poisoned")
+            .take()
+            .unwrap();
+
+        assert_eq!(
+            playback.play(None, mixed_tracks(), 1).await.unwrap_err(),
+            missing_spotify()
+        );
+        playback.prev(None).await.unwrap();
+
+        let request = receiver.recv().await.unwrap();
+        let loading = receiver.recv().await.unwrap();
+        let mut state = playback.state.lock().await;
+        assert!(state.reducer.handle(request).is_empty());
+        let actions = state.reducer.handle(loading);
+        let [ReducerAction::Emit(event)] = actions.as_slice() else {
+            panic!("file load should emit destination state");
+        };
+        assert_eq!(
+            event.uri.as_deref(),
+            Some("file:///definitely/missing/one.mp3")
+        );
+        assert_eq!(event.track_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn repeat_all_wraps_from_spotify_to_file_without_spotify() {
+        let playback = Playback::default();
+        assert_eq!(
+            playback.play(None, mixed_tracks(), 1).await.unwrap_err(),
+            missing_spotify()
+        );
+        playback.set_repeat(None, "all").await.unwrap();
+
+        playback.next(None).await.unwrap();
+        let state = playback.state.lock().await;
+        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        assert!(state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn repeat_all_wraps_last_file_to_first_file() {
+        let playback = Playback::default();
+        let mut tracks = mixed_tracks();
+        tracks[1].uri = "file:///definitely/missing/two.mp3".into();
+        playback.set_repeat(None, "all").await.unwrap();
+        playback.play(None, tracks, 1).await.unwrap();
+
+        playback.next(None).await.unwrap();
+        let state = playback.state.lock().await;
+        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        assert!(state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn repeat_one_reloads_file_through_router() {
+        let playback = Playback::default();
+        let mut receiver = playback
+            .receiver
+            .lock()
+            .expect("playback receiver mutex poisoned")
+            .take()
+            .unwrap();
+        playback.play(None, mixed_tracks(), 0).await.unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(NeutralEvent::RequestIdChanged { request_id: 1, .. })
+        ));
+        let mut state = playback.state.lock().await;
+
+        playback
+            .load_current_locked(&mut state, None, true, 0)
+            .await
+            .unwrap();
+        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        assert!(state.file.is_active());
+        drop(state);
+        while !matches!(
+            receiver.recv().await,
+            Some(NeutralEvent::RequestIdChanged { request_id: 2, .. })
+        ) {}
+    }
+
+    #[tokio::test]
+    async fn missing_file_advance_routes_into_spotify_destination() {
+        let playback = Playback::default();
+        let mut receiver = playback
+            .receiver
+            .lock()
+            .expect("playback receiver mutex poisoned")
+            .take()
+            .unwrap();
+        playback.play(None, mixed_tracks(), 0).await.unwrap();
+
+        let mut state = playback.state.lock().await;
+        assert!(state
+            .reducer
+            .handle(receiver.recv().await.unwrap())
+            .is_empty());
+        assert!(matches!(
+            state
+                .reducer
+                .handle(receiver.recv().await.unwrap())
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+        assert!(matches!(
+            state
+                .reducer
+                .handle(receiver.recv().await.unwrap())
+                .as_slice(),
+            [ReducerAction::Error(_), ReducerAction::Advance]
+        ));
+
+        assert_eq!(
+            playback.step_locked(&mut state, None, 1).await.unwrap_err(),
+            missing_spotify()
+        );
+        assert_eq!(state.reducer.snapshot().unwrap().index, 1);
+        assert!(!state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn active_local_backend_stops_before_file_load_without_client() {
+        let playback = Playback::default();
+        let tracks = mixed_tracks();
+        let mut state = playback.state.lock().await;
+        state.backend = PlayerBackend::Local(LocalBackend::with_snapshot_for_test(Snapshot {
+            tracks: tracks.clone(),
+            index: 1,
+        }));
+        state
+            .reducer
+            .set_snapshot(Some(Snapshot { tracks, index: 0 }));
+
+        playback
+            .load_current_locked(&mut state, None, true, 0)
+            .await
+            .unwrap();
+
+        let PlayerBackend::Local(local) = &state.backend else {
+            panic!("local backend should remain selected");
+        };
+        assert!(!local.has_snapshot());
+        assert!(state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn connect_boundary_returns_to_controller_for_file_load() {
+        let playback = Playback::default();
+        let mut receiver = playback
+            .receiver
+            .lock()
+            .expect("playback receiver mutex poisoned")
+            .take()
+            .unwrap();
+        let mut tracks = mixed_tracks();
+        tracks.reverse();
+        let mut state = playback.state.lock().await;
+        state
+            .reducer
+            .set_snapshot(Some(Snapshot { tracks, index: 0 }));
+        let generation = state.generation;
+
+        assert_eq!(
+            state.reducer.handle(NeutralEvent::ConnectBoundary {
+                generation,
+                uri: "spotify:track:two".into(),
+            }),
+            [ReducerAction::Advance]
+        );
+        playback.step_locked(&mut state, None, 1).await.unwrap();
+        assert_eq!(state.reducer.snapshot().unwrap().index, 1);
+        assert!(state.file.is_active());
+
+        assert!(state
+            .reducer
+            .handle(receiver.recv().await.unwrap())
+            .is_empty());
+        let actions = state.reducer.handle(receiver.recv().await.unwrap());
+        let [ReducerAction::Emit(event)] = actions.as_slice() else {
+            panic!("file load should emit destination state");
+        };
+        assert_eq!(
+            event.uri.as_deref(),
+            Some("file:///definitely/missing/one.mp3")
+        );
+        assert_eq!(event.track_id, Some(1));
     }
 
     #[tokio::test]

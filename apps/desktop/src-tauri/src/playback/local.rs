@@ -30,6 +30,22 @@ pub(super) struct LocalBackend {
 }
 
 impl LocalBackend {
+    #[cfg(test)]
+    pub(super) fn with_snapshot_for_test(snapshot: Snapshot) -> Self {
+        Self {
+            runtime: None,
+            generation: 1,
+            snapshot: Some(snapshot),
+            playing: true,
+            volume: 62,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_snapshot(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
     pub(super) async fn activate(
         client: &LiveClient,
         events: mpsc::UnboundedSender<NeutralEvent>,

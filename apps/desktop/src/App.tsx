@@ -127,8 +127,7 @@ type PlayerState = {
   volumeSupported: boolean
 }
 
-// `simulated` marks a local prototype session (disconnected, or fixture tracks
-// whose URIs must never reach the real Spotify API).
+// `simulated` marks fixture tracks whose URIs must never reach a real backend.
 type Playing = PlayerState & { queue: readonly PlaybackTrack[]; simulated?: boolean }
 
 type BrowseView = {
@@ -404,6 +403,11 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[]) => {
     const target = tracks.find((track) => track.id === id)
+    if (target?.uri.startsWith('file:')) {
+      queue.current = tracks
+      run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
+      return
+    }
     if (!target?.uri.startsWith('spotify:')) {
       dispatch({ type: 'play', id, queue: tracks })
       return
@@ -428,18 +432,19 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [connected, run])
 
   const toggle = useCallback(() => {
-    if (connected && !playingRef.current?.simulated) {
+    const current = playingRef.current
+    if (!current?.simulated && (connected || current?.uri?.startsWith('file:'))) {
       if (playingRef.current && !playingRef.current.external) run('player_toggle')
     }
     else dispatch({ type: 'togglePlay' })
   }, [connected, dispatch, run])
 
   const step = useCallback((direction: number) => {
-    if (connected && !playingRef.current?.simulated) {
+    const current = playingRef.current
+    if (!current?.simulated && (connected || current?.uri?.startsWith('file:'))) {
       if (playingRef.current && !playingRef.current.external) run(direction < 0 ? 'player_prev' : 'player_next')
       return
     }
-    const current = playingRef.current
     if (!current?.queue.length || current.trackId === null) return
     const index = current.queue.findIndex((track) => track.id === current.trackId)
     const next = current.queue[(index + direction + current.queue.length) % current.queue.length]
@@ -447,13 +452,15 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [connected, dispatch, run])
 
   const setVolume = useCallback((volume: number) => {
-    if (!connected || playingRef.current?.simulated) return
+    const current = playingRef.current
+    if (current?.simulated || (!connected && !current?.uri?.startsWith('file:'))) return
     window.clearTimeout(volumeTimer.current)
     volumeTimer.current = window.setTimeout(() => run('player_set_volume', { volume }), 150)
   }, [connected, run])
 
   const seek = useCallback((seconds: number) => {
-    if (connected && !playingRef.current?.simulated) {
+    const current = playingRef.current
+    if (!current?.simulated && (connected || current?.uri?.startsWith('file:'))) {
       if (playingRef.current && !playingRef.current.external) run('player_seek', { seconds })
       return
     }
@@ -647,7 +654,7 @@ function App() {
   }, [state.source])
 
   useEffect(() => {
-    if (state.connected && !state.playing?.simulated) return
+    if (!state.playing?.simulated) return
     if (!state.playing?.isPlaying) return
     const currentIndex = playbackTracks.findIndex((track) => track.id === state.playing?.trackId)
     const current = playbackTracks[currentIndex]

@@ -82,6 +82,7 @@ struct Context {
     previous: PolledState,
     generation: u64,
     epoch: u64,
+    route_at_end: bool,
 }
 
 #[derive(Default)]
@@ -144,10 +145,16 @@ impl ConnectBackend {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
         }
+        let (snapshot, route_at_end) = connect_snapshot(Snapshot { tracks, index }, repeat);
+        let tracks = snapshot.tracks;
+        let index = snapshot.index;
         let device = select_device(client.devices().await.map_err(|error| error.to_string())?)?;
         let device_id = device.id.expect("selected devices have ids");
         client
-            .set_repeat(connect_repeat(repeat)?, Some(&device_id))
+            .set_repeat(
+                connect_repeat(if route_at_end { "off" } else { repeat })?,
+                Some(&device_id),
+            )
             .await
             .map_err(|error| error.to_string())?;
         play_snapshot(client, &device_id, &tracks, index).await?;
@@ -168,6 +175,7 @@ impl ConnectBackend {
             volume_supported: device.supports_volume,
             generation,
             epoch: 1,
+            route_at_end,
         });
         Ok(event)
     }
@@ -353,6 +361,9 @@ impl ConnectBackend {
 
     pub(super) async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
         let mut state = self.state.lock().await;
+        if state.context.is_some() && client.is_none() {
+            return Err(super::missing_spotify());
+        }
         if let (Some(client), Some(context)) = (client, state.context.as_ref()) {
             client
                 .pause(Some(&context.device_id))
@@ -464,9 +475,20 @@ impl ConnectBackend {
                     )
                 }
                 PlaybackDecision::Stop => {
+                    let route_at_end = context.route_at_end;
+                    let uri = context.snapshot.current().uri.clone();
                     let _ = client.pause(Some(&context.device_id)).await;
                     state.context = None;
-                    empty_state()
+                    drop(state);
+                    if route_at_end {
+                        let _ = self.events.send(NeutralEvent::ConnectBoundary {
+                            generation: self.backend_generation,
+                            uri,
+                        });
+                    } else {
+                        self.emit(empty_state());
+                    }
+                    return;
                 }
                 PlaybackDecision::Takeover | PlaybackDecision::DeviceGone => {
                     state.context = None;
@@ -477,7 +499,7 @@ impl ConnectBackend {
             self.emit(event);
             if matches!(
                 decision,
-                PlaybackDecision::Stop | PlaybackDecision::Takeover | PlaybackDecision::DeviceGone
+                PlaybackDecision::Takeover | PlaybackDecision::DeviceGone
             ) {
                 return;
             }
@@ -494,6 +516,30 @@ fn connect_repeat(repeat: &str) -> Result<&'static str, String> {
     }
 }
 
+fn connect_snapshot(snapshot: Snapshot, repeat: &str) -> (Snapshot, bool) {
+    let start = snapshot.tracks[..snapshot.index]
+        .iter()
+        .rposition(|track| track.uri.starts_with("file:"))
+        .map_or(0, |index| index + 1);
+    let end = snapshot.tracks[start..]
+        .iter()
+        .position(|track| track.uri.starts_with("file:"))
+        .map_or(snapshot.tracks.len(), |offset| start + offset);
+    let route_at_end = end < snapshot.tracks.len()
+        || (repeat == "all"
+            && snapshot
+                .tracks
+                .iter()
+                .any(|track| track.uri.starts_with("file:")));
+    (
+        Snapshot {
+            tracks: snapshot.tracks[start..end].to_vec(),
+            index: snapshot.index - start,
+        },
+        route_at_end,
+    )
+}
+
 fn queue_request(tracks: &[SnapshotTrack], index: usize) -> (Vec<String>, usize) {
     let start = if tracks.len() > MAX_QUEUE_URIS {
         index
@@ -502,6 +548,7 @@ fn queue_request(tracks: &[SnapshotTrack], index: usize) -> (Vec<String>, usize)
     };
     let uris = tracks[start..]
         .iter()
+        .take_while(|track| track.uri.starts_with("spotify:"))
         .take(MAX_QUEUE_URIS)
         .map(|track| track.uri.clone())
         .collect();
@@ -745,6 +792,7 @@ mod tests {
             volume_supported: true,
             generation: 1,
             epoch: 2,
+            route_at_end: false,
         };
 
         assert_eq!(
@@ -778,6 +826,43 @@ mod tests {
         let (uris, offset) = queue_request(short, 25);
         assert_eq!(uris.len(), 100);
         assert_eq!(offset, 25);
+    }
+
+    #[test]
+    fn mixed_queue_request_never_includes_file_uri() {
+        let tracks = vec![
+            track(1, 100),
+            SnapshotTrack {
+                uri: "file:///tmp/local.mp3".into(),
+                ..track(2, 100)
+            },
+        ];
+
+        let (uris, _) = queue_request(&tracks, 0);
+        assert_eq!(uris, ["spotify:track:1"]);
+    }
+
+    #[test]
+    fn mixed_snapshot_returns_boundary_to_controller() {
+        let tracks = vec![
+            track(1, 100),
+            track(2, 100),
+            SnapshotTrack {
+                uri: "file:///tmp/local.mp3".into(),
+                ..track(3, 100)
+            },
+        ];
+
+        let (snapshot, route_at_end) = connect_snapshot(Snapshot { tracks, index: 0 }, "all");
+        assert_eq!(
+            snapshot
+                .tracks
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["spotify:track:1", "spotify:track:2"]
+        );
+        assert!(route_at_end);
     }
 
     #[test]
@@ -861,6 +946,42 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, "Open Spotify on your desktop");
+    }
+
+    #[tokio::test]
+    async fn stop_without_client_keeps_active_connect_context() {
+        let transport = FakeTransport::new([
+            Response::json(
+                200,
+                serde_json::json!({"devices": [{
+                    "id": "desk", "name": "Desk", "is_restricted": false,
+                    "type": "Computer", "is_active": true
+                }]}),
+            ),
+            Response::json(204, serde_json::Value::Null),
+            Response::json(204, serde_json::Value::Null),
+        ]);
+        let client = SpotifyClient::new(
+            "client",
+            transport,
+            InMemoryTokenStore::new(Some(Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+                scopes: String::new(),
+            })),
+        );
+        let playback = Playback::default();
+        playback
+            .begin(&client, vec![track(1, 100)], 0, "off")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            playback.stop(None).await.unwrap_err(),
+            super::super::missing_spotify()
+        );
+        assert!(playback.state.lock().await.context.is_some());
     }
 
     #[tokio::test]

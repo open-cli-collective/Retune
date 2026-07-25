@@ -205,6 +205,16 @@ impl EventReducer {
                     ReducerAction::Advance
                 }])
                 .unwrap_or_default(),
+            NeutralEvent::ConnectBoundary { uri, .. } => self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.current().uri == uri)
+                .then_some(vec![if self.repeat == "one" {
+                    ReducerAction::Reload
+                } else {
+                    ReducerAction::Advance
+                }])
+                .unwrap_or_default(),
         }
     }
 
@@ -329,6 +339,31 @@ mod tests {
                 position_ms: 1000,
             })
             .is_empty());
+    }
+
+    #[test]
+    fn connect_boundary_advances_full_snapshot() {
+        assert_eq!(
+            reducer().handle(NeutralEvent::ConnectBoundary {
+                generation: 7,
+                uri: "spotify:track:1".into(),
+            }),
+            [ReducerAction::Advance]
+        );
+    }
+
+    #[test]
+    fn connect_boundary_reloads_under_repeat_one() {
+        let mut reducer = reducer();
+        reducer.set_repeat("one");
+
+        assert_eq!(
+            reducer.handle(NeutralEvent::ConnectBoundary {
+                generation: 7,
+                uri: "spotify:track:1".into(),
+            }),
+            [ReducerAction::Reload]
+        );
     }
 
     #[test]

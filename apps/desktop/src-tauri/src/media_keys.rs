@@ -128,8 +128,8 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
         let client = crate::provider_from(&state).ok();
         let result = match command {
             PlaybackCommand::Toggle => state.playback.toggle(client.as_deref()).await,
-            PlaybackCommand::Next => state.playback.next(client.as_deref()).await,
-            PlaybackCommand::Previous => state.playback.prev(client.as_deref()).await,
+            PlaybackCommand::Next => state.playback.next(client).await,
+            PlaybackCommand::Previous => state.playback.prev(client).await,
             PlaybackCommand::Seek(seconds) => state.playback.seek(client.as_deref(), seconds).await,
         };
         if let Err(error) = result {
