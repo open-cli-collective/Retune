@@ -109,6 +109,13 @@ pub(crate) fn file_uri(canonical_path: &Path) -> String {
         .to_string()
 }
 
+pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
+    Url::parse(uri)
+        .map_err(|error| error.to_string())?
+        .to_file_path()
+        .map_err(|()| format!("invalid file URI: {uri}"))
+}
+
 fn nonempty(value: Option<String>, fallback: &str) -> String {
     value
         .filter(|value| !value.trim().is_empty())
@@ -120,13 +127,11 @@ mod tests {
     use std::cell::Cell;
     use std::{fs, path::PathBuf};
 
+    use super::*;
+    use crate::store::{FsOverlayStore, OverlayStore, StoreResult};
     use retune_audio::import_file;
     use retune_core::model::{Library, SourceId, TrackEdit};
     use tempfile::tempdir;
-    use url::Url;
-
-    use super::*;
-    use crate::store::{FsOverlayStore, OverlayStore, StoreResult};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -137,10 +142,10 @@ mod tests {
     #[test]
     fn file_uri_round_trips_spaces_and_unicode() {
         let path = PathBuf::from("/tmp/Rétune song.mp3");
-        let uri = Url::parse(&file_uri(&path)).unwrap();
-        assert_eq!(uri.to_file_path().unwrap(), path);
-        assert!(uri.as_str().contains("%20"));
-        assert!(uri.as_str().contains("%C3%A9"));
+        let uri = file_uri(&path);
+        assert_eq!(path_from_file_uri(&uri).unwrap(), path);
+        assert!(uri.contains("%20"));
+        assert!(uri.contains("%C3%A9"));
     }
 
     #[test]

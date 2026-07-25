@@ -125,18 +125,12 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let client = match crate::provider_from(&state) {
-            Ok(client) => client,
-            Err(error) => {
-                log::debug!("Ignoring media key while disconnected: {error}");
-                return;
-            }
-        };
+        let client = crate::provider_from(&state).ok();
         let result = match command {
-            PlaybackCommand::Toggle => state.playback.toggle(client.as_ref()).await,
-            PlaybackCommand::Next => state.playback.next(client.as_ref()).await,
-            PlaybackCommand::Previous => state.playback.prev(client.as_ref()).await,
-            PlaybackCommand::Seek(seconds) => state.playback.seek(client.as_ref(), seconds).await,
+            PlaybackCommand::Toggle => state.playback.toggle(client.as_deref()).await,
+            PlaybackCommand::Next => state.playback.next(client.as_deref()).await,
+            PlaybackCommand::Previous => state.playback.prev(client.as_deref()).await,
+            PlaybackCommand::Seek(seconds) => state.playback.seek(client.as_deref(), seconds).await,
         };
         if let Err(error) = result {
             let _ = app.emit("operation-error", error);

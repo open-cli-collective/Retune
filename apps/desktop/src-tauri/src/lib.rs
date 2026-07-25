@@ -1769,36 +1769,36 @@ async fn play_tracks(
     start_index: usize,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
+    let client = provider_from(&state).ok();
     state.playback.play(client, snapshot, start_index).await
 }
 
 #[tauri::command]
 async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    state.playback.toggle(client.as_ref()).await
+    let client = provider_from(&state).ok();
+    state.playback.toggle(client.as_deref()).await
 }
 
 #[tauri::command]
 async fn player_next(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    state.playback.next(client.as_ref()).await
+    let client = provider_from(&state).ok();
+    state.playback.next(client.as_deref()).await
 }
 
 #[tauri::command]
 async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    state.playback.prev(client.as_ref()).await
+    let client = provider_from(&state).ok();
+    state.playback.prev(client.as_deref()).await
 }
 
 #[tauri::command]
 async fn player_seek(app: tauri::AppHandle, seconds: u64) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    state.playback.seek(client.as_ref(), seconds).await
+    let client = provider_from(&state).ok();
+    state.playback.seek(client.as_deref(), seconds).await
 }
 
 #[tauri::command]
@@ -1819,10 +1819,10 @@ async fn player_set_volume(app: tauri::AppHandle, volume: u8) -> Result<(), Stri
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     app.emit("settings-changed", settings)
         .map_err(|error| error.to_string())?;
-    let client = provider_from(&state)?;
+    let client = provider_from(&state).ok();
     let playback = Arc::clone(&state.playback);
     tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(playback.set_volume(client.as_ref(), volume))
+        tauri::async_runtime::block_on(playback.set_volume(client.as_deref(), volume))
     })
     .await
     .map_err(|error| error.to_string())?

@@ -4081,6 +4081,7 @@ dependencies = [
  "retune-audio",
  "retune-core",
  "retune-spotify",
+ "rodio",
  "serde",
  "serde_json",
  "souvlaki",

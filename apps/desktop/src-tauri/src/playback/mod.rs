@@ -1,4 +1,5 @@
 mod connect;
+mod file;
 mod local;
 mod reducer;
 
@@ -9,6 +10,7 @@ use std::{
 };
 
 use connect::ConnectBackend;
+use file::FileEngine;
 use local::LocalBackend;
 use reducer::{EventReducer, ReducerAction};
 use retune_spotify::client::{HttpTransport, SpotifyClient};
@@ -280,6 +282,7 @@ impl PlayerBackend {
 
 struct ControllerState {
     backend: PlayerBackend,
+    file: FileEngine,
     generation: u64,
     reducer: EventReducer,
     volume: u8,
@@ -317,6 +320,7 @@ impl Playback {
         Self {
             state: tokio::sync::Mutex::new(ControllerState {
                 backend: PlayerBackend::Connect(ConnectBackend::new(events.clone(), generation)),
+                file: FileEngine::new(events.clone(), generation, 62),
                 generation,
                 reducer,
                 volume: 62,
@@ -349,7 +353,7 @@ impl Playback {
 
     pub async fn play(
         &self,
-        client: Arc<LiveClient>,
+        client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
     ) -> Result<(), String> {
@@ -366,53 +370,78 @@ impl Playback {
         }
         let snapshot = Snapshot { tracks, index };
         let mut state = self.state.lock().await;
+        if is_file_uri(&snapshot.current().uri) {
+            state.backend.stop(client.as_deref()).await?;
+            state.reducer.set_snapshot(Some(snapshot.clone()));
+            state.reducer.queue_load(&snapshot.current().uri, true);
+            let uri = snapshot.current().uri.clone();
+            return state.file.load(&uri, true, 0);
+        }
+        state.file.stop_silently();
+        let client = client.ok_or_else(missing_spotify)?;
         self.ensure_valid(&mut state, client.as_ref()).await?;
         if matches!(state.backend, PlayerBackend::Local(_)) {
             state.reducer.set_snapshot(Some(snapshot.clone()));
             state.reducer.queue_load(&snapshot.current().uri, true);
-            state.backend.play(client, snapshot, "off").await
+            state
+                .backend
+                .play(Arc::clone(&client), snapshot, "off")
+                .await
         } else {
             let repeat = state.reducer.repeat().to_owned();
             state
                 .backend
-                .play(client, snapshot.clone(), &repeat)
+                .play(Arc::clone(&client), snapshot.clone(), &repeat)
                 .await?;
             state.reducer.set_snapshot(Some(snapshot));
             Ok(())
         }
     }
 
-    pub async fn toggle(&self, client: &LiveClient) -> Result<(), String> {
+    pub async fn toggle(&self, client: Option<&LiveClient>) -> Result<(), String> {
         let mut state = self.state.lock().await;
+        if state.file.is_active() {
+            return state.file.toggle();
+        }
+        let client = require_spotify(client)?;
         self.ensure_valid(&mut state, client).await?;
         state.backend.toggle(client).await
     }
 
-    pub async fn next(&self, client: &LiveClient) -> Result<(), String> {
+    pub async fn next(&self, client: Option<&LiveClient>) -> Result<(), String> {
         self.step(client, 1).await
     }
 
-    pub async fn prev(&self, client: &LiveClient) -> Result<(), String> {
+    pub async fn prev(&self, client: Option<&LiveClient>) -> Result<(), String> {
         self.step(client, -1).await
     }
 
-    async fn step(&self, client: &LiveClient, direction: i8) -> Result<(), String> {
+    async fn step(&self, client: Option<&LiveClient>, direction: i8) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        self.ensure_valid(&mut state, client).await?;
         self.step_locked(&mut state, client, direction).await
     }
 
-    pub async fn seek(&self, client: &LiveClient, seconds: u64) -> Result<(), String> {
+    pub async fn seek(&self, client: Option<&LiveClient>, seconds: u64) -> Result<(), String> {
         let mut state = self.state.lock().await;
+        if state.file.is_active() {
+            return state.file.seek(seconds);
+        }
+        let client = require_spotify(client)?;
         self.ensure_valid(&mut state, client).await?;
         state.backend.seek(client, seconds).await
     }
 
-    pub async fn set_volume(&self, client: &LiveClient, volume: u8) -> Result<(), String> {
+    pub async fn set_volume(&self, client: Option<&LiveClient>, volume: u8) -> Result<(), String> {
         if volume > 100 {
             return Err("volume must be between 0 and 100".into());
         }
         let mut state = self.state.lock().await;
+        if state.file.is_active() {
+            state.file.set_volume(volume);
+            state.volume = volume;
+            return Ok(());
+        }
+        let client = require_spotify(client)?;
         self.ensure_valid(&mut state, client).await?;
         state.backend.set_volume(client, volume).await?;
         state.volume = volume;
@@ -435,6 +464,9 @@ impl Playback {
 
     pub async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
         let mut state = self.state.lock().await;
+        if state.file.is_active() {
+            state.file.stop();
+        }
         state.backend.stop(client).await?;
         state.reducer.set_snapshot(None);
         Ok(())
@@ -476,6 +508,7 @@ impl Playback {
         }
         state.generation = local.generation();
         let generation = state.generation;
+        state.file.set_generation(generation);
         state.reducer.activate(generation);
         state.backend = PlayerBackend::Local(local);
         state.volume = volume;
@@ -486,6 +519,7 @@ impl Playback {
         let mut state = self.state.lock().await;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
+        state.file.set_generation(generation);
         if let PlayerBackend::Local(local) = &mut state.backend {
             local.teardown();
         }
@@ -499,6 +533,7 @@ impl Playback {
         if matches!(state.backend, PlayerBackend::Local(_)) {
             state.generation = state.generation.wrapping_add(1);
             let generation = state.generation;
+            state.file.set_generation(generation);
             state.reducer.activate(generation);
             if let PlayerBackend::Local(local) = &mut state.backend {
                 local.teardown();
@@ -551,6 +586,7 @@ impl Playback {
             (snapshot, playing, position_ms)
         });
         state.generation = generation;
+        state.file.set_generation(generation);
         state.reducer.activate(generation);
         if let Some((snapshot, playing, position_ms)) = restore {
             state.reducer.queue_load(&snapshot.current().uri, playing);
@@ -577,10 +613,29 @@ impl Playback {
     async fn step_locked(
         &self,
         state: &mut ControllerState,
-        client: &LiveClient,
+        client: Option<&LiveClient>,
         direction: i8,
     ) -> Result<(), String> {
         let wrap = direction > 0 && state.reducer.repeat() == "all";
+        if state.file.is_active() {
+            let Some(snapshot) = state.reducer.snapshot_mut() else {
+                return Err("Nothing is playing".into());
+            };
+            let Some(next) = step_index(snapshot.index, snapshot.tracks.len(), direction, wrap)
+            else {
+                state.file.stop();
+                return Ok(());
+            };
+            snapshot.index = next;
+            let uri = snapshot.current().uri.clone();
+            if !is_file_uri(&uri) {
+                return Err("Mixed local and Spotify queues aren't supported yet".into());
+            }
+            state.reducer.queue_load(&uri, true);
+            return state.file.load(&uri, true, 0);
+        }
+        let client = require_spotify(client)?;
+        self.ensure_valid(state, client).await?;
         let ControllerState {
             backend, reducer, ..
         } = state;
@@ -607,22 +662,29 @@ impl Playback {
                     let _ = app.emit("operation-error", error);
                 }
                 ReducerAction::Advance => {
-                    let client = match crate::provider_from(&app.state::<crate::AppState>()) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            let _ = app.emit("operation-error", error);
-                            continue;
-                        }
-                    };
-                    if let Err(error) = self.step_locked(&mut state, client.as_ref(), 1).await {
+                    let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
+                    if let Err(error) = self.step_locked(&mut state, client.as_deref(), 1).await {
                         let _ = app.emit("operation-error", error);
                     }
                 }
                 ReducerAction::Reload => {
-                    let ControllerState {
-                        backend, reducer, ..
-                    } = &mut *state;
-                    if let Err(error) = backend.reload(reducer) {
+                    let result = if state.file.is_active() {
+                        let uri = state
+                            .reducer
+                            .snapshot()
+                            .map(|snapshot| snapshot.current().uri.clone())
+                            .ok_or_else(|| "Nothing is playing".to_string());
+                        uri.and_then(|uri| {
+                            state.reducer.queue_load(&uri, true);
+                            state.file.load(&uri, true, 0)
+                        })
+                    } else {
+                        let ControllerState {
+                            backend, reducer, ..
+                        } = &mut *state;
+                        backend.reload(reducer)
+                    };
+                    if let Err(error) = result {
                         let _ = app.emit("operation-error", error);
                     }
                 }
@@ -630,6 +692,7 @@ impl Playback {
                     log::info!("Local playback session lost; will reconnect on next use");
                     state.generation = state.generation.wrapping_add(1);
                     let generation = state.generation;
+                    state.file.set_generation(generation);
                     state.reducer.activate(generation);
                     if let PlayerBackend::Local(local) = &mut state.backend {
                         local.teardown();
@@ -703,6 +766,18 @@ fn reject_chapter(uri: &str) -> bool {
     uri.starts_with("spotify:chapter:")
 }
 
+fn is_file_uri(uri: &str) -> bool {
+    uri.starts_with("file:")
+}
+
+fn require_spotify(client: Option<&LiveClient>) -> Result<&LiveClient, String> {
+    client.ok_or_else(missing_spotify)
+}
+
+fn missing_spotify() -> String {
+    "Spotify Client ID is missing. Add it in Preferences, then try again.".into()
+}
+
 fn local_event(
     track: &SnapshotTrack,
     elapsed: u64,
@@ -742,6 +817,70 @@ pub fn empty_event(external: bool) -> PlayerStateEvent {
 mod tests {
     use super::*;
     use retune_spotify::tokens::{CachedTokenStore, InMemoryTokenStore, TokenStore};
+
+    #[test]
+    fn file_volume_uses_squared_percent_curve() {
+        assert_eq!(file::sink_volume(0), 0.0);
+        assert_eq!(file::sink_volume(50), 0.25);
+        assert_eq!(file::sink_volume(100), 1.0);
+        assert_eq!(file::sink_volume(200), 1.0);
+    }
+
+    #[tokio::test]
+    async fn all_file_queue_controls_work_without_spotify() {
+        let playback = Playback::default();
+        let tracks = vec![
+            SnapshotTrack {
+                id: 1,
+                uri: "file:///definitely/missing/one.mp3".into(),
+                name: "One".into(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 60,
+            },
+            SnapshotTrack {
+                id: 2,
+                uri: "file:///definitely/missing/two.mp3".into(),
+                name: "Two".into(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 60,
+            },
+        ];
+
+        playback.play(None, tracks, 0).await.unwrap();
+        playback.toggle(None).await.unwrap();
+        playback.seek(None, 10).await.unwrap();
+        playback.set_volume(None, 25).await.unwrap();
+        playback.next(None).await.unwrap();
+        assert_eq!(
+            playback
+                .state
+                .lock()
+                .await
+                .reducer
+                .snapshot()
+                .unwrap()
+                .index,
+            1
+        );
+        playback.prev(None).await.unwrap();
+        assert_eq!(
+            playback
+                .state
+                .lock()
+                .await
+                .reducer
+                .snapshot()
+                .unwrap()
+                .index,
+            0
+        );
+        playback.stop(None).await.unwrap();
+        let state = playback.state.lock().await;
+        assert!(!state.file.is_active());
+        assert!(state.reducer.snapshot().is_none());
+    }
 
     #[tokio::test]
     async fn failed_switch_keeps_connect_backend() {

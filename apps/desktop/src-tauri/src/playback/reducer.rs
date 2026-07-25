@@ -473,6 +473,78 @@ mod tests {
     }
 
     #[test]
+    fn file_events_bind_load_play_and_advance() {
+        let mut reducer = reducer();
+        reducer.snapshot_mut().unwrap().tracks[0].uri = "file:///tmp/song.mp3".into();
+        bind(&mut reducer, "file:///tmp/song.mp3", true, 41);
+
+        assert_eq!(
+            emitted(reducer.handle(NeutralEvent::Loading {
+                generation: 7,
+                request_id: 41,
+                uri: "file:///tmp/song.mp3".into(),
+                position_ms: 0,
+            }))
+            .track_id,
+            Some(1)
+        );
+        assert!(
+            emitted(reducer.handle(NeutralEvent::Playing {
+                generation: 7,
+                request_id: 41,
+                uri: "file:///tmp/song.mp3".into(),
+                position_ms: 0,
+            }))
+            .is_playing
+        );
+        assert_eq!(
+            reducer.handle(NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 41,
+                uri: "file:///tmp/song.mp3".into(),
+            }),
+            [ReducerAction::Advance]
+        );
+    }
+
+    #[test]
+    fn file_end_reloads_under_repeat_one_and_second_request_is_accepted() {
+        let mut reducer = reducer();
+        reducer.snapshot_mut().unwrap().tracks[0].uri = "file:///tmp/song.mp3".into();
+        reducer.set_repeat("one");
+        bind(&mut reducer, "file:///tmp/song.mp3", true, 42);
+
+        assert_eq!(
+            reducer.handle(NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 42,
+                uri: "file:///tmp/song.mp3".into(),
+            }),
+            [ReducerAction::Reload]
+        );
+        bind(&mut reducer, "file:///tmp/song.mp3", true, 43);
+        assert!(
+            emitted(reducer.handle(NeutralEvent::Playing {
+                generation: 7,
+                request_id: 43,
+                uri: "file:///tmp/song.mp3".into(),
+                position_ms: 0,
+            }))
+            .is_playing
+        );
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::Unavailable {
+                    generation: 7,
+                    request_id: 43,
+                    uri: "file:///tmp/song.mp3".into(),
+                })
+                .as_slice(),
+            [ReducerAction::Error(_), ReducerAction::Advance]
+        ));
+    }
+
+    #[test]
     fn loading_preserves_requested_paused_intent() {
         let mut reducer = reducer();
         bind(&mut reducer, "spotify:track:1", false, 1);
