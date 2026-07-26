@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use retune_core::model::Library;
 use retune_spotify::{
@@ -49,7 +49,8 @@ pub async fn sync<T: Transport, S: TokenStore>(
     library: &Library,
 ) -> retune_spotify::Result<PlaylistCache> {
     let user_id = client.me().await?.id;
-    let mut playlists = vec![];
+    let mut refreshed = HashMap::new();
+    let mut spotify_order = vec![];
     let mut offset = 0;
     loop {
         let page = client
@@ -61,7 +62,9 @@ pub async fn sync<T: Transport, S: TokenStore>(
                 .playlists
                 .iter()
                 .find(|playlist| playlist.id == summary.id);
-            playlists.push(
+            spotify_order.push(summary.id.clone());
+            refreshed.insert(
+                summary.id.clone(),
                 if cached.is_some_and(|playlist| playlist.snapshot_id == summary.snapshot_id) {
                     let mut cached = cached.expect("checked above").clone();
                     cached.name = summary.name;
@@ -85,7 +88,50 @@ pub async fn sync<T: Transport, S: TokenStore>(
             break;
         }
     }
+    let mut playlists = current
+        .playlists
+        .iter()
+        .filter_map(|playlist| refreshed.remove(&playlist.id))
+        .collect::<Vec<_>>();
+    playlists.extend(
+        spotify_order
+            .into_iter()
+            .filter_map(|id| refreshed.remove(&id)),
+    );
     Ok(PlaylistCache { playlists })
+}
+
+pub fn reorder_playlists(cache: &mut PlaylistCache, ids: &[String]) -> Result<(), String> {
+    if ids.len() != cache.playlists.len()
+        || ids.iter().collect::<HashSet<_>>().len() != ids.len()
+        || ids
+            .iter()
+            .any(|id| !cache.playlists.iter().any(|playlist| &playlist.id == id))
+    {
+        return Err("Playlist reorder must contain every playlist exactly once.".into());
+    }
+    let mut by_id = std::mem::take(&mut cache.playlists)
+        .into_iter()
+        .map(|playlist| (playlist.id.clone(), playlist))
+        .collect::<HashMap<_, _>>();
+    cache.playlists = ids
+        .iter()
+        .map(|id| by_id.remove(id).expect("validated playlist id"))
+        .collect();
+    Ok(())
+}
+
+pub async fn unfollow<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    cache: &mut PlaylistCache,
+    id: &str,
+) -> retune_spotify::Result<()> {
+    if !cache.playlists.iter().any(|playlist| playlist.id == id) {
+        return Err(Error::InvalidRequest(format!("unknown playlist {id}")));
+    }
+    client.unfollow_playlist(id).await?;
+    cache.playlists.retain(|playlist| playlist.id != id);
+    Ok(())
 }
 
 pub async fn create<T: Transport, S: TokenStore>(
@@ -503,7 +549,7 @@ mod tests {
     use crate::store::FsPlaylistStore;
     use retune_core::model::{NewTrack, SourceId};
     use retune_spotify::{
-        client::{FakeTransport, Response},
+        client::{FakeTransport, Method, Response},
         tokens::InMemoryTokenStore,
     };
 
@@ -531,6 +577,50 @@ mod tests {
                 non_library_tracks: vec![],
             }],
         }
+    }
+
+    fn ordered() -> PlaylistCache {
+        let mut cache = cached();
+        for id in ["second", "third"] {
+            let mut playlist = cache.playlists[0].clone();
+            playlist.id = id.into();
+            playlist.name = id.into();
+            cache.playlists.push(playlist);
+        }
+        cache
+    }
+
+    #[test]
+    fn playlist_reorder_validates_atomically_and_persists() {
+        let mut cache = ordered();
+        let before = serde_json::to_vec(&cache).unwrap();
+        assert!(reorder_playlists(&mut cache, &["playlist".into(), "second".into()]).is_err());
+        assert_eq!(serde_json::to_vec(&cache).unwrap(), before);
+        assert!(reorder_playlists(
+            &mut cache,
+            &["playlist".into(), "second".into(), "second".into()]
+        )
+        .is_err());
+        assert_eq!(serde_json::to_vec(&cache).unwrap(), before);
+
+        reorder_playlists(
+            &mut cache,
+            &["third".into(), "playlist".into(), "second".into()],
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsPlaylistStore::new(dir.path());
+        store.save(&cache).unwrap();
+        assert_eq!(
+            store
+                .load()
+                .unwrap()
+                .playlists
+                .iter()
+                .map(|playlist| playlist.id.as_str())
+                .collect::<Vec<_>>(),
+            ["third", "playlist", "second"]
+        );
     }
 
     fn local_track(uri: &str, name: &str) -> NewTrack {
@@ -728,6 +818,112 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].url.ends_with("/me"));
         assert!(requests[1].url.contains("/me/playlists?"));
+    }
+
+    #[tokio::test]
+    async fn sync_keeps_cached_order_drops_missing_and_appends_new_in_spotify_order() {
+        let mut current = ordered();
+        current.playlists.swap(0, 1);
+        let summaries = |items: serde_json::Value| {
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": items, "next": null
+                }),
+            )
+        };
+        let summary = |id: &str| {
+            serde_json::json!({
+                "id": id, "name": id, "snapshot_id": "same",
+                "owner": {"id": "user"}, "tracks": {"total": 2}
+            })
+        };
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(200, serde_json::json!({"id": "user"})),
+                summaries(serde_json::json!([
+                    summary("playlist"),
+                    summary("new-a"),
+                    summary("second"),
+                    summary("new-b")
+                ])),
+                Response::json(
+                    200,
+                    serde_json::json!({"items": [], "next": null, "total": 0}),
+                ),
+                Response::json(
+                    200,
+                    serde_json::json!({"items": [], "next": null, "total": 0}),
+                ),
+            ]),
+            tokens(retune_spotify::auth::SCOPES),
+        );
+
+        let synced = sync(&client, &current, &Library::new()).await.unwrap();
+
+        assert_eq!(
+            synced
+                .playlists
+                .iter()
+                .map(|playlist| playlist.id.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "playlist", "new-a", "new-b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unfollow_removes_only_after_success() {
+        for owned in [true, false] {
+            let mut cache = cached();
+            cache.playlists[0].owned = owned;
+            let client = SpotifyClient::new(
+                "client",
+                FakeTransport::new([Response::json(200, serde_json::Value::Null)]),
+                tokens(retune_spotify::auth::SCOPES),
+            );
+            unfollow(&client, &mut cache, "playlist").await.unwrap();
+            assert!(cache.playlists.is_empty());
+            let request = &client.transport().requests()[0];
+            assert_eq!(request.method, Method::Delete);
+            assert_eq!(
+                url::Url::parse(&request.url).unwrap().path(),
+                "/v1/playlists/playlist/followers"
+            );
+        }
+
+        for status in [403, 500] {
+            let mut cache = cached();
+            let before = serde_json::to_vec(&cache).unwrap();
+            let responses = std::iter::repeat_n(
+                Response::json(status, serde_json::json!({"error": {"message": "no"}})),
+                3,
+            );
+            let client = SpotifyClient::new(
+                "client",
+                FakeTransport::new(responses),
+                tokens(retune_spotify::auth::SCOPES),
+            );
+            assert!(unfollow(&client, &mut cache, "playlist").await.is_err());
+            assert_eq!(serde_json::to_vec(&cache).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_out_unfollow_does_not_touch_transport_or_cache() {
+        let mut cache = cached();
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::default(),
+            InMemoryTokenStore::new(None),
+        );
+
+        assert!(matches!(
+            unfollow(&client, &mut cache, "playlist").await,
+            Err(Error::MissingToken)
+        ));
+        assert_eq!(cache, cached());
+        assert!(client.transport().requests().is_empty());
     }
 
     #[tokio::test]

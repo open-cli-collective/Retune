@@ -246,6 +246,15 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         .await
     }
 
+    pub async fn unfollow_playlist(&self, playlist_id: &str) -> Result<()> {
+        self.empty(
+            Method::Delete,
+            &format!("/playlists/{playlist_id}/followers"),
+            Vec::new(),
+        )
+        .await
+    }
+
     pub async fn playlist_tracks(
         &self,
         playlist_id: &str,
@@ -1670,6 +1679,26 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
             serde_json::json!({"name": "Road Trip", "public": false})
         );
+    }
+
+    #[tokio::test]
+    async fn playlist_unfollow_sends_exact_delete() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(200, serde_json::Value::Null)]),
+            tokens(),
+        );
+
+        client.unfollow_playlist("playlist").await.unwrap();
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, Method::Delete);
+        assert_eq!(
+            requests[0].url,
+            format!("{API_BASE}/playlists/playlist/followers")
+        );
+        assert!(requests[0].body.is_empty());
     }
 
     #[tokio::test]

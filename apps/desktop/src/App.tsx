@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
@@ -123,6 +123,7 @@ type PlaylistSubject =
 
 const DRAG_TYPE = 'application/x-retune'
 const DRAG_LOCAL_TYPE = 'application/x-retune-local'
+const PLAYLIST_DRAG_TYPE = 'application/x-retune-playlist'
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
 const hasLocalTracks = (subject: PlaylistSubject) => subject.kind === 'tracks'
@@ -631,7 +632,7 @@ function App() {
 
   useEffect(() => {
     if (playlists && state.selectedPlaylist && !playlists.some((playlist) => playlist.id === state.selectedPlaylist)) {
-      dispatch({ type: 'playlist' })
+      dispatch({ type: 'source', source: 'music' })
     }
   }, [playlists, state.selectedPlaylist])
 
@@ -1177,6 +1178,17 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [dropTarget, setDropTarget] = useState<string>()
+  const [dragging, setDragging] = useState<string>()
+  const [insertBefore, setInsertBefore] = useState<number>()
+  const [menu, setMenu] = useState<{ x: number; y: number; playlist: PlaylistListView }>()
+  const [confirming, setConfirming] = useState<PlaylistListView>()
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (!confirming) return
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) setConfirming(undefined) }
+    document.addEventListener('keydown', close)
+    return () => document.removeEventListener('keydown', close)
+  }, [busy, confirming])
   const create = async () => {
     if (!name.trim()) return
     try {
@@ -1187,7 +1199,31 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       onError(String(error))
     }
   }
-  return <aside className="sidebar">
+  const reorder = async (target: number) => {
+    if (!playlists || !dragging) return
+    const source = playlists.findIndex((playlist) => playlist.id === dragging)
+    if (source < 0) return
+    const ids = playlists.map((playlist) => playlist.id)
+    const [id] = ids.splice(source, 1)
+    ids.splice(target - (source < target ? 1 : 0), 0, id)
+    setDragging(undefined)
+    setInsertBefore(undefined)
+    try { await invoke('reorder_playlists', { ids }) }
+    catch (error) { onError(String(error)) }
+  }
+  const unfollow = async () => {
+    if (!confirming) return
+    setBusy(true)
+    try {
+      await invoke('playlist_unfollow', { id: confirming.id })
+      setConfirming(undefined)
+    } catch (error) {
+      onError(String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <><aside className="sidebar">
     <div className="section-label">Library</div>
     {(Object.keys(labels) as Source[]).map((source) => <button key={source} className={`source-row ${state.source === source && !state.selectedPlaylist ? 'active' : ''}`} onClick={() => onSource(source)}>
       <span>{labels[source].icons}</span><span>{labels[source].name}</span><span className="source-count">{state.view?.counts.perSource[source] ?? '—'}</span>
@@ -1197,20 +1233,40 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       if (event.key === 'Enter') void create()
       else if (event.key === 'Escape') { setCreating(false); setName('') }
     }} /></div>}
-    {playlists?.map((playlist) => <button
-      key={playlist.id}
-      className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''}`}
+    {playlists?.map((playlist, index) => <Fragment key={playlist.id}><button
+      className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''} ${insertBefore === index ? 'insert-before' : ''} ${insertBefore === playlists.length && index === playlists.length - 1 ? 'insert-after' : ''}`}
       onClick={() => onPlaylist(playlist.id)}
-      onDragOver={playlist.owned ? (event) => {
+      draggable
+      onDragStart={(event) => {
+        setDragging(playlist.id)
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData(PLAYLIST_DRAG_TYPE, playlist.id)
+      }}
+      onDragEnd={() => { setDragging(undefined); setInsertBefore(undefined); setDropTarget(undefined) }}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes(PLAYLIST_DRAG_TYPE)) {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'move'
+          const bounds = event.currentTarget.getBoundingClientRect()
+          setInsertBefore(index + (event.clientY > bounds.top + bounds.height / 2 ? 1 : 0))
+          setDropTarget(undefined)
+          return
+        }
+        if (!playlist.owned) return
         if (!event.dataTransfer.types.includes(DRAG_TYPE)) return
         if (event.dataTransfer.types.includes(DRAG_LOCAL_TYPE)) { setDropTarget(undefined); return }
         event.preventDefault()
         event.dataTransfer.dropEffect = 'copy'
         setDropTarget(playlist.id)
-      } : undefined}
+      }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(undefined) }}
-      onDrop={playlist.owned ? (event) => {
+      onDrop={(event) => {
         event.preventDefault()
+        if (event.dataTransfer.types.includes(PLAYLIST_DRAG_TYPE)) {
+          void reorder(insertBefore ?? index)
+          return
+        }
+        if (!playlist.owned) return
         setDropTarget(undefined)
         try {
           const subject = JSON.parse(event.dataTransfer.getData(DRAG_TYPE)) as PlaylistSubject
@@ -1218,11 +1274,12 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
           else onDrop(playlist.id, subject)
         }
         catch { onError('Could not read the dragged playlist item.') }
-      } : undefined}
+      }}
+      onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, playlist }) }}
     >
       <span>{playlist.owned ? '' : '🌐'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
-    </button>)}
-  </aside>
+    </button>{menu?.playlist.id === playlist.id && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setConfirming(playlist); setMenu(undefined) }}>{playlist.owned ? 'Delete Playlist…' : 'Unfollow Playlist…'}</button></ContextMenu>}</Fragment>)}
+  </aside>{confirming && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setConfirming(undefined) }}><div className="get-info playlist-confirm" role="dialog" aria-modal="true" aria-labelledby="playlist-confirm-title"><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button className="danger" disabled={busy} onClick={() => void unfollow()}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></div></div>}</>
 }
 
 function PlaylistView({ playlist, revision, playing, onPlay, onError }: {

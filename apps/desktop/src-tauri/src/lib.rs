@@ -1595,6 +1595,45 @@ fn playlists_list(
 }
 
 #[tauri::command]
+fn reorder_playlists(app: tauri::AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut cache = state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .clone();
+    playlists::reorder_playlists(&mut cache, &ids)?;
+    state
+        .playlist_store
+        .save(&cache)
+        .map_err(|error| error.to_string())?;
+    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+    app.emit("playlists-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn playlist_unfollow(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state)?;
+    let mut cache = state
+        .playlists
+        .lock()
+        .expect("playlist mutex poisoned")
+        .clone();
+    playlists::unfollow(client.as_ref(), &mut cache, &id)
+        .await
+        .map_err(|error| playlist_error(&state, error))?;
+    state
+        .playlist_store
+        .save(&cache)
+        .map_err(|error| error.to_string())?;
+    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
+    app.emit("playlists-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn playlist_tracks(
     state: tauri::State<'_, AppState>,
     id: String,
@@ -2280,7 +2319,8 @@ fn export_library(app: &tauri::AppHandle, compressed: bool) {
                 let state = handle.state::<AppState>();
                 let library = state.library.lock().expect("library mutex poisoned");
                 let settings = state.settings.lock().expect("settings mutex poisoned");
-                let bytes = export_with_settings(&library, &settings, compressed)?;
+                let playlists = state.playlists.lock().expect("playlist mutex poisoned");
+                let bytes = export_with_settings(&library, &settings, &playlists, compressed)?;
                 fs::write(path, bytes).map_err(|error| error.to_string())
             })();
             if let Err(error) = result {
@@ -2292,6 +2332,7 @@ fn export_library(app: &tauri::AppHandle, compressed: bool) {
 fn export_with_settings(
     library: &Library,
     settings: &Settings,
+    playlists: &playlists::PlaylistCache,
     compressed: bool,
 ) -> Result<Vec<u8>, String> {
     let mut envelope: serde_json::Value =
@@ -2303,6 +2344,13 @@ fn export_with_settings(
             "settings".into(),
             serde_json::to_value(VisualSettings::from_settings(settings))
                 .map_err(|error| error.to_string())?,
+        );
+    envelope
+        .as_object_mut()
+        .expect("core export is an object")
+        .insert(
+            "playlists".into(),
+            serde_json::to_value(playlists).map_err(|error| error.to_string())?,
         );
     let json = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
     if !compressed {
@@ -2318,7 +2366,14 @@ fn export_with_settings(
 fn import_with_settings(
     bytes: &[u8],
     restore: bool,
-) -> Result<(Library, Option<VisualSettings>), String> {
+) -> Result<
+    (
+        Library,
+        Option<VisualSettings>,
+        Option<playlists::PlaylistCache>,
+    ),
+    String,
+> {
     let mut json = Vec::new();
     if bytes.starts_with(&[0x1f, 0x8b]) {
         GzDecoder::new(bytes)
@@ -2336,9 +2391,16 @@ fn import_with_settings(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|error| error.to_string())?;
+    let playlists = envelope
+        .as_object_mut()
+        .and_then(|object| object.remove("playlists"))
+        .filter(|_| restore)
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let library = import(&serde_json::to_vec(&envelope).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
-    Ok((library, settings))
+    Ok((library, settings, playlists))
 }
 
 fn import_library(app: &tauri::AppHandle, replace: bool) {
@@ -2348,13 +2410,13 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
         .add_filter("Retune Library", &["json", "json.gz", "gz"])
         .pick_file(move |path| {
             let Some(path) = path else { return };
-            let result = (|| -> Result<(Library, Option<VisualSettings>), String> {
+            let result = (|| -> Result<_, String> {
                 let path = path.into_path().map_err(|error| error.to_string())?;
                 let bytes = fs::read(path).map_err(|error| error.to_string())?;
                 import_with_settings(&bytes, replace)
             })();
             match result {
-                Ok((library, settings)) if replace => {
+                Ok((library, settings, playlists)) if replace => {
                     let confirmed_handle = handle.clone();
                     handle
                         .dialog()
@@ -2365,11 +2427,11 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
                         ))
                         .show(move |confirmed| {
                             if confirmed {
-                                apply_import(&confirmed_handle, library, settings, true);
+                                apply_import(&confirmed_handle, library, settings, playlists, true);
                             }
                         });
                 }
-                Ok((library, _)) => apply_import(&handle, library, None, false),
+                Ok((library, _, _)) => apply_import(&handle, library, None, None, false),
                 Err(error) => notify_error(&handle, error),
             }
         });
@@ -2379,6 +2441,7 @@ fn apply_import(
     app: &tauri::AppHandle,
     imported: Library,
     visual_settings: Option<VisualSettings>,
+    imported_playlists: Option<playlists::PlaylistCache>,
     replace: bool,
 ) {
     let state = app.state::<AppState>();
@@ -2397,6 +2460,14 @@ fn apply_import(
                     notify_error(app, error);
                     return;
                 }
+            }
+            if let Some(playlists) = imported_playlists {
+                if let Err(error) = state.playlist_store.save(&playlists) {
+                    notify_error(app, error.to_string());
+                    return;
+                }
+                *state.playlists.lock().expect("playlist mutex poisoned") = playlists;
+                let _ = app.emit("playlists-changed", ());
             }
             let _ = app.emit("library-changed", ());
         }
@@ -2462,6 +2533,8 @@ pub fn run() {
             add_spotify_album,
             remove_spotify_album,
             playlists_list,
+            reorder_playlists,
+            playlist_unfollow,
             playlist_create,
             playlist_tracks,
             playlist_add,
@@ -3253,8 +3326,22 @@ mod tests {
     }
 
     #[test]
-    fn export_restore_round_trips_visual_settings_only() {
+    fn export_restore_round_trips_visual_settings_and_playlist_order() {
         let library = fixture::library();
+        let playlists = playlists::PlaylistCache {
+            playlists: ["second", "first"]
+                .map(|id| playlists::CachedPlaylist {
+                    id: id.into(),
+                    name: id.into(),
+                    snapshot_id: "snapshot".into(),
+                    owned: true,
+                    owner: None,
+                    track_count: 0,
+                    tracks: vec![],
+                    non_library_tracks: vec![],
+                })
+                .to_vec(),
+        };
         let exported = Settings {
             theme: Theme::Dark,
             zoom: 1.4,
@@ -3294,8 +3381,9 @@ mod tests {
             normalize_volume: true,
             gapless: false,
         };
-        let bytes = export_with_settings(&library, &exported, true).unwrap();
-        let (restored_library, visual) = import_with_settings(&bytes, true).unwrap();
+        let bytes = export_with_settings(&library, &exported, &playlists, true).unwrap();
+        let (restored_library, visual, restored_playlists) =
+            import_with_settings(&bytes, true).unwrap();
         let mut restored = Settings {
             spotify_client_id: "local-machine".into(),
             auto_add_spotify_library: true,
@@ -3306,6 +3394,7 @@ mod tests {
         visual.unwrap().apply_to(&mut restored);
 
         assert_eq!(restored_library, library);
+        assert_eq!(restored_playlists, Some(playlists));
         assert_eq!(restored.theme, Theme::Dark);
         assert_eq!(restored.browser_panes, exported.browser_panes);
         assert_eq!(restored.column_order, exported.column_order);
@@ -3380,10 +3469,17 @@ mod tests {
     #[test]
     fn merge_ignores_exported_visual_settings() {
         let library = fixture::library();
-        let bytes = export_with_settings(&library, &Settings::default(), false).unwrap();
-        let (merged, visual) = import_with_settings(&bytes, false).unwrap();
+        let bytes = export_with_settings(
+            &library,
+            &Settings::default(),
+            &playlists::PlaylistCache::default(),
+            false,
+        )
+        .unwrap();
+        let (merged, visual, playlists) = import_with_settings(&bytes, false).unwrap();
         assert_eq!(merged, library);
         assert_eq!(visual, None);
+        assert_eq!(playlists, None);
     }
 
     #[test]
