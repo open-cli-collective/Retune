@@ -1951,6 +1951,29 @@ fn mutate_library<T>(
     Ok(value)
 }
 
+fn record_play(
+    store: &impl OverlayStore,
+    library: &Mutex<Library>,
+    uri: &str,
+    played_at: u64,
+) -> Result<bool, String> {
+    let mut current = library.lock().expect("library mutex poisoned");
+    if !current.tracks().iter().any(|track| track.uri == uri) {
+        return Ok(false);
+    }
+    let mut next = current.clone();
+    let track = next
+        .tracks_mut()
+        .iter_mut()
+        .find(|track| track.uri == uri)
+        .expect("track existence checked before cloning");
+    track.play_count = track.play_count.saturating_add(1);
+    track.last_played_at = Some(played_at);
+    store.save(&next).map_err(|error| error.to_string())?;
+    *current = next;
+    Ok(true)
+}
+
 #[tauri::command]
 fn import_local(
     app: tauri::AppHandle,
@@ -2559,7 +2582,22 @@ pub fn run() {
                 media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
             });
-            playback.listen(app.handle().clone());
+            let completion_app = app.handle().clone();
+            playback.listen(app.handle().clone(), move |uri| {
+                let handle = completion_app.clone();
+                drop(tauri::async_runtime::spawn_blocking(move || {
+                    let state = handle.state::<AppState>();
+                    match record_play(&state.store, &state.library, &uri, unix_now()) {
+                        Ok(true) => {
+                            if let Err(error) = handle.emit("library-changed", ()) {
+                                notify_error(&handle, error.to_string());
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => notify_error(&handle, error),
+                    }
+                }));
+            });
             if activate_local || connected || startup_action != StartupAction::Nothing {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -2628,6 +2666,23 @@ fn startup_action(
 
 #[cfg(test)]
 mod tests {
+    #[derive(Default)]
+    struct RecordingOverlayStore(Mutex<Vec<Library>>);
+
+    impl OverlayStore for RecordingOverlayStore {
+        fn load(&self) -> store::StoreResult<Option<Library>> {
+            Ok(None)
+        }
+
+        fn save(&self, library: &Library) -> store::StoreResult<()> {
+            self.0
+                .lock()
+                .expect("recording store mutex poisoned")
+                .push(library.clone());
+            Ok(())
+        }
+    }
+
     use retune_core::model::NewTrack;
     use retune_spotify::{
         auth,
@@ -2651,6 +2706,31 @@ mod tests {
             kind: None,
             bitrate_kbps: None,
         }
+    }
+
+    #[test]
+    fn record_play_updates_known_uri_once_and_ignores_unknown_uri() {
+        let mut library = Library::new();
+        let id = library.add(metadata_track(
+            "spotify:track:track",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+        library.tracks_mut()[0].play_count = 3;
+        let library = Mutex::new(library);
+        let store = RecordingOverlayStore::default();
+
+        assert!(record_play(&store, &library, "spotify:track:track", 123).unwrap());
+        assert!(!record_play(&store, &library, "spotify:track:missing", 456).unwrap());
+
+        let current = library.lock().unwrap();
+        let track = current.get(id).unwrap();
+        assert_eq!(track.play_count, 4);
+        assert_eq!(track.last_played_at, Some(123));
+        let saves = store.0.lock().unwrap();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0], *current);
     }
 
     #[test]

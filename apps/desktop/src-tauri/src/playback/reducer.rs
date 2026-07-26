@@ -6,6 +6,7 @@ use super::{empty_event, local_event, NeutralEvent, NeutralState, PlayerStateEve
 pub(super) enum ReducerAction {
     Emit(PlayerStateEvent),
     Error(String),
+    TrackCompleted(String),
     Advance,
     Reload,
     Invalidate,
@@ -199,21 +200,27 @@ impl EventReducer {
                 request_id, uri, ..
             } => self
                 .accepts(request_id, &uri)
-                .then_some(vec![if self.repeat == "one" {
-                    ReducerAction::Reload
-                } else {
-                    ReducerAction::Advance
-                }])
+                .then_some(vec![
+                    ReducerAction::TrackCompleted(uri),
+                    if self.repeat == "one" {
+                        ReducerAction::Reload
+                    } else {
+                        ReducerAction::Advance
+                    },
+                ])
                 .unwrap_or_default(),
             NeutralEvent::ConnectBoundary { uri, .. } => self
                 .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.current().uri == uri)
-                .then_some(vec![if self.repeat == "one" {
-                    ReducerAction::Reload
-                } else {
-                    ReducerAction::Advance
-                }])
+                .then_some(vec![
+                    ReducerAction::TrackCompleted(uri),
+                    if self.repeat == "one" {
+                        ReducerAction::Reload
+                    } else {
+                        ReducerAction::Advance
+                    },
+                ])
                 .unwrap_or_default(),
         }
     }
@@ -342,13 +349,36 @@ mod tests {
     }
 
     #[test]
+    fn stale_completion_events_are_discarded() {
+        let mut reducer = reducer();
+        bind(&mut reducer, "spotify:track:1", true, 1);
+
+        assert!(reducer
+            .handle(NeutralEvent::EndOfTrack {
+                generation: 6,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            })
+            .is_empty());
+        assert!(reducer
+            .handle(NeutralEvent::ConnectBoundary {
+                generation: 6,
+                uri: "spotify:track:1".into(),
+            })
+            .is_empty());
+    }
+
+    #[test]
     fn connect_boundary_advances_full_snapshot() {
         assert_eq!(
             reducer().handle(NeutralEvent::ConnectBoundary {
                 generation: 7,
                 uri: "spotify:track:1".into(),
             }),
-            [ReducerAction::Advance]
+            [
+                ReducerAction::TrackCompleted("spotify:track:1".into()),
+                ReducerAction::Advance
+            ]
         );
     }
 
@@ -362,8 +392,24 @@ mod tests {
                 generation: 7,
                 uri: "spotify:track:1".into(),
             }),
-            [ReducerAction::Reload]
+            [
+                ReducerAction::TrackCompleted("spotify:track:1".into()),
+                ReducerAction::Reload
+            ]
         );
+    }
+
+    #[test]
+    fn delayed_connect_boundary_for_previous_track_is_discarded() {
+        let mut reducer = reducer();
+        reducer.snapshot_mut().unwrap().index = 1;
+
+        assert!(reducer
+            .handle(NeutralEvent::ConnectBoundary {
+                generation: 7,
+                uri: "spotify:track:1".into(),
+            })
+            .is_empty());
     }
 
     #[test]
@@ -471,7 +517,10 @@ mod tests {
                 request_id: 1,
                 uri: "spotify:track:1".into(),
             }),
-            [ReducerAction::Advance]
+            [
+                ReducerAction::TrackCompleted("spotify:track:1".into()),
+                ReducerAction::Advance
+            ]
         );
     }
 
@@ -480,14 +529,22 @@ mod tests {
         let mut reducer = reducer();
         reducer.set_repeat("one");
         bind(&mut reducer, "spotify:track:1", true, 1);
-        assert_eq!(
-            reducer.handle(NeutralEvent::EndOfTrack {
-                generation: 7,
-                request_id: 1,
-                uri: "spotify:track:1".into(),
-            }),
-            [ReducerAction::Reload]
-        );
+        for request_id in [1, 2] {
+            assert_eq!(
+                reducer.handle(NeutralEvent::EndOfTrack {
+                    generation: 7,
+                    request_id,
+                    uri: "spotify:track:1".into(),
+                }),
+                [
+                    ReducerAction::TrackCompleted("spotify:track:1".into()),
+                    ReducerAction::Reload
+                ]
+            );
+            if request_id == 1 {
+                bind(&mut reducer, "spotify:track:1", true, 2);
+            }
+        }
     }
 
     #[test]
@@ -538,7 +595,10 @@ mod tests {
                 request_id: 41,
                 uri: "file:///tmp/song.mp3".into(),
             }),
-            [ReducerAction::Advance]
+            [
+                ReducerAction::TrackCompleted("file:///tmp/song.mp3".into()),
+                ReducerAction::Advance
+            ]
         );
     }
 
@@ -555,7 +615,10 @@ mod tests {
                 request_id: 42,
                 uri: "file:///tmp/song.mp3".into(),
             }),
-            [ReducerAction::Reload]
+            [
+                ReducerAction::TrackCompleted("file:///tmp/song.mp3".into()),
+                ReducerAction::Reload
+            ]
         );
         bind(&mut reducer, "file:///tmp/song.mp3", true, 43);
         assert!(

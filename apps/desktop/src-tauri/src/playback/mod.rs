@@ -331,7 +331,11 @@ impl Playback {
         *self.audio.lock().expect("audio settings mutex poisoned") = audio;
     }
 
-    pub fn listen(self: &Arc<Self>, app: tauri::AppHandle) {
+    pub fn listen(
+        self: &Arc<Self>,
+        app: tauri::AppHandle,
+        on_track_completed: impl Fn(String) + Send + Sync + 'static,
+    ) {
         let mut receiver = self
             .receiver
             .lock()
@@ -341,7 +345,9 @@ impl Playback {
         let playback = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                playback.handle_event(&app, event).await;
+                playback
+                    .handle_event(&app, event, &on_track_completed)
+                    .await;
             }
         });
     }
@@ -637,7 +643,12 @@ impl Playback {
         state.backend.play(client, snapshot, &repeat).await
     }
 
-    async fn handle_event(&self, app: &tauri::AppHandle, event: NeutralEvent) {
+    async fn handle_event(
+        &self,
+        app: &tauri::AppHandle,
+        event: NeutralEvent,
+        on_track_completed: &impl Fn(String),
+    ) {
         let mut state = self.state.lock().await;
         let actions = state.reducer.handle(event);
         for action in actions {
@@ -656,6 +667,7 @@ impl Playback {
                 ReducerAction::Error(error) => {
                     let _ = app.emit("operation-error", error);
                 }
+                ReducerAction::TrackCompleted(uri) => on_track_completed(uri),
                 ReducerAction::Advance => {
                     let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
                     if let Err(error) = self.step_locked(&mut state, client, 1).await {
@@ -885,6 +897,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_next_and_prev_do_not_complete_tracks() {
+        let playback = Playback::default();
+        let mut receiver = playback
+            .receiver
+            .lock()
+            .expect("playback receiver mutex poisoned")
+            .take()
+            .unwrap();
+        let mut tracks = mixed_tracks();
+        tracks[1].uri = "file:///definitely/missing/two.mp3".into();
+        playback
+            .state
+            .lock()
+            .await
+            .reducer
+            .set_snapshot(Some(Snapshot { tracks, index: 0 }));
+
+        for (step, expected_uri) in [(1, "two.mp3"), (-1, "one.mp3")] {
+            if step == 1 {
+                playback.next(None).await.unwrap();
+            } else {
+                playback.prev(None).await.unwrap();
+            }
+            let mut state = playback.state.lock().await;
+            loop {
+                let event = receiver.recv().await.unwrap();
+                let loaded_destination = matches!(&event, NeutralEvent::Loading { uri, .. } if uri.ends_with(expected_uri));
+                assert!(!state
+                    .reducer
+                    .handle(event)
+                    .iter()
+                    .any(|action| matches!(action, ReducerAction::TrackCompleted(_))));
+                if loaded_destination {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn mixed_boundaries_route_by_destination_without_spotify() {
         let playback = Playback::default();
         playback.play(None, mixed_tracks(), 0).await.unwrap();
@@ -1097,7 +1149,10 @@ mod tests {
                 generation,
                 uri: "spotify:track:two".into(),
             }),
-            [ReducerAction::Advance]
+            [
+                ReducerAction::TrackCompleted("spotify:track:two".into()),
+                ReducerAction::Advance
+            ]
         );
         playback.step_locked(&mut state, None, 1).await.unwrap();
         assert_eq!(state.reducer.snapshot().unwrap().index, 1);
