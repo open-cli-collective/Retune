@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
@@ -1389,6 +1389,18 @@ function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
 }
 
 function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: React.ReactNode }) {
+  const menu = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const element = menu.current
+    if (!element) return
+    const bounds = element.getBoundingClientRect()
+    const margin = 6
+    const left = Math.max(margin, Math.min(x, window.innerWidth - bounds.width - margin))
+    const preferredTop = y + bounds.height + margin <= window.innerHeight ? y : y - bounds.height
+    const top = Math.max(margin, Math.min(preferredTop, window.innerHeight - bounds.height - margin))
+    element.style.left = `${left}px`
+    element.style.top = `${top}px`
+  }, [x, y])
   useEffect(() => {
     const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest('.context-menu')) onClose() }
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
@@ -1399,7 +1411,7 @@ function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClos
       document.removeEventListener('keydown', escape)
     }
   }, [onClose])
-  return <div className="column-menu context-menu popup-context-menu" style={{ left: x, top: y }}>{children}</div>
+  return <div ref={menu} className="column-menu context-menu popup-context-menu" style={{ left: x, top: y }}>{children}</div>
 }
 
 function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
@@ -1529,7 +1541,6 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
-  const list = useRef<HTMLDivElement>(null)
   const headerDragged = useRef(false)
   const headings: Record<ColumnKey, string> = {
     track: '#',
@@ -1547,19 +1558,6 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
   const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px' }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
   const columns = `22px ${visibleColumns.map((column) => widths[column]).join(' ')}`
-  useEffect(() => {
-    if (!menu) return
-    const close = (event: PointerEvent) => {
-      if (!(event.target as HTMLElement).closest('.column-menu')) setMenu(undefined)
-    }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenu(undefined) }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', escape)
-    return () => {
-      document.removeEventListener('pointerdown', close)
-      document.removeEventListener('keydown', escape)
-    }
-  }, [menu])
   const drop = (target: ColumnKey) => {
     if (!dragging || dragging === target) return
     const next = columnOrder.filter((column) => column !== dragging)
@@ -1579,11 +1577,10 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     if (column === 'lastPlayed') return <span key={column} className="track-number">{track.lastPlayedAt === null ? '' : new Date(track.lastPlayedAt * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
     return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
   }
-  return <div className="track-list" ref={list} onMouseDown={onActivate}>
+  return <div className="track-list" onMouseDown={onActivate}>
     <div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
-      const bounds = list.current?.getBoundingClientRect()
-      setMenu({ x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0) })
+      setMenu({ x: event.clientX, y: event.clientY })
     }}><span />{visibleColumns.map((column) => <span key={column} draggable className={`${dragging === column ? 'dragging' : ''} ${['track', 'time', 'plays', 'bitrate', 'lastPlayed'].includes(column) ? 'track-number' : ''}`} onPointerDown={() => { headerDragged.current = false }} onClick={() => {
       if (headerDragged.current) return
       onSort(column, sortColumn === column ? !sortDesc : false)
@@ -1604,8 +1601,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
         }} onContextMenu={(event) => {
           event.preventDefault()
           if (!selectedIds.has(track.id)) onSelect(track.id, event)
-          const bounds = list.current?.getBoundingClientRect()
-          setMenu({ x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0), trackId: track.id })
+          setMenu({ x: event.clientX, y: event.clientY, trackId: track.id })
         }}>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
@@ -1613,12 +1609,12 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
       })}
     </div>
     {menu && (menu.trackId === undefined
-      ? <div className="column-menu" style={{ left: menu.x, top: menu.y }}>
+      ? <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
         {columnOrder.map((column) => <label key={column}><input type="checkbox" checked={!hiddenColumns.includes(column)} disabled={column === 'name'} onChange={(event) => onHiddenColumns(event.target.checked
           ? hiddenColumns.filter((hidden) => hidden !== column)
           : [...hiddenColumns, column])} />{headings[column]}</label>)}
-      </div>
-      : <div className="column-menu context-menu" style={{ left: menu.x, top: menu.y }}>
+      </ContextMenu>
+      : <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
         <button onClick={() => {
           const target = tracks.find((track) => track.id === menu.trackId)
           if (!target) return
@@ -1629,7 +1625,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
         <button disabled>Go to Album</button>
         <button disabled>Go to Artist</button>
         <button onClick={() => { const id = menu.trackId; setMenu(undefined); if (id !== undefined) onInfo(id) }}>Get Info</button>
-      </div>)}
+      </ContextMenu>)}
   </div>
 }
 
