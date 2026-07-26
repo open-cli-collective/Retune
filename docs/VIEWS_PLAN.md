@@ -177,11 +177,62 @@ Findings from the first manual pass, sequenced as F-tickets:
   column-menu style — extract a reusable checkbox-menu component and use
   it for both), replacing the single "Hide X" item.
 
-Parked pending user mockups (do NOT build yet): sidebar playlists
-chevron collapse/expand + New Playlist moved to the bottom; browser-pane
-visibility moving from the View menu to Preferences ▸ Appearance; other
-Preferences visual tweaks. A change-manifest.md from the user is
-incoming and will define that batch.
+## Design v5 batch (runs after F-chain)
+
+Source: `~/Downloads/Retune UI design (4)/design_handoff_retune/`
+(change-manifest.md 2026-07-26 entry is authoritative; Retune.dc.html is
+the working prototype). Icon: the titlebar icon is retune-icon-4a-circle
+— already shipped in assets/retune-icon.png (hash-verified); no icon
+work. Supersessions: pane visibility moves from the View ▸ Column
+Browser submenu to Preferences ▸ Appearance (submenu is removed; ⌘B and
+View theme items stay); shuffle/repeat live ONLY in the new sidebar
+bottom bar; no chrome-level theme toggle.
+
+### D1 — Chrome, toolbar, transport
+Remove the titlebar theme glyph. Toolbar right cell becomes a two-row
+right-aligned stack: search field (196px) above the Library|Spotify
+scope pills. Transport bar becomes a two-row stack: ⏮⏯⏭ above an
+interactive volume slider (click-to-set anywhere on the track, visible
+draggable knob, 0–1 → existing set_volume plumbing).
+
+### D2 — Shuffle playback
+Boolean `shuffle` setting (persisted, exported). ON: play order after
+the current track is a shuffled permutation of the remaining queue;
+OFF: canonical order restored. Next/prev/auto-advance follow the active
+order on both engines and Connect; the canonical order is retained so
+un-shuffle is lossless. Reducer/controller-level with tests; UI hookup
+lands in D3.
+
+### D3 — Sidebar bottom bar + collapse
+Bottom action bar (iTunes 4–10 style): ＋ new playlist (moved out of
+the PLAYLISTS header), ⇄ shuffle toggle, ↻ repeat cycling off→all→one
+(`one` renders ↻¹). 27×22 bevel buttons, blue-gel active state,
+tooltips "Shuffle: on/off" / "Repeat: off/all/one". PLAYLISTS header
+becomes a disclosure triangle (▾ / rotated −90°) collapsing the list
+(persisted). Playlist list scrolls independently; bottom bar and the
+overlay note stay pinned.
+
+### D4 — Preferences restyle (2004 Aqua vocabulary)
+Icon toolbar (Appearance/Library/Audio, recessed-pill selection) instead
+of tabs; grouped inset panes (bold sentence-case titles over white
+1px-border 5px-radius boxes); aqua radios/checkboxes replacing all
+iOS-style switches; gel-blue default button labelled OK + plain Cancel;
+small gray shortcut hints (⌘B on Column browser, ⌘+·⌘−·⌘0 on Text
+size). Appearance: theme radios reflect the RAW setting (System shows
+selected as System); Text size radios Small/Medium/Large → zoom
+0.9/1.0/1.15 (⌘+/⌘− still free-nudge; radios select within 0.03);
+new Column browser group (Show|Hide radios, divider, Genre/Artist/Album
+checkboxes that dim to 50% when Hidden but stay clickable). Library:
+"Spotify account" + "Syncing" groups, right-aligned Client ID row with
+helper text, sync options as checkboxes. Audio: streaming quality
+radios Normal 160 / High 256 / Very High 320 (no Low — migrate old
+values upward), playback options reordered Built-in first and Built-in
+becomes the DEFAULT backend, Normalize/Gapless as checkboxes below a
+divider in the Playback group; the F6 play-threshold control joins this
+tab in the same idiom. Remove the View ▸ Column Browser submenu.
+
+Note: flipping the default backend to built-in ships ahead of the two
+lid-close/output-switch checks — flagged to the user for QA priority.
 
 ## Done means
 
