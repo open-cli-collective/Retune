@@ -1058,7 +1058,22 @@ pub type AlbumTrack = Track;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SavedTrack {
+    #[serde(default, deserialize_with = "deserialize_added_at")]
+    pub added_at: Option<u64>,
     pub track: Track,
+}
+
+fn deserialize_added_at<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .map_err(serde::de::Error::custom)
+                .and_then(|date| u64::try_from(date.timestamp()).map_err(serde::de::Error::custom))
+        })
+        .transpose()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1201,14 +1216,19 @@ mod tests {
     async fn saved_track_page_sends_bearer_and_decodes() {
         let transport = FakeTransport::new([Response::json(
             200,
-            serde_json::json!({"items": [{"track": {
+            serde_json::json!({"items": [{"added_at": "2024-01-02T03:04:05Z", "track": {
                 "uri": "spotify:track:1", "name": "One", "duration_ms": 3,
+                "artists": [], "album": null
+            }}, {"added_at": "2024-01-02T03:04:05.987Z", "track": {
+                "uri": "spotify:track:2", "name": "Two", "duration_ms": 3,
                 "artists": [], "album": null
             }}], "next": null}),
         )]);
         let client = SpotifyClient::new("client", transport, tokens());
         let page = client.saved_tracks(20, 10).await.unwrap();
         assert_eq!(page.items[0].track.name, "One");
+        assert_eq!(page.items[0].added_at, Some(1_704_164_645));
+        assert_eq!(page.items[1].added_at, Some(1_704_164_645));
         let requests = client.transport().requests();
         assert_eq!(
             requests[0].url,

@@ -174,10 +174,13 @@ impl Default for Settings {
                 "kind",
                 "bitrate",
                 "lastPlayed",
+                "added",
             ]
             .map(String::from)
             .to_vec(),
-            hidden_columns: ["kind", "bitrate", "lastPlayed"].map(String::from).to_vec(),
+            hidden_columns: ["kind", "bitrate", "lastPlayed", "added"]
+                .map(String::from)
+                .to_vec(),
             sort_column: None,
             sort_desc: false,
             auto_add_spotify_library: true,
@@ -196,7 +199,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    const COLUMNS: [&'static str; 11] = [
+    const COLUMNS: [&'static str; 12] = [
         "name",
         "artist",
         "album",
@@ -208,6 +211,7 @@ impl Settings {
         "kind",
         "bitrate",
         "lastPlayed",
+        "added",
     ];
     const OLD_COLUMNS: [&'static str; 7] = [
         "track", "name", "time", "artist", "album", "genre", "rating",
@@ -220,12 +224,12 @@ impl Settings {
         if self.column_order == Self::OLD_COLUMNS {
             self.column_order = Self::default().column_order;
             self.hidden_columns
-                .extend(["kind", "bitrate", "lastPlayed"].map(String::from));
+                .extend(["kind", "bitrate", "lastPlayed", "added"].map(String::from));
         } else {
             for column in Self::COLUMNS {
                 if !self.column_order.iter().any(|item| item == column) {
                     self.column_order.push(column.into());
-                    if matches!(column, "kind" | "bitrate" | "lastPlayed") {
+                    if matches!(column, "kind" | "bitrate" | "lastPlayed" | "added") {
                         self.hidden_columns.push(column.into());
                     }
                 }
@@ -565,10 +569,11 @@ mod tests {
                 "kind",
                 "bitrate",
                 "lastPlayed",
+                "added",
             ]
             .map(String::from)
             .to_vec(),
-            hidden_columns: vec!["genre".into()],
+            hidden_columns: vec!["genre".into(), "added".into()],
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,
@@ -691,9 +696,13 @@ mod tests {
                 "kind",
                 "bitrate",
                 "lastPlayed",
+                "added",
             ]
         );
-        assert_eq!(settings.hidden_columns, ["kind", "bitrate", "lastPlayed"]);
+        assert_eq!(
+            settings.hidden_columns,
+            ["kind", "bitrate", "lastPlayed", "added"]
+        );
         assert_eq!(settings.playback_backend, "connect");
         assert_eq!(settings.repeat, "off");
         assert_eq!(settings.volume, 62);
@@ -753,12 +762,40 @@ mod tests {
                 "kind",
                 "bitrate",
                 "lastPlayed",
+                "added",
             ]
         );
         assert_eq!(
             settings.hidden_columns,
-            ["genre", "kind", "bitrate", "lastPlayed"]
+            ["genre", "kind", "bitrate", "lastPlayed", "added"]
         );
+    }
+
+    #[test]
+    fn settings_load_adds_date_added_after_last_played_and_hides_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let legacy = serde_json::json!({
+            "theme": "system", "zoom": 1.0, "zebra": true,
+            "columnOrder": ["name", "artist", "album", "track", "time", "rating", "genre", "plays", "kind", "bitrate", "lastPlayed"],
+            "hiddenColumns": ["kind", "bitrate", "lastPlayed"],
+            "autoAddSpotifyLibrary": true
+        });
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert_eq!(
+            settings.column_order.last().map(String::as_str),
+            Some("added")
+        );
+        assert!(settings
+            .hidden_columns
+            .iter()
+            .any(|column| column == "added"));
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub struct TrackRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_played_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<u32>,
@@ -177,6 +179,7 @@ impl Library {
             disc_no: incoming.disc_no,
             play_count: 0,
             last_played_at: None,
+            added_at: incoming.added_at,
             kind: incoming.kind,
             bitrate_kbps: incoming.bitrate_kbps,
             rating: None,
@@ -390,6 +393,8 @@ pub struct NewTrack {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disc_no: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<u32>,
@@ -430,6 +435,7 @@ mod tests {
             duration: Duration::from_secs(180),
             track_no: None,
             disc_no: None,
+            added_at: None,
             kind: None,
             bitrate_kbps: None,
         }
@@ -495,18 +501,22 @@ mod tests {
     #[test]
     fn upsert_refreshes_provider_metadata_and_preserves_play_overlay() {
         let mut library = Library::new();
-        let id = library.upsert(track("one", "Rock", "Artist", "Album"));
+        let mut original = track("one", "Rock", "Artist", "Album");
+        original.added_at = Some(100);
+        let id = library.upsert(original);
         let existing = &mut library.tracks_mut()[0];
         existing.play_count = 9;
         existing.last_played_at = Some(123);
 
         let mut changed = track("one", "Rock", "Artist", "Album");
+        changed.added_at = Some(200);
         changed.kind = Some("MPEG audio file".into());
         changed.bitrate_kbps = Some(192);
         library.upsert(changed);
 
         let track = library.get(id).unwrap();
         assert_eq!((track.play_count, track.last_played_at), (9, Some(123)));
+        assert_eq!(track.added_at, Some(100));
         assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
         assert_eq!(track.bitrate_kbps, Some(192));
     }

@@ -34,6 +34,7 @@ pub fn track(
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
         track_no: value.track_number,
         disc_no: value.disc_number,
+        added_at: None,
         kind: Some("Spotify".into()),
         bitrate_kbps: None,
     }
@@ -56,6 +57,7 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
         track_no: None,
         disc_no: None,
+        added_at: None,
         kind: Some("Spotify".into()),
         bitrate_kbps: None,
     }
@@ -80,6 +82,7 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
         track_no: value.chapter_number,
         disc_no: None,
+        added_at: None,
         kind: Some("Spotify".into()),
         bitrate_kbps: None,
     }

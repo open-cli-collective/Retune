@@ -9,7 +9,7 @@ type Theme = 'light' | 'dark' | 'system'
 type PlaybackBackend = 'connect' | 'local'
 type RepeatMode = 'off' | 'all' | 'one'
 type BrowserPanes = { cat: boolean; art: boolean; alb: boolean }
-type ColumnKey = 'name' | 'artist' | 'album' | 'track' | 'time' | 'rating' | 'genre' | 'plays' | 'kind' | 'bitrate' | 'lastPlayed'
+type ColumnKey = 'name' | 'artist' | 'album' | 'track' | 'time' | 'rating' | 'genre' | 'plays' | 'kind' | 'bitrate' | 'lastPlayed' | 'added'
 type Selection = { cat?: string[]; art?: string[]; alb?: string[] }
 type ActivePane = 'track' | keyof Selection
 
@@ -108,6 +108,7 @@ type Track = {
   durationSecs: number
   playCount: number
   lastPlayedAt: number | null
+  addedAt: number | null
   kind: string | null
   bitrateKbps: number | null
   overridden: boolean
@@ -259,8 +260,8 @@ const defaultSettings: Settings = {
   zoom: 1,
   zebra: true,
   browserPanes: { cat: true, art: true, alb: true },
-  columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed'],
-  hiddenColumns: ['kind', 'bitrate', 'lastPlayed'],
+  columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added'],
+  hiddenColumns: ['kind', 'bitrate', 'lastPlayed', 'added'],
   sortColumn: null,
   sortDesc: false,
   autoAddSpotifyLibrary: true,
@@ -429,7 +430,8 @@ const sortValue = (track: Track, column: ColumnKey): string | number | null => {
   if (column === 'plays') return track.playCount
   if (column === 'kind') return track.kind
   if (column === 'bitrate') return track.bitrateKbps
-  return track.lastPlayedAt
+  if (column === 'lastPlayed') return track.lastPlayedAt
+  return track.addedAt
 }
 
 const compareTracks = (left: Track, right: Track, column: ColumnKey, desc: boolean) => {
@@ -1552,8 +1554,9 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     kind: 'Kind',
     bitrate: 'Bit Rate',
     lastPlayed: 'Last Played',
+    added: 'Date Added',
   }
-  const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px' }
+  const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px', added: '88px' }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
   const columns = `22px ${visibleColumns.map((column) => widths[column]).join(' ')}`
   const drop = (target: ColumnKey) => {
@@ -1573,13 +1576,14 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     if (column === 'kind') return <span key={column} title={track.kind ?? undefined}>{track.kind ?? ''}</span>
     if (column === 'bitrate') return <span key={column} className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
     if (column === 'lastPlayed') return <span key={column} className="track-number">{track.lastPlayedAt === null ? '' : new Date(track.lastPlayedAt * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
+    if (column === 'added') return <span key={column} className="track-number">{track.addedAt === null ? '' : new Date(track.addedAt * 1000).toLocaleDateString()}</span>
     return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
   }
   return <div className="track-list" onMouseDown={onActivate}>
     <div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
-    }}><span />{visibleColumns.map((column) => <span key={column} draggable className={`${dragging === column ? 'dragging' : ''} ${['track', 'time', 'plays', 'bitrate', 'lastPlayed'].includes(column) ? 'track-number' : ''}`} onPointerDown={() => { headerDragged.current = false }} onClick={() => {
+    }}><span />{visibleColumns.map((column) => <span key={column} draggable className={`${dragging === column ? 'dragging' : ''} ${['track', 'time', 'plays', 'bitrate', 'lastPlayed', 'added'].includes(column) ? 'track-number' : ''}`} onPointerDown={() => { headerDragged.current = false }} onClick={() => {
       if (headerDragged.current) return
       onSort(column, sortColumn === column ? !sortDesc : false)
     }} onDragStart={(event) => {

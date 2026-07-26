@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use retune_audio::{audio_kind, import_file, scan_paths, ImportedFile};
@@ -108,6 +109,12 @@ fn map_file(file: ImportedFile) -> Result<NewTrack, String> {
         duration: file.tags.duration,
         track_no: file.tags.track_no,
         disc_no: file.tags.disc_no,
+        added_at: Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is before Unix epoch")
+                .as_secs(),
+        ),
         kind,
         bitrate_kbps,
     })
@@ -120,7 +127,15 @@ fn average_bitrate(bytes: u64, duration: std::time::Duration) -> Option<u32> {
 
 pub(crate) fn backfill_metadata(library: &mut Library) -> bool {
     let mut changed = false;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_secs();
     for track in library.tracks_mut() {
+        if track.added_at.is_none() {
+            track.added_at = Some(now);
+            changed = true;
+        }
         if track.uri.starts_with("spotify:") {
             if track.kind.is_none() {
                 track.kind = Some("Spotify".into());
@@ -223,6 +238,7 @@ mod tests {
         assert_eq!(track.cat, "Fixture Genre");
         assert_eq!(track.track_no, Some(7));
         assert_eq!(track.disc_no, Some(2));
+        assert!(track.added_at.is_some());
         assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
         assert!(track
             .bitrate_kbps
@@ -350,6 +366,9 @@ mod tests {
         spotify.kind = None;
         spotify.bitrate_kbps = None;
         let spotify_id = library.add(spotify);
+        for track in library.tracks_mut() {
+            track.added_at = None;
+        }
 
         assert!(backfill_metadata(&mut library));
         let local = library.get(local_id).unwrap();
@@ -362,6 +381,9 @@ mod tests {
             library.get(spotify_id).unwrap().kind.as_deref(),
             Some("Spotify")
         );
+        let added = library.tracks()[0].added_at;
+        assert!(added.is_some());
+        assert!(library.tracks().iter().all(|track| track.added_at == added));
         assert!(!backfill_metadata(&mut library));
     }
 
@@ -373,12 +395,12 @@ mod tests {
         };
         let mut library = Library::new();
         let mut track = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
-        track.kind = None;
-        track.bitrate_kbps = None;
+        track.added_at = None;
         library.add(track);
 
         assert_eq!(backfill_transaction(&store, &mut library), Ok(true));
         assert_eq!(store.saves.get(), 1);
+        assert!(library.tracks()[0].added_at.is_some());
         assert_eq!(backfill_transaction(&store, &mut library), Ok(false));
         assert_eq!(store.saves.get(), 1);
     }

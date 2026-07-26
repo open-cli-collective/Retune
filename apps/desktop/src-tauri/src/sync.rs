@@ -154,6 +154,7 @@ mod tests {
             duration: Duration::from_secs(1),
             track_no: None,
             disc_no: None,
+            added_at: None,
             kind: Some("Spotify".into()),
             bitrate_kbps: None,
         }

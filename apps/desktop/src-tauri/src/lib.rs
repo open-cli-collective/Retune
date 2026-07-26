@@ -203,6 +203,7 @@ struct TrackView {
     duration_secs: u64,
     play_count: u32,
     last_played_at: Option<u64>,
+    added_at: Option<u64>,
     kind: Option<String>,
     bitrate_kbps: Option<u32>,
     overridden: bool,
@@ -223,6 +224,7 @@ impl TrackView {
             duration_secs: track.duration.as_secs(),
             play_count: track.play_count,
             last_played_at: track.last_played_at,
+            added_at: track.added_at,
             kind: track.kind.clone(),
             bitrate_kbps: track.bitrate_kbps,
             overridden: track
@@ -2793,6 +2795,7 @@ mod tests {
             duration: Duration::from_secs(1),
             track_no: None,
             disc_no: None,
+            added_at: None,
             kind: None,
             bitrate_kbps: None,
         }
@@ -2855,10 +2858,12 @@ mod tests {
         let track = &mut library.tracks_mut()[0];
         track.play_count = 4;
         track.last_played_at = Some(123);
+        track.added_at = Some(100);
         track.kind = Some("Spotify".into());
         let view = TrackView::from_track(library.get(id).unwrap(), None);
 
         assert_eq!((view.play_count, view.last_played_at), (4, Some(123)));
+        assert_eq!(view.added_at, Some(100));
         assert_eq!(view.kind.as_deref(), Some("Spotify"));
         assert_eq!(view.bitrate_kbps, None);
     }
@@ -3370,10 +3375,16 @@ mod tests {
                 "kind",
                 "bitrate",
                 "lastPlayed",
+                "added",
             ]
             .map(String::from)
             .to_vec(),
-            hidden_columns: vec!["genre".into(), "kind".into(), "bitrate".into()],
+            hidden_columns: vec![
+                "genre".into(),
+                "kind".into(),
+                "bitrate".into(),
+                "added".into(),
+            ],
             sort_column: Some("plays".into()),
             sort_desc: true,
             auto_add_spotify_library: false,
@@ -3467,7 +3478,7 @@ mod tests {
         assert_eq!(settings.column_order, Settings::default().column_order);
         assert_eq!(
             settings.hidden_columns,
-            ["genre", "kind", "bitrate", "lastPlayed"]
+            ["genre", "kind", "bitrate", "lastPlayed", "added"]
         );
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);

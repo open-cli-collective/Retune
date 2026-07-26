@@ -492,14 +492,21 @@ struct PendingTrack {
     artist_id: Option<String>,
 }
 
-fn normalized_track(track: &retune_spotify::client::Track, album: Option<&Album>) -> PendingTrack {
+fn normalized_track(
+    track: &retune_spotify::client::Track,
+    album: Option<&Album>,
+    added_at: Option<u64>,
+) -> PendingTrack {
     let artist_id = track
         .artists
         .first()
         .or_else(|| album.and_then(|album| album.artists.first()))
         .map(|artist| artist.id.clone());
     PendingTrack {
-        track: normalize::track(track, None, album),
+        track: NewTrack {
+            added_at,
+            ..normalize::track(track, None, album)
+        },
         artist_id,
     }
 }
@@ -553,7 +560,7 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
         let count = (page.items.len() + page.skipped) as u32;
         expected_total = Some(page.total);
         for track in page.items {
-            tracks.push(normalized_track(&track, Some(album)));
+            tracks.push(normalized_track(&track, Some(album), None));
         }
         offset = count;
         if page.total <= offset {
@@ -571,7 +578,7 @@ async fn normalized_album_tracks<T: Transport, S: TokenStore>(
         };
         let count = (page.items.len() + page.skipped) as u32;
         for track in page.items {
-            tracks.push(normalized_track(&track, Some(album)));
+            tracks.push(normalized_track(&track, Some(album), None));
         }
         offset += count;
         if count == 0
@@ -637,7 +644,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 let batch = page
                     .items
                     .into_iter()
-                    .map(|saved| normalized_track(&saved.track, None))
+                    .map(|saved| normalized_track(&saved.track, None, saved.added_at))
                     .collect::<Vec<_>>();
                 done += count;
                 on_batch(SyncBatch {
@@ -939,7 +946,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                 .map_err(|error| error.to_string())?;
             let count = (page.items.len() + page.skipped) as u32;
             for track in page.items {
-                normalized.push(normalized_track(&track, None));
+                normalized.push(normalized_track(&track, None, None));
             }
             if page.next.is_none() || count == 0 {
                 return Ok(enrich_music(&genres, vec![normalized])
@@ -1099,7 +1106,7 @@ mod tests {
         let client = client([
             Response::json(
                 200,
-                serde_json::json!({"items": [{"track": {
+                serde_json::json!({"items": [{"added_at": "2024-01-02T03:04:05Z", "track": {
                     "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
                     "artists": [{"id": "artist-1", "name": "Artist"}],
                     "album": {"id": "album-1", "uri": "spotify:album:1", "name": "Album", "images": []}
@@ -1123,6 +1130,7 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0][0].cat, "rock");
         assert_eq!(batches[0][0].alb, "Album");
+        assert_eq!(batches[0][0].added_at, Some(1_704_164_645));
         assert_eq!(tapped.len(), 2);
         assert_eq!(tapped[0].tracks[0].uri, "spotify:track:1");
         assert_eq!(tapped[0].done, 1);

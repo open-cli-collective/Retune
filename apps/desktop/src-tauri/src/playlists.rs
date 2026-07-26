@@ -637,6 +637,7 @@ mod tests {
             duration: std::time::Duration::from_secs(1),
             track_no: None,
             disc_no: None,
+            added_at: None,
             kind: None,
             bitrate_kbps: None,
         }

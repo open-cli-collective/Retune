@@ -105,6 +105,7 @@ mod tests {
             duration: Duration::from_secs(42),
             track_no: None,
             disc_no: None,
+            added_at: None,
             kind: Some("Spotify".into()),
             bitrate_kbps: None,
         });
@@ -114,6 +115,7 @@ mod tests {
         let track = &mut library.tracks_mut()[0];
         track.play_count = 3;
         track.last_played_at = Some(1_700_000_000);
+        track.added_at = Some(1_600_000_000);
         track.kind = Some("Spotify".into());
         track.bitrate_kbps = Some(320);
         library.set_album_rating(
@@ -189,6 +191,7 @@ mod tests {
             duration: Duration::from_secs(1),
             track_no: None,
             disc_no: None,
+            added_at: None,
             kind: None,
             bitrate_kbps: None,
         });
@@ -232,6 +235,7 @@ mod tests {
         let track = &library.tracks()[0];
         assert_eq!(track.play_count, 0);
         assert_eq!(track.last_played_at, None);
+        assert_eq!(track.added_at, None);
         assert_eq!(track.kind, None);
         assert_eq!(track.bitrate_kbps, None);
 
