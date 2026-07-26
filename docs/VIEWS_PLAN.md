@@ -142,6 +142,47 @@ chacha20poly1305. Accept: unit tests with fake keychain (key reuse,
 migration, corrupt file → treated as absent); release path constructs the
 new store.
 
+## QA fix-up round (2026-07-26)
+
+Findings from the first manual pass, sequenced as F-tickets:
+
+- F1 Context menus: clamp to viewport (no off-window overflow), open at
+  the cursor for ALL column headers (Plays/Kind/Last Played headers
+  currently don't open the menu; Rating opened it at the window edge),
+  playlist menu opens far from the click.
+- F2 Sidebar: mouse-wheel and arrow-key scrolling don't work (window
+  must be resized to reveal playlists); playlist drag-reorder does
+  nothing in practice — debug and fix.
+- F3 Followed playlists STILL empty after rebuild: cache entries
+  predating T0 have matching snapshot_ids with empty tracks, and the
+  snapshot short-circuit trusts them forever → refetch when
+  track_count > 0 but tracks is empty. Also: playlist track names now
+  render bold in owned playlists — find and fix the regression.
+- F4 Date Added: `added_at` (unix seconds, UTC) on TrackRecord; Spotify
+  saved-tracks `added_at` when the API provides it, import time for
+  local files, first-sync/now placeholder backfill for existing records.
+  "Date Added" column, default OFF, date-only display, full-timestamp
+  sort precision; exports like the rest.
+- F5 Finder drag-and-drop import: dropping files/folders onto the window
+  routes through the existing import pipeline (dedupe, summary, events).
+  Sequenced after F4 so imports stamp added_at.
+- F6 Play threshold: Preferences setting "count as played after N%"
+  (default 100% = current completion behavior). Counting/last-played
+  fire on a single internal TrackPlayed signal at threshold crossing
+  (or completion if never crossed); skips before threshold don't count.
+- F7 Column width resize: draggable dividers on variable-width columns
+  (fixed ones like Rating excluded), persisted + exported.
+- F8 Universal pane menu: right-clicking ANY browser pane header opens
+  one checkbox menu listing Genre/Artist/Album (exactly the tracklist
+  column-menu style — extract a reusable checkbox-menu component and use
+  it for both), replacing the single "Hide X" item.
+
+Parked pending user mockups (do NOT build yet): sidebar playlists
+chevron collapse/expand + New Playlist moved to the bottom; browser-pane
+visibility moving from the View menu to Preferences ▸ Appearance; other
+Preferences visual tweaks. A change-manifest.md from the user is
+incoming and will define that batch.
+
 ## Done means
 
 Panes hide/show from menu and right-click with sane empty state; tracklist
