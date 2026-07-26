@@ -461,33 +461,25 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn is_following_artist(&self, id: &str) -> Result<bool> {
+        let uri = format!("spotify:artist:{id}");
         let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("type", "artist")
-            .append_pair("ids", id)
+            .append_pair("uris", &uri)
             .finish();
-        self.get::<Vec<bool>>(&format!("/me/following/contains?{query}"))
+        self.get::<Vec<bool>>(&format!("/me/library/contains?{query}"))
             .await
             .map(|following| following.first().copied().unwrap_or(false))
     }
 
     pub async fn follow_artist(&self, id: &str, follow: bool) -> Result<()> {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("type", "artist")
-            .append_pair("ids", id)
-            .finish();
-        self.empty(
+        self.change_library(
             if follow { Method::Put } else { Method::Delete },
-            &format!("/me/following?{query}"),
-            Vec::new(),
+            &[format!("spotify:artist:{id}")],
         )
         .await
     }
 
     pub async fn remove_saved_album(&self, id: &str) -> Result<()> {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("ids", id)
-            .finish();
-        self.empty(Method::Delete, &format!("/me/albums?{query}"), Vec::new())
+        self.change_library(Method::Delete, &[format!("spotify:album:{id}")])
             .await
     }
 
@@ -646,11 +638,15 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn save_to_library(&self, uris: &[String]) -> Result<()> {
+        self.change_library(Method::Put, uris).await
+    }
+
+    async fn change_library(&self, method: Method, uris: &[String]) -> Result<()> {
         for chunk in uris.chunks(40) {
             let query = url::form_urlencoded::Serializer::new(String::new())
                 .append_pair("uris", &chunk.join(","))
                 .finish();
-            self.empty(Method::Put, &format!("/me/library?{query}"), Vec::new())
+            self.empty(method.clone(), &format!("/me/library?{query}"), Vec::new())
                 .await?;
         }
         Ok(())
@@ -1427,7 +1423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artist_follow_contains_and_writes_use_query_parameters() {
+    async fn artist_follow_contains_and_writes_use_library_uris() {
         let transport = FakeTransport::new([
             Response::json(200, serde_json::json!([true])),
             Response::json(204, serde_json::Value::Null),
@@ -1443,13 +1439,19 @@ mod tests {
         assert_eq!(requests[0].method, Method::Get);
         assert_eq!(requests[1].method, Method::Put);
         assert_eq!(requests[2].method, Method::Delete);
+        assert_eq!(
+            url::Url::parse(&requests[0].url).unwrap().path(),
+            "/v1/me/library/contains"
+        );
+        assert!(
+            requests[1..]
+                .iter()
+                .all(|request| url::Url::parse(&request.url).unwrap().path() == "/v1/me/library")
+        );
         assert!(requests.iter().all(|request| {
             let url = url::Url::parse(&request.url).unwrap();
             url.query_pairs()
-                .any(|pair| pair == ("type".into(), "artist".into()))
-                && url
-                    .query_pairs()
-                    .any(|pair| pair == ("ids".into(), "a & b".into()))
+                .any(|pair| pair == ("uris".into(), "spotify:artist:a & b".into()))
         }));
     }
 
@@ -1466,10 +1468,10 @@ mod tests {
         let request = &client.transport().requests()[0];
         assert_eq!(request.method, Method::Delete);
         let url = url::Url::parse(&request.url).unwrap();
-        assert_eq!(url.path(), "/v1/me/albums");
+        assert_eq!(url.path(), "/v1/me/library");
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
-            [("ids".into(), "album".into())]
+            [("uris".into(), "spotify:album:album".into())]
         );
     }
 
