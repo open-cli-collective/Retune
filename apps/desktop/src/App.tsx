@@ -8,6 +8,7 @@ type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
 type PlaybackBackend = 'connect' | 'local'
 type RepeatMode = 'off' | 'all' | 'one'
+type BrowserPanes = { cat: boolean; art: boolean; alb: boolean }
 type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
 type Selection = { cat?: string[]; art?: string[]; alb?: string[] }
 type ActivePane = 'track' | keyof Selection
@@ -16,6 +17,7 @@ type Settings = {
   theme: Theme
   zoom: number
   zebra: boolean
+  browserPanes: BrowserPanes
   columnOrder: ColumnKey[]
   hiddenColumns: ColumnKey[]
   autoAddSpotifyLibrary: boolean
@@ -227,6 +229,7 @@ type Action =
   | { type: 'playerState'; player: PlayerState; queue: readonly PlaybackTrack[] }
   | { type: 'hydrateSettings'; settings: Settings }
   | { type: 'settings'; settings: Partial<Settings> }
+  | { type: 'browserPanes'; browserPanes: BrowserPanes }
   | { type: 'systemTheme'; dark: boolean }
   | { type: 'refresh' }
   | { type: 'notice'; notice?: string }
@@ -248,6 +251,7 @@ const defaultSettings: Settings = {
   theme: 'system',
   zoom: 1,
   zebra: true,
+  browserPanes: { cat: true, art: true, alb: true },
   columnOrder: ['track', 'name', 'time', 'artist', 'album', 'genre', 'rating'],
   hiddenColumns: [],
   autoAddSpotifyLibrary: true,
@@ -350,6 +354,11 @@ function reducer(state: State, action: Action): State {
       return { ...state, settings: action.settings, settingsHydrated: true }
     case 'settings':
       return { ...state, settings: { ...state.settings, ...action.settings } }
+    case 'browserPanes': {
+      const sel = { ...state.sel }
+      for (const facet of ['cat', 'art', 'alb'] as const) if (!action.browserPanes[facet]) delete sel[facet]
+      return { ...state, sel, settings: { ...state.settings, browserPanes: action.browserPanes } }
+    }
     case 'systemTheme':
       return { ...state, systemDark: action.dark }
     case 'refresh':
@@ -496,6 +505,7 @@ function App() {
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
+  const lastBrowserPanes = useRef<BrowserPanes | undefined>(undefined)
   const skipSettingsSave = useRef(false)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
@@ -521,6 +531,26 @@ function App() {
     }
     dispatch({ type: 'select', facet, values })
   }, [])
+  const setBrowserPanes = useCallback((browserPanes: BrowserPanes) => {
+    for (const facet of ['cat', 'art', 'alb'] as const) {
+      if (!browserPanes[facet]) delete facetAnchors.current[facet]
+    }
+    dispatch({ type: 'browserPanes', browserPanes })
+  }, [])
+  const toggleBrowser = useCallback(() => {
+    const panes = state.settings.browserPanes
+    if (panes.cat || panes.art || panes.alb) {
+      lastBrowserPanes.current = panes
+      setBrowserPanes({ cat: false, art: false, alb: false })
+    } else {
+      setBrowserPanes(lastBrowserPanes.current ?? defaultSettings.browserPanes)
+    }
+  }, [setBrowserPanes, state.settings.browserPanes])
+  const toggleBrowserPane = useCallback((facet: keyof BrowserPanes) => {
+    const browserPanes = { ...state.settings.browserPanes, [facet]: !state.settings.browserPanes[facet] }
+    setBrowserPanes(browserPanes)
+    if (!browserPanes[facet]) setActivePane('track')
+  }, [setBrowserPanes, state.settings.browserPanes])
   const cycleRepeat = () => {
     const repeat: RepeatMode = state.settings.repeat === 'off' ? 'all' : state.settings.repeat === 'all' ? 'one' : 'off'
     invoke('set_repeat', { mode: repeat })
@@ -588,6 +618,7 @@ function App() {
     state.settings.theme,
     state.settings.zoom,
     state.settings.zebra,
+    state.settings.browserPanes,
     state.settings.columnOrder,
     state.settings.hiddenColumns,
     state.settings.autoAddSpotifyLibrary,
@@ -730,6 +761,8 @@ function App() {
       else if (payload === 'zoom_out') setZoom(state.settings.zoom - 0.1)
       else if (payload === 'actual_size') setZoom(1)
       else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
+      else if (payload === 'toggle_browser') toggleBrowser()
+      else if (payload.startsWith('toggle_browser_')) toggleBrowserPane(payload.slice(-3) as keyof BrowserPanes)
     })
     const playerActions = listen<string>('player-action', ({ payload }) => {
       if (payload === 'play_pause') player.toggle()
@@ -743,7 +776,7 @@ function App() {
       void preferences.then((stop) => stop())
       void setup.then((stop) => stop())
     }
-  }, [state.settings, player])
+  }, [state.settings, player, toggleBrowser, toggleBrowserPane])
 
   useEffect(() => {
     if (typeahead.current.buffer) {
@@ -898,7 +931,10 @@ function App() {
           ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onError={(error) => dispatch({ type: 'error', error })} />
           : (
             <>
-              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} />
+              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onHide={(facet) => {
+                setBrowserPanes({ ...state.settings.browserPanes, [facet]: false })
+                setActivePane('track')
+              }} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
                 <AlbumRatingStrip
                   album={selectedAlbum}
@@ -1319,21 +1355,29 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   </div>
 }
 
-function BrowserPane({ state, anchors, onActivate, onSelect }: {
+function BrowserPane({ state, anchors, onActivate, onSelect, onHide }: {
   state: State
   anchors: { current: Partial<Record<keyof Selection, string>> }
   onActivate: (facet: keyof Selection) => void
   onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
+  onHide: (facet: keyof Selection) => void
 }) {
+  const [menu, setMenu] = useState<{ x: number; y: number; facet: keyof Selection; title: string }>()
   const sourceLabels = labels[state.source].facets
   const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
-  return <div className="browser-pane">
-    {facets.map((facet, index) => <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} />)}
+  const visible = facets.filter((facet) => state.settings.browserPanes[facet])
+  if (!visible.length) return null
+  return <div className="browser-pane" style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
+    {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
+      event.preventDefault()
+      setMenu({ x: event.clientX, y: event.clientY, facet, title: sourceLabels[index] })
+    }} />)}
+    {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { onHide(menu.facet); setMenu(undefined) }}>Hide {menu.title}</button></ContextMenu>}
   </div>
 }
 
-function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect }: {
+function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect, onContextMenu }: {
   facet: keyof Selection
   title: string
   values: string[]
@@ -1341,6 +1385,7 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   anchor?: string
   onActivate: () => void
   onSelect: (values: string[], anchor?: string) => void
+  onContextMenu: (event: React.MouseEvent) => void
 }) {
   const select = (value: string, event: React.MouseEvent) => {
     if (event.shiftKey) {
@@ -1353,7 +1398,7 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
       onSelect([value], value)
     }
   }
-  return <div className="facet-column" data-facet={facet} onMouseDown={onActivate}>
+  return <div className="facet-column" data-facet={facet} onMouseDown={onActivate} onContextMenu={onContextMenu}>
     <div className="column-header">{title}</div>
     <div className="facet-list">
       <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)}>All ({values.length} {title}s)</button>

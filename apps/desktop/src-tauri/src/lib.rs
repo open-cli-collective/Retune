@@ -42,8 +42,8 @@ use retune_spotify::{
 };
 use serde::{Deserialize, Serialize};
 use store::{
-    FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore, OverlayStore, Settings,
-    StoreError, Theme,
+    BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore, OverlayStore,
+    Settings, StoreError, Theme,
 };
 use sync_orchestrator::SyncOrchestrator;
 use tauri::{
@@ -76,6 +76,9 @@ struct AppState {
 
 struct MenuChecks {
     zebra: CheckMenuItem<tauri::Wry>,
+    browser_cat: CheckMenuItem<tauri::Wry>,
+    browser_art: CheckMenuItem<tauri::Wry>,
+    browser_alb: CheckMenuItem<tauri::Wry>,
     account_status: tauri::menu::MenuItem<tauri::Wry>,
     connect: tauri::menu::MenuItem<tauri::Wry>,
     disconnect: tauri::menu::MenuItem<tauri::Wry>,
@@ -83,7 +86,10 @@ struct MenuChecks {
 
 impl MenuChecks {
     fn sync(&self, settings: &Settings) -> tauri::Result<()> {
-        self.zebra.set_checked(settings.zebra)
+        self.zebra.set_checked(settings.zebra)?;
+        self.browser_cat.set_checked(settings.browser_panes.cat)?;
+        self.browser_art.set_checked(settings.browser_panes.art)?;
+        self.browser_alb.set_checked(settings.browser_panes.alb)
     }
 
     fn sync_connection(&self, connected: bool) -> tauri::Result<()> {
@@ -108,6 +114,8 @@ struct VisualSettings {
     theme: Theme,
     zoom: f64,
     zebra: bool,
+    #[serde(default)]
+    browser_panes: BrowserPanes,
     column_order: Vec<String>,
     hidden_columns: Vec<String>,
 }
@@ -118,6 +126,7 @@ impl VisualSettings {
             theme: settings.theme,
             zoom: settings.zoom,
             zebra: settings.zebra,
+            browser_panes: settings.browser_panes,
             column_order: settings.column_order.clone(),
             hidden_columns: settings.hidden_columns.clone(),
         }
@@ -127,6 +136,7 @@ impl VisualSettings {
         settings.theme = self.theme;
         settings.zoom = self.zoom;
         settings.zebra = self.zebra;
+        settings.browser_panes = self.browser_panes;
         settings.column_order = self.column_order;
         settings.hidden_columns = self.hidden_columns;
     }
@@ -2087,9 +2097,27 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let zebra = CheckMenuItemBuilder::with_id("toggle_zebra", "Toggle Zebra Striping")
         .checked(settings.zebra)
         .build(app)?;
+    let browser = MenuItemBuilder::with_id("toggle_browser", "Show Browser")
+        .accelerator("CmdOrCtrl+B")
+        .build(app)?;
+    let browser_cat = CheckMenuItemBuilder::with_id("toggle_browser_cat", "Genre")
+        .checked(settings.browser_panes.cat)
+        .build(app)?;
+    let browser_art = CheckMenuItemBuilder::with_id("toggle_browser_art", "Artist")
+        .checked(settings.browser_panes.art)
+        .build(app)?;
+    let browser_alb = CheckMenuItemBuilder::with_id("toggle_browser_alb", "Album")
+        .checked(settings.browser_panes.alb)
+        .build(app)?;
+    let column_browser = SubmenuBuilder::new(app, "Column Browser")
+        .items(&[&browser_cat, &browser_art, &browser_alb])
+        .separator()
+        .item(&browser)
+        .build()?;
     let view = SubmenuBuilder::new(app, "View")
         .items(&[&zoom_in, &zoom_out, &actual_size])
         .separator()
+        .item(&column_browser)
         .item(&zebra)
         .build()?;
     let controls = SubmenuBuilder::new(app, "Controls")
@@ -2171,7 +2199,8 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "preferences" => {
             let _ = app.emit("open-preferences", ());
         }
-        "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" => {
+        "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "toggle_browser"
+        | "toggle_browser_cat" | "toggle_browser_art" | "toggle_browser_alb" => {
             let _ = app.emit("view-action", event.id().as_ref());
         }
         "play_pause" | "previous" | "next" => {
@@ -2183,6 +2212,9 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     });
     Ok(MenuChecks {
         zebra,
+        browser_cat,
+        browser_art,
+        browser_alb,
         account_status,
         connect,
         disconnect,
@@ -3103,6 +3135,11 @@ mod tests {
             theme: Theme::Dark,
             zoom: 1.4,
             zebra: false,
+            browser_panes: BrowserPanes {
+                cat: false,
+                art: true,
+                alb: false,
+            },
             column_order: [
                 "name", "track", "rating", "artist", "album", "genre", "time",
             ]
@@ -3134,11 +3171,45 @@ mod tests {
 
         assert_eq!(restored_library, library);
         assert_eq!(restored.theme, Theme::Dark);
+        assert_eq!(restored.browser_panes, exported.browser_panes);
         assert_eq!(restored.hidden_columns, ["genre"]);
         assert_eq!(restored.spotify_client_id, "local-machine");
         assert!(restored.auto_add_spotify_library);
         assert!(restored.auto_connect);
         assert!(!restored.spotify_sync_completed);
+    }
+
+    #[test]
+    fn legacy_visual_settings_default_all_browser_panes_visible() {
+        let mut json =
+            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
+        json.as_object_mut().unwrap().remove("browserPanes");
+
+        let visual: VisualSettings = serde_json::from_value(json).unwrap();
+
+        assert_eq!(visual.browser_panes, BrowserPanes::default());
+    }
+
+    #[test]
+    fn visual_settings_apply_restored_browser_visibility() {
+        let mut settings = Settings::default();
+        let mut visual = VisualSettings::from_settings(&settings);
+        visual.browser_panes = BrowserPanes {
+            cat: true,
+            art: false,
+            alb: true,
+        };
+
+        visual.apply_to(&mut settings);
+
+        assert_eq!(
+            settings.browser_panes,
+            BrowserPanes {
+                cat: true,
+                art: false,
+                alb: true,
+            }
+        );
     }
 
     #[test]

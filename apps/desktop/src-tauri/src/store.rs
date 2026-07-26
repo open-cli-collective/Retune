@@ -78,6 +78,8 @@ pub struct Settings {
     pub theme: Theme,
     pub zoom: f64,
     pub zebra: bool,
+    #[serde(default)]
+    pub browser_panes: BrowserPanes,
     pub column_order: Vec<String>,
     #[serde(default)]
     pub hidden_columns: Vec<String>,
@@ -102,6 +104,23 @@ pub struct Settings {
     pub normalize_volume: bool,
     #[serde(default = "default_true")]
     pub gapless: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BrowserPanes {
+    pub cat: bool,
+    pub art: bool,
+    pub alb: bool,
+}
+
+impl Default for BrowserPanes {
+    fn default() -> Self {
+        Self {
+            cat: true,
+            art: true,
+            alb: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -138,6 +157,7 @@ impl Default for Settings {
             theme: Theme::System,
             zoom: 1.0,
             zebra: true,
+            browser_panes: BrowserPanes::default(),
             column_order: [
                 "track", "name", "time", "artist", "album", "genre", "rating",
             ]
@@ -461,6 +481,11 @@ mod tests {
             theme: Theme::Dark,
             zoom: 1.3,
             zebra: false,
+            browser_panes: BrowserPanes {
+                cat: false,
+                art: true,
+                alb: false,
+            },
             column_order: [
                 "rating", "name", "artist", "album", "genre", "time", "track",
             ]
@@ -483,6 +508,16 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn legacy_settings_default_all_browser_panes_visible() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("browserPanes");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert_eq!(settings.browser_panes, BrowserPanes::default());
     }
 
     #[test]
