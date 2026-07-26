@@ -38,7 +38,10 @@ use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
     client::{Album, HttpTransport, SpotifyClient, Transport},
     normalize::UNCATEGORIZED,
-    tokens::{CachedTokenStore, KeychainTokenStore, TokenStore, Tokens},
+    tokens::{
+        migrate_token_store, CachedTokenStore, EncryptedFsTokenStore, KeychainTokenStore,
+        TokenStore, Tokens,
+    },
 };
 use serde::{Deserialize, Serialize};
 use store::{
@@ -2593,18 +2596,22 @@ pub fn run() {
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
-            // Dev builds keep tokens in a 0600 file: Keychain ACL grants are
-            // keyed to the binary signature, which changes every rebuild, so
-            // dev iteration would re-prompt constantly. Release uses Keychain.
+            // Dev builds keep tokens in a 0600 plaintext file. Release keeps
+            // only the encryption key in Keychain and migrates legacy tokens.
             let backing: Box<dyn TokenStore> = if cfg!(debug_assertions) {
                 Box::new(store::FsTokenStore::new(&app_data_dir))
             } else {
-                Box::new(KeychainTokenStore::new().map_err(std::io::Error::other)?)
+                let encrypted =
+                    EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?;
+                let legacy = KeychainTokenStore::new().map_err(std::io::Error::other)?;
+                if let Err(error) = migrate_token_store(&legacy, &encrypted) {
+                    log::warn!("Could not migrate legacy Spotify tokens: {error}");
+                }
+                Box::new(encrypted)
             };
             let token_store = Arc::new(CachedTokenStore::new(backing));
-            // Keychain access can fail transiently (e.g. "In dark wake, no UI
-            // possible" while the display sleeps); start disconnected rather
-            // than abort — the cache retries the Keychain on the next access.
+            // Keychain access can fail transiently; start disconnected rather
+            // than aborting startup.
             let connected = match token_store.load() {
                 Ok(tokens) => {
                     if let Some(tokens) = &tokens {
