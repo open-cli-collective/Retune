@@ -1380,7 +1380,7 @@ function PlaylistView({ playlist, revision, playing, onPlay, onError }: {
         onDragOver={canReorder ? (event) => { event.preventDefault(); setInsertBefore(index) } : undefined}
         onDrop={canReorder ? (event) => { event.preventDefault(); void drop(index) } : undefined}
         onDragEnd={() => { setDragging(undefined); setInsertBefore(undefined) }}
-      ><span>{index + 1}</span><strong title={track.name}>{track.name}</strong><time>{formatTime(track.durationSecs)}</time><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span></div>)}
+      ><span>{index + 1}</span><span title={track.name}>{track.name}</span><time>{formatTime(track.durationSecs)}</time><span title={track.art}>{track.art}</span><span title={track.alb}>{track.alb}</span></div>)}
       {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} onDragOver={(event) => { event.preventDefault(); setInsertBefore(tracks.length) }} onDrop={(event) => { event.preventDefault(); void drop(tracks.length) }} />}
     </div>
   </div>
