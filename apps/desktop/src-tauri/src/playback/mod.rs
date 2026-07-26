@@ -12,6 +12,7 @@ use std::{
 use connect::ConnectBackend;
 use file::FileEngine;
 use local::LocalBackend;
+use rand::seq::SliceRandom;
 use reducer::{EventReducer, ReducerAction};
 use retune_spotify::client::{HttpTransport, SpotifyClient};
 use serde::{Deserialize, Serialize};
@@ -44,16 +45,80 @@ pub struct SnapshotTrack {
 #[derive(Clone, Debug)]
 pub(super) struct Snapshot {
     tracks: Vec<SnapshotTrack>,
+    order: Vec<usize>,
     index: usize,
 }
 
 impl Snapshot {
+    fn new(tracks: Vec<SnapshotTrack>, index: usize, shuffle: bool) -> Self {
+        Self::new_with(tracks, index, shuffle, |suffix| {
+            suffix.shuffle(&mut rand::rng())
+        })
+    }
+
+    fn new_with(
+        tracks: Vec<SnapshotTrack>,
+        index: usize,
+        shuffle: bool,
+        permute: impl FnOnce(&mut [usize]),
+    ) -> Self {
+        let mut snapshot = Self {
+            order: (0..tracks.len()).collect(),
+            tracks,
+            index,
+        };
+        if shuffle {
+            snapshot.set_shuffle_with(true, permute);
+        }
+        snapshot
+    }
+
     fn current(&self) -> &SnapshotTrack {
-        &self.tracks[self.index]
+        self.track_at(self.index)
+    }
+
+    fn track_at(&self, index: usize) -> &SnapshotTrack {
+        &self.tracks[self.order[index]]
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn active_tracks(&self) -> Vec<SnapshotTrack> {
+        self.order
+            .iter()
+            .map(|&index| self.tracks[index].clone())
+            .collect()
+    }
+
+    fn active_position(&self, uri: &str) -> Option<usize> {
+        if self.current().uri == uri {
+            return Some(self.index);
+        }
+        self.order[self.index + 1..]
+            .iter()
+            .position(|&index| self.tracks[index].uri == uri)
+            .map(|offset| self.index + 1 + offset)
+            .or_else(|| {
+                self.order[..self.index]
+                    .iter()
+                    .position(|&index| self.tracks[index].uri == uri)
+            })
+    }
+
+    fn set_shuffle_with(&mut self, shuffle: bool, permute: impl FnOnce(&mut [usize])) {
+        if shuffle {
+            permute(&mut self.order[self.index + 1..]);
+        } else {
+            let canonical_index = self.order[self.index];
+            self.order = (0..self.tracks.len()).collect();
+            self.index = canonical_index;
+        }
     }
 
     fn has_next(&self) -> bool {
-        self.index + 1 < self.tracks.len()
+        self.index + 1 < self.len()
     }
 }
 
@@ -70,6 +135,7 @@ pub struct PlayerStateEvent {
     pub alb: Option<String>,
     pub duration_secs: Option<u64>,
     pub volume_supported: bool,
+    pub shuffle: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -222,12 +288,11 @@ impl PlayerBackend {
                 let Some(snapshot) = reducer.snapshot_mut() else {
                     return Err("Nothing is playing".into());
                 };
-                let Some(next) = step_index(snapshot.index, snapshot.tracks.len(), direction, wrap)
-                else {
+                let Some(next) = step_index(snapshot.index, snapshot.len(), direction, wrap) else {
                     backend.stop();
                     return Ok(());
                 };
-                if reject_chapter(&snapshot.tracks[next].uri) {
+                if reject_chapter(&snapshot.track_at(next).uri) {
                     return Err(AUDIOBOOK_ERROR.into());
                 }
                 snapshot.index = next;
@@ -264,6 +329,12 @@ impl PlayerBackend {
         }
     }
 
+    async fn set_shuffle_snapshot(&mut self, snapshot: Option<Snapshot>, repeat: &str) {
+        if let (Self::Connect(backend), Some(snapshot)) = (self, snapshot) {
+            backend.update_snapshot(snapshot, repeat).await;
+        }
+    }
+
     async fn stop(&mut self, client: Option<&LiveClient>) -> Result<(), String> {
         match self {
             Self::Connect(backend) => backend.stop(client).await,
@@ -295,6 +366,7 @@ impl Default for Playback {
     fn default() -> Self {
         Self::new(
             "off",
+            false,
             100,
             AudioSettings {
                 bitrate: 320,
@@ -309,6 +381,7 @@ impl Default for Playback {
 impl Playback {
     pub fn new(
         repeat: &str,
+        shuffle: bool,
         play_threshold_percent: u8,
         audio: AudioSettings,
         cache_dir: Option<PathBuf>,
@@ -318,6 +391,7 @@ impl Playback {
         let mut reducer = EventReducer::default();
         reducer.activate(generation);
         reducer.set_repeat(repeat);
+        reducer.set_shuffle_with(shuffle, |suffix| suffix.shuffle(&mut rand::rng()));
         reducer.set_play_threshold_percent(play_threshold_percent);
         Self {
             state: tokio::sync::Mutex::new(ControllerState {
@@ -373,6 +447,19 @@ impl Playback {
         tracks: Vec<SnapshotTrack>,
         index: usize,
     ) -> Result<(), String> {
+        self.play_with(client, tracks, index, |suffix| {
+            suffix.shuffle(&mut rand::rng())
+        })
+        .await
+    }
+
+    async fn play_with(
+        &self,
+        client: Option<Arc<LiveClient>>,
+        tracks: Vec<SnapshotTrack>,
+        index: usize,
+        permute: impl FnOnce(&mut [usize]),
+    ) -> Result<(), String> {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
         }
@@ -384,8 +471,8 @@ impl Playback {
             });
             return Ok(());
         }
-        let snapshot = Snapshot { tracks, index };
         let mut state = self.state.lock().await;
+        let snapshot = Snapshot::new_with(tracks, index, state.reducer.shuffle(), permute);
         state.reducer.set_snapshot(Some(snapshot));
         self.load_current_locked(&mut state, client, true, 0).await
     }
@@ -452,6 +539,31 @@ impl Playback {
         state.backend.set_repeat(client, repeat).await?;
         state.reducer.set_repeat(repeat);
         Ok(())
+    }
+
+    pub async fn set_shuffle(&self, shuffle: bool) -> PlayerStateEvent {
+        let mut state = self.state.lock().await;
+        state
+            .reducer
+            .set_shuffle_with(shuffle, |suffix| suffix.shuffle(&mut rand::rng()));
+        let snapshot = state.reducer.snapshot().cloned();
+        let repeat = state.reducer.repeat().to_owned();
+        state.backend.set_shuffle_snapshot(snapshot, &repeat).await;
+        state.reducer.state().clone()
+    }
+
+    #[cfg(test)]
+    async fn set_shuffle_with(
+        &self,
+        shuffle: bool,
+        permute: impl FnOnce(&mut [usize]),
+    ) -> PlayerStateEvent {
+        let mut state = self.state.lock().await;
+        state.reducer.set_shuffle_with(shuffle, permute);
+        let snapshot = state.reducer.snapshot().cloned();
+        let repeat = state.reducer.repeat().to_owned();
+        state.backend.set_shuffle_snapshot(snapshot, &repeat).await;
+        state.reducer.state().clone()
     }
 
     pub async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
@@ -612,7 +724,7 @@ impl Playback {
         let Some(snapshot) = state.reducer.snapshot() else {
             return Err("Nothing is playing".into());
         };
-        let Some(next) = step_index(snapshot.index, snapshot.tracks.len(), direction, wrap) else {
+        let Some(next) = step_index(snapshot.index, snapshot.len(), direction, wrap) else {
             if state.file.is_active() {
                 state.file.stop();
                 return Ok(());
@@ -624,7 +736,7 @@ impl Playback {
             } = state;
             return backend.step(client, reducer, direction, wrap).await;
         };
-        if reject_chapter(&snapshot.tracks[next].uri) {
+        if reject_chapter(&snapshot.track_at(next).uri) {
             return Err(AUDIOBOOK_ERROR.into());
         }
         state.reducer.snapshot_mut().unwrap().index = next;
@@ -791,6 +903,7 @@ fn local_event(
     elapsed: u64,
     is_playing: bool,
     volume_supported: bool,
+    shuffle: bool,
 ) -> PlayerStateEvent {
     PlayerStateEvent {
         track_id: Some(track.id),
@@ -803,10 +916,11 @@ fn local_event(
         alb: Some(track.alb.clone()),
         duration_secs: Some(track.duration_secs),
         volume_supported,
+        shuffle,
     }
 }
 
-pub fn empty_event(external: bool) -> PlayerStateEvent {
+pub fn empty_event(external: bool, shuffle: bool) -> PlayerStateEvent {
     PlayerStateEvent {
         track_id: None,
         uri: None,
@@ -818,6 +932,7 @@ pub fn empty_event(external: bool) -> PlayerStateEvent {
         alb: None,
         duration_secs: None,
         volume_supported: false,
+        shuffle,
     }
 }
 
@@ -845,6 +960,201 @@ mod tests {
                 duration_secs: 60,
             },
         ]
+    }
+
+    fn file_tracks(count: u64) -> Vec<SnapshotTrack> {
+        (1..=count)
+            .map(|id| SnapshotTrack {
+                id,
+                uri: format!("file:///definitely/missing/{id}.mp3"),
+                name: id.to_string(),
+                art: String::new(),
+                alb: String::new(),
+                duration_secs: 60,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shuffle_only_permutes_future_and_restores_duplicate_occurrence() {
+        let duplicate = SnapshotTrack {
+            id: 1,
+            uri: "file:///duplicate.mp3".into(),
+            name: "Duplicate".into(),
+            art: "Artist".into(),
+            alb: "Album".into(),
+            duration_secs: 60,
+        };
+        let mut snapshot = Snapshot::new(
+            vec![
+                duplicate.clone(),
+                SnapshotTrack {
+                    id: 2,
+                    ..duplicate.clone()
+                },
+                duplicate.clone(),
+                SnapshotTrack { id: 3, ..duplicate },
+            ],
+            0,
+            false,
+        );
+
+        snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
+        assert_eq!(snapshot.order, [0, 3, 2, 1]);
+        snapshot.index = 2;
+        assert_eq!(snapshot.current().id, 1);
+
+        snapshot.set_shuffle_with(false, |_| unreachable!());
+        assert_eq!(snapshot.order, [0, 1, 2, 3]);
+        assert_eq!(snapshot.index, 2);
+        assert_eq!(snapshot.current().id, 1);
+    }
+
+    #[test]
+    fn deterministic_shuffle_preserves_history_current_and_multiset() {
+        let tracks = (1..=5)
+            .map(|id| SnapshotTrack {
+                id,
+                uri: format!("file:///{id}.mp3"),
+                name: id.to_string(),
+                art: String::new(),
+                alb: String::new(),
+                duration_secs: 60,
+            })
+            .collect();
+        let mut snapshot = Snapshot::new(tracks, 1, false);
+
+        snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
+
+        assert_eq!(snapshot.order, [0, 1, 4, 3, 2]);
+        assert_eq!(snapshot.index, 1);
+        assert_eq!(snapshot.current().id, 2);
+        let mut ids = snapshot
+            .active_tracks()
+            .into_iter()
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn toggling_shuffle_mid_song_does_not_load() {
+        let playback = Playback::default();
+        let mut tracks = mixed_tracks();
+        tracks[1].uri = "file:///definitely/missing/two.mp3".into();
+        playback.play(None, tracks, 0).await.unwrap();
+        let before = playback.state.lock().await.file.request_id();
+
+        playback
+            .set_shuffle_with(true, |suffix| suffix.reverse())
+            .await;
+
+        let state = playback.state.lock().await;
+        assert_eq!(state.file.request_id(), before);
+        assert!(state.reducer.state().shuffle);
+    }
+
+    #[tokio::test]
+    async fn enabled_shuffle_constructs_exact_queue_then_event_advance_and_prev_follow_it() {
+        let playback = Playback::default();
+        playback.set_shuffle_with(true, |_| unreachable!()).await;
+        playback
+            .play_with(None, file_tracks(5), 1, |suffix| suffix.reverse())
+            .await
+            .unwrap();
+        let mut state = playback.state.lock().await;
+        let snapshot = state.reducer.snapshot().unwrap();
+        assert_eq!(snapshot.order, [0, 1, 4, 3, 2]);
+        assert_eq!(snapshot.index, 1);
+        assert_eq!(snapshot.current().id, 2);
+        let generation = state.generation;
+        assert!(state
+            .reducer
+            .handle(NeutralEvent::RequestIdChanged {
+                generation,
+                request_id: 99,
+            })
+            .is_empty());
+        let actions = state.reducer.handle(NeutralEvent::EndOfTrack {
+            generation,
+            request_id: 99,
+            uri: "file:///definitely/missing/2.mp3".into(),
+        });
+        assert!(matches!(
+            actions.as_slice(),
+            [ReducerAction::TrackCompleted(_), ReducerAction::Advance]
+        ));
+
+        playback.step_locked(&mut state, None, 1).await.unwrap();
+        assert_eq!(state.reducer.snapshot().unwrap().current().id, 5);
+        playback.step_locked(&mut state, None, -1).await.unwrap();
+        assert_eq!(state.reducer.snapshot().unwrap().current().id, 2);
+    }
+
+    #[tokio::test]
+    async fn advance_follows_shuffle_and_disable_restores_canonical_current() {
+        let playback = Playback::default();
+        let tracks = (1..=4)
+            .map(|id| SnapshotTrack {
+                id,
+                uri: format!("file:///definitely/missing/{id}.mp3"),
+                name: id.to_string(),
+                art: String::new(),
+                alb: String::new(),
+                duration_secs: 60,
+            })
+            .collect();
+        playback.play(None, tracks, 1).await.unwrap();
+        playback
+            .set_shuffle_with(true, |suffix| suffix.reverse())
+            .await;
+
+        playback.next(None).await.unwrap();
+        {
+            let state = playback.state.lock().await;
+            let snapshot = state.reducer.snapshot().unwrap();
+            assert_eq!(snapshot.current().id, 4);
+            assert_eq!(snapshot.order, [0, 1, 3, 2]);
+        }
+
+        playback.set_shuffle_with(false, |_| unreachable!()).await;
+        let state = playback.state.lock().await;
+        let snapshot = state.reducer.snapshot().unwrap();
+        assert_eq!(snapshot.current().id, 4);
+        assert_eq!(snapshot.index, 3);
+        assert_eq!(snapshot.order, [0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn repeat_all_wraps_shuffled_active_order_while_shuffle_stays_on() {
+        let playback = Playback::default();
+        let tracks = (1..=4)
+            .map(|id| SnapshotTrack {
+                id,
+                uri: format!("file:///definitely/missing/{id}.mp3"),
+                name: id.to_string(),
+                art: String::new(),
+                alb: String::new(),
+                duration_secs: 60,
+            })
+            .collect();
+        playback.play(None, tracks, 1).await.unwrap();
+        playback
+            .set_shuffle_with(true, |suffix| suffix.reverse())
+            .await;
+        playback.set_repeat(None, "all").await.unwrap();
+
+        playback.next(None).await.unwrap();
+        playback.next(None).await.unwrap();
+        playback.next(None).await.unwrap();
+
+        let state = playback.state.lock().await;
+        let snapshot = state.reducer.snapshot().unwrap();
+        assert!(state.reducer.state().shuffle);
+        assert_eq!(snapshot.order, [0, 1, 3, 2]);
+        assert_eq!(snapshot.index, 0);
+        assert_eq!(snapshot.current().id, 1);
     }
 
     #[test]
@@ -927,7 +1237,7 @@ mod tests {
             .lock()
             .await
             .reducer
-            .set_snapshot(Some(Snapshot { tracks, index: 0 }));
+            .set_snapshot(Some(Snapshot::new(tracks, 0, false)));
 
         for (step, expected_uri) in [(1, "two.mp3"), (-1, "one.mp3")] {
             if step == 1 {
@@ -1050,7 +1360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeat_one_reloads_file_through_router() {
+    async fn repeat_one_completion_reloads_shuffled_active_current() {
         let playback = Playback::default();
         let mut receiver = playback
             .receiver
@@ -1058,24 +1368,38 @@ mod tests {
             .expect("playback receiver mutex poisoned")
             .take()
             .unwrap();
-        playback.play(None, mixed_tracks(), 0).await.unwrap();
-        assert!(matches!(
-            receiver.recv().await,
-            Some(NeutralEvent::RequestIdChanged { request_id: 1, .. })
-        ));
+        playback.set_shuffle_with(true, |_| unreachable!()).await;
+        playback
+            .play_with(None, file_tracks(4), 1, |suffix| suffix.reverse())
+            .await
+            .unwrap();
+        let request = receiver.recv().await.unwrap();
         let mut state = playback.state.lock().await;
-
+        assert!(state.reducer.handle(request).is_empty());
+        state.reducer.set_repeat("one");
+        let generation = state.generation;
+        assert!(matches!(
+            state
+                .reducer
+                .handle(NeutralEvent::EndOfTrack {
+                    generation,
+                    request_id: 1,
+                    uri: "file:///definitely/missing/2.mp3".into(),
+                })
+                .as_slice(),
+            [ReducerAction::TrackCompleted(_), ReducerAction::Reload]
+        ));
+        let before = state.file.request_id();
         playback
             .load_current_locked(&mut state, None, true, 0)
             .await
             .unwrap();
-        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        let snapshot = state.reducer.snapshot().unwrap();
+        assert_eq!(snapshot.order, [0, 1, 3, 2]);
+        assert_eq!(snapshot.index, 1);
+        assert_eq!(snapshot.current().id, 2);
+        assert_eq!(state.file.request_id(), before + 1);
         assert!(state.file.is_active());
-        drop(state);
-        while !matches!(
-            receiver.recv().await,
-            Some(NeutralEvent::RequestIdChanged { request_id: 2, .. })
-        ) {}
     }
 
     #[tokio::test]
@@ -1122,13 +1446,14 @@ mod tests {
         let playback = Playback::default();
         let tracks = mixed_tracks();
         let mut state = playback.state.lock().await;
-        state.backend = PlayerBackend::Local(LocalBackend::with_snapshot_for_test(Snapshot {
-            tracks: tracks.clone(),
-            index: 1,
-        }));
+        state.backend = PlayerBackend::Local(LocalBackend::with_snapshot_for_test(Snapshot::new(
+            tracks.clone(),
+            1,
+            false,
+        )));
         state
             .reducer
-            .set_snapshot(Some(Snapshot { tracks, index: 0 }));
+            .set_snapshot(Some(Snapshot::new(tracks, 0, false)));
 
         playback
             .load_current_locked(&mut state, None, true, 0)
@@ -1156,7 +1481,7 @@ mod tests {
         let mut state = playback.state.lock().await;
         state
             .reducer
-            .set_snapshot(Some(Snapshot { tracks, index: 0 }));
+            .set_snapshot(Some(Snapshot::new(tracks, 0, false)));
         let generation = state.generation;
 
         assert_eq!(

@@ -53,22 +53,21 @@ pub fn resolve(prev: PolledState, now: PolledState, expected: &Snapshot) -> Play
     if now.track_id.as_deref() == Some(expected.current().uri.as_str()) {
         return PlaybackDecision::Tick;
     }
+    if near_end(&prev) {
+        return terminal();
+    }
     if now.track_id.as_ref().is_some_and(|uri| {
         expected
-            .tracks
+            .order
             .iter()
-            .any(|track| track.uri.as_str() == uri)
+            .any(|&index| expected.tracks[index].uri.as_str() == uri)
     }) {
         return PlaybackDecision::Advance;
     }
     if now.track_id.is_some() {
         return PlaybackDecision::Takeover;
     }
-    if near_end(&prev) {
-        terminal()
-    } else {
-        PlaybackDecision::Takeover
-    }
+    PlaybackDecision::Takeover
 }
 
 fn poll_decision(context: &Context, now: PolledState, epoch: u64) -> Option<PlaybackDecision> {
@@ -83,6 +82,7 @@ struct Context {
     generation: u64,
     epoch: u64,
     route_at_end: bool,
+    wrap: bool,
 }
 
 #[derive(Default)]
@@ -117,7 +117,12 @@ impl ConnectBackend {
         repeat: &str,
     ) -> Result<(), String> {
         let event = self
-            .begin(client.as_ref(), snapshot.tracks, snapshot.index, repeat)
+            .begin(
+                client.as_ref(),
+                snapshot.active_tracks(),
+                snapshot.index,
+                repeat,
+            )
             .await?;
         let generation = self
             .state
@@ -145,8 +150,9 @@ impl ConnectBackend {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
         }
-        let (snapshot, route_at_end) = connect_snapshot(Snapshot { tracks, index }, repeat);
-        let tracks = snapshot.tracks;
+        let (snapshot, route_at_end) =
+            connect_snapshot(Snapshot::new(tracks, index, false), repeat);
+        let tracks = snapshot.active_tracks();
         let index = snapshot.index;
         let device = select_device(client.devices().await.map_err(|error| error.to_string())?)?;
         let device_id = device.id.expect("selected devices have ids");
@@ -161,7 +167,7 @@ impl ConnectBackend {
         let mut state = self.state.lock().await;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
-        let snapshot = Snapshot { tracks, index };
+        let snapshot = Snapshot::new(tracks, index, false);
         let event = local_state(&snapshot, 0, true, device.supports_volume);
         state.context = Some(Context {
             previous: PolledState {
@@ -176,6 +182,7 @@ impl ConnectBackend {
             generation,
             epoch: 1,
             route_at_end,
+            wrap: repeat == "all" && !route_at_end,
         });
         Ok(event)
     }
@@ -239,7 +246,7 @@ impl ConnectBackend {
         } else {
             context.snapshot.index + 1
         };
-        if next >= context.snapshot.tracks.len() {
+        if next >= context.snapshot.len() {
             client
                 .pause(Some(&context.device_id))
                 .await
@@ -251,7 +258,7 @@ impl ConnectBackend {
         play_snapshot(
             client,
             &context.device_id,
-            &context.snapshot.tracks,
+            &context.snapshot.active_tracks(),
             context.snapshot.index,
         )
         .await?;
@@ -323,6 +330,21 @@ impl ConnectBackend {
 
     async fn clear(&self) {
         self.state.lock().await.context = None;
+    }
+
+    pub(super) async fn update_snapshot(&self, snapshot: Snapshot, repeat: &str) {
+        let (snapshot, route_at_end) = connect_snapshot(snapshot, repeat);
+        let mut state = self.state.lock().await;
+        let Some(context) = state.context.as_mut() else {
+            return;
+        };
+        if snapshot.current().uri != context.snapshot.current().uri {
+            return;
+        }
+        context.snapshot = snapshot;
+        context.route_at_end = route_at_end;
+        context.wrap = repeat == "all" && !route_at_end;
+        context.epoch = context.epoch.wrapping_add(1);
     }
 
     pub(super) async fn toggle(&self, client: &LiveClient) -> Result<(), String> {
@@ -432,21 +454,22 @@ impl ConnectBackend {
                 }
                 PlaybackDecision::Advance => {
                     let previous_index = context.snapshot.index;
-                    let polled_index = now.track_id.as_ref().and_then(|uri| {
-                        context
-                            .snapshot
-                            .tracks
-                            .iter()
-                            .position(|track| &track.uri == uri)
-                    });
-                    context.snapshot.index = polled_index
-                        .filter(|index| *index != previous_index)
-                        .unwrap_or(previous_index + 1);
-                    if polled_index == Some(previous_index) || polled_index.is_none() {
+                    let polled_index = now
+                        .track_id
+                        .as_ref()
+                        .and_then(|uri| context.snapshot.active_position(uri));
+                    context.snapshot.index = if previous_index + 1 < context.snapshot.len() {
+                        previous_index + 1
+                    } else if context.wrap {
+                        0
+                    } else {
+                        polled_index.unwrap_or(previous_index)
+                    };
+                    if polled_index != Some(context.snapshot.index) {
                         if let Err(error) = play_snapshot(
                             client.as_ref(),
                             &context.device_id,
-                            &context.snapshot.tracks,
+                            &context.snapshot.active_tracks(),
                             context.snapshot.index,
                         )
                         .await
@@ -517,25 +540,19 @@ fn connect_repeat(repeat: &str) -> Result<&'static str, String> {
 }
 
 fn connect_snapshot(snapshot: Snapshot, repeat: &str) -> (Snapshot, bool) {
-    let start = snapshot.tracks[..snapshot.index]
+    let tracks = snapshot.active_tracks();
+    let start = tracks[..snapshot.index]
         .iter()
         .rposition(|track| track.uri.starts_with("file:"))
         .map_or(0, |index| index + 1);
-    let end = snapshot.tracks[start..]
+    let end = tracks[start..]
         .iter()
         .position(|track| track.uri.starts_with("file:"))
-        .map_or(snapshot.tracks.len(), |offset| start + offset);
-    let route_at_end = end < snapshot.tracks.len()
-        || (repeat == "all"
-            && snapshot
-                .tracks
-                .iter()
-                .any(|track| track.uri.starts_with("file:")));
+        .map_or(tracks.len(), |offset| start + offset);
+    let route_at_end = end < tracks.len()
+        || (repeat == "all" && tracks.iter().any(|track| track.uri.starts_with("file:")));
     (
-        Snapshot {
-            tracks: snapshot.tracks[start..end].to_vec(),
-            index: snapshot.index - start,
-        },
+        Snapshot::new(tracks[start..end].to_vec(), snapshot.index - start, false),
         route_at_end,
     )
 }
@@ -684,10 +701,7 @@ mod tests {
     }
 
     fn snapshot(index: usize) -> Snapshot {
-        Snapshot {
-            tracks: vec![track(1, 100), track(2, 100)],
-            index,
-        }
+        Snapshot::new(vec![track(1, 100), track(2, 100)], index, false)
     }
 
     fn polled(id: Option<&str>, elapsed: u64, playing: bool) -> PolledState {
@@ -720,6 +734,46 @@ mod tests {
                 &snapshot(0),
             ),
             PlaybackDecision::Takeover
+        );
+    }
+
+    #[test]
+    fn old_queue_transition_after_expected_end_advances_active_order() {
+        assert_eq!(
+            resolve(
+                polled(Some("spotify:track:1"), 96, true),
+                polled(Some("spotify:track:old-next"), 0, true),
+                &snapshot(0),
+            ),
+            PlaybackDecision::Advance
+        );
+    }
+
+    #[test]
+    fn old_queue_transition_after_shuffled_mixed_boundary_stops_connect_run() {
+        let mut snapshot = Snapshot::new(
+            vec![
+                track(1, 100),
+                track(2, 100),
+                SnapshotTrack {
+                    uri: "file:///three.mp3".into(),
+                    ..track(3, 100)
+                },
+            ],
+            0,
+            false,
+        );
+        snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
+        let (expected, route_at_end) = connect_snapshot(snapshot, "off");
+
+        assert!(route_at_end);
+        assert_eq!(
+            resolve(
+                polled(Some("spotify:track:1"), 96, true),
+                polled(Some("spotify:track:2"), 0, true),
+                &expected,
+            ),
+            PlaybackDecision::Stop
         );
     }
 
@@ -793,6 +847,7 @@ mod tests {
             generation: 1,
             epoch: 2,
             route_at_end: false,
+            wrap: false,
         };
 
         assert_eq!(
@@ -802,14 +857,14 @@ mod tests {
     }
 
     #[test]
-    fn end_of_snapshot_takeover_is_external() {
+    fn end_of_snapshot_external_jump_is_terminal() {
         assert_eq!(
             resolve(
                 polled(Some("spotify:track:2"), 99, true),
                 polled(Some("spotify:track:else"), 0, true),
                 &snapshot(1),
             ),
-            PlaybackDecision::Takeover
+            PlaybackDecision::Stop
         );
     }
 
@@ -853,7 +908,7 @@ mod tests {
             },
         ];
 
-        let (snapshot, route_at_end) = connect_snapshot(Snapshot { tracks, index: 0 }, "all");
+        let (snapshot, route_at_end) = connect_snapshot(Snapshot::new(tracks, 0, false), "all");
         assert_eq!(
             snapshot
                 .tracks
@@ -863,6 +918,89 @@ mod tests {
             ["spotify:track:1", "spotify:track:2"]
         );
         assert!(route_at_end);
+    }
+
+    #[test]
+    fn mixed_snapshot_splits_runs_in_active_shuffle_order() {
+        let mut tracks = vec![
+            SnapshotTrack {
+                uri: "file:///one.mp3".into(),
+                ..track(1, 100)
+            },
+            track(2, 100),
+            SnapshotTrack {
+                uri: "file:///three.mp3".into(),
+                ..track(3, 100)
+            },
+            track(4, 100),
+        ];
+        let mut snapshot = Snapshot::new(std::mem::take(&mut tracks), 0, false);
+        snapshot.set_shuffle_with(true, |suffix| {
+            suffix.swap(0, 2);
+            suffix.swap(1, 2);
+        });
+        snapshot.index = 2;
+
+        let (run, route_at_end) = connect_snapshot(snapshot, "all");
+
+        assert_eq!(run.current().uri, "spotify:track:2");
+        assert_eq!(
+            run.active_tracks()
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["spotify:track:4", "spotify:track:2"]
+        );
+        assert_eq!(run.index, 1);
+        assert!(route_at_end);
+    }
+
+    #[tokio::test]
+    async fn update_snapshot_rewrites_context_to_shuffled_active_run_without_playing() {
+        let (events, _) = mpsc::unbounded_channel();
+        let backend = ConnectBackend::new(events, 7);
+        backend.state.lock().await.context = Some(Context {
+            snapshot: Snapshot::new(vec![track(1, 100), track(2, 100)], 0, false),
+            device_id: "desk".into(),
+            volume_supported: true,
+            previous: polled(Some("spotify:track:1"), 40, true),
+            generation: 1,
+            epoch: 7,
+            route_at_end: false,
+            wrap: false,
+        });
+        let mut snapshot = Snapshot::new(
+            vec![
+                track(1, 100),
+                track(2, 100),
+                SnapshotTrack {
+                    uri: "file:///three.mp3".into(),
+                    ..track(3, 100)
+                },
+                track(4, 100),
+            ],
+            0,
+            false,
+        );
+        snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
+
+        backend.update_snapshot(snapshot, "all").await;
+
+        let state = backend.state.lock().await;
+        let context = state.context.as_ref().unwrap();
+        assert_eq!(
+            context
+                .snapshot
+                .active_tracks()
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["spotify:track:1", "spotify:track:4"]
+        );
+        assert_eq!(context.snapshot.index, 0);
+        assert!(context.route_at_end);
+        assert!(!context.wrap);
+        assert_eq!(context.epoch, 8);
     }
 
     #[test]

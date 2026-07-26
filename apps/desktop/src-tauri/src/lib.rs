@@ -129,6 +129,37 @@ struct VisualSettings {
     sort_desc: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BehavioralSettings {
+    #[serde(default)]
+    shuffle: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct ExportSettings {
+    #[serde(flatten)]
+    visual: VisualSettings,
+    #[serde(flatten)]
+    behavioral: BehavioralSettings,
+}
+
+impl ExportSettings {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            visual: VisualSettings::from_settings(settings),
+            behavioral: BehavioralSettings {
+                shuffle: settings.shuffle,
+            },
+        }
+    }
+
+    fn apply_to(self, settings: &mut Settings) {
+        self.visual.apply_to(settings);
+        settings.shuffle = self.behavioral.shuffle;
+    }
+}
+
 impl VisualSettings {
     fn from_settings(settings: &Settings) -> Self {
         Self {
@@ -902,7 +933,12 @@ async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
         .clear()
         .map_err(|error| error.to_string())?;
     emit_connection_state(&app)?;
-    app.emit("player-state", empty_player_state())
+    let shuffle = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .shuffle;
+    app.emit("player-state", empty_player_state(shuffle))
         .map_err(|error| error.to_string())
 }
 
@@ -923,7 +959,7 @@ fn set_auto_connect(app: &tauri::AppHandle, auto_connect: bool) -> Result<(), St
         .map_err(|error| error.to_string())
 }
 
-fn empty_player_state() -> PlayerStateEvent {
+fn empty_player_state(shuffle: bool) -> PlayerStateEvent {
     PlayerStateEvent {
         track_id: None,
         uri: None,
@@ -935,6 +971,7 @@ fn empty_player_state() -> PlayerStateEvent {
         alb: None,
         duration_secs: None,
         volume_supported: false,
+        shuffle,
     }
 }
 
@@ -1959,6 +1996,27 @@ async fn set_repeat(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn set_shuffle(app: tauri::AppHandle, shuffle: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    settings.shuffle = shuffle;
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    app.emit("settings-changed", settings)
+        .map_err(|error| error.to_string())?;
+    let event = state.playback.set_shuffle(shuffle).await;
+    app.emit("player-state", event)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn set_audio_settings(
     app: tauri::AppHandle,
@@ -2359,7 +2417,7 @@ fn export_with_settings(
         .expect("core export is an object")
         .insert(
             "settings".into(),
-            serde_json::to_value(VisualSettings::from_settings(settings))
+            serde_json::to_value(ExportSettings::from_settings(settings))
                 .map_err(|error| error.to_string())?,
         );
     envelope
@@ -2386,7 +2444,7 @@ fn import_with_settings(
 ) -> Result<
     (
         Library,
-        Option<VisualSettings>,
+        Option<ExportSettings>,
         Option<playlists::PlaylistCache>,
     ),
     String,
@@ -2457,7 +2515,7 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
 fn apply_import(
     app: &tauri::AppHandle,
     imported: Library,
-    visual_settings: Option<VisualSettings>,
+    export_settings: Option<ExportSettings>,
     imported_playlists: Option<playlists::PlaylistCache>,
     replace: bool,
 ) {
@@ -2472,8 +2530,8 @@ fn apply_import(
     });
     match result {
         Ok(()) => {
-            if let Some(visual_settings) = visual_settings {
-                if let Err(error) = apply_visual_settings(app, visual_settings) {
+            if let Some(export_settings) = export_settings {
+                if let Err(error) = apply_export_settings(app, export_settings) {
                     notify_error(app, error);
                     return;
                 }
@@ -2492,9 +2550,9 @@ fn apply_import(
     }
 }
 
-fn apply_visual_settings(
+fn apply_export_settings(
     app: &tauri::AppHandle,
-    visual_settings: VisualSettings,
+    export_settings: ExportSettings,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut settings = state
@@ -2502,7 +2560,7 @@ fn apply_visual_settings(
         .lock()
         .expect("settings mutex poisoned")
         .clone();
-    visual_settings.apply_to(&mut settings);
+    export_settings.apply_to(&mut settings);
     state
         .settings_store
         .save(&settings)
@@ -2512,8 +2570,15 @@ fn apply_visual_settings(
         .sync(&settings)
         .map_err(|error| error.to_string())?;
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())
+    app.emit("settings-changed", settings.clone())
+        .map_err(|error| error.to_string())?;
+    let playback = Arc::clone(&state.playback);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let event = playback.set_shuffle(settings.shuffle).await;
+        let _ = app.emit("player-state", event);
+    });
+    Ok(())
 }
 
 fn notify_error(app: &tauri::AppHandle, error: String) {
@@ -2565,6 +2630,7 @@ pub fn run() {
             player_seek,
             player_set_volume,
             set_repeat,
+            set_shuffle,
             set_audio_settings,
             track_artwork
         ])
@@ -2661,6 +2727,7 @@ pub fn run() {
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(
                 &settings.repeat,
+                settings.shuffle,
                 settings.play_threshold_percent,
                 AudioSettings {
                     bitrate: settings.streaming_bitrate,
@@ -3408,6 +3475,7 @@ mod tests {
             last_full_sync: Some(42),
             playback_backend: "local".into(),
             repeat: "all".into(),
+            shuffle: true,
             volume: 40,
             streaming_bitrate: 160,
             normalize_volume: true,
@@ -3435,6 +3503,7 @@ mod tests {
         assert_eq!(restored.hidden_columns, exported.hidden_columns);
         assert_eq!(restored.sort_column.as_deref(), Some("plays"));
         assert!(restored.sort_desc);
+        assert!(restored.shuffle);
         assert_eq!(restored.spotify_client_id, "local-machine");
         assert!(restored.auto_add_spotify_library);
         assert!(restored.auto_connect);
@@ -3450,6 +3519,17 @@ mod tests {
         let visual: VisualSettings = serde_json::from_value(json).unwrap();
 
         assert_eq!(visual.browser_panes, BrowserPanes::default());
+    }
+
+    #[test]
+    fn legacy_export_defaults_shuffle_off_and_visual_settings_exclude_it() {
+        let visual =
+            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
+        assert!(visual.get("shuffle").is_none());
+
+        let exported: ExportSettings = serde_json::from_value(visual).unwrap();
+
+        assert!(!exported.behavioral.shuffle);
     }
 
     #[test]

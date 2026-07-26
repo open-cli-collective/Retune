@@ -32,6 +32,7 @@ pub(super) struct EventReducer {
     play_threshold_percent: u8,
     previous_position_ms: u32,
     counted: bool,
+    shuffle: bool,
 }
 
 impl Default for EventReducer {
@@ -39,7 +40,7 @@ impl Default for EventReducer {
         Self {
             generation: 0,
             snapshot: None,
-            state: empty_event(false),
+            state: empty_event(false, false),
             next_intent: 0,
             latest_intent: None,
             pending: VecDeque::new(),
@@ -48,6 +49,7 @@ impl Default for EventReducer {
             play_threshold_percent: 100,
             previous_position_ms: 0,
             counted: false,
+            shuffle: false,
         }
     }
 }
@@ -79,6 +81,21 @@ impl EventReducer {
 
     pub(super) fn repeat(&self) -> &str {
         &self.repeat
+    }
+
+    pub(super) fn shuffle(&self) -> bool {
+        self.shuffle
+    }
+
+    pub(super) fn set_shuffle_with(&mut self, shuffle: bool, permute: impl FnOnce(&mut [usize])) {
+        if self.shuffle == shuffle {
+            return;
+        }
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.set_shuffle_with(shuffle, permute);
+        }
+        self.shuffle = shuffle;
+        self.state.shuffle = shuffle;
     }
 
     pub(super) fn set_repeat(&mut self, repeat: &str) {
@@ -205,7 +222,7 @@ impl EventReducer {
                 if !self.accepts(request_id, &uri) {
                     return vec![];
                 }
-                self.state = empty_event(false);
+                self.state = empty_event(false, self.shuffle);
                 self.snapshot = None;
                 vec![ReducerAction::Emit(self.state.clone())]
             }
@@ -246,10 +263,17 @@ impl EventReducer {
     fn track(&self, uri: &str) -> Option<&super::SnapshotTrack> {
         let snapshot = self.snapshot.as_ref()?;
         snapshot
-            .tracks
-            .get(snapshot.index)
-            .filter(|track| track.uri == uri)
-            .or_else(|| snapshot.tracks.iter().find(|track| track.uri == uri))
+            .current()
+            .uri
+            .eq(uri)
+            .then(|| snapshot.current())
+            .or_else(|| {
+                snapshot
+                    .order
+                    .iter()
+                    .map(|&index| &snapshot.tracks[index])
+                    .find(|track| track.uri == uri)
+            })
     }
 
     fn emit_track(&mut self, uri: &str, position_ms: u32, playing: bool) -> Vec<ReducerAction> {
@@ -259,7 +283,13 @@ impl EventReducer {
             ))];
         };
         self.previous_position_ms = position_ms;
-        self.state = local_event(&track, u64::from(position_ms) / 1000, playing, true);
+        self.state = local_event(
+            &track,
+            u64::from(position_ms) / 1000,
+            playing,
+            true,
+            self.shuffle,
+        );
         vec![ReducerAction::Emit(self.state.clone())]
     }
 
@@ -324,10 +354,11 @@ impl EventReducer {
                 alb: state.alb,
                 duration_secs: state.duration_ms.map(|value| u64::from(value) / 1000),
                 volume_supported: state.volume_supported,
+                shuffle: self.shuffle,
             }
         } else if let Some(uri) = state.uri {
             if let Some(snapshot) = &mut self.snapshot {
-                if let Some(index) = snapshot.tracks.iter().position(|track| track.uri == uri) {
+                if let Some(index) = snapshot.active_position(&uri) {
                     snapshot.index = index;
                 }
             }
@@ -341,9 +372,10 @@ impl EventReducer {
                 u64::from(state.position_ms) / 1000,
                 state.is_playing,
                 state.volume_supported,
+                self.shuffle,
             )
         } else {
-            empty_event(false)
+            empty_event(false, self.shuffle)
         };
         vec![ReducerAction::Emit(self.state.clone())]
     }
@@ -368,10 +400,7 @@ mod tests {
     fn reducer() -> EventReducer {
         let mut reducer = EventReducer::default();
         reducer.activate(7);
-        reducer.set_snapshot(Some(Snapshot {
-            tracks: vec![track(1), track(2)],
-            index: 0,
-        }));
+        reducer.set_snapshot(Some(Snapshot::new(vec![track(1), track(2)], 0, false)));
         reducer
     }
 
@@ -466,6 +495,31 @@ mod tests {
                 uri: "spotify:track:1".into(),
             })
             .is_empty());
+    }
+
+    #[test]
+    fn connect_advance_selects_future_duplicate_occurrence() {
+        let mut reducer = reducer();
+        reducer.snapshot_mut().unwrap().tracks.push(track(1));
+        reducer.snapshot_mut().unwrap().order.push(2);
+        reducer.snapshot_mut().unwrap().index = 1;
+
+        reducer.handle(NeutralEvent::ConnectState {
+            generation: 7,
+            state: NeutralState {
+                uri: Some("spotify:track:1".into()),
+                position_ms: 0,
+                is_playing: true,
+                external: false,
+                name: None,
+                art: None,
+                alb: None,
+                duration_ms: None,
+                volume_supported: true,
+            },
+        });
+
+        assert_eq!(reducer.snapshot().unwrap().index, 2);
     }
 
     #[test]

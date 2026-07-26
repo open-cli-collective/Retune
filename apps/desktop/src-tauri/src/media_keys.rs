@@ -182,6 +182,7 @@ mod tests {
             alb: None,
             duration_secs: None,
             volume_supported: false,
+            shuffle: false,
         }
     }
 

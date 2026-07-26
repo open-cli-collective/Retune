@@ -80,6 +80,11 @@ impl FileEngine {
         self.uri.is_some()
     }
 
+    #[cfg(test)]
+    pub(super) fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
     pub(super) fn load(
         &mut self,
         uri: &str,

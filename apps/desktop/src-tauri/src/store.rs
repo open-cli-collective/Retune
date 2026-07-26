@@ -102,6 +102,8 @@ pub struct Settings {
     pub playback_backend: String,
     #[serde(default = "default_repeat")]
     pub repeat: String,
+    #[serde(default)]
+    pub shuffle: bool,
     #[serde(default = "default_volume")]
     pub volume: u8,
     #[serde(default = "default_streaming_bitrate")]
@@ -199,6 +201,7 @@ impl Default for Settings {
             last_full_sync: None,
             playback_backend: default_playback_backend(),
             repeat: default_repeat(),
+            shuffle: false,
             volume: default_volume(),
             streaming_bitrate: default_streaming_bitrate(),
             normalize_volume: false,
@@ -613,6 +616,7 @@ mod tests {
             last_full_sync: Some(42),
             playback_backend: "local".into(),
             repeat: "all".into(),
+            shuffle: true,
             volume: 40,
             streaming_bitrate: 160,
             normalize_volume: true,
@@ -623,6 +627,16 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn legacy_settings_default_shuffle_off() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("shuffle");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert!(!settings.shuffle);
     }
 
     #[test]

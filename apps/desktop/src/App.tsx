@@ -30,6 +30,7 @@ type Settings = {
   spotifySyncCompleted: boolean
   playbackBackend: PlaybackBackend
   repeat: RepeatMode
+  shuffle: boolean
   volume: number
   streamingBitrate: number
   normalizeVolume: boolean
@@ -145,6 +146,7 @@ type PlayerState = {
   alb: string | null
   durationSecs: number | null
   volumeSupported: boolean
+  shuffle: boolean
 }
 
 // `simulated` marks fixture tracks whose URIs must never reach a real backend.
@@ -275,6 +277,7 @@ const defaultSettings: Settings = {
   spotifySyncCompleted: false,
   playbackBackend: 'connect',
   repeat: 'off',
+  shuffle: false,
   volume: 62,
   streamingBitrate: 320,
   normalizeVolume: false,
@@ -339,7 +342,7 @@ function reducer(state: State, action: Action): State {
           trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
           uri: action.queue.find((track) => track.id === action.id)?.uri ?? null,
           external: false, name: null, art: null, alb: null, durationSecs: null,
-          volumeSupported: false, simulated: true,
+          volumeSupported: false, shuffle: state.settings.shuffle, simulated: true,
         },
       }
     case 'togglePlay':
@@ -674,6 +677,7 @@ function App() {
     state.settings.spotifyClientId,
     state.settings.spotifySyncCompleted,
     state.settings.playbackBackend,
+    state.settings.shuffle,
     state.settings.playThresholdPercent,
     state.settings.volume,
     state.settingsHydrated,
