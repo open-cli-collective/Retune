@@ -991,7 +991,7 @@ function App() {
               onClose={() => dispatch({ type: 'scope', scope: 'library' })}
               onError={(error) => dispatch({ type: 'error', error })}
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
-          ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onOpen={() => invoke('open_spotify_playlist', { id: selectedPlaylist.id }).catch((error) => dispatch({ type: 'error', error: String(error) }))} onError={(error) => dispatch({ type: 'error', error })} />
+          ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch((error) => dispatch({ type: 'error', error: String(error) }))} onError={(error) => dispatch({ type: 'error', error })} />
           : (
             <>
               <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onToggle={toggleBrowserPane} />
@@ -1326,7 +1326,7 @@ function PlaylistView({ playlist, revision, playing, onPlay, onOpen, onError }: 
   revision: number
   playing: State['playing']
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
-  onOpen: () => void
+  onOpen: (target: 'app' | 'web') => void
   onError: (error: string) => void
 }) {
   const [tracks, setTracks] = useState<PlaylistTrack[]>([])
@@ -1384,7 +1384,7 @@ function PlaylistView({ playlist, revision, playing, onPlay, onOpen, onError }: 
   }
   return <div className="playlist-view">
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span>{playlist.owned && <button disabled={!canReorder || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
-    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify only exposes items from playlists you own or collaborate on.</span><button onClick={onOpen}>Open in Spotify</button></div> : <><div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
+    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify only exposes items from playlists you own or collaborate on.</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <><div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
     <div className="playlist-track-scroll">
       {tracks.map((track, index) => <div
         key={`${track.uri}-${index}`}

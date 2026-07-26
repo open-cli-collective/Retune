@@ -1681,7 +1681,14 @@ fn playlists_list(
     )
 }
 
-fn spotify_item_url(kind: &str, id: &str) -> Result<String, String> {
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SpotifyOpenTarget {
+    App,
+    Web,
+}
+
+fn spotify_item_link(kind: &str, id: &str, target: SpotifyOpenTarget) -> Result<String, String> {
     if id.is_empty()
         || !id
             .chars()
@@ -1689,13 +1696,19 @@ fn spotify_item_url(kind: &str, id: &str) -> Result<String, String> {
     {
         return Err("Invalid Spotify ID.".into());
     }
-    Ok(format!("https://open.spotify.com/{kind}/{id}"))
+    Ok(match target {
+        SpotifyOpenTarget::App => format!("spotify:{kind}:{id}"),
+        SpotifyOpenTarget::Web => format!("https://open.spotify.com/{kind}/{id}"),
+    })
 }
 
-#[tauri::command]
-fn open_spotify_playlist(id: String) -> Result<(), String> {
-    tauri_plugin_opener::open_url(spotify_item_url("playlist", &id)?, None::<&str>)
-        .map_err(|error| error.to_string())
+#[tauri::command(rename_all = "camelCase")]
+fn open_spotify_playlist(id: String, target: SpotifyOpenTarget) -> Result<(), String> {
+    tauri_plugin_opener::open_url(spotify_item_link("playlist", &id, target)?, None::<&str>)
+        .map_err(|error| match target {
+            SpotifyOpenTarget::App => format!("Could not open the Spotify app: {error}"),
+            SpotifyOpenTarget::Web => error.to_string(),
+        })
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -3315,11 +3328,15 @@ mod tests {
     #[test]
     fn spotify_links_and_track_destinations_are_canonical() {
         assert_eq!(
-            spotify_item_url("playlist", "abc123").unwrap(),
+            spotify_item_link("playlist", "abc123", SpotifyOpenTarget::Web).unwrap(),
             "https://open.spotify.com/playlist/abc123"
         );
-        assert!(spotify_item_url("playlist", "").is_err());
-        assert!(spotify_item_url("playlist", "../account").is_err());
+        assert_eq!(
+            spotify_item_link("playlist", "abc123", SpotifyOpenTarget::App).unwrap(),
+            "spotify:playlist:abc123"
+        );
+        assert!(spotify_item_link("playlist", "", SpotifyOpenTarget::App).is_err());
+        assert!(spotify_item_link("playlist", "../account", SpotifyOpenTarget::Web).is_err());
 
         let track: SpotifyTrack = serde_json::from_value(serde_json::json!({
             "uri": "spotify:track:track1", "name": "Song", "artists": [{"id": "artist1", "name": "Artist"}],

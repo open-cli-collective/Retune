@@ -232,7 +232,9 @@ button { color: inherit; }
 .playlist-track-scroll { min-height: 0; flex: 1; overflow: auto; }
 .playlist-unavailable { min-height: 0; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); text-align: center; }
 .playlist-unavailable strong { color: var(--text); font-size: 13px; }
-.playlist-unavailable button { margin-top: 4px; padding: 5px 12px; border: 1px solid var(--accent); border-radius: 4px; color: #fff; background: var(--accent); }
+.playlist-open-actions { display: flex; gap: 8px; margin-top: 4px; }
+.playlist-unavailable button { padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--control); }
+.playlist-unavailable button:first-child { border-color: var(--accent); color: #fff; background: var(--accent); }
 .playlist-track-row { height: 20px; border-top: 2px solid transparent; white-space: nowrap; }
 .zebra .playlist-track-row:nth-child(even) { background: var(--alt); }
 .playlist-track-row.selected, .zebra .playlist-track-row.selected:nth-child(even) { color: #fff; background: var(--accent); }
