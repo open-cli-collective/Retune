@@ -97,6 +97,7 @@ button { color: inherit; }
 .track-row { min-width: 720px; height: 18px; display: grid; grid-template-columns: 22px minmax(160px, 1.6fr) 52px 1.1fr 1.1fr .9fr 84px; align-items: center; padding: 0 6px; white-space: nowrap; }
 .zebra .track-scroll .track-row:nth-child(even) { background: var(--alt); }
 .track-row > span { min-width: 0; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; }
+.track-number { text-align: right; font-variant-numeric: tabular-nums; }
 .track-name { display: flex; align-items: center; gap: 4px; }
 .track-name .local-glyph { flex: 0 0 auto; color: var(--dim); font-size: 11px; }
 .track-name .track-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

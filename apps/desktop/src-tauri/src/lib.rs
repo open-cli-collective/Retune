@@ -118,6 +118,10 @@ struct VisualSettings {
     browser_panes: BrowserPanes,
     column_order: Vec<String>,
     hidden_columns: Vec<String>,
+    #[serde(default)]
+    sort_column: Option<String>,
+    #[serde(default)]
+    sort_desc: bool,
 }
 
 impl VisualSettings {
@@ -129,6 +133,8 @@ impl VisualSettings {
             browser_panes: settings.browser_panes,
             column_order: settings.column_order.clone(),
             hidden_columns: settings.hidden_columns.clone(),
+            sort_column: settings.sort_column.clone(),
+            sort_desc: settings.sort_desc,
         }
     }
 
@@ -139,6 +145,9 @@ impl VisualSettings {
         settings.browser_panes = self.browser_panes;
         settings.column_order = self.column_order;
         settings.hidden_columns = self.hidden_columns;
+        settings.sort_column = self.sort_column;
+        settings.sort_desc = self.sort_desc;
+        settings.normalize();
     }
 }
 
@@ -686,6 +695,7 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
 #[tauri::command]
 async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(), String> {
     let state = app.state::<AppState>();
+    settings.normalize();
     let current = state
         .settings
         .lock()
@@ -3255,11 +3265,23 @@ mod tests {
                 alb: false,
             },
             column_order: [
-                "name", "track", "rating", "artist", "album", "genre", "time",
+                "name",
+                "plays",
+                "track",
+                "rating",
+                "artist",
+                "album",
+                "genre",
+                "time",
+                "kind",
+                "bitrate",
+                "lastPlayed",
             ]
             .map(String::from)
             .to_vec(),
-            hidden_columns: vec!["genre".into()],
+            hidden_columns: vec!["genre".into(), "kind".into(), "bitrate".into()],
+            sort_column: Some("plays".into()),
+            sort_desc: true,
             auto_add_spotify_library: false,
             auto_connect: false,
             spotify_client_id: "exported-machine".into(),
@@ -3286,7 +3308,10 @@ mod tests {
         assert_eq!(restored_library, library);
         assert_eq!(restored.theme, Theme::Dark);
         assert_eq!(restored.browser_panes, exported.browser_panes);
-        assert_eq!(restored.hidden_columns, ["genre"]);
+        assert_eq!(restored.column_order, exported.column_order);
+        assert_eq!(restored.hidden_columns, exported.hidden_columns);
+        assert_eq!(restored.sort_column.as_deref(), Some("plays"));
+        assert!(restored.sort_desc);
         assert_eq!(restored.spotify_client_id, "local-machine");
         assert!(restored.auto_add_spotify_library);
         assert!(restored.auto_connect);
@@ -3324,6 +3349,32 @@ mod tests {
                 alb: true,
             }
         );
+    }
+
+    #[test]
+    fn visual_settings_apply_normalizes_legacy_columns() {
+        let mut json =
+            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.insert(
+            "columnOrder".into(),
+            serde_json::json!(["track", "name", "time", "artist", "album", "genre", "rating"]),
+        );
+        object.insert("hiddenColumns".into(), serde_json::json!(["name", "genre"]));
+        object.remove("sortColumn");
+        object.remove("sortDesc");
+        let visual: VisualSettings = serde_json::from_value(json).unwrap();
+        let mut settings = Settings::default();
+
+        visual.apply_to(&mut settings);
+
+        assert_eq!(settings.column_order, Settings::default().column_order);
+        assert_eq!(
+            settings.hidden_columns,
+            ["genre", "kind", "bitrate", "lastPlayed"]
+        );
+        assert_eq!(settings.sort_column, None);
+        assert!(!settings.sort_desc);
     }
 
     #[test]

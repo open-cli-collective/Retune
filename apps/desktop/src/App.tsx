@@ -9,7 +9,7 @@ type Theme = 'light' | 'dark' | 'system'
 type PlaybackBackend = 'connect' | 'local'
 type RepeatMode = 'off' | 'all' | 'one'
 type BrowserPanes = { cat: boolean; art: boolean; alb: boolean }
-type ColumnKey = 'track' | 'name' | 'time' | 'artist' | 'album' | 'genre' | 'rating'
+type ColumnKey = 'name' | 'artist' | 'album' | 'track' | 'time' | 'rating' | 'genre' | 'plays' | 'kind' | 'bitrate' | 'lastPlayed'
 type Selection = { cat?: string[]; art?: string[]; alb?: string[] }
 type ActivePane = 'track' | keyof Selection
 
@@ -20,6 +20,8 @@ type Settings = {
   browserPanes: BrowserPanes
   columnOrder: ColumnKey[]
   hiddenColumns: ColumnKey[]
+  sortColumn: ColumnKey | null
+  sortDesc: boolean
   autoAddSpotifyLibrary: boolean
   autoConnect: boolean
   spotifyClientId: string
@@ -256,8 +258,10 @@ const defaultSettings: Settings = {
   zoom: 1,
   zebra: true,
   browserPanes: { cat: true, art: true, alb: true },
-  columnOrder: ['track', 'name', 'time', 'artist', 'album', 'genre', 'rating'],
-  hiddenColumns: [],
+  columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed'],
+  hiddenColumns: ['kind', 'bitrate', 'lastPlayed'],
+  sortColumn: null,
+  sortDesc: false,
   autoAddSpotifyLibrary: true,
   autoConnect: true,
   spotifyClientId: '',
@@ -413,6 +417,36 @@ function formatTime(seconds: number) {
     : `${minutes}:${String(secs).padStart(2, '0')}`
 }
 
+const sortValue = (track: Track, column: ColumnKey): string | number | null => {
+  if (column === 'track') return track.trackNo
+  if (column === 'name') return track.name
+  if (column === 'time') return track.durationSecs
+  if (column === 'artist') return track.art
+  if (column === 'album') return track.alb
+  if (column === 'genre') return track.cat
+  if (column === 'rating') return track.rating?.stars ?? null
+  if (column === 'plays') return track.playCount
+  if (column === 'kind') return track.kind
+  if (column === 'bitrate') return track.bitrateKbps
+  return track.lastPlayedAt
+}
+
+const compareTracks = (left: Track, right: Track, column: ColumnKey, desc: boolean) => {
+  const columns = [column, ...(['track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => key !== column)]
+  for (const key of columns) {
+    const a = sortValue(left, key)
+    const b = sortValue(right, key)
+    if (a === null && b === null) continue
+    if (a === null) return 1
+    if (b === null) return -1
+    const compared = typeof a === 'number' && typeof b === 'number'
+      ? a - b
+      : String(a).localeCompare(String(b), undefined, { sensitivity: 'base' })
+    if (compared) return desc ? -compared : compared
+  }
+  return 0
+}
+
 function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[] } | null>(null)
@@ -516,7 +550,10 @@ function App() {
   const typeaheadExpires = useRef(0)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
-  const selectedTracks = tracks.filter((track) => state.selectedTrackIds.has(track.id))
+  const displayedTracks = useMemo(() => state.settings.sortColumn
+    ? [...tracks].sort((left, right) => compareTracks(left, right, state.settings.sortColumn!, state.settings.sortDesc))
+    : tracks, [state.settings.sortColumn, state.settings.sortDesc, tracks])
+  const selectedTracks = displayedTracks.filter((track) => state.selectedTrackIds.has(track.id))
   const spotifySearchActive = state.scope === 'spotify' && Boolean(state.query.trim())
   const tracklistVisible = !spotifySearchActive && !state.selectedPlaylist
   const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
@@ -625,6 +662,8 @@ function App() {
     state.settings.browserPanes,
     state.settings.columnOrder,
     state.settings.hiddenColumns,
+    state.settings.sortColumn,
+    state.settings.sortDesc,
     state.settings.autoAddSpotifyLibrary,
     state.settings.autoConnect,
     state.settings.spotifyClientId,
@@ -638,7 +677,7 @@ function App() {
   useEffect(() => {
     const unlisten = listen('get-info', () => openInfo())
     return () => { void unlisten.then((stop) => stop()) }
-  }, [state.selectedTrackIds, tracks])
+  }, [state.selectedTrackIds, displayedTracks])
 
   useEffect(() => {
     const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
@@ -806,10 +845,10 @@ function App() {
         setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
       } else if (command && event.key.toLowerCase() === 'a' && activePane === 'track' && tracklistVisible) {
         event.preventDefault()
-        const anchor = tracks.some((track) => track.id === state.selectionAnchor)
+        const anchor = displayedTracks.some((track) => track.id === state.selectionAnchor)
           ? state.selectionAnchor
-          : tracks[0]?.id
-        dispatch({ type: 'selection', ids: new Set(tracks.map((track) => track.id)), anchor })
+          : displayedTracks[0]?.id
+        dispatch({ type: 'selection', ids: new Set(displayedTracks.map((track) => track.id)), anchor })
       } else if (command && event.key.toLowerCase() === 'i') {
         event.preventDefault()
         openInfo()
@@ -831,7 +870,7 @@ function App() {
         typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, 1000)
         const prefix = typeahead.current.buffer.toLocaleLowerCase()
         if (activePane === 'track') {
-          const track = tracks.find((track) => track.name.toLocaleLowerCase().startsWith(prefix))
+          const track = displayedTracks.find((track) => track.name.toLocaleLowerCase().startsWith(prefix))
           if (!track) return
           dispatch({ type: 'selectTrack', id: track.id })
           window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${track.id}"]`)?.scrollIntoView({ block: 'nearest' }))
@@ -852,11 +891,11 @@ function App() {
         event.preventDefault()
         const direction = event.key === 'ArrowUp' ? -1 : 1
         if (activePane === 'track') {
-          if (!tracks.length) return
-          const current = tracks.findIndex((track) => track.id === state.selectionAnchor)
-          const index = current < 0 ? 0 : Math.max(0, Math.min(tracks.length - 1, current + direction))
-          dispatch({ type: 'selectTrack', id: tracks[index].id })
-          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${tracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
+          if (!displayedTracks.length) return
+          const current = displayedTracks.findIndex((track) => track.id === state.selectionAnchor)
+          const index = current < 0 ? 0 : Math.max(0, Math.min(displayedTracks.length - 1, current + direction))
+          dispatch({ type: 'selectTrack', id: displayedTracks[index].id })
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${displayedTracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
         } else {
           const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
           const values: (string | undefined)[] = [undefined, ...facetValues]
@@ -872,7 +911,7 @@ function App() {
       window.clearTimeout(typeahead.current.timer)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [activePane, playlistSubject, state.info, state.preferences, state.setup, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, tracks, tracklistVisible, player, selectFacet])
+  }, [activePane, playlistSubject, state.info, state.preferences, state.setup, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.view, displayedTracks, tracklistVisible, player, selectFacet])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -953,23 +992,25 @@ function App() {
               )}
               {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
               <TrackList
-                tracks={tracks}
+                tracks={displayedTracks}
                 label={labels[state.source]}
                 selectedIds={state.selectedTrackIds}
                 playing={state.playing}
                 columnOrder={state.settings.columnOrder}
                 hiddenColumns={state.settings.hiddenColumns}
+                sortColumn={state.settings.sortColumn}
+                sortDesc={state.settings.sortDesc}
                 empty={libraryEmpty}
                 onActivate={() => setActivePane('track')}
                 onSetup={() => dispatch({ type: 'setup', open: true })}
                 onSelect={(id, event) => {
                   if (event.shiftKey && state.selectionAnchor !== undefined) {
-                    const anchor = tracks.findIndex((track) => track.id === state.selectionAnchor)
-                    const row = tracks.findIndex((track) => track.id === id)
+                    const anchor = displayedTracks.findIndex((track) => track.id === state.selectionAnchor)
+                    const row = displayedTracks.findIndex((track) => track.id === id)
                     if (anchor >= 0 && row >= 0) {
                       dispatch({
                         type: 'selection',
-                        ids: new Set(tracks.slice(Math.min(anchor, row), Math.max(anchor, row) + 1).map((track) => track.id)),
+                        ids: new Set(displayedTracks.slice(Math.min(anchor, row), Math.max(anchor, row) + 1).map((track) => track.id)),
                         anchor: state.selectionAnchor,
                       })
                       return
@@ -983,12 +1024,13 @@ function App() {
                     dispatch({ type: 'selectTrack', id })
                   }
                 }}
-                onPlay={(id) => player.start(id, tracks)}
+                onPlay={(id) => player.start(id, displayedTracks)}
                 onRate={(id, stars) => mutate('click_track_star', { id, stars })}
                 onInfo={openInfo}
                 onPlaylist={setPlaylistSubject}
                 onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
                 onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
+                onSort={(sortColumn, sortDesc) => dispatch({ type: 'settings', settings: { sortColumn, sortDesc } })}
               />
             </>
           )}
@@ -1421,16 +1463,17 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
-function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onReorder, onHiddenColumns }: {
+function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onReorder, onHiddenColumns, onSort }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: State['playing']
-  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
+  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
   onPlaylist: (subject: PlaylistSubject) => void
-  onActivate: () => void; onSetup: () => void; onHiddenColumns: (columns: ColumnKey[]) => void
+  onActivate: () => void; onSetup: () => void; onHiddenColumns: (columns: ColumnKey[]) => void; onSort: (column: ColumnKey, desc: boolean) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
   const list = useRef<HTMLDivElement>(null)
+  const headerDragged = useRef(false)
   const headings: Record<ColumnKey, string> = {
     track: '#',
     name: label.item[0].toUpperCase() + label.item.slice(1),
@@ -1439,8 +1482,12 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     album: label.facets[2],
     genre: label.facets[0],
     rating: 'Rating',
+    plays: 'Plays',
+    kind: 'Kind',
+    bitrate: 'Bit Rate',
+    lastPlayed: 'Last Played',
   }
-  const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px' }
+  const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px' }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
   const columns = `22px ${visibleColumns.map((column) => widths[column]).join(' ')}`
   useEffect(() => {
@@ -1463,12 +1510,16 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     onReorder(next)
   }
   const cell = (track: Track, column: ColumnKey) => {
-    if (column === 'track') return <span key={column}>{track.trackNo ?? ''}</span>
+    if (column === 'track') return <span key={column} className="track-number">{track.trackNo ?? ''}</span>
     if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
-    if (column === 'time') return <span key={column}>{formatTime(track.durationSecs)}</span>
+    if (column === 'time') return <span key={column} className="track-number">{formatTime(track.durationSecs)}</span>
     if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
     if (column === 'album') return <span key={column} title={track.alb}>{track.alb}</span>
     if (column === 'genre') return <span key={column} title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
+    if (column === 'plays') return <span key={column} className="track-number">{track.playCount || ''}</span>
+    if (column === 'kind') return <span key={column} title={track.kind ?? undefined}>{track.kind ?? ''}</span>
+    if (column === 'bitrate') return <span key={column} className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
+    if (column === 'lastPlayed') return <span key={column} className="track-number">{track.lastPlayedAt === null ? '' : new Date(track.lastPlayedAt * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
     return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
   }
   return <div className="track-list" ref={list} onMouseDown={onActivate}>
@@ -1476,10 +1527,14 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
       event.preventDefault()
       const bounds = list.current?.getBoundingClientRect()
       setMenu({ x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0) })
-    }}><span />{visibleColumns.map((column) => <span key={column} draggable className={dragging === column ? 'dragging' : ''} onDragStart={(event) => {
+    }}><span />{visibleColumns.map((column) => <span key={column} draggable className={`${dragging === column ? 'dragging' : ''} ${['track', 'time', 'plays', 'bitrate', 'lastPlayed'].includes(column) ? 'track-number' : ''}`} onPointerDown={() => { headerDragged.current = false }} onClick={() => {
+      if (headerDragged.current) return
+      onSort(column, sortColumn === column ? !sortDesc : false)
+    }} onDragStart={(event) => {
+      headerDragged.current = true
       setDragging(column)
       event.dataTransfer.effectAllowed = 'move'
-    }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}>{headings[column]}</span>)}</div>
+    }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}>{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</span>)}</div>
     <div className={`track-scroll ${empty ? 'empty-library' : ''}`}>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id

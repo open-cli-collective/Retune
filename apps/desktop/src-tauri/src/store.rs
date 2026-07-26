@@ -83,6 +83,10 @@ pub struct Settings {
     pub column_order: Vec<String>,
     #[serde(default)]
     pub hidden_columns: Vec<String>,
+    #[serde(default)]
+    pub sort_column: Option<String>,
+    #[serde(default)]
+    pub sort_desc: bool,
     pub auto_add_spotify_library: bool,
     #[serde(default = "default_true")]
     pub auto_connect: bool,
@@ -159,11 +163,23 @@ impl Default for Settings {
             zebra: true,
             browser_panes: BrowserPanes::default(),
             column_order: [
-                "track", "name", "time", "artist", "album", "genre", "rating",
+                "name",
+                "artist",
+                "album",
+                "track",
+                "time",
+                "rating",
+                "genre",
+                "plays",
+                "kind",
+                "bitrate",
+                "lastPlayed",
             ]
             .map(String::from)
             .to_vec(),
-            hidden_columns: Vec::new(),
+            hidden_columns: ["kind", "bitrate", "lastPlayed"].map(String::from).to_vec(),
+            sort_column: None,
+            sort_desc: false,
             auto_add_spotify_library: true,
             auto_connect: true,
             spotify_client_id: String::new(),
@@ -180,17 +196,59 @@ impl Default for Settings {
 }
 
 impl Settings {
+    const COLUMNS: [&'static str; 11] = [
+        "name",
+        "artist",
+        "album",
+        "track",
+        "time",
+        "rating",
+        "genre",
+        "plays",
+        "kind",
+        "bitrate",
+        "lastPlayed",
+    ];
+    const OLD_COLUMNS: [&'static str; 7] = [
+        "track", "name", "time", "artist", "album", "genre", "rating",
+    ];
+
+    pub(crate) fn normalize(&mut self) {
+        if !self.column_order.iter().any(|column| column == "track") {
+            self.column_order.insert(0, "track".into());
+        }
+        if self.column_order == Self::OLD_COLUMNS {
+            self.column_order = Self::default().column_order;
+            self.hidden_columns
+                .extend(["kind", "bitrate", "lastPlayed"].map(String::from));
+        } else {
+            for column in Self::COLUMNS {
+                if !self.column_order.iter().any(|item| item == column) {
+                    self.column_order.push(column.into());
+                    if matches!(column, "kind" | "bitrate" | "lastPlayed") {
+                        self.hidden_columns.push(column.into());
+                    }
+                }
+            }
+        }
+        self.hidden_columns.retain(|column| column != "name");
+        self.hidden_columns.sort_by_key(|column| {
+            Self::COLUMNS
+                .iter()
+                .position(|candidate| candidate == column)
+                .unwrap_or(usize::MAX)
+        });
+        self.hidden_columns.dedup();
+    }
+
     pub(crate) fn validate(&self) -> StoreResult<()> {
-        const COLUMNS: [&str; 7] = [
-            "track", "name", "time", "artist", "album", "genre", "rating",
-        ];
         if !(0.7..=1.8).contains(&self.zoom) {
             return Err(StoreError::InvalidSettings(
                 "settings zoom must be between 0.7 and 1.8",
             ));
         }
-        if self.column_order.len() != COLUMNS.len()
-            || COLUMNS.iter().any(|column| {
+        if self.column_order.len() != Self::COLUMNS.len()
+            || Self::COLUMNS.iter().any(|column| {
                 self.column_order
                     .iter()
                     .filter(|item| item == column)
@@ -204,7 +262,7 @@ impl Settings {
         }
         if self.hidden_columns.iter().any(|column| {
             column == "name"
-                || !COLUMNS.contains(&column.as_str())
+                || !Self::COLUMNS.contains(&column.as_str())
                 || self
                     .hidden_columns
                     .iter()
@@ -214,6 +272,15 @@ impl Settings {
         }) {
             return Err(StoreError::InvalidSettings(
                 "settings hiddenColumns must be unique track columns other than name",
+            ));
+        }
+        if self
+            .sort_column
+            .as_deref()
+            .is_some_and(|column| !Self::COLUMNS.contains(&column))
+        {
+            return Err(StoreError::InvalidSettings(
+                "settings sortColumn must be a track column",
             ));
         }
         if !matches!(self.playback_backend.as_str(), "connect" | "local") {
@@ -319,9 +386,7 @@ impl FsSettingsStore {
         match fs::read(&self.path) {
             Ok(bytes) => {
                 let mut settings: Settings = serde_json::from_slice(&bytes)?;
-                if !settings.column_order.iter().any(|column| column == "track") {
-                    settings.column_order.insert(0, "track".into());
-                }
+                settings.normalize();
                 settings.validate()?;
                 Ok(Some(settings))
             }
@@ -331,8 +396,10 @@ impl FsSettingsStore {
     }
 
     pub fn save(&self, settings: &Settings) -> StoreResult<()> {
+        let mut settings = settings.clone();
+        settings.normalize();
         settings.validate()?;
-        atomic_write(&self.path, &serde_json::to_vec(settings)?)
+        atomic_write(&self.path, &serde_json::to_vec(&settings)?)
     }
 }
 
@@ -487,11 +554,23 @@ mod tests {
                 alb: false,
             },
             column_order: [
-                "rating", "name", "artist", "album", "genre", "time", "track",
+                "rating",
+                "name",
+                "artist",
+                "album",
+                "genre",
+                "time",
+                "track",
+                "plays",
+                "kind",
+                "bitrate",
+                "lastPlayed",
             ]
             .map(String::from)
             .to_vec(),
             hidden_columns: vec!["genre".into()],
+            sort_column: Some("artist".into()),
+            sort_desc: true,
             auto_add_spotify_library: true,
             auto_connect: false,
             spotify_client_id: "client-id".into(),
@@ -598,14 +677,101 @@ mod tests {
         .unwrap();
 
         let settings = store.load().unwrap().unwrap();
-        assert_eq!(settings.column_order[0], "track");
-        assert_eq!(settings.column_order.len(), 7);
+        assert_eq!(
+            settings.column_order,
+            [
+                "name",
+                "artist",
+                "album",
+                "track",
+                "time",
+                "rating",
+                "genre",
+                "plays",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+            ]
+        );
+        assert_eq!(settings.hidden_columns, ["kind", "bitrate", "lastPlayed"]);
         assert_eq!(settings.playback_backend, "connect");
         assert_eq!(settings.repeat, "off");
         assert_eq!(settings.volume, 62);
         assert_eq!(settings.streaming_bitrate, 320);
         assert!(!settings.normalize_volume);
         assert!(settings.gapless);
+    }
+
+    #[test]
+    fn settings_load_upgrades_exact_old_default_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let legacy = serde_json::json!({
+            "theme": "system", "zoom": 1.0, "zebra": true,
+            "columnOrder": ["track", "name", "time", "artist", "album", "genre", "rating"],
+            "autoAddSpotifyLibrary": true
+        });
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert_eq!(settings.column_order, Settings::default().column_order);
+        assert_eq!(settings.hidden_columns, Settings::default().hidden_columns);
+    }
+
+    #[test]
+    fn settings_load_appends_new_columns_and_hides_new_optional_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let legacy = serde_json::json!({
+            "theme": "system", "zoom": 1.0, "zebra": true,
+            "columnOrder": ["name", "track", "artist", "album", "time", "genre", "rating"],
+            "hiddenColumns": ["name", "genre"],
+            "autoAddSpotifyLibrary": true
+        });
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert_eq!(
+            settings.column_order,
+            [
+                "name",
+                "track",
+                "artist",
+                "album",
+                "time",
+                "genre",
+                "rating",
+                "plays",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+            ]
+        );
+        assert_eq!(
+            settings.hidden_columns,
+            ["genre", "kind", "bitrate", "lastPlayed"]
+        );
+    }
+
+    #[test]
+    fn legacy_settings_json_defaults_to_no_sort() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "theme": "system", "zoom": 1.0, "zebra": true,
+            "columnOrder": ["track", "name", "time", "artist", "album", "genre", "rating"],
+            "autoAddSpotifyLibrary": true
+        }))
+        .unwrap();
+
+        assert_eq!(settings.sort_column, None);
+        assert!(!settings.sort_desc);
     }
 
     #[test]
@@ -630,6 +796,15 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(settings.repeat, "off");
         settings.repeat = "sometimes".into();
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_sort_column_is_rejected() {
+        let settings = Settings {
+            sort_column: Some("composer".into()),
+            ..Settings::default()
+        };
         assert!(settings.validate().is_err());
     }
 
