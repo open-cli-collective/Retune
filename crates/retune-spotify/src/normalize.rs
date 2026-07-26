@@ -34,6 +34,8 @@ pub fn track(
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
         track_no: value.track_number,
         disc_no: value.disc_number,
+        kind: Some("Spotify".into()),
+        bitrate_kbps: None,
     }
 }
 
@@ -54,6 +56,8 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
         track_no: None,
         disc_no: None,
+        kind: Some("Spotify".into()),
+        bitrate_kbps: None,
     }
 }
 
@@ -76,6 +80,8 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
         duration: Duration::from_millis(value.duration_ms.unwrap_or_default()),
         track_no: value.chapter_number,
         disc_no: None,
+        kind: Some("Spotify".into()),
+        bitrate_kbps: None,
     }
 }
 
@@ -120,6 +126,8 @@ mod tests {
         assert_eq!(mapped.art, "Primary");
         assert_eq!(mapped.alb, "Record");
         assert_eq!((mapped.disc_no, mapped.track_no), (Some(1), Some(2)));
+        assert_eq!(mapped.kind.as_deref(), Some("Spotify"));
+        assert_eq!(mapped.bitrate_kbps, None);
         assert_eq!(track(&music(), None, None).cat, UNCATEGORIZED);
         assert_eq!(
             track(
@@ -180,6 +188,8 @@ mod tests {
         assert_eq!(mapped.cat, "Technology");
         assert_eq!(mapped.art, "Podcaster");
         assert_eq!(mapped.alb, "The Show");
+        assert_eq!(mapped.kind.as_deref(), Some("Spotify"));
+        assert_eq!(mapped.bitrate_kbps, None);
         let uncategorized = episode(
             &value,
             Some(&Show {
@@ -242,6 +252,8 @@ mod tests {
         assert_eq!(mapped.art, "First Author");
         assert_eq!(mapped.alb, "The Book");
         assert_eq!(mapped.track_no, Some(1));
+        assert_eq!(mapped.kind.as_deref(), Some("Spotify"));
+        assert_eq!(mapped.bitrate_kbps, None);
         assert_eq!(
             chapter(
                 &value,

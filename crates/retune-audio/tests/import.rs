@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use retune_audio::{import_file, scan_paths};
+use retune_audio::{audio_kind, import_file, scan_paths};
 use tempfile::tempdir;
 
 fn fixture(name: &str) -> PathBuf {
@@ -73,6 +73,41 @@ fn import_preserves_tags_and_canonical_path() {
     assert_eq!(imported.tags.genre.as_deref(), Some("Fixture Genre"));
     assert_eq!(imported.tags.track_no, Some(7));
     assert_eq!(imported.tags.disc_no, Some(2));
+}
+
+#[test]
+fn import_reports_codec_specific_m4a_kinds() {
+    let aac = import_file(fixture("cc0-audio-aac-lc.m4a")).unwrap();
+    assert_eq!(
+        audio_kind(Some(aac.info.codec), &aac.canonical_path),
+        Some("AAC audio file")
+    );
+    let alac = import_file(fixture("cc0-audio-alac.m4a")).unwrap();
+    assert_eq!(
+        audio_kind(Some(alac.info.codec), &alac.canonical_path),
+        Some("Apple Lossless audio file")
+    );
+}
+
+#[test]
+fn extension_fallback_covers_supported_kinds() {
+    for (name, expected) in [
+        ("song.mp3", "MPEG audio file"),
+        ("song.aac", "AAC audio file"),
+        ("song.m4a", "AAC audio file"),
+        ("song.mp4", "AAC audio file"),
+        ("song.flac", "FLAC audio file"),
+        ("song.wav", "WAV audio file"),
+        ("song.aif", "AIFF audio file"),
+        ("song.aiff", "AIFF audio file"),
+        ("song.oga", "Ogg Vorbis audio file"),
+        ("song.ogg", "Ogg Vorbis audio file"),
+        ("song.opus", "Opus audio file"),
+        ("song.webm", "WebM audio file"),
+    ] {
+        assert_eq!(audio_kind(None, name), Some(expected), "{name}");
+    }
+    assert_eq!(audio_kind(None, "song.txt"), None);
 }
 
 #[test]

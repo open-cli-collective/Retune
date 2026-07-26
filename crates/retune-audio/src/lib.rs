@@ -13,7 +13,10 @@ use lofty::{
 use rodio::{ChannelCount, SampleRate, Source, source::SeekError};
 use symphonia::core::{
     audio::{Channels, SampleBuffer},
-    codecs::{CODEC_TYPE_NULL, CODEC_TYPE_OPUS, CodecRegistry, Decoder, DecoderOptions},
+    codecs::{
+        CODEC_TYPE_AAC, CODEC_TYPE_ALAC, CODEC_TYPE_FLAC, CODEC_TYPE_MP3, CODEC_TYPE_NULL,
+        CODEC_TYPE_OPUS, CODEC_TYPE_VORBIS, CodecRegistry, CodecType, Decoder, DecoderOptions,
+    },
     errors::Error as SymphoniaError,
     formats::{FormatOptions, FormatReader, SeekMode, SeekTo},
     io::MediaSourceStream,
@@ -46,6 +49,8 @@ pub enum AudioError {
 /// Basic stream properties available before playback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AudioInfo {
+    /// Codec declared by the selected audio stream.
+    pub codec: CodecType,
     /// Samples per channel per second.
     pub sample_rate: u32,
     /// Interleaved channel count.
@@ -242,6 +247,30 @@ pub fn probe_duration(path: impl AsRef<Path>) -> Result<Duration, AudioError> {
     probe(path)?.duration.ok_or(AudioError::DurationUnavailable)
 }
 
+/// Returns the iTunes-style kind for a codec/path pair.
+///
+/// The codec disambiguates containers such as M4A and Ogg; the extension
+/// keeps legacy-library backfill cheap when probing is unavailable.
+pub fn audio_kind(codec: Option<CodecType>, path: impl AsRef<Path>) -> Option<&'static str> {
+    let extension = path
+        .as_ref()
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match (codec, extension.as_deref()) {
+        (_, Some("webm")) => Some("WebM audio file"),
+        (_, Some("wav")) => Some("WAV audio file"),
+        (_, Some("aif" | "aiff")) => Some("AIFF audio file"),
+        (Some(CODEC_TYPE_ALAC), _) => Some("Apple Lossless audio file"),
+        (Some(CODEC_TYPE_AAC), _) | (None, Some("aac" | "m4a" | "mp4")) => Some("AAC audio file"),
+        (Some(CODEC_TYPE_MP3), _) | (None, Some("mp3")) => Some("MPEG audio file"),
+        (Some(CODEC_TYPE_FLAC), _) | (None, Some("flac")) => Some("FLAC audio file"),
+        (Some(CODEC_TYPE_OPUS), _) | (None, Some("opus")) => Some("Opus audio file"),
+        (Some(CODEC_TYPE_VORBIS), _) | (None, Some("oga" | "ogg")) => Some("Ogg Vorbis audio file"),
+        _ => None,
+    }
+}
+
 /// Reads common tags and the first embedded artwork image.
 pub fn read_tags(path: impl AsRef<Path>) -> Result<FileTags, AudioError> {
     let tagged = lofty::probe::Probe::open(path.as_ref())
@@ -324,6 +353,7 @@ fn open(path: &Path) -> Result<Opened, AudioError> {
         decoder,
         track_id,
         AudioInfo {
+            codec: params.codec,
             sample_rate,
             channels,
             duration,

@@ -159,6 +159,8 @@ mod tests {
             duration: Duration::ZERO,
             track_no: None,
             disc_no: None,
+            kind: None,
+            bitrate_kbps: None,
         });
     }
 
@@ -317,6 +319,8 @@ mod tests {
                 duration: Duration::ZERO,
                 track_no,
                 disc_no,
+                kind: None,
+                bitrate_kbps: None,
             });
         }
 

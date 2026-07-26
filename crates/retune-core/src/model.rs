@@ -67,6 +67,14 @@ pub struct TrackRecord {
     pub track_no: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disc_no: Option<u32>,
+    #[serde(default)]
+    pub play_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_played_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
     /// Per-track rating override. `None` means "inherit from album".
     pub rating: Option<Rating>,
     /// The provider's original category, recorded the first time `cat`
@@ -139,6 +147,10 @@ impl Library {
         &self.tracks
     }
 
+    pub fn tracks_mut(&mut self) -> &mut [TrackRecord] {
+        &mut self.tracks
+    }
+
     pub fn get(&self, id: TrackId) -> Option<&TrackRecord> {
         self.tracks.iter().find(|track| track.id == id)
     }
@@ -163,6 +175,10 @@ impl Library {
             duration: incoming.duration,
             track_no: incoming.track_no,
             disc_no: incoming.disc_no,
+            play_count: 0,
+            last_played_at: None,
+            kind: incoming.kind,
+            bitrate_kbps: incoming.bitrate_kbps,
             rating: None,
             orig_cat: None,
         });
@@ -178,6 +194,8 @@ impl Library {
         {
             track.track_no = incoming.track_no;
             track.disc_no = incoming.disc_no;
+            track.kind = incoming.kind;
+            track.bitrate_kbps = incoming.bitrate_kbps;
             if track.orig_cat.is_some() {
                 track.orig_cat = Some(incoming.cat);
             } else {
@@ -371,6 +389,10 @@ pub struct NewTrack {
     pub track_no: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disc_no: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// Field edits from Get Info. `None` = leave unchanged.
@@ -408,6 +430,8 @@ mod tests {
             duration: Duration::from_secs(180),
             track_no: None,
             disc_no: None,
+            kind: None,
+            bitrate_kbps: None,
         }
     }
 
@@ -466,6 +490,25 @@ mod tests {
 
         let record = library.get(id).unwrap();
         assert_eq!((record.disc_no, record.track_no), (Some(2), Some(4)));
+    }
+
+    #[test]
+    fn upsert_refreshes_provider_metadata_and_preserves_play_overlay() {
+        let mut library = Library::new();
+        let id = library.upsert(track("one", "Rock", "Artist", "Album"));
+        let existing = &mut library.tracks_mut()[0];
+        existing.play_count = 9;
+        existing.last_played_at = Some(123);
+
+        let mut changed = track("one", "Rock", "Artist", "Album");
+        changed.kind = Some("MPEG audio file".into());
+        changed.bitrate_kbps = Some(192);
+        library.upsert(changed);
+
+        let track = library.get(id).unwrap();
+        assert_eq!((track.play_count, track.last_played_at), (9, Some(123)));
+        assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
+        assert_eq!(track.bitrate_kbps, Some(192));
     }
 
     #[test]

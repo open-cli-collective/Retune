@@ -104,6 +104,10 @@ type Track = {
   cat: string
   trackNo: number | null
   durationSecs: number
+  playCount: number
+  lastPlayedAt: number | null
+  kind: string | null
+  bitrateKbps: number | null
   overridden: boolean
   isLocal: boolean
   rating: RatingView | null

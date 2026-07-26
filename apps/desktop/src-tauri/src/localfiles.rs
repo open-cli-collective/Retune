@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use retune_audio::{import_file, scan_paths, ImportedFile};
+use retune_audio::{audio_kind, import_file, scan_paths, ImportedFile};
 use retune_core::model::{Library, NewTrack, SourceId};
 use retune_spotify::normalize::UNCATEGORIZED;
 use serde::Serialize;
@@ -80,6 +80,14 @@ pub(crate) fn import_transaction(
 }
 
 fn map_file(file: ImportedFile) -> Result<NewTrack, String> {
+    let kind = audio_kind(Some(file.info.codec), &file.canonical_path).map(str::to_owned);
+    let bitrate_kbps = std::fs::metadata(&file.canonical_path)
+        .ok()
+        .and_then(|metadata| {
+            file.info
+                .duration
+                .and_then(|duration| average_bitrate(metadata.len(), duration))
+        });
     let name = file
         .tags
         .title
@@ -100,7 +108,55 @@ fn map_file(file: ImportedFile) -> Result<NewTrack, String> {
         duration: file.tags.duration,
         track_no: file.tags.track_no,
         disc_no: file.tags.disc_no,
+        kind,
+        bitrate_kbps,
     })
+}
+
+fn average_bitrate(bytes: u64, duration: std::time::Duration) -> Option<u32> {
+    (duration.as_secs_f64() > 0.0)
+        .then(|| ((bytes as f64 * 8.0 / duration.as_secs_f64() / 1000.0).round()) as u32)
+}
+
+pub(crate) fn backfill_metadata(library: &mut Library) -> bool {
+    let mut changed = false;
+    for track in library.tracks_mut() {
+        if track.uri.starts_with("spotify:") {
+            if track.kind.is_none() {
+                track.kind = Some("Spotify".into());
+                changed = true;
+            }
+            continue;
+        }
+        if !track.uri.starts_with("file:") {
+            continue;
+        }
+        let Ok(path) = path_from_file_uri(&track.uri) else {
+            continue;
+        };
+        if track.kind.is_none() {
+            track.kind = audio_kind(None, &path).map(str::to_owned);
+            changed |= track.kind.is_some();
+        }
+        if track.bitrate_kbps.is_none() {
+            track.bitrate_kbps = std::fs::metadata(path)
+                .ok()
+                .and_then(|metadata| average_bitrate(metadata.len(), track.duration));
+            changed |= track.bitrate_kbps.is_some();
+        }
+    }
+    changed
+}
+
+pub(crate) fn backfill_transaction(
+    store: &impl OverlayStore,
+    library: &mut Library,
+) -> Result<bool, String> {
+    if !backfill_metadata(library) {
+        return Ok(false);
+    }
+    store.save(library).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 pub(crate) fn file_uri(canonical_path: &Path) -> String {
@@ -149,6 +205,14 @@ mod tests {
     }
 
     #[test]
+    fn average_bitrate_rounds_to_nearest_kbps() {
+        assert_eq!(
+            average_bitrate(188_125, std::time::Duration::from_secs(10)),
+            Some(151)
+        );
+    }
+
+    #[test]
     fn mapping_carries_tags_and_uses_required_fallbacks() {
         let tagged = import_file(fixture("cc0-audio-tagged.mp3")).unwrap();
         let track = map_file(tagged).unwrap();
@@ -159,6 +223,10 @@ mod tests {
         assert_eq!(track.cat, "Fixture Genre");
         assert_eq!(track.track_no, Some(7));
         assert_eq!(track.disc_no, Some(2));
+        assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
+        assert!(track
+            .bitrate_kbps
+            .is_some_and(|bitrate| (100..=200).contains(&bitrate)));
         assert!(track.duration.as_secs_f64() > 2.0);
 
         let untagged = import_file(fixture("cc0-audio.wav")).unwrap();
@@ -167,6 +235,11 @@ mod tests {
         assert_eq!(track.art, "Unknown Artist");
         assert_eq!(track.alb, "Unknown Album");
         assert_eq!(track.cat, "Uncategorized");
+
+        let aac = map_file(import_file(fixture("cc0-audio-aac-lc.m4a")).unwrap()).unwrap();
+        assert_eq!(aac.kind.as_deref(), Some("AAC audio file"));
+        let alac = map_file(import_file(fixture("cc0-audio-alac.m4a")).unwrap()).unwrap();
+        assert_eq!(alac.kind.as_deref(), Some("Apple Lossless audio file"));
     }
 
     #[cfg(unix)]
@@ -261,6 +334,53 @@ mod tests {
         assert!(import_transaction(&failing, &mut library, &[fixture("cc0-audio.flac")]).is_err());
         assert_eq!(failing.saves.get(), 1);
         assert_eq!(library, before);
+    }
+
+    #[test]
+    fn backfill_sets_spotify_and_local_metadata_then_is_a_noop() {
+        let mut library = Library::new();
+        let mut local = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
+        local.kind = None;
+        local.bitrate_kbps = None;
+        let local_id = library.add(local.clone());
+        local.uri = "file:///definitely/missing/song.flac".into();
+        let missing_id = library.add(local);
+        let mut spotify = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
+        spotify.uri = "spotify:track:one".into();
+        spotify.kind = None;
+        spotify.bitrate_kbps = None;
+        let spotify_id = library.add(spotify);
+
+        assert!(backfill_metadata(&mut library));
+        let local = library.get(local_id).unwrap();
+        assert_eq!(local.kind.as_deref(), Some("MPEG audio file"));
+        assert!(local.bitrate_kbps.is_some());
+        let missing = library.get(missing_id).unwrap();
+        assert_eq!(missing.kind.as_deref(), Some("FLAC audio file"));
+        assert_eq!(missing.bitrate_kbps, None);
+        assert_eq!(
+            library.get(spotify_id).unwrap().kind.as_deref(),
+            Some("Spotify")
+        );
+        assert!(!backfill_metadata(&mut library));
+    }
+
+    #[test]
+    fn backfill_transaction_saves_once_only_when_changed() {
+        let store = RecordingStore {
+            saves: Cell::new(0),
+            fail: false,
+        };
+        let mut library = Library::new();
+        let mut track = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
+        track.kind = None;
+        track.bitrate_kbps = None;
+        library.add(track);
+
+        assert_eq!(backfill_transaction(&store, &mut library), Ok(true));
+        assert_eq!(store.saves.get(), 1);
+        assert_eq!(backfill_transaction(&store, &mut library), Ok(false));
+        assert_eq!(store.saves.get(), 1);
     }
 
     #[test]

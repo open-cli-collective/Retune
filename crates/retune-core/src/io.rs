@@ -105,10 +105,17 @@ mod tests {
             duration: Duration::from_secs(42),
             track_no: None,
             disc_no: None,
+            kind: Some("Spotify".into()),
+            bitrate_kbps: None,
         });
         library
             .click_track_star(id, Rating::new(5).unwrap())
             .unwrap();
+        let track = &mut library.tracks_mut()[0];
+        track.play_count = 3;
+        track.last_played_at = Some(1_700_000_000);
+        track.kind = Some("Spotify".into());
+        track.bitrate_kbps = Some(320);
         library.set_album_rating(
             AlbumKey::of(library.get(id).unwrap()),
             Some(Rating::new(4).unwrap()),
@@ -182,6 +189,8 @@ mod tests {
             duration: Duration::from_secs(1),
             track_no: None,
             disc_no: None,
+            kind: None,
+            bitrate_kbps: None,
         });
         assert_eq!(id.0, 8);
     }
@@ -218,8 +227,14 @@ mod tests {
                 "next_id": 8
             }
         }"#;
-
         let library = import(fixture).unwrap();
+        let library = import(&export_json(&library)).unwrap();
+        let track = &library.tracks()[0];
+        assert_eq!(track.play_count, 0);
+        assert_eq!(track.last_played_at, None);
+        assert_eq!(track.kind, None);
+        assert_eq!(track.bitrate_kbps, None);
+
         assert_eq!(library.tracks()[0].id.0, 7);
         assert_eq!(library.tracks()[0].orig_cat.as_deref(), Some("Original"));
         assert_eq!(

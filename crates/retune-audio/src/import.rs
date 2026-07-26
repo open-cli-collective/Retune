@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{AudioError, FileTags, probe, read_tags};
+use crate::{AudioError, AudioInfo, FileTags, probe, read_tags};
 
 const EXTENSIONS: &[&str] = &[
     "aac", "aif", "aiff", "flac", "m4a", "mp3", "mp4", "oga", "ogg", "opus", "wav", "webm",
@@ -14,6 +14,7 @@ const EXTENSIONS: &[&str] = &[
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedFile {
     pub canonical_path: PathBuf,
+    pub info: AudioInfo,
     pub tags: FileTags,
 }
 
@@ -47,6 +48,7 @@ pub fn import_file(path: impl AsRef<Path>) -> Result<ImportedFile, AudioError> {
         }
     });
     Ok(ImportedFile {
+        info,
         tags,
         canonical_path: path,
     })

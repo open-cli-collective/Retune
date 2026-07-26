@@ -189,6 +189,10 @@ struct TrackView {
     cat: String,
     track_no: Option<u32>,
     duration_secs: u64,
+    play_count: u32,
+    last_played_at: Option<u64>,
+    kind: Option<String>,
+    bitrate_kbps: Option<u32>,
     overridden: bool,
     is_local: bool,
     rating: Option<RatingView>,
@@ -205,6 +209,10 @@ impl TrackView {
             cat: track.cat.clone(),
             track_no: track.track_no,
             duration_secs: track.duration.as_secs(),
+            play_count: track.play_count,
+            last_played_at: track.last_played_at,
+            kind: track.kind.clone(),
+            bitrate_kbps: track.bitrate_kbps,
             overridden: track
                 .orig_cat
                 .as_ref()
@@ -2447,27 +2455,31 @@ pub fn run() {
             )?;
             let app_data_dir = app.path().app_data_dir()?;
             let store = FsOverlayStore::new(&app_data_dir);
-            let (library, recovery_notice) = match store.load() {
-                Ok(Some(library)) => (library, None),
+            let (mut library, recovery_notice, needs_save) = match store.load() {
+                Ok(Some(library)) => (library, None, false),
                 Ok(None) => {
                     let library = initial_library(cfg!(debug_assertions));
-                    store.save(&library)?;
-                    (library, None)
+                    (library, None, true)
                 }
                 Err(StoreError::Import(error)) => {
                     let corrupt = store.quarantine_corrupt()?;
                     let library = Library::new();
-                    store.save(&library)?;
                     (
                         library,
                         Some(format!(
                             "Retune could not load your library ({error}). The corrupt file was moved to {} and an empty library was started.",
                             corrupt.display()
                         )),
+                        true,
                     )
                 }
                 Err(error) => return Err(error.into()),
             };
+            let backfilled = localfiles::backfill_transaction(&store, &mut library)
+                .map_err(std::io::Error::other)?;
+            if needs_save && !backfilled {
+                store.save(&library)?;
+            }
             let settings_store = FsSettingsStore::new(&app_data_dir);
             let sync_store = FsSyncStore::new(&app_data_dir);
             let playlist_store = FsPlaylistStore::new(&app_data_dir);
@@ -2636,6 +2648,8 @@ mod tests {
             duration: Duration::from_secs(1),
             track_no: None,
             disc_no: None,
+            kind: None,
+            bitrate_kbps: None,
         }
     }
 
@@ -2657,6 +2671,26 @@ mod tests {
 
         assert!(TrackView::from_track(library.get(local).unwrap(), None).is_local);
         assert!(!TrackView::from_track(library.get(spotify).unwrap(), None).is_local);
+    }
+
+    #[test]
+    fn track_view_exposes_metadata_fields() {
+        let mut library = Library::new();
+        let id = library.add(metadata_track(
+            "spotify:track:track",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+        let track = &mut library.tracks_mut()[0];
+        track.play_count = 4;
+        track.last_played_at = Some(123);
+        track.kind = Some("Spotify".into());
+        let view = TrackView::from_track(library.get(id).unwrap(), None);
+
+        assert_eq!((view.play_count, view.last_played_at), (4, Some(123)));
+        assert_eq!(view.kind.as_deref(), Some("Spotify"));
+        assert_eq!(view.bitrate_kbps, None);
     }
 
     #[test]
