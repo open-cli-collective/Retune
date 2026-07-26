@@ -11,7 +11,7 @@ mod sync;
 mod sync_orchestrator;
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{Read, Write},
     path::PathBuf,
@@ -120,6 +120,8 @@ struct VisualSettings {
     #[serde(default)]
     browser_panes: BrowserPanes,
     column_order: Vec<String>,
+    #[serde(default)]
+    column_widths: BTreeMap<String, u32>,
     hidden_columns: Vec<String>,
     #[serde(default)]
     sort_column: Option<String>,
@@ -135,6 +137,7 @@ impl VisualSettings {
             zebra: settings.zebra,
             browser_panes: settings.browser_panes,
             column_order: settings.column_order.clone(),
+            column_widths: settings.column_widths.clone(),
             hidden_columns: settings.hidden_columns.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
@@ -147,6 +150,7 @@ impl VisualSettings {
         settings.zebra = self.zebra;
         settings.browser_panes = self.browser_panes;
         settings.column_order = self.column_order;
+        settings.column_widths = self.column_widths;
         settings.hidden_columns = self.hidden_columns;
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
@@ -3388,6 +3392,7 @@ mod tests {
             ]
             .map(String::from)
             .to_vec(),
+            column_widths: BTreeMap::from([("name".into(), 260), ("artist".into(), 140)]),
             hidden_columns: vec![
                 "genre".into(),
                 "kind".into(),
@@ -3426,6 +3431,7 @@ mod tests {
         assert_eq!(restored.theme, Theme::Dark);
         assert_eq!(restored.browser_panes, exported.browser_panes);
         assert_eq!(restored.column_order, exported.column_order);
+        assert_eq!(restored.column_widths, exported.column_widths);
         assert_eq!(restored.hidden_columns, exported.hidden_columns);
         assert_eq!(restored.sort_column.as_deref(), Some("plays"));
         assert!(restored.sort_desc);
@@ -3444,6 +3450,17 @@ mod tests {
         let visual: VisualSettings = serde_json::from_value(json).unwrap();
 
         assert_eq!(visual.browser_panes, BrowserPanes::default());
+    }
+
+    #[test]
+    fn legacy_visual_settings_default_column_widths_to_empty() {
+        let mut json =
+            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
+        json.as_object_mut().unwrap().remove("columnWidths");
+
+        let visual: VisualSettings = serde_json::from_value(json).unwrap();
+
+        assert!(visual.column_widths.is_empty());
     }
 
     #[test]

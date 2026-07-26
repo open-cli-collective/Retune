@@ -82,6 +82,8 @@ pub struct Settings {
     pub browser_panes: BrowserPanes,
     pub column_order: Vec<String>,
     #[serde(default)]
+    pub column_widths: BTreeMap<String, u32>,
+    #[serde(default)]
     pub hidden_columns: Vec<String>,
     #[serde(default)]
     pub sort_column: Option<String>,
@@ -184,6 +186,7 @@ impl Default for Settings {
             ]
             .map(String::from)
             .to_vec(),
+            column_widths: BTreeMap::new(),
             hidden_columns: ["kind", "bitrate", "lastPlayed", "added"]
                 .map(String::from)
                 .to_vec(),
@@ -206,6 +209,15 @@ impl Default for Settings {
 }
 
 impl Settings {
+    const RESIZABLE_COLUMNS: [&'static str; 7] = [
+        "name",
+        "artist",
+        "album",
+        "genre",
+        "kind",
+        "lastPlayed",
+        "added",
+    ];
     const COLUMNS: [&'static str; 12] = [
         "name",
         "artist",
@@ -286,6 +298,13 @@ impl Settings {
         }) {
             return Err(StoreError::InvalidSettings(
                 "settings hiddenColumns must be unique track columns other than name",
+            ));
+        }
+        if self.column_widths.iter().any(|(column, width)| {
+            !Self::RESIZABLE_COLUMNS.contains(&column.as_str()) || *width < 60
+        }) {
+            return Err(StoreError::InvalidSettings(
+                "settings columnWidths must contain resizable track columns at least 60px wide",
             ));
         }
         if self
@@ -583,6 +602,7 @@ mod tests {
             ]
             .map(String::from)
             .to_vec(),
+            column_widths: BTreeMap::from([("name".into(), 240), ("lastPlayed".into(), 120)]),
             hidden_columns: vec!["genre".into(), "added".into()],
             sort_column: Some("artist".into()),
             sort_desc: true,
@@ -603,6 +623,16 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn legacy_settings_default_column_widths_to_empty() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("columnWidths");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert!(settings.column_widths.is_empty());
     }
 
     #[test]
@@ -895,6 +925,36 @@ mod tests {
             ..Settings::default()
         };
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn column_widths_only_allow_resizable_columns_at_least_60px() {
+        for column in [
+            "name",
+            "artist",
+            "album",
+            "genre",
+            "kind",
+            "lastPlayed",
+            "added",
+        ] {
+            let settings = Settings {
+                column_widths: BTreeMap::from([(column.into(), 60)]),
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_ok(), "{column}");
+        }
+
+        let mut settings = Settings::default();
+        settings.column_widths.insert("name".into(), u32::MAX);
+        assert!(settings.validate().is_ok());
+        settings.column_widths.insert("artist".into(), 59);
+        assert!(settings.validate().is_err());
+
+        for column in ["rating", "composer"] {
+            settings.column_widths = BTreeMap::from([(column.into(), 84)]);
+            assert!(settings.validate().is_err(), "{column}");
+        }
     }
 
     #[test]

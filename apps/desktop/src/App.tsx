@@ -20,6 +20,7 @@ type Settings = {
   zebra: boolean
   browserPanes: BrowserPanes
   columnOrder: ColumnKey[]
+  columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
   sortColumn: ColumnKey | null
   sortDesc: boolean
@@ -264,6 +265,7 @@ const defaultSettings: Settings = {
   zebra: true,
   browserPanes: { cat: true, art: true, alb: true },
   columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added'],
+  columnWidths: {},
   hiddenColumns: ['kind', 'bitrate', 'lastPlayed', 'added'],
   sortColumn: null,
   sortDesc: false,
@@ -669,6 +671,7 @@ function App() {
     state.settings.zebra,
     state.settings.browserPanes,
     state.settings.columnOrder,
+    state.settings.columnWidths,
     state.settings.hiddenColumns,
     state.settings.sortColumn,
     state.settings.sortDesc,
@@ -1017,6 +1020,7 @@ function App() {
                 selectedIds={state.selectedTrackIds}
                 playing={state.playing}
                 columnOrder={state.settings.columnOrder}
+                columnWidths={state.settings.columnWidths}
                 hiddenColumns={state.settings.hiddenColumns}
                 sortColumn={state.settings.sortColumn}
                 sortDesc={state.settings.sortDesc}
@@ -1049,6 +1053,7 @@ function App() {
                 onInfo={openInfo}
                 onPlaylist={setPlaylistSubject}
                 onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
+                onColumnWidths={(columnWidths) => dispatch({ type: 'settings', settings: { columnWidths } })}
                 onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
                 onSort={(sortColumn, sortDesc) => dispatch({ type: 'settings', settings: { sortColumn, sortDesc } })}
               />
@@ -1549,16 +1554,24 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
-function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onReorder, onHiddenColumns, onSort }: {
+const RESIZABLE_COLUMNS = new Set<ColumnKey>(['name', 'artist', 'album', 'genre', 'kind', 'lastPlayed', 'added'])
+const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px', added: '88px' }
+const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) => Math.max(60, Math.round(startWidth + clientX - startX))
+
+function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: State['playing']
-  columnOrder: ColumnKey[]; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
+  columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
+  onColumnWidths: (widths: Partial<Record<ColumnKey, number>>) => void
   onPlaylist: (subject: PlaylistSubject) => void
   onActivate: () => void; onSetup: () => void; onHiddenColumns: (columns: ColumnKey[]) => void; onSort: (column: ColumnKey, desc: boolean) => void
 }) {
   const [dragging, setDragging] = useState<ColumnKey>()
+  const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
   const headerDragged = useRef(false)
+  const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
+  useEffect(() => setLiveWidths(columnWidths), [columnWidths])
   const headings: Record<ColumnKey, string> = {
     track: '#',
     name: label.item[0].toUpperCase() + label.item.slice(1),
@@ -1573,14 +1586,37 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
     lastPlayed: 'Last Played',
     added: 'Date Added',
   }
-  const widths: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px', added: '88px' }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
-  const columns = `22px ${visibleColumns.map((column) => widths[column]).join(' ')}`
+  const columns = `22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? DEFAULT_COLUMN_WIDTHS[column] : `${liveWidths[column]}px`).join(' ')}`
   const drop = (target: ColumnKey) => {
     if (!dragging || dragging === target) return
     const next = columnOrder.filter((column) => column !== dragging)
     next.splice(next.indexOf(target), 0, dragging)
     onReorder(next)
+  }
+  const beginResize = (event: React.PointerEvent<HTMLSpanElement>, column: ColumnKey) => {
+    event.preventDefault()
+    event.stopPropagation()
+    headerDragged.current = true
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resize.current = { column, pointerId: event.pointerId, startX: event.clientX, startWidth: event.currentTarget.parentElement?.getBoundingClientRect().width ?? 60 }
+  }
+  const moveResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const active = resize.current
+    if (!active || active.pointerId !== event.pointerId) return
+    setLiveWidths((widths) => ({ ...widths, [active.column]: resizedColumnWidth(active.startWidth, active.startX, event.clientX) }))
+  }
+  const endResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const active = resize.current
+    if (!active || active.pointerId !== event.pointerId) return
+    const width = resizedColumnWidth(active.startWidth, active.startX, event.clientX)
+    resize.current = undefined
+    onColumnWidths({ ...columnWidths, [active.column]: width })
+  }
+  const cancelResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    if (resize.current?.pointerId !== event.pointerId) return
+    resize.current = undefined
+    setLiveWidths(columnWidths)
   }
   const cell = (track: Track, column: ColumnKey) => {
     if (column === 'track') return <span key={column} className="track-number">{track.trackNo ?? ''}</span>
@@ -1604,10 +1640,20 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, hiddenCol
       if (headerDragged.current) return
       onSort(column, sortColumn === column ? !sortDesc : false)
     }} onDragStart={(event) => {
+      if (resize.current) {
+        event.preventDefault()
+        return
+      }
       headerDragged.current = true
       setDragging(column)
       event.dataTransfer.effectAllowed = 'move'
-    }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}>{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</span>)}</div>
+    }} onDragEnd={() => setDragging(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={() => drop(column)}><span className="track-header-label">{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</span>{RESIZABLE_COLUMNS.has(column) && <span className="column-resize-handle" draggable={false} onPointerDown={(event) => beginResize(event, column)} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={cancelResize} onClick={(event) => {
+      event.preventDefault()
+      event.stopPropagation()
+    }} onDragStart={(event) => {
+      event.preventDefault()
+      event.stopPropagation()
+    }} />}</span>)}</div>
     <div className={`track-scroll ${empty ? 'empty-library' : ''}`}>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id

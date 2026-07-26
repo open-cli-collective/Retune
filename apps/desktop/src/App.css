@@ -113,6 +113,9 @@ button { color: inherit; }
 .track-header { flex: 0 0 20px; height: 20px; border-bottom: 1px solid var(--border); color: var(--dim); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; }
 .track-header [draggable="true"] { cursor: grab; }
 .track-header .dragging { opacity: .35; }
+.track-header > span { position: relative; overflow: visible; }
+.track-header-label { display: block; overflow: hidden; text-overflow: ellipsis; }
+.column-resize-handle { position: absolute; z-index: 1; top: 0; right: -2px; width: 5px; height: 100%; padding: 0; cursor: col-resize; touch-action: none; }
 .column-menu { position: absolute; z-index: 10; min-width: 130px; padding: 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--control); box-shadow: 0 3px 10px #0004; }
 .column-menu label { display: block; padding: 2px 5px; }
 .column-menu input { margin-right: 6px; }
