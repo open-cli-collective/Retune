@@ -997,10 +997,7 @@ function App() {
           ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onError={(error) => dispatch({ type: 'error', error })} />
           : (
             <>
-              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onHide={(facet) => {
-                setBrowserPanes({ ...state.settings.browserPanes, [facet]: false })
-                setActivePane('track')
-              }} />
+              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onToggle={toggleBrowserPane} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
                 <AlbumRatingStrip
                   album={selectedAlbum}
@@ -1436,6 +1433,15 @@ function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClos
   return <div ref={menu} className="column-menu context-menu popup-context-menu" style={{ left: x, top: y }}>{children}</div>
 }
 
+function CheckboxMenu({ x, y, onClose, items }: {
+  x: number
+  y: number
+  onClose: () => void
+  items: { key: string; label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }[]
+}) {
+  return <ContextMenu x={x} y={y} onClose={onClose}>{items.map((item) => <label key={item.key}><input type="checkbox" checked={item.checked} disabled={item.disabled} onChange={(event) => item.onChange(event.target.checked)} />{item.label}</label>)}</ContextMenu>
+}
+
 function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   subject: PlaylistSubject
   revision: number
@@ -1492,14 +1498,14 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   </div>
 }
 
-function BrowserPane({ state, anchors, onActivate, onSelect, onHide }: {
+function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
   state: State
   anchors: { current: Partial<Record<keyof Selection, string>> }
   onActivate: (facet: keyof Selection) => void
   onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
-  onHide: (facet: keyof Selection) => void
+  onToggle: (facet: keyof Selection) => void
 }) {
-  const [menu, setMenu] = useState<{ x: number; y: number; facet: keyof Selection; title: string }>()
+  const [menu, setMenu] = useState<{ x: number; y: number }>()
   const sourceLabels = labels[state.source].facets
   const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
@@ -1508,9 +1514,9 @@ function BrowserPane({ state, anchors, onActivate, onSelect, onHide }: {
   return <div className="browser-pane" style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
     {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
       event.preventDefault()
-      setMenu({ x: event.clientX, y: event.clientY, facet, title: sourceLabels[index] })
+      setMenu({ x: event.clientX, y: event.clientY })
     }} />)}
-    {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { onHide(menu.facet); setMenu(undefined) }}>Hide {menu.title}</button></ContextMenu>}
+    {menu && <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={facets.map((facet, index) => ({ key: facet, label: sourceLabels[index], checked: state.settings.browserPanes[facet], onChange: () => onToggle(facet) }))} />}
   </div>
 }
 
@@ -1674,11 +1680,13 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWid
       })}
     </div>
     {menu && (menu.trackId === undefined
-      ? <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
-        {columnOrder.map((column) => <label key={column}><input type="checkbox" checked={!hiddenColumns.includes(column)} disabled={column === 'name'} onChange={(event) => onHiddenColumns(event.target.checked
-          ? hiddenColumns.filter((hidden) => hidden !== column)
-          : [...hiddenColumns, column])} />{headings[column]}</label>)}
-      </ContextMenu>
+      ? <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={columnOrder.map((column) => ({
+        key: column,
+        label: headings[column],
+        checked: !hiddenColumns.includes(column),
+        disabled: column === 'name',
+        onChange: (checked) => onHiddenColumns(checked ? hiddenColumns.filter((hidden) => hidden !== column) : [...hiddenColumns, column]),
+      }))} />
       : <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
         <button onClick={() => {
           const target = tracks.find((track) => track.id === menu.trackId)
