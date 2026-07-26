@@ -905,7 +905,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
         let mut offset = 0;
         let mut albums = vec![];
         loop {
-            let page = SpotifyClient::artist_albums(self, id, offset, PAGE_SIZE)
+            let page = SpotifyClient::artist_albums(self, id, offset, SEARCH_PAGE_SIZE)
                 .await
                 .map_err(|error| error.to_string())?;
             let count = (page.items.len() + page.skipped) as u32;
@@ -1751,6 +1751,7 @@ mod tests {
         assert!(client.transport().requests()[0]
             .url
             .contains("/artists/artist-1/albums?"));
+        assert!(client.transport().requests()[0].url.contains("limit=10"));
     }
 
     #[tokio::test]

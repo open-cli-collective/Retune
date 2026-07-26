@@ -411,17 +411,6 @@ struct AlbumPageView {
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ArtistTopTrackView {
-    uri: String,
-    name: String,
-    alb: String,
-    duration_secs: u64,
-    image_url: Option<String>,
-    album_uri: String,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ArtistPageView {
     id: String,
     name: String,
@@ -429,7 +418,6 @@ struct ArtistPageView {
     image_url: Option<String>,
     following: bool,
     albums: Vec<SearchAlbum>,
-    top_tracks: Vec<ArtistTopTrackView>,
 }
 
 #[derive(Serialize)]
@@ -1571,26 +1559,6 @@ async fn spotify_artist_page(
         }
     };
     let albums = MediaProvider::artist_albums(provider.as_ref(), id).await?;
-    let top_tracks = provider
-        .artist_top_tracks(id)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|track| {
-            let album = track.album;
-            ArtistTopTrackView {
-                uri: track.uri,
-                name: track.name,
-                alb: album
-                    .as_ref()
-                    .map(|album| album.name.clone())
-                    .unwrap_or_default(),
-                duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
-                image_url: album.as_ref().and_then(|album| image_url(&album.images)),
-                album_uri: album.map(|album| album.uri).unwrap_or_default(),
-            }
-        })
-        .collect();
     Ok(ArtistPageView {
         id: artist.id.clone(),
         name: artist.name.clone(),
@@ -1598,7 +1566,6 @@ async fn spotify_artist_page(
         image_url: image_url(&artist.images),
         following,
         albums,
-        top_tracks,
     })
 }
 
@@ -1738,39 +1705,48 @@ enum SpotifyDestination {
     Artist,
 }
 
-fn spotify_track_destination_url(
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum SpotifyNavigation {
+    Album { uri: String, highlight: String },
+    Artist { id: String },
+}
+
+fn spotify_track_destination(
     track: &SpotifyTrack,
     destination: SpotifyDestination,
-) -> Result<String, String> {
-    let (kind, id) = match destination {
-        SpotifyDestination::Album => ("album", track.album.as_ref().map(|album| album.id.as_str())),
-        SpotifyDestination::Artist => (
-            "artist",
-            track.artists.first().map(|artist| artist.id.as_str()),
-        ),
-    };
-    spotify_item_url(
-        kind,
-        id.ok_or_else(|| format!("Spotify {kind} is unavailable."))?,
-    )
+) -> Result<SpotifyNavigation, String> {
+    match destination {
+        SpotifyDestination::Album => track
+            .album
+            .as_ref()
+            .map(|album| SpotifyNavigation::Album {
+                uri: album.uri.clone(),
+                highlight: track.uri.clone(),
+            })
+            .ok_or_else(|| "Spotify album is unavailable.".into()),
+        SpotifyDestination::Artist => track
+            .artists
+            .first()
+            .map(|artist| SpotifyNavigation::Artist {
+                id: artist.id.clone(),
+            })
+            .ok_or_else(|| "Spotify artist is unavailable.".into()),
+    }
 }
 
 #[tauri::command]
-async fn open_spotify_track_destination(
+async fn resolve_spotify_track_destination(
     state: tauri::State<'_, AppState>,
     uri: String,
     destination: SpotifyDestination,
-) -> Result<(), String> {
+) -> Result<SpotifyNavigation, String> {
     let id = track_id(&uri).ok_or("This track is not from Spotify.")?;
     let track = provider_from(&state)?
         .track(id)
         .await
         .map_err(|error| error.to_string())?;
-    tauri_plugin_opener::open_url(
-        spotify_track_destination_url(&track, destination)?,
-        None::<&str>,
-    )
-    .map_err(|error| error.to_string())
+    spotify_track_destination(&track, destination)
 }
 
 #[tauri::command]
@@ -2761,7 +2737,7 @@ pub fn run() {
             remove_spotify_album,
             playlists_list,
             open_spotify_playlist,
-            open_spotify_track_destination,
+            resolve_spotify_track_destination,
             reorder_playlists,
             playlist_unfollow,
             playlist_create,
@@ -3337,7 +3313,7 @@ mod tests {
     }
 
     #[test]
-    fn spotify_links_validate_ids_and_track_destinations() {
+    fn spotify_links_and_track_destinations_are_canonical() {
         assert_eq!(
             spotify_item_url("playlist", "abc123").unwrap(),
             "https://open.spotify.com/playlist/abc123"
@@ -3350,12 +3326,17 @@ mod tests {
             "album": {"id": "album1", "uri": "spotify:album:album1", "name": "Album"}
         })).unwrap();
         assert_eq!(
-            spotify_track_destination_url(&track, SpotifyDestination::Album).unwrap(),
-            "https://open.spotify.com/album/album1"
+            spotify_track_destination(&track, SpotifyDestination::Album).unwrap(),
+            SpotifyNavigation::Album {
+                uri: "spotify:album:album1".into(),
+                highlight: "spotify:track:track1".into()
+            }
         );
         assert_eq!(
-            spotify_track_destination_url(&track, SpotifyDestination::Artist).unwrap(),
-            "https://open.spotify.com/artist/artist1"
+            spotify_track_destination(&track, SpotifyDestination::Artist).unwrap(),
+            SpotifyNavigation::Artist {
+                id: "artist1".into()
+            }
         );
     }
 

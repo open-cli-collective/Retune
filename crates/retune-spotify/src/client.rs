@@ -460,12 +460,6 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         self.get(&format!("/tracks/{id}")).await
     }
 
-    pub async fn artist_top_tracks(&self, id: &str) -> Result<Vec<Track>> {
-        self.get::<TopTracks>(&format!("/artists/{id}/top-tracks"))
-            .await
-            .map(|response| response.tracks)
-    }
-
     pub async fn is_following_artist(&self, id: &str) -> Result<bool> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("type", "artist")
@@ -1167,11 +1161,6 @@ pub struct SearchResults {
     pub artists: Page<Artist>,
     pub albums: Page<Album>,
     pub tracks: Page<Track>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TopTracks {
-    tracks: Vec<Track>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
