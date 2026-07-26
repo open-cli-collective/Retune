@@ -80,6 +80,8 @@ pub struct Settings {
     pub zebra: bool,
     #[serde(default)]
     pub pl_collapsed: bool,
+    #[serde(default = "default_true")]
+    pub browser_visible: bool,
     #[serde(default)]
     pub browser_panes: BrowserPanes,
     pub column_order: Vec<String>,
@@ -140,7 +142,7 @@ fn default_true() -> bool {
 }
 
 fn default_playback_backend() -> String {
-    "connect".into()
+    "local".into()
 }
 
 fn default_volume() -> u8 {
@@ -174,6 +176,7 @@ impl Default for Settings {
             zoom: 1.0,
             zebra: true,
             pl_collapsed: false,
+            browser_visible: true,
             browser_panes: BrowserPanes::default(),
             column_order: [
                 "name",
@@ -271,6 +274,9 @@ impl Settings {
         if !matches!(self.play_threshold_percent, 50 | 75 | 90 | 100) {
             self.play_threshold_percent = default_play_threshold_percent();
         }
+        if self.streaming_bitrate < 160 {
+            self.streaming_bitrate = 160;
+        }
     }
 
     pub(crate) fn validate(&self) -> StoreResult<()> {
@@ -337,9 +343,9 @@ impl Settings {
                 "settings volume must be between 0 and 100",
             ));
         }
-        if !matches!(self.streaming_bitrate, 96 | 160 | 320) {
+        if !matches!(self.streaming_bitrate, 160 | 256 | 320) {
             return Err(StoreError::InvalidSettings(
-                "settings streamingBitrate must be 96, 160, or 320",
+                "settings streamingBitrate must be 160, 256, or 320",
             ));
         }
         Ok(())
@@ -424,7 +430,17 @@ impl FsSettingsStore {
     pub fn load(&self) -> StoreResult<Option<Settings>> {
         match fs::read(&self.path) {
             Ok(bytes) => {
-                let mut settings: Settings = serde_json::from_slice(&bytes)?;
+                let mut json: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let legacy_browser = json.get("browserVisible").is_none();
+                let mut settings: Settings = serde_json::from_value(json.take())?;
+                if legacy_browser {
+                    settings.browser_visible = settings.browser_panes.cat
+                        || settings.browser_panes.art
+                        || settings.browser_panes.alb;
+                    if !settings.browser_visible {
+                        settings.browser_panes = BrowserPanes::default();
+                    }
+                }
                 settings.normalize();
                 settings.validate()?;
                 Ok(Some(settings))
@@ -588,6 +604,7 @@ mod tests {
             zoom: 1.3,
             zebra: false,
             pl_collapsed: true,
+            browser_visible: false,
             browser_panes: BrowserPanes {
                 cat: false,
                 art: true,
@@ -631,6 +648,67 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), Some(settings));
+    }
+
+    #[test]
+    fn legacy_hidden_browser_migrates_to_independent_visibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("browserVisible");
+        json["browserPanes"] = serde_json::json!({"cat": false, "art": false, "alb": false});
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert!(!settings.browser_visible);
+        assert_eq!(settings.browser_panes, BrowserPanes::default());
+    }
+
+    #[test]
+    fn legacy_visible_browser_preserves_panes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let panes = BrowserPanes {
+            cat: false,
+            art: true,
+            alb: false,
+        };
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("browserVisible");
+        json["browserPanes"] = serde_json::to_value(panes).unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert!(settings.browser_visible);
+        assert_eq!(settings.browser_panes, panes);
+    }
+
+    #[test]
+    fn settings_load_normalizes_legacy_streaming_quality() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json["streamingBitrate"] = 96.into();
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap().streaming_bitrate, 160);
+    }
+
+    #[test]
+    fn fresh_settings_default_to_local_playback() {
+        assert_eq!(Settings::default().playback_backend, "local");
     }
 
     #[test]
@@ -813,7 +891,7 @@ mod tests {
             settings.hidden_columns,
             ["kind", "bitrate", "lastPlayed", "added"]
         );
-        assert_eq!(settings.playback_backend, "connect");
+        assert_eq!(settings.playback_backend, "local");
         assert_eq!(settings.repeat, "off");
         assert_eq!(settings.volume, 62);
         assert_eq!(settings.streaming_bitrate, 320);
@@ -922,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_playback_backend_defaults_to_connect() {
+    fn missing_playback_backend_defaults_to_local() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "theme": "system",
             "zoom": 1.0,
@@ -931,7 +1009,7 @@ mod tests {
             "autoAddSpotifyLibrary": true
         }))
         .unwrap();
-        assert_eq!(settings.playback_backend, "connect");
+        assert_eq!(settings.playback_backend, "local");
         assert_eq!(settings.repeat, "off");
         assert_eq!(settings.streaming_bitrate, 320);
         assert!(!settings.normalize_volume);

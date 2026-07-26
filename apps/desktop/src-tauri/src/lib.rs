@@ -79,9 +79,9 @@ struct AppState {
 
 struct MenuChecks {
     zebra: CheckMenuItem<tauri::Wry>,
-    browser_cat: CheckMenuItem<tauri::Wry>,
-    browser_art: CheckMenuItem<tauri::Wry>,
-    browser_alb: CheckMenuItem<tauri::Wry>,
+    theme_system: CheckMenuItem<tauri::Wry>,
+    theme_light: CheckMenuItem<tauri::Wry>,
+    theme_dark: CheckMenuItem<tauri::Wry>,
     account_status: tauri::menu::MenuItem<tauri::Wry>,
     connect: tauri::menu::MenuItem<tauri::Wry>,
     disconnect: tauri::menu::MenuItem<tauri::Wry>,
@@ -90,9 +90,11 @@ struct MenuChecks {
 impl MenuChecks {
     fn sync(&self, settings: &Settings) -> tauri::Result<()> {
         self.zebra.set_checked(settings.zebra)?;
-        self.browser_cat.set_checked(settings.browser_panes.cat)?;
-        self.browser_art.set_checked(settings.browser_panes.art)?;
-        self.browser_alb.set_checked(settings.browser_panes.alb)
+        self.theme_system
+            .set_checked(settings.theme == Theme::System)?;
+        self.theme_light
+            .set_checked(settings.theme == Theme::Light)?;
+        self.theme_dark.set_checked(settings.theme == Theme::Dark)
     }
 
     fn sync_connection(&self, connected: bool) -> tauri::Result<()> {
@@ -119,6 +121,8 @@ struct VisualSettings {
     zebra: bool,
     #[serde(default)]
     pl_collapsed: bool,
+    #[serde(default = "default_browser_visible")]
+    browser_visible: bool,
     #[serde(default)]
     browser_panes: BrowserPanes,
     column_order: Vec<String>,
@@ -169,6 +173,7 @@ impl VisualSettings {
             zoom: settings.zoom,
             zebra: settings.zebra,
             pl_collapsed: settings.pl_collapsed,
+            browser_visible: settings.browser_visible,
             browser_panes: settings.browser_panes,
             column_order: settings.column_order.clone(),
             column_widths: settings.column_widths.clone(),
@@ -183,6 +188,7 @@ impl VisualSettings {
         settings.zoom = self.zoom;
         settings.zebra = self.zebra;
         settings.pl_collapsed = self.pl_collapsed;
+        settings.browser_visible = self.browser_visible;
         settings.browser_panes = self.browser_panes;
         settings.column_order = self.column_order;
         settings.column_widths = self.column_widths;
@@ -191,6 +197,10 @@ impl VisualSettings {
         settings.sort_desc = self.sort_desc;
         settings.normalize();
     }
+}
+
+fn default_browser_visible() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -2256,27 +2266,26 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     let zebra = CheckMenuItemBuilder::with_id("toggle_zebra", "Toggle Zebra Striping")
         .checked(settings.zebra)
         .build(app)?;
-    let browser = MenuItemBuilder::with_id("toggle_browser", "Show Browser")
+    let browser = MenuItemBuilder::with_id("toggle_browser", "Show/Hide Column Browser")
         .accelerator("CmdOrCtrl+B")
         .build(app)?;
-    let browser_cat = CheckMenuItemBuilder::with_id("toggle_browser_cat", "Genre")
-        .checked(settings.browser_panes.cat)
+    let theme_system = CheckMenuItemBuilder::with_id("theme_system", "System")
+        .checked(settings.theme == Theme::System)
         .build(app)?;
-    let browser_art = CheckMenuItemBuilder::with_id("toggle_browser_art", "Artist")
-        .checked(settings.browser_panes.art)
+    let theme_light = CheckMenuItemBuilder::with_id("theme_light", "Light")
+        .checked(settings.theme == Theme::Light)
         .build(app)?;
-    let browser_alb = CheckMenuItemBuilder::with_id("toggle_browser_alb", "Album")
-        .checked(settings.browser_panes.alb)
+    let theme_dark = CheckMenuItemBuilder::with_id("theme_dark", "Dark")
+        .checked(settings.theme == Theme::Dark)
         .build(app)?;
-    let column_browser = SubmenuBuilder::new(app, "Column Browser")
-        .items(&[&browser_cat, &browser_art, &browser_alb])
-        .separator()
-        .item(&browser)
+    let theme = SubmenuBuilder::new(app, "Theme")
+        .items(&[&theme_system, &theme_light, &theme_dark])
         .build()?;
     let view = SubmenuBuilder::new(app, "View")
         .items(&[&zoom_in, &zoom_out, &actual_size])
         .separator()
-        .item(&column_browser)
+        .item(&theme)
+        .item(&browser)
         .item(&zebra)
         .build()?;
     let controls = SubmenuBuilder::new(app, "Controls")
@@ -2359,7 +2368,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
             let _ = app.emit("open-preferences", ());
         }
         "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "toggle_browser"
-        | "toggle_browser_cat" | "toggle_browser_art" | "toggle_browser_alb" => {
+        | "theme_system" | "theme_light" | "theme_dark" => {
             let _ = app.emit("view-action", event.id().as_ref());
         }
         "play_pause" | "previous" | "next" => {
@@ -2371,9 +2380,9 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     });
     Ok(MenuChecks {
         zebra,
-        browser_cat,
-        browser_art,
-        browser_alb,
+        theme_system,
+        theme_light,
+        theme_dark,
         account_status,
         connect,
         disconnect,
@@ -2467,7 +2476,24 @@ fn import_with_settings(
         .as_object_mut()
         .and_then(|object| object.remove("settings"))
         .filter(|_| restore)
-        .map(serde_json::from_value)
+        .map(|mut value| {
+            if value.get("browserVisible").is_none() {
+                let visible = value
+                    .get("browserPanes")
+                    .and_then(serde_json::Value::as_object)
+                    .is_none_or(|panes| {
+                        ["cat", "art", "alb"].into_iter().any(|pane| {
+                            panes.get(pane).and_then(serde_json::Value::as_bool) != Some(false)
+                        })
+                    });
+                value["browserVisible"] = visible.into();
+                if !visible {
+                    value["browserPanes"] =
+                        serde_json::json!({"cat": true, "art": true, "alb": true});
+                }
+            }
+            serde_json::from_value(value)
+        })
         .transpose()
         .map_err(|error| error.to_string())?;
     let playlists = envelope
@@ -3443,6 +3469,7 @@ mod tests {
             zoom: 1.4,
             zebra: false,
             pl_collapsed: true,
+            browser_visible: false,
             browser_panes: BrowserPanes {
                 cat: false,
                 art: true,
@@ -3503,6 +3530,7 @@ mod tests {
         assert_eq!(restored_playlists, Some(playlists));
         assert_eq!(restored.theme, Theme::Dark);
         assert!(restored.pl_collapsed);
+        assert!(!restored.browser_visible);
         assert_eq!(restored.browser_panes, exported.browser_panes);
         assert_eq!(restored.column_order, exported.column_order);
         assert_eq!(restored.column_widths, exported.column_widths);

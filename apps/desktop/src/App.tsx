@@ -19,6 +19,7 @@ type Settings = {
   zoom: number
   zebra: boolean
   plCollapsed: boolean
+  browserVisible: boolean
   browserPanes: BrowserPanes
   columnOrder: ColumnKey[]
   columnWidths: Partial<Record<ColumnKey, number>>
@@ -191,8 +192,8 @@ const emptyTracks: Track[] = []
 const ZOOM_MIN = 0.7
 const ZOOM_MAX = 1.8
 const streamingQualities = [
-  ['Normal', 96],
-  ['High', 160],
+  ['Normal', 160],
+  ['High', 256],
   ['Very High', 320],
 ] as const
 const playThresholds: PlayThresholdPercent[] = [50, 75, 90, 100]
@@ -267,6 +268,7 @@ const defaultSettings: Settings = {
   zoom: 1,
   zebra: true,
   plCollapsed: false,
+  browserVisible: true,
   browserPanes: { cat: true, art: true, alb: true },
   columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added'],
   columnWidths: {},
@@ -277,7 +279,7 @@ const defaultSettings: Settings = {
   autoConnect: true,
   spotifyClientId: '',
   spotifySyncCompleted: false,
-  playbackBackend: 'connect',
+  playbackBackend: 'local',
   repeat: 'off',
   shuffle: false,
   volume: 62,
@@ -558,7 +560,6 @@ function App() {
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
-  const lastBrowserPanes = useRef<BrowserPanes | undefined>(undefined)
   const skipSettingsSave = useRef(false)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
@@ -594,14 +595,8 @@ function App() {
     dispatch({ type: 'browserPanes', browserPanes })
   }, [])
   const toggleBrowser = useCallback(() => {
-    const panes = state.settings.browserPanes
-    if (panes.cat || panes.art || panes.alb) {
-      lastBrowserPanes.current = panes
-      setBrowserPanes({ cat: false, art: false, alb: false })
-    } else {
-      setBrowserPanes(lastBrowserPanes.current ?? defaultSettings.browserPanes)
-    }
-  }, [setBrowserPanes, state.settings.browserPanes])
+    dispatch({ type: 'settings', settings: { browserVisible: !state.settings.browserVisible } })
+  }, [state.settings.browserVisible])
   const toggleBrowserPane = useCallback((facet: keyof BrowserPanes) => {
     const browserPanes = { ...state.settings.browserPanes, [facet]: !state.settings.browserPanes[facet] }
     setBrowserPanes(browserPanes)
@@ -669,6 +664,7 @@ function App() {
     state.settings.zoom,
     state.settings.zebra,
     state.settings.plCollapsed,
+    state.settings.browserVisible,
     state.settings.browserPanes,
     state.settings.columnOrder,
     state.settings.columnWidths,
@@ -824,7 +820,7 @@ function App() {
       else if (payload === 'actual_size') setZoom(1)
       else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
       else if (payload === 'toggle_browser') toggleBrowser()
-      else if (payload.startsWith('toggle_browser_')) toggleBrowserPane(payload.slice(-3) as keyof BrowserPanes)
+      else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
     })
     const playerActions = listen<string>('player-action', ({ payload }) => {
       if (payload === 'play_pause') player.toggle()
@@ -1069,14 +1065,15 @@ function App() {
           return invoke('sync_from_spotify')
         })
         .catch((error) => dispatch({ type: 'error', error: String(error) }))} />}
-      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent) => {
+      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={(theme, browserVisible, browserPanes, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent) => {
         const audioChanged = streamingBitrate !== state.settings.streamingBitrate
           || normalizeVolume !== state.settings.normalizeVolume
           || gapless !== state.settings.gapless
         dispatch({
           type: 'settings',
-          settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent },
+          settings: { theme, browserVisible, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent },
         })
+        dispatch({ type: 'browserPanes', browserPanes })
         if (audioChanged) invoke('set_audio_settings', { streamingBitrate, normalizeVolume, gapless })
           .catch((error) => dispatch({ type: 'error', error: String(error) }))
         dispatch({ type: 'preferences', open: false })
@@ -1523,7 +1520,7 @@ function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
   const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
   const visible = facets.filter((facet) => state.settings.browserPanes[facet])
-  if (!visible.length) return null
+  if (!state.settings.browserVisible || !visible.length) return null
   return <div className="browser-pane" style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
     {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
       event.preventDefault()
@@ -2141,11 +2138,13 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   settings: Settings
   onZoom: (zoom: number) => void
   onCancel: () => void
-  onSave: (theme: Theme, autoAdd: boolean, autoConnect: boolean, clientId: string, playbackBackend: PlaybackBackend, streamingBitrate: number, normalizeVolume: boolean, gapless: boolean, playThresholdPercent: PlayThresholdPercent) => void
+  onSave: (theme: Theme, browserVisible: boolean, browserPanes: BrowserPanes, autoAdd: boolean, autoConnect: boolean, clientId: string, playbackBackend: PlaybackBackend, streamingBitrate: number, normalizeVolume: boolean, gapless: boolean, playThresholdPercent: PlayThresholdPercent) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
   const [theme, setTheme] = useState(settings.theme)
+  const [browserVisible, setBrowserVisible] = useState(settings.browserVisible)
+  const [browserPanes, setBrowserPanes] = useState(settings.browserPanes)
   const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
   const [autoConnect, setAutoConnect] = useState(settings.autoConnect)
   const [clientId, setClientId] = useState(settings.spotifyClientId)
@@ -2156,11 +2155,10 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   const [playThresholdPercent, setPlayThresholdPercent] = useState(settings.playThresholdPercent)
   const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => { dialog.current?.focus() }, [])
-  const qualityIndex = Math.max(0, streamingQualities.findIndex(([, bitrate]) => bitrate === streamingBitrate))
   const tabs: [PreferenceTab, string, string][] = [
-    ['appearance', '◐', 'Appearance'],
-    ['library', '♪', 'Library'],
-    ['audio', '🔊', 'Audio'],
+    ['appearance', '◑', 'Appearance'],
+    ['library', '♫', 'Library'],
+    ['audio', '◉', 'Audio'],
   ]
   const themeOptions: [Theme, string, string][] = [
     ['system', 'System', 'Follow the OS appearance, switching automatically.'],
@@ -2170,61 +2168,51 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   return <div className="modal-backdrop" role="presentation">
     <div className="get-info preferences" role="dialog" aria-modal="true" aria-labelledby="preferences-title" tabIndex={-1} ref={dialog}>
       <h2 id="preferences-title">Preferences</h2>
-      <div className="preference-tabs" role="tablist">
+      <div className="preference-toolbar" role="tablist">
         {tabs.map(([value, glyph, label]) => <button key={value} id={`preferences-${value}-tab`} className={tab === value ? 'active' : ''} role="tab" aria-selected={tab === value} aria-controls={`preferences-${value}`} onClick={() => setTab(value)}><span aria-hidden="true">{glyph}</span>{label}</button>)}
       </div>
       <div className="preference-content" id={`preferences-${tab}`} role="tabpanel" aria-labelledby={`preferences-${tab}-tab`}>
         {tab === 'appearance' && <>
-          <div className="preference-section-label">Theme</div>
-          <div className="preference-options">
-            {themeOptions.map(([value, label, help]) => <label className="preference-radio" key={value}><input type="radio" name="theme" value={value} checked={theme === value} onChange={() => setTheme(value)} /><span><strong>{label}</strong><small>{help}</small></span></label>)}
+          <section className="preference-group"><h3>Theme</h3><div className="preference-inset preference-options">
+            {themeOptions.map(([value, label, help]) => <label className="preference-choice" key={value}><input type="radio" name="theme" value={value} checked={theme === value} onChange={() => setTheme(value)} /><span><strong>{label}</strong><small>{help}</small></span></label>)}
+          </div></section>
+          <section className="preference-group"><h3>Text size <small>⌘+ · ⌘− · ⌘0</small></h3><div className="preference-inset preference-row">
+            {([['Small', .9], ['Medium', 1], ['Large', 1.15]] as const).map(([label, zoom]) => <label className="preference-choice" key={label}><input type="radio" name="text-size" checked={Math.abs(settings.zoom - zoom) <= .03} onChange={() => onZoom(zoom)} /><span>{label}</span></label>)}
+          </div></section>
+          <section className="preference-group"><h3>Column browser <small>⌘B</small></h3><div className="preference-inset">
+            <div className="preference-row">{([['Show', true], ['Hide', false]] as const).map(([label, visible]) => <label className="preference-choice" key={label}><input type="radio" name="browser-visible" checked={browserVisible === visible} onChange={() => setBrowserVisible(visible)} /><span>{label}</span></label>)}</div>
+            <div className="preference-divider" />
+            <div className={`preference-row browser-checks ${browserVisible ? '' : 'dimmed'}`}>{([['cat', 'Genre'], ['art', 'Artist'], ['alb', 'Album']] as const).map(([pane, label]) => <label className="preference-choice" key={pane}><input type="checkbox" checked={browserPanes[pane]} onChange={() => setBrowserPanes({ ...browserPanes, [pane]: !browserPanes[pane] })} /><span>{label}</span></label>)}</div>
           </div>
-          <div className="preference-section-label preference-size-label">Size</div>
-          <input
-            className="preference-range"
-            type="range"
-            aria-label="Interface size"
-            min={ZOOM_MIN}
-            max={ZOOM_MAX}
-            step="0.1"
-            value={settings.zoom}
-            style={{ '--range-progress': `${(settings.zoom - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN) * 100}%` } as React.CSSProperties}
-            onChange={(event) => onZoom(Number(event.target.value))}
-          />
-          <div className="range-labels range-edges"><span>Smaller</span><span>Larger</span></div>
+          </section>
         </>}
         {tab === 'library' && <>
-          <label className="client-id-field"><strong>Spotify Client ID</strong><input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
-          <label className="preference-switch"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} /><span className="switch-control" aria-hidden="true" /><span><strong>Automatically add my entire Spotify library</strong><small>Everything you save on Spotify appears here automatically.</small></span></label>
-          <label className="preference-switch"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} /><span className="switch-control" aria-hidden="true" /><span><strong>Connect to Spotify automatically at launch</strong><small>Keep pulling in music you add on Spotify each time Retune starts.</small></span></label>
+          <section className="preference-group"><h3>Spotify account</h3><div className="preference-inset client-id-field">
+            <label><span>Client ID:</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
+            <small>From your Spotify Developer dashboard. Stored on this Mac only.</small>
+          </div></section>
+          <section className="preference-group"><h3>Syncing</h3><div className="preference-inset preference-options">
+            <label className="preference-choice"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} /><span><strong>Automatically add my entire Spotify library</strong><small>Everything you save on Spotify appears here automatically.</small></span></label>
+            <label className="preference-choice"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} /><span><strong>Connect to Spotify automatically at launch</strong><small>Keep pulling in music you add on Spotify each time Retune starts.</small></span></label>
+          </div></section>
         </>}
         {tab === 'audio' && <>
-          <div className="quality-heading"><strong>Streaming quality</strong><span>{streamingQualities[qualityIndex][0]} – {streamingQualities[qualityIndex][1]} kbps</span></div>
-          <input
-            className="preference-range"
-            type="range"
-            aria-label="Streaming quality"
-            min="0"
-            max={streamingQualities.length - 1}
-            value={qualityIndex}
-            style={{ '--range-progress': `${qualityIndex / (streamingQualities.length - 1) * 100}%` } as React.CSSProperties}
-            onChange={(event) => setStreamingBitrate(streamingQualities[Number(event.target.value)][1])}
-          />
-          <div className="range-labels quality-labels">{streamingQualities.map(([label]) => <span key={label}>{label}</span>)}</div>
-          <div className="preference-section-label playback-label">Playback</div>
-          <div className="preference-options">
-            <label className="preference-radio"><input type="radio" name="playback-backend" checked={playbackBackend === 'connect'} onChange={() => setPlaybackBackend('connect')} /><span><strong>Spotify app (Connect)</strong><small>Route playback through the running Spotify desktop app.</small></span></label>
-            <label className="preference-radio"><input type="radio" name="playback-backend" checked={playbackBackend === 'local'} onChange={() => setPlaybackBackend('local')} /><span><strong>Built-in (librespot)</strong><small>Play directly inside Retune — no Spotify app window needed.</small></span></label>
-          </div>
-          <label className="preference-switch compact"><input type="checkbox" checked={normalizeVolume} onChange={(event) => setNormalizeVolume(event.target.checked)} /><span className="switch-control" aria-hidden="true" /><span><strong>Normalize volume across tracks</strong></span></label>
-          <label className="preference-switch compact"><input type="checkbox" checked={gapless} onChange={(event) => setGapless(event.target.checked)} /><span className="switch-control" aria-hidden="true" /><span><strong>Gapless album playback</strong></span></label>
-          <div className="preference-section-label preference-size-label">Count as played after</div>
-          <div className="preference-options">
-            {playThresholds.map((percent) => <label className="preference-radio" key={percent}><input type="radio" name="play-threshold" checked={playThresholdPercent === percent} onChange={() => setPlayThresholdPercent(percent)} /><span><strong>{percent === 100 ? 'When finished' : `${percent}%`}</strong></span></label>)}
-          </div>
+          <section className="preference-group"><h3>Streaming quality</h3><div className="preference-inset preference-row quality-options">
+            {streamingQualities.map(([label, bitrate]) => <label className="preference-choice" key={label}><input type="radio" name="streaming-quality" checked={streamingBitrate === bitrate} onChange={() => setStreamingBitrate(bitrate)} /><span><strong>{label}</strong><small>{bitrate} kbps</small></span></label>)}
+          </div></section>
+          <section className="preference-group"><h3>Playback</h3><div className="preference-inset preference-options">
+            <label className="preference-choice"><input type="radio" name="playback-backend" checked={playbackBackend === 'local'} onChange={() => setPlaybackBackend('local')} /><span><strong>Built-in (librespot)</strong><small>Play directly inside Retune — no Spotify app window needed.</small></span></label>
+            <label className="preference-choice"><input type="radio" name="playback-backend" checked={playbackBackend === 'connect'} onChange={() => setPlaybackBackend('connect')} /><span><strong>Spotify app (Connect)</strong><small>Route playback through the running Spotify desktop app.</small></span></label>
+            <div className="preference-divider" />
+            <label className="preference-choice"><input type="checkbox" checked={normalizeVolume} onChange={(event) => setNormalizeVolume(event.target.checked)} /><span>Normalize volume across tracks</span></label>
+            <label className="preference-choice"><input type="checkbox" checked={gapless} onChange={(event) => setGapless(event.target.checked)} /><span>Gapless album playback</span></label>
+          </div></section>
+          <section className="preference-group"><h3>Count as played after</h3><div className="preference-inset preference-row threshold-options">
+            {playThresholds.map((percent) => <label className="preference-choice" key={percent}><input type="radio" name="play-threshold" checked={playThresholdPercent === percent} onChange={() => setPlayThresholdPercent(percent)} /><span>{percent === 100 ? 'When finished' : `${percent}%`}</span></label>)}
+          </div></section>
         </>}
       </div>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, autoAdd, autoConnect, clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent)}>Save</button></div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, browserVisible, browserPanes, autoAdd, autoConnect, clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent)}>OK</button></div>
     </div>
   </div>
 }
