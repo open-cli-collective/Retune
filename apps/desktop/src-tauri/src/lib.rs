@@ -118,6 +118,8 @@ struct VisualSettings {
     zoom: f64,
     zebra: bool,
     #[serde(default)]
+    pl_collapsed: bool,
+    #[serde(default)]
     browser_panes: BrowserPanes,
     column_order: Vec<String>,
     #[serde(default)]
@@ -166,6 +168,7 @@ impl VisualSettings {
             theme: settings.theme,
             zoom: settings.zoom,
             zebra: settings.zebra,
+            pl_collapsed: settings.pl_collapsed,
             browser_panes: settings.browser_panes,
             column_order: settings.column_order.clone(),
             column_widths: settings.column_widths.clone(),
@@ -179,6 +182,7 @@ impl VisualSettings {
         settings.theme = self.theme;
         settings.zoom = self.zoom;
         settings.zebra = self.zebra;
+        settings.pl_collapsed = self.pl_collapsed;
         settings.browser_panes = self.browser_panes;
         settings.column_order = self.column_order;
         settings.column_widths = self.column_widths;
@@ -3438,6 +3442,7 @@ mod tests {
             theme: Theme::Dark,
             zoom: 1.4,
             zebra: false,
+            pl_collapsed: true,
             browser_panes: BrowserPanes {
                 cat: false,
                 art: true,
@@ -3497,6 +3502,7 @@ mod tests {
         assert_eq!(restored_library, library);
         assert_eq!(restored_playlists, Some(playlists));
         assert_eq!(restored.theme, Theme::Dark);
+        assert!(restored.pl_collapsed);
         assert_eq!(restored.browser_panes, exported.browser_panes);
         assert_eq!(restored.column_order, exported.column_order);
         assert_eq!(restored.column_widths, exported.column_widths);
@@ -3519,6 +3525,17 @@ mod tests {
         let visual: VisualSettings = serde_json::from_value(json).unwrap();
 
         assert_eq!(visual.browser_panes, BrowserPanes::default());
+    }
+
+    #[test]
+    fn legacy_visual_settings_default_playlists_expanded() {
+        let mut json =
+            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
+        json.as_object_mut().unwrap().remove("plCollapsed");
+
+        let visual: VisualSettings = serde_json::from_value(json).unwrap();
+
+        assert!(!visual.pl_collapsed);
     }
 
     #[test]

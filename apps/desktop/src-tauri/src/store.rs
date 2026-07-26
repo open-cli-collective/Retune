@@ -79,6 +79,8 @@ pub struct Settings {
     pub zoom: f64,
     pub zebra: bool,
     #[serde(default)]
+    pub pl_collapsed: bool,
+    #[serde(default)]
     pub browser_panes: BrowserPanes,
     pub column_order: Vec<String>,
     #[serde(default)]
@@ -171,6 +173,7 @@ impl Default for Settings {
             theme: Theme::System,
             zoom: 1.0,
             zebra: true,
+            pl_collapsed: false,
             browser_panes: BrowserPanes::default(),
             column_order: [
                 "name",
@@ -584,6 +587,7 @@ mod tests {
             theme: Theme::Dark,
             zoom: 1.3,
             zebra: false,
+            pl_collapsed: true,
             browser_panes: BrowserPanes {
                 cat: false,
                 art: true,
@@ -637,6 +641,16 @@ mod tests {
         let settings: Settings = serde_json::from_value(json).unwrap();
 
         assert!(!settings.shuffle);
+    }
+
+    #[test]
+    fn legacy_settings_default_playlists_expanded() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("plCollapsed");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert!(!settings.pl_collapsed);
     }
 
     #[test]

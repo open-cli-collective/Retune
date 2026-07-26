@@ -18,7 +18,7 @@
   --danger: #c94b4b;
 }
 
-:root { --accent: #3f7fd6; --gold: #e0a53d; }
+:root { --accent: #3f7fd6; --gold: #e0a53d; --gel-border: #2a63b8; --gel-top: #7db4f2; --gel-bottom: #2f6fd0; }
 
 button { color: inherit; }
 .app-shell { height: 100%; min-width: 720px; color: var(--text); background: var(--desk); font-size: 11px; }
@@ -70,13 +70,15 @@ button { color: inherit; }
 .search { width: 196px; height: 24px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--list); outline: 0; }
 .search:focus { border-color: var(--accent); }
 .body-grid { height: calc(100% - 60px); display: grid; grid-template-columns: 190px minmax(0, 1fr); }
-.sidebar { position: relative; min-height: 0; padding-top: 7px; overflow-y: auto; border-right: 1px solid var(--border); background: linear-gradient(120deg, var(--side1), var(--side2)); }
+.sidebar { position: relative; min-height: 0; display: flex; flex-direction: column; padding-top: 7px; overflow: hidden; border-right: 1px solid var(--border); background: linear-gradient(120deg, var(--side1), var(--side2)); }
 .section-label { padding: 0 10px 4px; color: var(--dim); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
 .source-row { width: 100%; height: 24px; display: grid; grid-template-columns: 18px 1fr 28px; align-items: center; border: 0; padding: 0 10px; text-align: left; background: transparent; cursor: default; }
 .source-row.active { color: #fff; background: var(--accent); font-weight: 600; }
 .source-count { text-align: right; opacity: .75; font-size: 10px; }
-.playlists-label { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-bottom: 2px; }
-.playlists-label button { width: 18px; padding: 0; border: 0; color: var(--dim); background: transparent; font: inherit; font-size: 13px; }
+.playlists-label { width: 100%; display: flex; align-items: center; gap: 5px; margin-top: 10px; padding-bottom: 2px; border: 0; color: var(--dim); background: transparent; text-align: left; font: inherit; font-size: 10px; font-weight: 700; cursor: default; }
+.disclosure { width: 9px; display: inline-block; transition: transform .12s; font-size: 9px; }
+.disclosure.collapsed { transform: rotate(-90deg); }
+.playlist-list { min-height: 0; flex: 1; overflow-y: auto; }
 .playlist-row { width: 100%; height: 22px; display: grid; grid-template-columns: 18px minmax(0, 1fr) 28px; align-items: center; padding: 0 10px; border: 0; overflow: hidden; color: var(--text); background: transparent; text-align: left; }
 .playlist-row > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-row.active { color: #fff; background: var(--accent); font-weight: 600; }
@@ -84,6 +86,10 @@ button { color: inherit; }
 .playlist-row.insert-after { box-shadow: inset 0 -2px var(--accent); }
 .playlist-new-row { padding: 1px 10px 3px; }
 .playlist-new-row input { width: 100%; height: 20px; box-sizing: border-box; border: 1px solid var(--accent); border-radius: 2px; color: var(--text); background: var(--list); font: inherit; outline: 0; }
+.sidebar-actions { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-top: 1px solid var(--border); }
+.sidebar-actions button { width: 27px; height: 22px; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--border); border-radius: 5px; color: var(--dim); background: linear-gradient(var(--list), var(--control)); box-shadow: 0 1px 0 rgb(255 255 255 / .5); font: inherit; font-size: 13px; cursor: default; }
+.sidebar-actions button.active { border-color: var(--gel-border); color: #fff; background: linear-gradient(var(--gel-top), var(--gel-bottom)); }
+.sidebar-note { padding: 8px 12px 10px; border-top: 1px solid var(--border); color: var(--dim); font-size: 10.5px; line-height: 1.5; }
 .content { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--list); }
 .browser-pane { height: 200px; flex: 0 0 200px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
 .facet-column { min-width: 0; border-right: 1px solid var(--border); }

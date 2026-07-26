@@ -18,6 +18,7 @@ type Settings = {
   theme: Theme
   zoom: number
   zebra: boolean
+  plCollapsed: boolean
   browserPanes: BrowserPanes
   columnOrder: ColumnKey[]
   columnWidths: Partial<Record<ColumnKey, number>>
@@ -265,6 +266,7 @@ const defaultSettings: Settings = {
   theme: 'system',
   zoom: 1,
   zebra: true,
+  plCollapsed: false,
   browserPanes: { cat: true, art: true, alb: true },
   columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added'],
   columnWidths: {},
@@ -666,6 +668,7 @@ function App() {
     state.settings.theme,
     state.settings.zoom,
     state.settings.zebra,
+    state.settings.plCollapsed,
     state.settings.browserPanes,
     state.settings.columnOrder,
     state.settings.columnWidths,
@@ -966,6 +969,9 @@ function App() {
           playlists={playlists}
           onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }}
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
+          onCollapse={() => dispatch({ type: 'settings', settings: { plCollapsed: !state.settings.plCollapsed } })}
+          onShuffle={(shuffle) => invoke('set_shuffle', { shuffle }).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch((error) => dispatch({ type: 'error', error: String(error) }))}
+          onRepeat={(repeat) => invoke('set_repeat', { mode: repeat }).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch((error) => dispatch({ type: 'error', error: String(error) }))}
           onDrop={(id, subject) => addToPlaylist(id, subject).catch((error) => dispatch({ type: 'error', error: String(error) }))}
           onError={(error) => dispatch({ type: 'error', error })}
         />
@@ -1180,11 +1186,14 @@ function TransportBar({ playing, track, query, scope, connected, volume, searchR
   </header>
 }
 
-function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
+function Sidebar({ state, playlists, onSource, onPlaylist, onCollapse, onShuffle, onRepeat, onDrop, onError }: {
   state: State
   playlists?: PlaylistListView[]
   onSource: (source: Source) => void
   onPlaylist: (id: string) => void
+  onCollapse: () => void
+  onShuffle: (shuffle: boolean) => void
+  onRepeat: (repeat: RepeatMode) => void
   onDrop: (id: string, subject: PlaylistSubject) => void
   onError: (error: string) => void
 }) {
@@ -1195,6 +1204,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
   const [menu, setMenu] = useState<{ x: number; y: number; playlist: PlaylistListView }>()
   const [confirming, setConfirming] = useState<PlaylistListView>()
   const [busy, setBusy] = useState(false)
+  const playlistList = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!confirming) return
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) setConfirming(undefined) }
@@ -1234,17 +1244,22 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       setBusy(false)
     }
   }
-  return <><aside className="sidebar" tabIndex={0} onMouseDown={(event) => event.currentTarget.focus()}>
+  return <><aside className="sidebar" tabIndex={0} onMouseDown={(event) => event.currentTarget.focus()} onKeyDown={(event) => {
+    if (event.target instanceof HTMLInputElement || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
+    event.preventDefault()
+    playlistList.current?.scrollBy({ top: event.key === 'ArrowUp' ? -22 : 22 })
+  }}>
     <div className="section-label">Library</div>
     {(Object.keys(labels) as Source[]).map((source) => <button key={source} className={`source-row ${state.source === source && !state.selectedPlaylist ? 'active' : ''}`} onClick={() => onSource(source)}>
       <span>{labels[source].icons}</span><span>{labels[source].name}</span><span className="source-count">{state.view?.counts.perSource[source] ?? '—'}</span>
     </button>)}
-    <div className="section-label playlists-label"><span>Playlists</span><button aria-label="New playlist" onClick={() => setCreating(true)}>+</button></div>
-    {creating && <div className="playlist-new-row"><input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
+    <button className="section-label playlists-label" aria-expanded={!state.settings.plCollapsed} onClick={onCollapse}><span className={`disclosure ${state.settings.plCollapsed ? 'collapsed' : ''}`} aria-hidden="true">▾</span><span>Playlists</span></button>
+    <div ref={playlistList} className="playlist-list">
+    {!state.settings.plCollapsed && creating && <div className="playlist-new-row"><input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
       if (event.key === 'Enter') void create()
       else if (event.key === 'Escape') { setCreating(false); setName('') }
     }} /></div>}
-    {playlists?.map((playlist, index) => <Fragment key={playlist.id}><button
+    {!state.settings.plCollapsed && playlists?.map((playlist, index) => <Fragment key={playlist.id}><button
       className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''} ${insertBefore === index ? 'insert-before' : ''} ${insertBefore === playlists.length && index === playlists.length - 1 ? 'insert-after' : ''}`}
       onClick={() => onPlaylist(playlist.id)}
       draggable
@@ -1289,6 +1304,13 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
     >
       <span>{playlist.owned ? '' : '🌐'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
     </button>{menu?.playlist.id === playlist.id && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setConfirming(playlist); setMenu(undefined) }}>{playlist.owned ? 'Delete Playlist…' : 'Unfollow Playlist…'}</button></ContextMenu>}</Fragment>)}
+    </div>
+    <div className="sidebar-actions">
+      <button title="New playlist" aria-label="New playlist" onClick={() => { setCreating(true); if (state.settings.plCollapsed) onCollapse() }}>＋</button>
+      <button className={state.settings.shuffle ? 'active' : ''} title={`Shuffle: ${state.settings.shuffle ? 'on' : 'off'}`} aria-label={`Shuffle: ${state.settings.shuffle ? 'on' : 'off'}`} aria-pressed={state.settings.shuffle} onClick={() => onShuffle(!state.settings.shuffle)}>⇄</button>
+      <button className={state.settings.repeat !== 'off' ? 'active' : ''} title={`Repeat: ${state.settings.repeat}`} aria-label={`Repeat: ${state.settings.repeat}`} aria-pressed={state.settings.repeat !== 'off'} onClick={() => onRepeat(state.settings.repeat === 'off' ? 'all' : state.settings.repeat === 'all' ? 'one' : 'off')}>{state.settings.repeat === 'one' ? '↻¹' : '↻'}</button>
+    </div>
+    <div className="sidebar-note">🔒 Overlay edits stay local.<br />Never written back to Spotify.</div>
   </aside>{confirming && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setConfirming(undefined) }}><div className="get-info playlist-confirm" role="dialog" aria-modal="true" aria-labelledby="playlist-confirm-title"><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button className="danger" disabled={busy} onClick={() => void unfollow()}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></div></div>}</>
 }
 
