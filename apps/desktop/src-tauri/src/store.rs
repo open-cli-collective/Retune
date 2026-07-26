@@ -108,6 +108,8 @@ pub struct Settings {
     pub normalize_volume: bool,
     #[serde(default = "default_true")]
     pub gapless: bool,
+    #[serde(default = "default_play_threshold_percent")]
+    pub play_threshold_percent: u8,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -145,6 +147,10 @@ fn default_streaming_bitrate() -> u16 {
 
 fn default_repeat() -> String {
     "off".into()
+}
+
+fn default_play_threshold_percent() -> u8 {
+    100
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -194,6 +200,7 @@ impl Default for Settings {
             streaming_bitrate: default_streaming_bitrate(),
             normalize_volume: false,
             gapless: true,
+            play_threshold_percent: default_play_threshold_percent(),
         }
     }
 }
@@ -243,6 +250,9 @@ impl Settings {
                 .unwrap_or(usize::MAX)
         });
         self.hidden_columns.dedup();
+        if !matches!(self.play_threshold_percent, 50 | 75 | 90 | 100) {
+            self.play_threshold_percent = default_play_threshold_percent();
+        }
     }
 
     pub(crate) fn validate(&self) -> StoreResult<()> {
@@ -587,6 +597,7 @@ mod tests {
             streaming_bitrate: 160,
             normalize_volume: true,
             gapless: false,
+            play_threshold_percent: 75,
         };
 
         assert!(store.load().unwrap().is_none());
@@ -602,6 +613,47 @@ mod tests {
         let settings: Settings = serde_json::from_value(json).unwrap();
 
         assert_eq!(settings.browser_panes, BrowserPanes::default());
+    }
+
+    #[test]
+    fn legacy_settings_default_play_threshold_to_completion() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("playThresholdPercent");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert_eq!(settings.play_threshold_percent, 100);
+    }
+
+    #[test]
+    fn settings_load_normalizes_invalid_play_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json["playThresholdPercent"] = 42.into();
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap().play_threshold_percent, 100);
+    }
+
+    #[test]
+    fn settings_round_trip_every_allowed_play_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let mut settings = Settings::default();
+
+        for threshold in [50, 75, 90, 100] {
+            settings.play_threshold_percent = threshold;
+            store.save(&settings).unwrap();
+            assert_eq!(
+                store.load().unwrap().unwrap().play_threshold_percent,
+                threshold
+            );
+        }
     }
 
     #[test]

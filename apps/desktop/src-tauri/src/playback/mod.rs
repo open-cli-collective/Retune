@@ -295,6 +295,7 @@ impl Default for Playback {
     fn default() -> Self {
         Self::new(
             "off",
+            100,
             AudioSettings {
                 bitrate: 320,
                 normalize: false,
@@ -306,12 +307,18 @@ impl Default for Playback {
 }
 
 impl Playback {
-    pub fn new(repeat: &str, audio: AudioSettings, cache_dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        repeat: &str,
+        play_threshold_percent: u8,
+        audio: AudioSettings,
+        cache_dir: Option<PathBuf>,
+    ) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
         let generation = 1;
         let mut reducer = EventReducer::default();
         reducer.activate(generation);
         reducer.set_repeat(repeat);
+        reducer.set_play_threshold_percent(play_threshold_percent);
         Self {
             state: tokio::sync::Mutex::new(ControllerState {
                 backend: PlayerBackend::Connect(ConnectBackend::new(events.clone(), generation)),
@@ -329,6 +336,14 @@ impl Playback {
 
     pub fn set_audio(&self, audio: AudioSettings) {
         *self.audio.lock().expect("audio settings mutex poisoned") = audio;
+    }
+
+    pub async fn set_play_threshold_percent(&self, percent: u8) {
+        self.state
+            .lock()
+            .await
+            .reducer
+            .set_play_threshold_percent(percent);
     }
 
     pub fn listen(

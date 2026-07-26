@@ -7,6 +7,7 @@ import './App.css'
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
 type PlaybackBackend = 'connect' | 'local'
+type PlayThresholdPercent = 50 | 75 | 90 | 100
 type RepeatMode = 'off' | 'all' | 'one'
 type BrowserPanes = { cat: boolean; art: boolean; alb: boolean }
 type ColumnKey = 'name' | 'artist' | 'album' | 'track' | 'time' | 'rating' | 'genre' | 'plays' | 'kind' | 'bitrate' | 'lastPlayed' | 'added'
@@ -32,6 +33,7 @@ type Settings = {
   streamingBitrate: number
   normalizeVolume: boolean
   gapless: boolean
+  playThresholdPercent: PlayThresholdPercent
 }
 
 type ConnectionState = { connected: boolean }
@@ -189,6 +191,7 @@ const streamingQualities = [
   ['High', 160],
   ['Very High', 320],
 ] as const
+const playThresholds: PlayThresholdPercent[] = [50, 75, 90, 100]
 
 type State = {
   source: Source
@@ -274,6 +277,7 @@ const defaultSettings: Settings = {
   streamingBitrate: 320,
   normalizeVolume: false,
   gapless: true,
+  playThresholdPercent: 100,
 }
 
 const initialState: State = {
@@ -673,6 +677,7 @@ function App() {
     state.settings.spotifyClientId,
     state.settings.spotifySyncCompleted,
     state.settings.playbackBackend,
+    state.settings.playThresholdPercent,
     state.settings.volume,
     state.settingsHydrated,
     state.preferences,
@@ -1066,13 +1071,13 @@ function App() {
           return invoke('sync_from_spotify')
         })
         .catch((error) => dispatch({ type: 'error', error: String(error) }))} />}
-      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless) => {
+      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={(theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent) => {
         const audioChanged = streamingBitrate !== state.settings.streamingBitrate
           || normalizeVolume !== state.settings.normalizeVolume
           || gapless !== state.settings.gapless
         dispatch({
           type: 'settings',
-          settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless },
+          settings: { theme, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent },
         })
         if (audioChanged) invoke('set_audio_settings', { streamingBitrate, normalizeVolume, gapless })
           .catch((error) => dispatch({ type: 'error', error: String(error) }))
@@ -2069,7 +2074,7 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   settings: Settings
   onZoom: (zoom: number) => void
   onCancel: () => void
-  onSave: (theme: Theme, autoAdd: boolean, autoConnect: boolean, clientId: string, playbackBackend: PlaybackBackend, streamingBitrate: number, normalizeVolume: boolean, gapless: boolean) => void
+  onSave: (theme: Theme, autoAdd: boolean, autoConnect: boolean, clientId: string, playbackBackend: PlaybackBackend, streamingBitrate: number, normalizeVolume: boolean, gapless: boolean, playThresholdPercent: PlayThresholdPercent) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
@@ -2081,6 +2086,7 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
   const [streamingBitrate, setStreamingBitrate] = useState(settings.streamingBitrate)
   const [normalizeVolume, setNormalizeVolume] = useState(settings.normalizeVolume)
   const [gapless, setGapless] = useState(settings.gapless)
+  const [playThresholdPercent, setPlayThresholdPercent] = useState(settings.playThresholdPercent)
   const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => { dialog.current?.focus() }, [])
   const qualityIndex = Math.max(0, streamingQualities.findIndex(([, bitrate]) => bitrate === streamingBitrate))
@@ -2145,9 +2151,13 @@ function Preferences({ settings, onZoom, onCancel, onSave }: {
           </div>
           <label className="preference-switch compact"><input type="checkbox" checked={normalizeVolume} onChange={(event) => setNormalizeVolume(event.target.checked)} /><span className="switch-control" aria-hidden="true" /><span><strong>Normalize volume across tracks</strong></span></label>
           <label className="preference-switch compact"><input type="checkbox" checked={gapless} onChange={(event) => setGapless(event.target.checked)} /><span className="switch-control" aria-hidden="true" /><span><strong>Gapless album playback</strong></span></label>
+          <div className="preference-section-label preference-size-label">Count as played after</div>
+          <div className="preference-options">
+            {playThresholds.map((percent) => <label className="preference-radio" key={percent}><input type="radio" name="play-threshold" checked={playThresholdPercent === percent} onChange={() => setPlayThresholdPercent(percent)} /><span><strong>{percent === 100 ? 'When finished' : `${percent}%`}</strong></span></label>)}
+          </div>
         </>}
       </div>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, autoAdd, autoConnect, clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless)}>Save</button></div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, autoAdd, autoConnect, clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent)}>Save</button></div>
     </div>
   </div>
 }

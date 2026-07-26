@@ -736,6 +736,10 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
         .map_err(|error| error.to_string())?;
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     state
+        .playback
+        .set_play_threshold_percent(settings.play_threshold_percent)
+        .await;
+    state
         .menu_checks
         .sync(&settings)
         .map_err(|error| error.to_string())?;
@@ -2653,6 +2657,7 @@ pub fn run() {
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(
                 &settings.repeat,
+                settings.play_threshold_percent,
                 AudioSettings {
                     bitrate: settings.streaming_bitrate,
                     normalize: settings.normalize_volume,
@@ -3402,6 +3407,7 @@ mod tests {
             streaming_bitrate: 160,
             normalize_volume: true,
             gapless: false,
+            play_threshold_percent: 100,
         };
         let bytes = export_with_settings(&library, &exported, &playlists, true).unwrap();
         let (restored_library, visual, restored_playlists) =

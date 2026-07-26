@@ -29,6 +29,9 @@ pub(super) struct EventReducer {
     pending: VecDeque<LoadIntent>,
     bindings: HashMap<u64, LoadIntent>,
     repeat: String,
+    play_threshold_percent: u8,
+    previous_position_ms: u32,
+    counted: bool,
 }
 
 impl Default for EventReducer {
@@ -42,6 +45,9 @@ impl Default for EventReducer {
             pending: VecDeque::new(),
             bindings: HashMap::new(),
             repeat: "off".into(),
+            play_threshold_percent: 100,
+            previous_position_ms: 0,
+            counted: false,
         }
     }
 }
@@ -52,6 +58,7 @@ impl EventReducer {
         self.pending.clear();
         self.bindings.clear();
         self.latest_intent = None;
+        self.reset_playthrough();
     }
 
     pub(super) fn set_snapshot(&mut self, snapshot: Option<Snapshot>) {
@@ -78,7 +85,12 @@ impl EventReducer {
         self.repeat = repeat.to_owned();
     }
 
+    pub(super) fn set_play_threshold_percent(&mut self, percent: u8) {
+        self.play_threshold_percent = percent;
+    }
+
     pub(super) fn queue_load(&mut self, uri: &str, playing: bool) {
+        self.reset_playthrough();
         self.next_intent = self.next_intent.wrapping_add(1);
         let intent = LoadIntent {
             id: self.next_intent,
@@ -152,8 +164,8 @@ impl EventReducer {
                 uri,
                 position_ms,
                 ..
-            }
-            | NeutralEvent::Seeked {
+            } => self.position_changed(request_id, &uri, position_ms),
+            NeutralEvent::Seeked {
                 request_id,
                 uri,
                 position_ms,
@@ -168,6 +180,7 @@ impl EventReducer {
                 if !self.accepts(request_id, &uri) {
                     return vec![];
                 }
+                self.previous_position_ms = position_ms;
                 self.state.elapsed = u64::from(position_ms) / 1000;
                 vec![ReducerAction::Emit(self.state.clone())]
             }
@@ -198,30 +211,24 @@ impl EventReducer {
             }
             NeutralEvent::EndOfTrack {
                 request_id, uri, ..
-            } => self
-                .accepts(request_id, &uri)
-                .then_some(vec![
-                    ReducerAction::TrackCompleted(uri),
-                    if self.repeat == "one" {
-                        ReducerAction::Reload
-                    } else {
-                        ReducerAction::Advance
-                    },
-                ])
-                .unwrap_or_default(),
-            NeutralEvent::ConnectBoundary { uri, .. } => self
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.current().uri == uri)
-                .then_some(vec![
-                    ReducerAction::TrackCompleted(uri),
-                    if self.repeat == "one" {
-                        ReducerAction::Reload
-                    } else {
-                        ReducerAction::Advance
-                    },
-                ])
-                .unwrap_or_default(),
+            } => {
+                if self.accepts(request_id, &uri) {
+                    self.complete(uri)
+                } else {
+                    vec![]
+                }
+            }
+            NeutralEvent::ConnectBoundary { uri, .. } => {
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.current().uri == uri)
+                {
+                    self.complete(uri)
+                } else {
+                    vec![]
+                }
+            }
         }
     }
 
@@ -251,11 +258,60 @@ impl EventReducer {
                 "Playback returned a track outside the active queue: {uri}"
             ))];
         };
+        self.previous_position_ms = position_ms;
         self.state = local_event(&track, u64::from(position_ms) / 1000, playing, true);
         vec![ReducerAction::Emit(self.state.clone())]
     }
 
+    fn position_changed(
+        &mut self,
+        request_id: u64,
+        uri: &str,
+        position_ms: u32,
+    ) -> Vec<ReducerAction> {
+        if !self.accepts(request_id, uri) {
+            return vec![];
+        }
+        let threshold_ms = self
+            .track(uri)
+            .map(|track| track.duration_secs * 1000 * u64::from(self.play_threshold_percent) / 100);
+        let crossed = self.play_threshold_percent < 100
+            && !self.counted
+            && threshold_ms.is_some_and(|threshold| {
+                u64::from(self.previous_position_ms) < threshold
+                    && u64::from(position_ms) >= threshold
+            });
+        self.previous_position_ms = position_ms;
+        self.state.elapsed = u64::from(position_ms) / 1000;
+        let mut actions = vec![ReducerAction::Emit(self.state.clone())];
+        if crossed {
+            self.counted = true;
+            actions.push(ReducerAction::TrackCompleted(uri.to_owned()));
+        }
+        actions
+    }
+
+    fn complete(&mut self, uri: String) -> Vec<ReducerAction> {
+        let mut actions = Vec::with_capacity(2);
+        if !self.counted {
+            self.counted = true;
+            actions.push(ReducerAction::TrackCompleted(uri));
+        }
+        actions.push(if self.repeat == "one" {
+            ReducerAction::Reload
+        } else {
+            ReducerAction::Advance
+        });
+        actions
+    }
+
+    fn reset_playthrough(&mut self) {
+        self.previous_position_ms = 0;
+        self.counted = false;
+    }
+
     fn connect_state(&mut self, state: NeutralState) -> Vec<ReducerAction> {
+        self.previous_position_ms = state.position_ms;
         self.state = if state.external {
             PlayerStateEvent {
                 track_id: None,
@@ -721,5 +777,290 @@ mod tests {
         for event in events {
             assert_eq!(emitted(reducer.handle(event)).elapsed, 9);
         }
+    }
+
+    #[test]
+    fn organic_crossing_counts_once_and_completion_does_not_count_again() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(75);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        reducer.handle(NeutralEvent::Playing {
+            generation: 7,
+            request_id: 1,
+            uri: "spotify:track:1".into(),
+            position_ms: 74_000,
+        });
+
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 75_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_), ReducerAction::TrackCompleted(uri)] if uri == "spotify:track:1"
+        ));
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 90_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+        assert_eq!(
+            reducer.handle(NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            }),
+            [ReducerAction::Advance]
+        );
+    }
+
+    #[test]
+    fn connect_boundary_does_not_count_again_after_threshold_crossing() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(75);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 75_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_), ReducerAction::TrackCompleted(_)]
+        ));
+
+        assert_eq!(
+            reducer.handle(NeutralEvent::ConnectBoundary {
+                generation: 7,
+                uri: "spotify:track:1".into(),
+            }),
+            [ReducerAction::Advance]
+        );
+    }
+
+    #[test]
+    fn seeks_and_corrections_do_not_count() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(50);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::Seeked {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 60_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 61_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionCorrection {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 40_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 50_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_), ReducerAction::TrackCompleted(_)]
+        ));
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 51_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+    }
+
+    #[test]
+    fn completion_counts_when_sparse_events_never_observe_threshold_crossing() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(50);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+
+        assert_eq!(
+            reducer.handle(NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            }),
+            [
+                ReducerAction::TrackCompleted("spotify:track:1".into()),
+                ReducerAction::Advance
+            ]
+        );
+    }
+
+    #[test]
+    fn queued_skip_resets_crossing_and_does_not_count_skipped_track() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(50);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        reducer.handle(NeutralEvent::PositionChanged {
+            generation: 7,
+            request_id: 1,
+            uri: "spotify:track:1".into(),
+            position_ms: 49_000,
+        });
+        reducer.snapshot_mut().unwrap().index = 1;
+        bind(&mut reducer, "spotify:track:2", true, 2);
+
+        assert!(reducer
+            .handle(NeutralEvent::PositionChanged {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+                position_ms: 51_000,
+            })
+            .is_empty());
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 2,
+                    uri: "spotify:track:2".into(),
+                    position_ms: 51_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_), ReducerAction::TrackCompleted(uri)] if uri == "spotify:track:2"
+        ));
+    }
+
+    #[test]
+    fn queued_skip_after_crossing_does_not_count_previous_track_again() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(50);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 50_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_), ReducerAction::TrackCompleted(_)]
+        ));
+        reducer.snapshot_mut().unwrap().index = 1;
+        bind(&mut reducer, "spotify:track:2", true, 2);
+
+        assert!(reducer
+            .handle(NeutralEvent::PositionChanged {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+                position_ms: 60_000,
+            })
+            .is_empty());
+    }
+
+    #[test]
+    fn repeat_one_counts_each_loaded_pass() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(90);
+        reducer.set_repeat("one");
+
+        for request_id in [1, 2] {
+            bind(&mut reducer, "spotify:track:1", true, request_id);
+            assert!(matches!(
+                reducer
+                    .handle(NeutralEvent::PositionChanged {
+                        generation: 7,
+                        request_id,
+                        uri: "spotify:track:1".into(),
+                        position_ms: 90_000,
+                    })
+                    .as_slice(),
+                [ReducerAction::Emit(_), ReducerAction::TrackCompleted(_)]
+            ));
+            assert_eq!(
+                reducer.handle(NeutralEvent::EndOfTrack {
+                    generation: 7,
+                    request_id,
+                    uri: "spotify:track:1".into(),
+                }),
+                [ReducerAction::Reload]
+            );
+        }
+    }
+
+    #[test]
+    fn stale_crossing_is_ignored_and_completion_fallback_remains_at_100_percent() {
+        let mut reducer = reducer();
+        reducer.set_play_threshold_percent(75);
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        assert!(reducer
+            .handle(NeutralEvent::PositionChanged {
+                generation: 6,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+                position_ms: 80_000,
+            })
+            .is_empty());
+
+        reducer.set_play_threshold_percent(100);
+        assert!(matches!(
+            reducer
+                .handle(NeutralEvent::PositionChanged {
+                    generation: 7,
+                    request_id: 1,
+                    uri: "spotify:track:1".into(),
+                    position_ms: 100_000,
+                })
+                .as_slice(),
+            [ReducerAction::Emit(_)]
+        ));
+        assert_eq!(
+            reducer.handle(NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            }),
+            [
+                ReducerAction::TrackCompleted("spotify:track:1".into()),
+                ReducerAction::Advance
+            ]
+        );
     }
 }
