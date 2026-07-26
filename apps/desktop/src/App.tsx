@@ -40,7 +40,7 @@ type Settings = {
   playThresholdPercent: PlayThresholdPercent
 }
 
-type ConnectionState = { connected: boolean }
+type ConnectionState = { connected: boolean; needs_reauth: boolean; missing_scopes: string[] }
 type ImportSummary = { imported: number; duplicates: number; failed: { path: string; reason: string }[] }
 export type PlaylistListView = {
   id: string
@@ -216,7 +216,7 @@ type State = {
   info?: InfoDialog
   preferences: boolean
   setup: boolean
-  connected: boolean
+  connection: ConnectionState
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
   selectedPlaylist?: string
@@ -252,7 +252,7 @@ type Action =
   | { type: 'info'; info?: InfoDialog }
   | { type: 'preferences'; open: boolean }
   | { type: 'setup'; open: boolean }
-  | { type: 'connection'; connected: boolean }
+  | { type: 'connection'; connection: ConnectionState }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'syncPhase'; phase?: string }
@@ -303,7 +303,7 @@ const initialState: State = {
   revision: 0,
   preferences: false,
   setup: false,
-  connected: false,
+  connection: { connected: false, needs_reauth: false, missing_scopes: [] },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,
@@ -395,7 +395,7 @@ function reducer(state: State, action: Action): State {
     case 'setup':
       return { ...state, setup: action.open, preferences: false, info: undefined }
     case 'connection':
-      return { ...state, connected: action.connected }
+      return { ...state, connection: action.connection }
     case 'spotifyResults':
       return { ...state, spotifyResults: action.results, spotifySearching: false }
     case 'spotifySearching':
@@ -574,7 +574,7 @@ function App() {
   const tracklistVisible = !spotifySearchActive && !state.selectedPlaylist
   const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
   const playbackTracks = state.playing?.queue ?? emptyTracks
-  const player = usePlayer(state.connected, state.playing, dispatch)
+  const player = usePlayer(state.connection.connected, state.playing, dispatch)
   const addToPlaylist = useCallback((id: string, subject: PlaylistSubject) => subject.kind === 'album'
     ? invoke('playlist_add_album', { id, albumUri: subject.albumUri, albumLabel: subject.label })
     : invoke('playlist_add', { id, uris: subject.uris }), [])
@@ -647,7 +647,7 @@ function App() {
       .then((notice) => dispatch({ type: 'notice', notice: notice ?? undefined }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
     invoke<ConnectionState>('connection_state')
-      .then(({ connected }) => dispatch({ type: 'connection', connected }))
+      .then((connection) => dispatch({ type: 'connection', connection }))
       .catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [])
 
@@ -692,7 +692,7 @@ function App() {
     const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
     const failed = listen<string>('operation-error', ({ payload }) => dispatch({ type: 'error', error: payload }))
     const recovered = listen('operation-recovered', () => dispatch({ type: 'clear-error' }))
-    const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connected: payload.connected }))
+    const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connection: payload }))
     const settings = listen<Settings>('settings-changed', ({ payload }) => dispatch({ type: 'hydrateSettings', settings: payload }))
     const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
     const progressCount = listen<{ tracks: number; fraction: number }>('sync-progress-count', ({ payload }) => dispatch({ type: 'syncProgress', progress: payload }))
@@ -733,7 +733,7 @@ function App() {
 
   useEffect(() => {
     const query = state.query.trim()
-    if (state.scope !== 'spotify' || !query || !state.connected) {
+    if (state.scope !== 'spotify' || !query || !state.connection.connected) {
       dispatch({ type: 'spotifyResults', results: null })
       return
     }
@@ -752,7 +752,7 @@ function App() {
       active = false
       window.clearTimeout(timer)
     }
-  }, [state.scope, state.query, state.connected])
+  }, [state.scope, state.query, state.connection.connected])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -784,7 +784,7 @@ function App() {
       dispatch({ type: 'tick', duration: current.durationSecs, nextId: next.id })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [state.connected, state.playing?.trackId, state.playing?.isPlaying, playbackTracks])
+  }, [state.connection.connected, state.playing?.trackId, state.playing?.isPlaying, playbackTracks])
 
   const mutate = (command: string, args: Record<string, unknown>) => {
     invoke(command, args)
@@ -948,7 +948,7 @@ function App() {
         track={playingTrack}
         query={state.query}
         scope={state.scope}
-        connected={state.connected}
+        connected={state.connection.connected}
         volume={state.settings.volume}
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
@@ -972,8 +972,9 @@ function App() {
           onError={(error) => dispatch({ type: 'error', error })}
         />
         <section className="content">
+          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Reconnect</button></div>}
           {spotifySearchActive ? (
-            state.connected ? <SpotifySearch
+            state.connection.connected ? <SpotifySearch
               query={state.query.trim()}
               searching={state.spotifySearching}
               results={state.spotifyResults}
@@ -1057,7 +1058,7 @@ function App() {
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
       {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={() => dispatch({ type: 'info' })} onSaved={() => dispatch({ type: 'info' })} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.setup && <SetupLibrary settings={state.settings} connected={state.connected} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
+      {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
         .then(() => invoke('connect_spotify'))
         .catch((error) => dispatch({ type: 'error', error: String(error) }))} onSync={(clientId) => saveSetupClientId(clientId)
         .then(() => {

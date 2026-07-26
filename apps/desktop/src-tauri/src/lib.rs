@@ -15,7 +15,10 @@ use std::{
     fs,
     io::{Read, Write},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -75,6 +78,7 @@ struct AppState {
     playback: Arc<Playback>,
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
+    playlist_reauth_notified: AtomicBool,
 }
 
 struct MenuChecks {
@@ -97,20 +101,42 @@ impl MenuChecks {
         self.theme_dark.set_checked(settings.theme == Theme::Dark)
     }
 
-    fn sync_connection(&self, connected: bool) -> tauri::Result<()> {
-        self.account_status.set_text(if connected {
+    fn sync_connection(&self, connection: &ConnectionState) -> tauri::Result<()> {
+        self.account_status.set_text(if connection.needs_reauth {
+            "Reconnect required"
+        } else if connection.connected {
             "Connected"
         } else {
             "Not connected"
         })?;
-        self.connect.set_enabled(!connected)?;
-        self.disconnect.set_enabled(connected)
+        self.connect
+            .set_enabled(!connection.connected || connection.needs_reauth)?;
+        self.disconnect.set_enabled(connection.connected)
     }
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct ConnectionState {
     connected: bool,
+    needs_reauth: bool,
+    missing_scopes: Vec<String>,
+}
+
+impl ConnectionState {
+    fn from_tokens(tokens: Option<Tokens>) -> Self {
+        let missing_scopes = tokens
+            .as_ref()
+            .map(Tokens::missing_scopes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        Self {
+            connected: tokens.is_some(),
+            needs_reauth: !missing_scopes.is_empty(),
+            missing_scopes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -842,12 +868,10 @@ fn spotify_provider(
 }
 
 fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionState, String> {
-    Ok(ConnectionState {
-        connected: token_store
-            .load()
-            .map_err(|error| error.to_string())?
-            .is_some(),
-    })
+    token_store
+        .load()
+        .map(ConnectionState::from_tokens)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -860,7 +884,7 @@ fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
     let connection = stored_connection_state(&state.token_store)?;
     state
         .menu_checks
-        .sync_connection(connection.connected)
+        .sync_connection(&connection)
         .map_err(|error| error.to_string())?;
     app.emit("connection-changed", connection)
         .map_err(|error| error.to_string())
@@ -1345,9 +1369,21 @@ async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Res
         .lock()
         .expect("library mutex poisoned")
         .clone();
-    let synced = playlists::sync(client, &current, &library)
-        .await
-        .map_err(|error| playlist_error(&state, error))?;
+    let synced = match playlists::sync(client, &current, &library).await {
+        Ok(synced) => synced,
+        Err(error) => {
+            let tokens = state.token_store.load().ok().flatten();
+            if let Some(error) = dispatch_playlist_error(
+                &state.playlist_reauth_notified,
+                error,
+                tokens.as_ref(),
+                |error| notify_error(app, error),
+            ) {
+                return Err(error);
+            }
+            return Ok(());
+        }
+    };
     state
         .playlist_store
         .save(&synced)
@@ -1360,6 +1396,22 @@ async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Res
 fn playlist_error(state: &AppState, error: retune_spotify::Error) -> String {
     let tokens = state.token_store.load().ok().flatten();
     playlists::map_error(error, tokens.as_ref())
+}
+
+fn dispatch_playlist_error(
+    notified: &AtomicBool,
+    error: retune_spotify::Error,
+    tokens: Option<&Tokens>,
+    notify: impl FnOnce(String),
+) -> Option<String> {
+    let error = playlists::map_error(error, tokens);
+    if error != playlists::RECONNECT_HINT {
+        return Some(error);
+    }
+    if !notified.swap(true, Ordering::Relaxed) {
+        notify(error);
+    }
+    None
 }
 
 fn unix_now() -> u64 {
@@ -2722,38 +2774,33 @@ pub fn run() {
             let token_store = Arc::new(CachedTokenStore::new(backing));
             // Keychain access can fail transiently; start disconnected rather
             // than aborting startup.
-            let connected = match token_store.load() {
-                Ok(tokens) => {
-                    if let Some(tokens) = &tokens {
-                        let missing = tokens.missing_scopes();
-                        if !missing.is_empty() {
-                            log::info!(
-                                "Spotify connection is missing playlist scopes: {}",
-                                missing.join(" ")
-                            );
-                        }
-                    }
-                    tokens.is_some()
-                }
+            let connection = match token_store.load() {
+                Ok(tokens) => ConnectionState::from_tokens(tokens),
                 Err(error) => {
                     log::warn!("Token store unavailable at startup: {error}");
-                    false
+                    ConnectionState::from_tokens(None)
                 }
             };
-            menu_checks.sync_connection(connected)?;
+            if connection.needs_reauth {
+                log::info!(
+                    "Spotify connection is missing playlist scopes: {}",
+                    connection.missing_scopes.join(" ")
+                );
+            }
+            menu_checks.sync_connection(&connection)?;
             let spotify = spotify_provider(&settings.spotify_client_id, Arc::clone(&token_store))
                 .map_err(std::io::Error::other)?;
             let startup_action = startup_action(
-                connected,
+                &connection,
                 &settings.spotify_client_id,
                 settings.auto_connect,
                 settings.last_full_sync,
                 unix_now(),
             );
-            if connected && startup_action == StartupAction::Nothing {
+            if connection.connected && startup_action == StartupAction::Nothing {
                 log::info!("startup sync skipped; library fresh");
             }
-            let activate_local = connected && settings.playback_backend == "local";
+            let activate_local = connection.connected && settings.playback_backend == "local";
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(
                 &settings.repeat,
@@ -2783,6 +2830,7 @@ pub fn run() {
                 playback: Arc::clone(&playback),
                 media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
+                playlist_reauth_notified: AtomicBool::new(false),
             });
             let completion_app = app.handle().clone();
             playback.listen(app.handle().clone(), move |uri| {
@@ -2800,7 +2848,10 @@ pub fn run() {
                     }
                 }));
             });
-            if activate_local || connected || startup_action != StartupAction::Nothing {
+            if activate_local
+                || connection.connected
+                || startup_action != StartupAction::Nothing
+            {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if activate_local {
@@ -2847,13 +2898,13 @@ enum StartupAction {
 }
 
 fn startup_action(
-    connected: bool,
+    connection: &ConnectionState,
     client_id: &str,
     auto_connect: bool,
     last_full_sync: Option<u64>,
     now: u64,
 ) -> StartupAction {
-    if connected {
+    if connection.connected {
         if last_full_sync.is_some_and(|last| now.saturating_sub(last) <= 15 * 60) {
             StartupAction::Nothing
         } else {
@@ -2893,6 +2944,12 @@ mod tests {
     };
 
     use super::*;
+
+    fn shared_token_store(tokens: Option<Tokens>) -> SharedTokenStore {
+        Arc::new(CachedTokenStore::new(
+            Box::new(InMemoryTokenStore::new(tokens)) as Box<dyn TokenStore>,
+        ))
+    }
 
     fn metadata_track(uri: &str, cat: &str, art: &str, alb: &str) -> NewTrack {
         NewTrack {
@@ -3409,29 +3466,120 @@ mod tests {
 
     #[test]
     fn startup_action_syncs_connects_or_does_nothing() {
+        let connected = ConnectionState {
+            connected: true,
+            needs_reauth: false,
+            missing_scopes: vec![],
+        };
+        let disconnected = ConnectionState::from_tokens(None);
+        let needs_reauth = ConnectionState {
+            connected: true,
+            needs_reauth: true,
+            missing_scopes: vec!["playlist-read-private".into()],
+        };
         assert_eq!(
-            startup_action(true, "", false, None, 1_000),
+            startup_action(&connected, "", false, None, 1_000),
             StartupAction::Sync
         );
         assert_eq!(
-            startup_action(true, "", false, Some(999), 1_000),
+            startup_action(&connected, "", false, Some(999), 1_000),
             StartupAction::Nothing
         );
         assert_eq!(
-            startup_action(true, "", false, Some(99), 1_000),
+            startup_action(&connected, "", false, Some(99), 1_000),
             StartupAction::Sync
         );
         assert_eq!(
-            startup_action(false, "client-id", true, None, 1_000),
+            startup_action(&disconnected, "client-id", true, None, 1_000),
             StartupAction::Connect
         );
         assert_eq!(
-            startup_action(false, "", true, None, 1_000),
+            startup_action(&disconnected, "", true, None, 1_000),
             StartupAction::Nothing
         );
         assert_eq!(
-            startup_action(false, "client-id", false, None, 1_000),
+            startup_action(&disconnected, "client-id", false, None, 1_000),
             StartupAction::Nothing
+        );
+        assert_eq!(
+            startup_action(&needs_reauth, "client-id", true, None, 1_000),
+            StartupAction::Sync
+        );
+    }
+
+    #[test]
+    fn connection_state_reports_missing_scopes() {
+        let legacy = Tokens {
+            access: String::new(),
+            refresh: String::new(),
+            expires_at: 0,
+            scopes: "user-library-read".into(),
+        };
+        let current = Tokens {
+            scopes: auth::SCOPES.into(),
+            ..legacy.clone()
+        };
+
+        assert_eq!(
+            stored_connection_state(&shared_token_store(Some(legacy))).unwrap(),
+            ConnectionState {
+                connected: true,
+                needs_reauth: true,
+                missing_scopes: auth::REQUIRED_SCOPES
+                    .into_iter()
+                    .filter(|scope| *scope != "user-library-read")
+                    .map(String::from)
+                    .collect(),
+            }
+        );
+        assert_eq!(
+            stored_connection_state(&shared_token_store(Some(current))).unwrap(),
+            ConnectionState {
+                connected: true,
+                needs_reauth: false,
+                missing_scopes: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn playlist_reconnect_hint_is_dispatched_once() {
+        let notified = AtomicBool::new(false);
+        let mut messages = vec![];
+        let legacy = Tokens {
+            access: String::new(),
+            refresh: String::new(),
+            expires_at: 0,
+            scopes: "user-library-read".into(),
+        };
+        let forbidden = || retune_spotify::Error::Http {
+            endpoint: "/playlists/id/tracks".into(),
+            status: 403,
+            body: "Insufficient client scope".into(),
+        };
+
+        assert_eq!(
+            dispatch_playlist_error(&notified, forbidden(), Some(&legacy), |message| {
+                messages.push(message)
+            }),
+            None
+        );
+        assert_eq!(
+            dispatch_playlist_error(&notified, forbidden(), Some(&legacy), |message| {
+                messages.push(message)
+            }),
+            None
+        );
+        assert_eq!(messages, [playlists::RECONNECT_HINT]);
+        let unrelated = retune_spotify::Error::Http {
+            endpoint: "/playlists/id/tracks".into(),
+            status: 500,
+            body: "Server error".into(),
+        };
+        let expected = unrelated.to_string();
+        assert_eq!(
+            dispatch_playlist_error(&notified, unrelated, Some(&legacy), |_| panic!()),
+            Some(expected)
         );
     }
 
