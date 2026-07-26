@@ -75,10 +75,8 @@ pub async fn sync<T: Transport, S: TokenStore>(
                             .any(|library_track| library_track.uri == track.uri)
                     });
                     cached
-                } else if summary.owned {
-                    fetch(client, summary, library).await?
                 } else {
-                    summary_only(summary)
+                    fetch(client, summary, library).await?
                 },
             );
         }
@@ -453,19 +451,6 @@ async fn fetch_tracks<T: Transport, S: TokenStore>(
     Ok((track_count.unwrap_or_default(), tracks, non_library_tracks))
 }
 
-fn summary_only(summary: Playlist) -> CachedPlaylist {
-    CachedPlaylist {
-        id: summary.id,
-        name: summary.name,
-        snapshot_id: summary.snapshot_id,
-        owned: summary.owned,
-        owner: Some(summary.owner.display_name.unwrap_or(summary.owner.id)),
-        track_count: summary.tracks.total as usize,
-        tracks: vec![],
-        non_library_tracks: vec![],
-    }
-}
-
 fn cached_track(track: &Track) -> CachedTrack {
     CachedTrack {
         uri: track.uri.clone(),
@@ -642,7 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn followed_playlist_keeps_summary_without_fetching_inaccessible_items() {
+    async fn changed_followed_playlist_fetches_tracks() {
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([
@@ -651,29 +636,65 @@ mod tests {
                     200,
                     serde_json::json!({
                         "items": [{
-                            "id": "followed", "name": "Followed", "snapshot_id": "snapshot",
+                            "id": "playlist", "name": "Followed", "snapshot_id": "changed",
                             "owner": {"id": "other", "display_name": "Other"},
-                            "items": {"total": 12}
+                            "items": {"total": 2}
                         }],
                         "next": null
+                    }),
+                ),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "items": [
+                            {"is_local": false, "item": {
+                                "uri": "spotify:track:1", "name": "Library track",
+                                "artists": [], "album": null, "duration_ms": 1000
+                            }},
+                            {"is_local": false, "item": {
+                                "uri": "spotify:track:2", "name": "Followed track",
+                                "artists": [{"id": "artist", "name": "Artist"}],
+                                "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "images": []},
+                                "duration_ms": 2345
+                            }}
+                        ],
+                        "next": null, "total": 2
                     }),
                 ),
             ]),
             tokens(retune_spotify::auth::SCOPES),
         );
+        let mut current = cached();
+        current.playlists[0].owned = false;
+        let mut library = Library::new();
+        library.add(local_track("spotify:track:1", "Library track"));
 
-        let synced = sync(&client, &PlaylistCache::default(), &Library::new())
-            .await
-            .unwrap();
+        let synced = sync(&client, &current, &library).await.unwrap();
 
-        assert_eq!(synced.playlists[0].track_count, 12);
-        assert!(!synced.playlists[0].owned);
-        assert!(synced.playlists[0].tracks.is_empty());
-        assert_eq!(client.transport().requests().len(), 2);
+        let playlist = &synced.playlists[0];
+        assert_eq!(playlist.track_count, 2);
+        assert!(!playlist.owned);
+        assert_eq!(playlist.tracks, ["spotify:track:1", "spotify:track:2"]);
+        assert_eq!(
+            playlist.non_library_tracks,
+            [CachedTrack {
+                uri: "spotify:track:2".into(),
+                name: "Followed track".into(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                duration: 2345,
+            }]
+        );
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            url::Url::parse(&requests[2].url).unwrap().path(),
+            "/v1/playlists/playlist/items"
+        );
     }
 
     #[tokio::test]
-    async fn unchanged_snapshot_skips_track_fetch() {
+    async fn unchanged_followed_playlist_snapshot_skips_track_fetch() {
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([
@@ -683,7 +704,7 @@ mod tests {
                     serde_json::json!({
                         "items": [{
                             "id": "playlist", "name": "New name", "snapshot_id": "same",
-                            "owner": {"id": "user", "display_name": "Owner Name"},
+                            "owner": {"id": "other", "display_name": "Owner Name"},
                             "tracks": {"total": 2}
                         }],
                         "next": null
@@ -692,13 +713,19 @@ mod tests {
             ]),
             tokens(retune_spotify::auth::SCOPES),
         );
+        let mut current = cached();
+        current.playlists[0].owned = false;
 
-        let synced = sync(&client, &cached(), &Library::new()).await.unwrap();
+        let synced = sync(&client, &current, &Library::new()).await.unwrap();
 
         assert_eq!(synced.playlists[0].name, "New name");
         assert_eq!(synced.playlists[0].owner.as_deref(), Some("Owner Name"));
+        assert!(!synced.playlists[0].owned);
         assert_eq!(synced.playlists[0].tracks.len(), 2);
-        assert_eq!(client.transport().requests().len(), 2);
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.ends_with("/me"));
+        assert!(requests[1].url.contains("/me/playlists?"));
     }
 
     #[tokio::test]
