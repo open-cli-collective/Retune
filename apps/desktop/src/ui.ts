@@ -20,6 +20,23 @@ export const moveBefore = <T>(items: T[], item: T, target?: T) => {
   return next
 }
 
+export const moveToIndex = <T>(items: T[], item: T, target: number) => {
+  const source = items.indexOf(item)
+  if (source < 0) return items
+  const next = items.filter((candidate) => candidate !== item)
+  next.splice(Math.max(0, Math.min(target - (source < target ? 1 : 0), next.length)), 0, item)
+  return next
+}
+
+export const mergeByUri = <T extends { uri: string }>(current: T[], incoming: T[]) => {
+  const seen = new Set(current.map((item) => item.uri))
+  return [...current, ...incoming.filter((item) => {
+    if (seen.has(item.uri)) return false
+    seen.add(item.uri)
+    return true
+  })]
+}
+
 export const menuPosition = (x: number, y: number, width: number, height: number, viewportWidth: number, viewportHeight: number, zoom: number, margin = 6) => {
   const left = Math.max(margin, Math.min(x, viewportWidth - width - margin))
   const preferredTop = y + height + margin <= viewportHeight ? y : y - height

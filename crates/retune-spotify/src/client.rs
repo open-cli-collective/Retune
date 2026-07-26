@@ -499,12 +499,13 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         offset: u32,
         limit: u32,
     ) -> Result<Page<Album>> {
-        self.get(&paged(
-            &format!("/artists/{artist_id}/albums"),
-            offset,
-            limit,
-        ))
-        .await
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("include_groups", "album,single")
+            .append_pair("offset", &offset.to_string())
+            .append_pair("limit", &limit.to_string())
+            .finish();
+        self.get(&format!("/artists/{artist_id}/albums?{query}"))
+            .await
     }
 
     pub async fn album_tracks(

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, menuPosition, moveBefore, nextNativeDragActive, normalizeZoom, parseDragRange } from '../src/ui.ts'
+import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange } from '../src/ui.ts'
 
 test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
@@ -29,6 +29,15 @@ test('playlist drag ranges reject malformed payloads', () => {
 test('columns move before the header under the pointer', () => {
   assert.deepEqual(moveBefore(['name', 'artist', 'track'], 'track', 'name'), ['track', 'name', 'artist'])
   assert.deepEqual(moveBefore(['name', 'artist', 'track'], 'name'), ['artist', 'track', 'name'])
+})
+
+test('playlist rows move to the indicated insertion point', () => {
+  assert.deepEqual(moveToIndex(['a', 'b', 'c'], 'a', 3), ['b', 'c', 'a'])
+  assert.deepEqual(moveToIndex(['a', 'b', 'c'], 'c', 1), ['a', 'c', 'b'])
+})
+
+test('artist album pages append without duplicate releases', () => {
+  assert.deepEqual(mergeByUri([{ uri: 'a' }], [{ uri: 'a' }, { uri: 'b' }]), [{ uri: 'a' }, { uri: 'b' }])
 })
 
 test('clearing a track rating reveals its inherited album rating', () => {

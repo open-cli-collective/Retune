@@ -27,8 +27,8 @@ use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{
-    artist_descriptor, image_url, spotify_id, title_case, MediaProvider, SearchAlbum,
-    SearchResults, SpotifySyncProvider, SyncBatch,
+    artist_albums_page, artist_descriptor, image_url, spotify_id, title_case, ArtistAlbumsPage,
+    MediaProvider, SearchResults, SpotifySyncProvider, SyncBatch,
 };
 use retune_core::{
     browse::{self, Selection},
@@ -39,7 +39,9 @@ use retune_core::{
 };
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
-    client::{Album, HttpTransport, SpotifyClient, Track as SpotifyTrack, Transport},
+    client::{
+        endpoint_family, Album, HttpTransport, SpotifyClient, Track as SpotifyTrack, Transport,
+    },
     normalize::UNCATEGORIZED,
     tokens::{
         migrate_token_store, CachedTokenStore, EncryptedFsTokenStore, KeychainTokenStore,
@@ -417,7 +419,6 @@ struct ArtistPageView {
     descriptor: String,
     image_url: Option<String>,
     following: bool,
-    albums: Vec<SearchAlbum>,
 }
 
 #[derive(Serialize)]
@@ -1558,14 +1559,12 @@ async fn spotify_artist_page(
             false
         }
     };
-    let albums = MediaProvider::artist_albums(provider.as_ref(), id).await?;
     Ok(ArtistPageView {
         id: artist.id.clone(),
         name: artist.name.clone(),
         descriptor: artist_descriptor(&artist),
         image_url: image_url(&artist.images),
         following,
-        albums,
     })
 }
 
@@ -1585,9 +1584,45 @@ async fn spotify_follow_artist(
 async fn spotify_artist_albums(
     state: tauri::State<'_, AppState>,
     artist_id: String,
-) -> Result<Vec<SearchAlbum>, String> {
+    offset: u32,
+) -> Result<ArtistAlbumsPage, String> {
+    let now = unix_now();
+    if let Some(deadline) = state
+        .sync_store
+        .cooldowns(now)
+        .map_err(|error| error.to_string())?
+        .get("/artists")
+        .copied()
+    {
+        return Err(format!(
+            "Spotify artist albums are rate limited; try again {}.",
+            provider::format_resume_time(deadline, chrono::Local::now())
+        ));
+    }
     let provider = provider_from(&state)?;
-    MediaProvider::artist_albums(provider.as_ref(), &artist_id).await
+    match artist_albums_page(provider.as_ref(), &artist_id, offset).await {
+        Ok(page) => Ok(page),
+        Err(retune_spotify::Error::RateLimited {
+            endpoint,
+            retry_after_secs,
+        }) => {
+            let deadline = now.saturating_add(retry_after_secs);
+            let mut cooldowns = state
+                .sync_store
+                .cooldowns(now)
+                .map_err(|error| error.to_string())?;
+            cooldowns.insert(endpoint_family(&endpoint), deadline);
+            state
+                .sync_store
+                .save_cooldowns(&cooldowns)
+                .map_err(|error| error.to_string())?;
+            Err(format!(
+                "Spotify artist albums are rate limited; try again {}.",
+                provider::format_resume_time(deadline, chrono::Local::now())
+            ))
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[tauri::command]

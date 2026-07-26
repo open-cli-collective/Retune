@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { clearedTrackRating, menuPosition, moveBefore, nextNativeDragActive, normalizeZoom, parseDragRange } from './ui.ts'
+import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange } from './ui.ts'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
@@ -95,8 +95,9 @@ export type ArtistPageView = {
   descriptor: string
   imageUrl: string | null
   following: boolean
-  albums: SearchAlbum[]
 }
+
+type ArtistAlbumsPage = { albums: SearchAlbum[]; nextOffset: number | null; total: number }
 
 type Track = {
   id: number
@@ -967,6 +968,7 @@ function App() {
           playlists={playlists}
           onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }}
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
+          onReorder={setPlaylists}
           onCollapse={() => dispatch({ type: 'settings', settings: { plCollapsed: !state.settings.plCollapsed } })}
           onShuffle={(shuffle) => invoke('set_shuffle', { shuffle }).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch((error) => dispatch({ type: 'error', error: String(error) }))}
           onRepeat={(repeat) => invoke('set_repeat', { mode: repeat }).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch((error) => dispatch({ type: 'error', error: String(error) }))}
@@ -1158,7 +1160,7 @@ function TransportBar({ playing, track, query, scope, connected, volume, searchR
         <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '⏸' : '▶'}</button>
         <button aria-label="Next track" onClick={onNext}>⏭</button>
       </div>
-      <label className="volume-control"><span aria-hidden="true">🔈</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} style={{ '--volume': `${volume}%` } as React.CSSProperties} onChange={(event) => onVolume(Number(event.target.value))} /><span aria-hidden="true">🔊</span></label>
+      <label className="volume-control"><span aria-hidden="true">−</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} style={{ '--volume': `${volume}%` } as React.CSSProperties} onChange={(event) => onVolume(Number(event.target.value))} /><span aria-hidden="true">+</span></label>
     </div>
     <div className={`lcd ${playing?.external ? 'external' : ''} ${shown ? '' : 'idle'}`}>
       <div className="lcd-artwork">{artwork ? <img src={artwork} alt="" /> : <span aria-hidden="true">♪</span>}</div>
@@ -1190,11 +1192,12 @@ function TransportBar({ playing, track, query, scope, connected, volume, searchR
   </header>
 }
 
-function Sidebar({ state, playlists, onSource, onPlaylist, onCollapse, onShuffle, onRepeat, onDrop, onError }: {
+function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError }: {
   state: State
   playlists?: PlaylistListView[]
   onSource: (source: Source) => void
   onPlaylist: (id: string) => void
+  onReorder: (playlists: PlaylistListView[]) => void
   onCollapse: () => void
   onShuffle: (shuffle: boolean) => void
   onRepeat: (repeat: RepeatMode) => void
@@ -1226,14 +1229,12 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onCollapse, onShuffle
   }
   const reorder = async (dragged: string, target: number) => {
     if (!playlists) return
-    const source = playlists.findIndex((playlist) => playlist.id === dragged)
-    if (source < 0) return
-    const ids = playlists.map((playlist) => playlist.id)
-    const [id] = ids.splice(source, 1)
-    ids.splice(target - (source < target ? 1 : 0), 0, id)
+    const ids = moveToIndex(playlists.map((playlist) => playlist.id), dragged, target)
+    const reordered = ids.map((id) => playlists.find((playlist) => playlist.id === id)!)
     setInsertBefore(undefined)
+    onReorder(reordered)
     try { await invoke('reorder_playlists', { ids }) }
-    catch (error) { onError(String(error)) }
+    catch (error) { onReorder(playlists); onError(String(error)) }
   }
   const unfollow = async () => {
     if (!confirming) return
@@ -1384,7 +1385,7 @@ function PlaylistView({ playlist, revision, playing, onPlay, onOpen, onError }: 
   }
   return <div className="playlist-view">
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}</span>{playlist.owned && <button disabled={!canReorder || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
-    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify only exposes items from playlists you own or collaborate on.</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <><div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
+    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify does not allow third-party apps to interact with playlists not owned by you. :-(</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <><div className="playlist-track-header"><span>#</span><span>Name</span><span>Time</span><span>Artist</span><span>Album</span></div>
     <div className="playlist-track-scroll">
       {tracks.map((track, index) => <div
         key={`${track.uri}-${index}`}
@@ -1863,6 +1864,33 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
   </div>
 }
 
+const artistPageCache = new Map<string, ArtistPageView>()
+const artistPageRequests = new Map<string, Promise<ArtistPageView>>()
+const artistAlbumsCache = new Map<string, ArtistAlbumsPage>()
+const artistAlbumRequests = new Map<string, Promise<ArtistAlbumsPage>>()
+
+function getArtistPage(id: string) {
+  const cached = artistPageCache.get(id)
+  if (cached) return Promise.resolve(cached)
+  const pending = artistPageRequests.get(id)
+  if (pending) return pending
+  const request = invoke<ArtistPageView>('spotify_artist_page', { artistId: id })
+    .then((page) => { artistPageCache.set(id, page); return page })
+    .finally(() => artistPageRequests.delete(id))
+  artistPageRequests.set(id, request)
+  return request
+}
+
+function getArtistAlbumsPage(id: string, offset: number) {
+  const key = `${id}:${offset}`
+  const pending = artistAlbumRequests.get(key)
+  if (pending) return pending
+  const request = invoke<ArtistAlbumsPage>('spotify_artist_albums', { artistId: id, offset })
+    .finally(() => artistAlbumRequests.delete(key))
+  artistAlbumRequests.set(key, request)
+  return request
+}
+
 function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAdd, onPlaylist, onError }: {
   id: string
   backLabel: string
@@ -1874,25 +1902,61 @@ function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAd
   onPlaylist: (subject: PlaylistSubject) => void
   onError: (error: string) => void
 }) {
-  const [page, setPage] = useState<ArtistPageView>()
+  const [page, setPage] = useState<ArtistPageView | undefined>(() => artistPageCache.get(id))
+  const [discography, setDiscography] = useState<ArtistAlbumsPage>(() => artistAlbumsCache.get(id) ?? { albums: [], nextOffset: 0, total: 0 })
+  const [loadingAlbums, setLoadingAlbums] = useState(!artistAlbumsCache.has(id))
+  const [albumsError, setAlbumsError] = useState<string>()
   const [toggling, setToggling] = useState(false)
   useEffect(() => {
     let active = true
-    setPage(undefined)
-    invoke<ArtistPageView>('spotify_artist_page', { artistId: id })
+    setPage(artistPageCache.get(id))
+    const cachedAlbums = artistAlbumsCache.get(id)
+    setDiscography(cachedAlbums ?? { albums: [], nextOffset: 0, total: 0 })
+    setLoadingAlbums(!cachedAlbums)
+    setAlbumsError(undefined)
+    getArtistPage(id)
       .then((view) => active && setPage(view))
       .catch((error) => active && onError(String(error)))
+    if (!cachedAlbums) getArtistAlbumsPage(id, 0)
+      .then((next) => {
+        if (!active) return
+        artistAlbumsCache.set(id, next)
+        setDiscography(next)
+      })
+      .catch((error) => active && setAlbumsError(String(error)))
+      .finally(() => active && setLoadingAlbums(false))
     return () => { active = false }
   }, [id])
-  if (!page) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading artist…</div></div>
+  if (!page || page.id !== id) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading artist…</div></div>
+  const loadMore = async () => {
+    if (discography.nextOffset === null || loadingAlbums) return
+    setLoadingAlbums(true)
+    setAlbumsError(undefined)
+    try {
+      const incoming = await getArtistAlbumsPage(id, discography.nextOffset)
+      setDiscography((current) => {
+        const next = { ...incoming, albums: mergeByUri(current.albums, incoming.albums) }
+        artistAlbumsCache.set(id, next)
+        return next
+      })
+    } catch (error) {
+      setAlbumsError(String(error))
+    } finally {
+      setLoadingAlbums(false)
+    }
+  }
   const toggleFollow = async () => {
     const following = !page.following
-    setPage({ ...page, following })
+    const next = { ...page, following }
+    artistPageCache.set(id, next)
+    setPage(next)
     setToggling(true)
     try {
       await invoke('spotify_follow_artist', { artistId: page.id, follow: following })
     } catch (error) {
-      setPage((current) => current ? { ...current, following: !following } : current)
+      const restored = { ...page, following: !following }
+      artistPageCache.set(id, restored)
+      setPage(restored)
       onError(String(error))
     } finally {
       setToggling(false)
@@ -1905,16 +1969,19 @@ function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAd
       <div className="spotify-page-copy">
         <div className="spotify-eyebrow">ARTIST</div>
         <h1>{page.name}</h1>
-        <div className="spotify-page-meta">{page.descriptor} · {page.albums.length} {page.albums.length === 1 ? 'album' : 'albums'}</div>
+        <div className="spotify-page-meta">{page.descriptor}{discography.total ? ` · ${discography.total} albums and singles` : ''}</div>
         <div className="spotify-page-actions">
           <button disabled={toggling} onClick={() => void toggleFollow()}>{page.following ? '✓ Following' : '+ Follow'}</button>
         </div>
       </div>
     </header>
     <section className="spotify-page-section">
-      <h2>Discography</h2>
-      {page.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
-      {!page.albums.length && <p>No albums found.</p>}
+      <h2>Discography{discography.total ? ` · ${discography.albums.length} of ${discography.total}` : ''}</h2>
+      {discography.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
+      {loadingAlbums && <p>Loading albums…</p>}
+      {albumsError && <div className="spotify-page-load-more"><span>{albumsError}</span><button onClick={() => void loadMore()}>Try again</button></div>}
+      {!loadingAlbums && !albumsError && !discography.albums.length && discography.nextOffset === null && <p>No albums or singles found.</p>}
+      {!loadingAlbums && !albumsError && discography.nextOffset !== null && <div className="spotify-page-load-more"><button onClick={() => void loadMore()}>Load more</button></div>}
     </section>
   </div>
 }

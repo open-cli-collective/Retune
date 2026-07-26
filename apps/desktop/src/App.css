@@ -35,7 +35,7 @@ button { color: inherit; }
 .transport-buttons button { color: var(--dim); font-size: 18px; line-height: 20px; }
 .transport-buttons .play-button { width: 24px; color: var(--text); font-size: 20px; }
 .volume-control { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 10px; }
-.volume-control > span:last-child { font-size: 12px; }
+.volume-control > span { width: 10px; text-align: center; font-size: 13px; font-weight: 600; }
 .volume-control input { width: 96px; height: 13px; margin: 0; appearance: none; background: transparent; cursor: pointer; }
 .volume-control input::-webkit-slider-runnable-track { height: 5px; border-radius: 3px; background: linear-gradient(to right, var(--dim) var(--volume), var(--volume-track) var(--volume)); box-shadow: inset 0 1px 1px rgb(0 0 0 / .18); }
 .volume-control input::-webkit-slider-thumb { width: 13px; height: 13px; margin-top: -4px; appearance: none; border: 1px solid var(--volume-knob-border); border-radius: 50%; background: linear-gradient(#fff, #e4e4e4); box-shadow: 0 1px 2px rgb(0 0 0 / .28); }
@@ -62,14 +62,14 @@ button { color: inherit; }
 .progress-row progress::-webkit-progress-bar { border-radius: 2px; background: color-mix(in srgb, var(--dim) 30%, transparent); }
 .progress-row progress::-webkit-progress-value { border-radius: 2px; background: var(--accent); }
 .progress-row progress::-moz-progress-bar { border-radius: 2px; background: var(--accent); }
-.search-area { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; min-width: 0; }
-.search-scope { display: flex; align-items: center; gap: 5px; }
+.search-area { width: 218px; justify-self: end; display: flex; flex-direction: column; align-items: stretch; gap: 5px; min-width: 0; }
+.search-scope { position: relative; display: flex; align-items: center; justify-content: center; }
 .scope-pills { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--control) 80%, transparent); }
 .scope-pills button { padding: 2px 8px; border-radius: 8px; color: var(--dim); }
 .scope-pills .active { color: var(--text); background: var(--list); box-shadow: 0 1px 2px rgb(0 0 0 / .18); font-weight: 600; }
-.connection-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #999; }
+.connection-dot { position: absolute; left: 0; width: 7px; height: 7px; border-radius: 50%; background: #999; }
 .connection-dot.connected { background: #1db954; box-shadow: 0 0 0 1px rgb(0 0 0 / .15); }
-.search { width: 196px; height: 24px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--list); outline: 0; }
+.search { box-sizing: border-box; width: 100%; height: 24px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--list); outline: 0; }
 .search:focus { border-color: var(--accent); }
 .body-grid { height: calc(100% - 60px); display: grid; grid-template-columns: 190px minmax(0, 1fr); }
 .sidebar { position: relative; min-height: 0; display: flex; flex-direction: column; padding-top: 7px; overflow: hidden; border-right: 1px solid var(--border); background: linear-gradient(120deg, var(--side1), var(--side2)); }
@@ -186,6 +186,8 @@ button { color: inherit; }
 .spotify-page-section h2 { margin: 0; padding: 8px 12px 5px; font-size: 11px; }
 .spotify-page-section > p { margin: 8px 12px; color: var(--dim); }
 .spotify-page-section .spotify-row { cursor: pointer; }
+.spotify-page-load-more { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 12px; color: var(--dim); }
+.spotify-page-load-more button { padding: 4px 11px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--control); }
 .spotify-track-row { min-height: 22px; display: grid; grid-template-columns: 27px minmax(0, 1fr) 82px 42px; align-items: center; padding: 0 10px 0 12px; border-left: 3px solid transparent; }
 .spotify-track-row:nth-child(even), .spotify-top-track-row:nth-child(odd) { background: var(--alt); }
 .spotify-track-row.highlighted { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--list)); }

@@ -82,6 +82,14 @@ pub struct SearchAlbum {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ArtistAlbumsPage {
+    pub albums: Vec<SearchAlbum>,
+    pub next_offset: Option<u32>,
+    pub total: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchTrack {
     pub uri: String,
     pub name: String,
@@ -133,7 +141,6 @@ pub trait MediaProvider: Send + Sync {
         BTreeMap::new()
     }
     async fn search(&self, query: &str) -> Result<SearchResults, String>;
-    async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String>;
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String>;
     async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String>;
 }
@@ -900,40 +907,6 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
         })
     }
 
-    async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String> {
-        let id = spotify_id(artist);
-        let mut offset = 0;
-        let mut albums = vec![];
-        loop {
-            let page = SpotifyClient::artist_albums(self, id, offset, SEARCH_PAGE_SIZE)
-                .await
-                .map_err(|error| error.to_string())?;
-            let count = (page.items.len() + page.skipped) as u32;
-            albums.extend(page.items.into_iter().map(|album| {
-                SearchAlbum {
-                    artist: album
-                        .artists
-                        .first()
-                        .map(|artist| artist.name.clone())
-                        .unwrap_or_default(),
-                    year: album
-                        .release_date
-                        .as_deref()
-                        .and_then(|date| date.get(..4))
-                        .map(str::to_owned),
-                    image_url: image_url(&album.images),
-                    album_type: album.album_type.as_deref().map(title_case),
-                    uri: album.uri,
-                    name: album.name,
-                }
-            }));
-            if page.next.is_none() || count == 0 {
-                return Ok(albums);
-            }
-            offset += count;
-        }
-    }
-
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
         let health = SyncHealth::new(None);
         let genres = GenreSource::new(self, &health);
@@ -965,6 +938,41 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 }
 
+pub async fn artist_albums_page<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    artist: &str,
+    offset: u32,
+) -> retune_spotify::Result<ArtistAlbumsPage> {
+    let page = client
+        .artist_albums(spotify_id(artist), offset, SEARCH_PAGE_SIZE)
+        .await?;
+    let count = (page.items.len() + page.skipped) as u32;
+    Ok(ArtistAlbumsPage {
+        albums: page
+            .items
+            .into_iter()
+            .map(|album| SearchAlbum {
+                artist: album
+                    .artists
+                    .first()
+                    .map(|artist| artist.name.clone())
+                    .unwrap_or_default(),
+                year: album
+                    .release_date
+                    .as_deref()
+                    .and_then(|date| date.get(..4))
+                    .map(str::to_owned),
+                image_url: image_url(&album.images),
+                album_type: album.album_type.as_deref().map(title_case),
+                uri: album.uri,
+                name: album.name,
+            })
+            .collect(),
+        next_offset: (page.next.is_some() && count > 0).then_some(offset + count),
+        total: page.total,
+    })
+}
+
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifySyncProvider<'_, T, S> {
     async fn library_snapshot(
         &self,
@@ -984,10 +992,6 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifySyncProvider<'_, T, S
 
     async fn search(&self, query: &str) -> Result<SearchResults, String> {
         MediaProvider::search(self.client, query).await
-    }
-
-    async fn artist_albums(&self, artist: &str) -> Result<Vec<SearchAlbum>, String> {
-        MediaProvider::artist_albums(self.client, artist).await
     }
 
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
@@ -1038,10 +1042,6 @@ impl MediaProvider for FakeProvider {
             albums: vec![],
             tracks: vec![],
         })
-    }
-
-    async fn artist_albums(&self, _artist: &str) -> Result<Vec<SearchAlbum>, String> {
-        Ok(vec![])
     }
 
     async fn album_tracks(&self, _album: &str) -> Result<Vec<NewTrack>, String> {
@@ -1734,24 +1734,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artist_albums_pages_by_artist_id() {
+    async fn artist_album_page_filters_release_types_and_preserves_pagination() {
         let client = client([Response::json(
             200,
             serde_json::json!({"items": [{
             "id": "album-1", "uri": "spotify:album:1", "name": "Album",
             "artists": [{"id": "artist-1", "name": "Artist"}], "images": []
-        }], "next": null}),
+        }], "next": "next", "total": 12}),
         )]);
 
-        let albums = MediaProvider::artist_albums(&client, "spotify:artist:artist-1")
+        let page = artist_albums_page(&client, "spotify:artist:artist-1", 0)
             .await
             .unwrap();
 
-        assert_eq!(albums[0].name, "Album");
-        assert!(client.transport().requests()[0]
-            .url
-            .contains("/artists/artist-1/albums?"));
-        assert!(client.transport().requests()[0].url.contains("limit=10"));
+        assert_eq!(page.albums[0].name, "Album");
+        assert_eq!(page.next_offset, Some(1));
+        assert_eq!(page.total, 12);
+        let url = url::Url::parse(&client.transport().requests()[0].url).unwrap();
+        assert_eq!(url.path(), "/v1/artists/artist-1/albums");
+        assert!(url
+            .query_pairs()
+            .any(|pair| pair == ("include_groups".into(), "album,single".into())));
+        assert!(url
+            .query_pairs()
+            .any(|pair| pair == ("limit".into(), "10".into())));
     }
 
     #[tokio::test]
