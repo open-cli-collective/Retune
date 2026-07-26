@@ -1201,7 +1201,6 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onCollapse, onShuffle
   const [menu, setMenu] = useState<{ x: number; y: number; playlist: PlaylistListView }>()
   const [confirming, setConfirming] = useState<PlaylistListView>()
   const [busy, setBusy] = useState(false)
-  const playlistList = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!confirming) return
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) setConfirming(undefined) }
@@ -1244,14 +1243,18 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onCollapse, onShuffle
   return <><aside className="sidebar" tabIndex={0} onMouseDown={(event) => event.currentTarget.focus()} onKeyDown={(event) => {
     if (event.target instanceof HTMLInputElement || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
     event.preventDefault()
-    playlistList.current?.scrollBy({ top: event.key === 'ArrowUp' ? -22 : 22 })
+    const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.source-row, .playlist-row')]
+    const current = rows.findIndex((row) => row.classList.contains('active'))
+    const next = rows[current + (event.key === 'ArrowUp' ? -1 : 1)]
+    next?.click()
+    next?.scrollIntoView({ block: 'nearest' })
   }}>
     <div className="section-label">Library</div>
     {(Object.keys(labels) as Source[]).map((source) => <button key={source} className={`source-row ${state.source === source && !state.selectedPlaylist ? 'active' : ''}`} onClick={() => onSource(source)}>
       <span>{labels[source].icons}</span><span>{labels[source].name}</span><span className="source-count">{state.view?.counts.perSource[source] ?? '—'}</span>
     </button>)}
     <button className="section-label playlists-label" aria-expanded={!state.settings.plCollapsed} onClick={onCollapse}><span className={`disclosure ${state.settings.plCollapsed ? 'collapsed' : ''}`} aria-hidden="true">▾</span><span>Playlists</span></button>
-    <div ref={playlistList} className="playlist-list">
+    <div className="playlist-list">
     {!state.settings.plCollapsed && creating && <div className="playlist-new-row"><input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
       if (event.key === 'Enter') void create()
       else if (event.key === 'Escape') { setCreating(false); setName('') }
