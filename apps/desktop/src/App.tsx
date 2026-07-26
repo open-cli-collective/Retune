@@ -889,6 +889,7 @@ function App() {
         event.preventDefault()
         player.step(1)
       } else if (!command && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        if (event.target instanceof Element && event.target.closest('.sidebar')) return
         event.preventDefault()
         const direction = event.key === 'ArrowUp' ? -1 : 1
         if (activePane === 'track') {
@@ -1178,7 +1179,6 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [dropTarget, setDropTarget] = useState<string>()
-  const [dragging, setDragging] = useState<string>()
   const [insertBefore, setInsertBefore] = useState<number>()
   const [menu, setMenu] = useState<{ x: number; y: number; playlist: PlaylistListView }>()
   const [confirming, setConfirming] = useState<PlaylistListView>()
@@ -1199,14 +1199,13 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       onError(String(error))
     }
   }
-  const reorder = async (target: number) => {
-    if (!playlists || !dragging) return
-    const source = playlists.findIndex((playlist) => playlist.id === dragging)
+  const reorder = async (dragged: string, target: number) => {
+    if (!playlists) return
+    const source = playlists.findIndex((playlist) => playlist.id === dragged)
     if (source < 0) return
     const ids = playlists.map((playlist) => playlist.id)
     const [id] = ids.splice(source, 1)
     ids.splice(target - (source < target ? 1 : 0), 0, id)
-    setDragging(undefined)
     setInsertBefore(undefined)
     try { await invoke('reorder_playlists', { ids }) }
     catch (error) { onError(String(error)) }
@@ -1223,7 +1222,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       setBusy(false)
     }
   }
-  return <><aside className="sidebar">
+  return <><aside className="sidebar" tabIndex={0} onMouseDown={(event) => event.currentTarget.focus()}>
     <div className="section-label">Library</div>
     {(Object.keys(labels) as Source[]).map((source) => <button key={source} className={`source-row ${state.source === source && !state.selectedPlaylist ? 'active' : ''}`} onClick={() => onSource(source)}>
       <span>{labels[source].icons}</span><span>{labels[source].name}</span><span className="source-count">{state.view?.counts.perSource[source] ?? '—'}</span>
@@ -1238,11 +1237,10 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       onClick={() => onPlaylist(playlist.id)}
       draggable
       onDragStart={(event) => {
-        setDragging(playlist.id)
         event.dataTransfer.effectAllowed = 'move'
         event.dataTransfer.setData(PLAYLIST_DRAG_TYPE, playlist.id)
       }}
-      onDragEnd={() => { setDragging(undefined); setInsertBefore(undefined); setDropTarget(undefined) }}
+      onDragEnd={() => { setInsertBefore(undefined); setDropTarget(undefined) }}
       onDragOver={(event) => {
         if (event.dataTransfer.types.includes(PLAYLIST_DRAG_TYPE)) {
           event.preventDefault()
@@ -1263,7 +1261,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onDrop, onError }: {
       onDrop={(event) => {
         event.preventDefault()
         if (event.dataTransfer.types.includes(PLAYLIST_DRAG_TYPE)) {
-          void reorder(insertBefore ?? index)
+          void reorder(event.dataTransfer.getData(PLAYLIST_DRAG_TYPE), insertBefore ?? index)
           return
         }
         if (!playlist.owned) return
