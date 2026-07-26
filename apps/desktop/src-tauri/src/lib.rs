@@ -2029,14 +2029,17 @@ fn record_play(
 }
 
 #[tauri::command]
-fn import_local(
-    app: tauri::AppHandle,
-    paths: Vec<String>,
+fn import_local(app: tauri::AppHandle, paths: Vec<String>) {
+    launch_local_import(app, paths.into_iter().map(PathBuf::from).collect());
+}
+
+fn run_local_import(
+    app: &tauri::AppHandle,
+    paths: &[PathBuf],
 ) -> Result<localfiles::ImportSummary, String> {
     let state = app.state::<AppState>();
-    let paths = paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
     let mut library = state.library.lock().expect("library mutex poisoned");
-    let summary = localfiles::import_transaction(&state.store, &mut library, &paths)?;
+    let summary = localfiles::import_transaction(&state.store, &mut library, paths)?;
     drop(library);
     for failure in &summary.failed {
         log::warn!(
@@ -2054,6 +2057,16 @@ fn import_local(
     app.emit("local-import-complete", summary.clone())
         .map_err(|error| error.to_string())?;
     Ok(summary)
+}
+
+fn launch_local_import(app: tauri::AppHandle, paths: Vec<PathBuf>) {
+    let _ = app.emit("local-import-started", ());
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = run_local_import(&app, &paths) {
+            notify_error(&app, error);
+            let _ = app.emit("local-import-failed", ());
+        }
+    }));
 }
 
 fn format_import_failures(failures: &[localfiles::FailedImport]) -> Option<String> {
@@ -2087,21 +2100,17 @@ fn import_local_files(app: &tauri::AppHandle) {
         )
         .pick_files(move |paths| {
             let Some(paths) = paths else { return };
-            let _ = handle.emit("local-import-started", ());
-            drop(tauri::async_runtime::spawn_blocking(move || {
-                let paths = paths
-                    .into_iter()
-                    .map(|path| {
-                        path.into_path()
-                            .map(|path| path.to_string_lossy().into_owned())
-                            .map_err(|error| error.to_string())
-                    })
-                    .collect::<Result<Vec<_>, _>>();
-                if let Err(error) = paths.and_then(|paths| import_local(handle.clone(), paths)) {
+            let paths = paths
+                .into_iter()
+                .map(|path| path.into_path().map_err(|error| error.to_string()))
+                .collect::<Result<Vec<_>, _>>();
+            match paths {
+                Ok(paths) => launch_local_import(handle.clone(), paths),
+                Err(error) => {
                     notify_error(&handle, error);
                     let _ = handle.emit("local-import-failed", ());
                 }
-            }));
+            }
         });
 }
 
@@ -2109,18 +2118,13 @@ fn import_local_folder(app: &tauri::AppHandle) {
     let handle = app.clone();
     app.dialog().file().pick_folder(move |path| {
         let Some(path) = path else { return };
-        let _ = handle.emit("local-import-started", ());
-        drop(tauri::async_runtime::spawn_blocking(move || {
-            let result = path
-                .into_path()
-                .map(|path| path.to_string_lossy().into_owned())
-                .map_err(|error| error.to_string())
-                .and_then(|path| import_local(handle.clone(), vec![path]));
-            if let Err(error) = result {
-                notify_error(&handle, error);
+        match path.into_path() {
+            Ok(path) => launch_local_import(handle.clone(), vec![path]),
+            Err(error) => {
+                notify_error(&handle, error.to_string());
                 let _ = handle.emit("local-import-failed", ());
             }
-        }));
+        }
     });
 }
 

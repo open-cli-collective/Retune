@@ -541,6 +541,7 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
+  const [nativeDragActive, setNativeDragActive] = useState(false)
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
@@ -707,6 +708,16 @@ function App() {
       void imported.then((stop) => stop())
       void importFailed.then((stop) => stop())
     }
+  }, [])
+
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onDragDropEvent(({ payload }) => {
+      if (payload.type === 'enter' || payload.type === 'over') setNativeDragActive(true)
+      if (payload.type === 'leave' || payload.type === 'drop') setNativeDragActive(false)
+      if (payload.type === 'drop' && payload.paths.length) invoke('import_local', { paths: payload.paths })
+        .catch((error) => dispatch({ type: 'error', error: String(error) }))
+    })
+    return () => { void unlisten.then((stop) => stop()) }
   }, [])
 
   useEffect(() => {
@@ -1068,6 +1079,7 @@ function App() {
         dispatch({ type: 'preferences', open: false })
       }} />}
       {playlistSubject && <AddToPlaylist subject={playlistSubject} revision={state.playlistRevision} onAdd={addToPlaylist} onClose={() => setPlaylistSubject(undefined)} onError={(error) => dispatch({ type: 'error', error })} />}
+      {nativeDragActive && <div className="native-drop-overlay"><strong>Drop to add to Library</strong><span>Audio files and folders</span></div>}
     </main>
   )
 }

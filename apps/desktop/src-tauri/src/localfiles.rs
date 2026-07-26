@@ -338,9 +338,21 @@ mod tests {
             fail: false,
         };
         let mut library = Library::new();
-        let summary =
-            import_transaction(&successful, &mut library, &[fixture("cc0-audio.mp3")]).unwrap();
-        assert_eq!((summary.imported, successful.saves.get()), (1, 1));
+        let summary = import_transaction(
+            &successful,
+            &mut library,
+            &[fixture("cc0-audio.mp3"), fixture("not-audio.mp3")],
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                summary.imported,
+                summary.duplicates,
+                summary.failed.len(),
+                successful.saves.get()
+            ),
+            (1, 0, 1, 1)
+        );
 
         let failing = RecordingStore {
             saves: Cell::new(0),
