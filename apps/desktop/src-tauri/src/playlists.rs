@@ -63,6 +63,24 @@ pub async fn sync<T: Transport, S: TokenStore>(
                 .iter()
                 .find(|playlist| playlist.id == summary.id);
             spotify_order.push(summary.id.clone());
+            if !summary.owned && !summary.collaborative {
+                let mut cached = cached.cloned().unwrap_or_else(|| CachedPlaylist {
+                    id: summary.id.clone(),
+                    name: summary.name.clone(),
+                    snapshot_id: summary.snapshot_id.clone(),
+                    owned: false,
+                    owner: None,
+                    track_count: 0,
+                    tracks: vec![],
+                    non_library_tracks: vec![],
+                });
+                cached.name = summary.name;
+                cached.snapshot_id = summary.snapshot_id;
+                cached.owner = Some(summary.owner.display_name.unwrap_or(summary.owner.id));
+                cached.track_count = summary.tracks.total as usize;
+                refreshed.insert(summary.id, cached);
+                continue;
+            }
             refreshed.insert(
                 summary.id.clone(),
                 if cached.is_some_and(|playlist| {
@@ -723,7 +741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_followed_playlist_fetches_tracks() {
+    async fn changed_collaborative_playlist_fetches_tracks() {
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([
@@ -732,7 +750,7 @@ mod tests {
                     200,
                     serde_json::json!({
                         "items": [{
-                            "id": "playlist", "name": "Followed", "snapshot_id": "changed",
+                            "id": "playlist", "name": "Collaborative", "snapshot_id": "changed", "collaborative": true,
                             "owner": {"id": "other", "display_name": "Other"},
                             "items": {"total": 2}
                         }],
@@ -858,7 +876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unchanged_followed_playlist_refills_implausibly_empty_cache_once() {
+    async fn followed_playlist_with_empty_cache_does_not_request_forbidden_items() {
         let summary = || {
             Response::json(
                 200,
@@ -877,44 +895,17 @@ mod tests {
             FakeTransport::new([
                 Response::json(200, serde_json::json!({"id": "user"})),
                 summary(),
-                Response::json(
-                    200,
-                    serde_json::json!({
-                        "items": [
-                            {"is_local": false, "item": {
-                                "uri": "spotify:track:1", "name": "One",
-                                "artists": [], "album": null, "duration_ms": 1000
-                            }},
-                            {"is_local": false, "item": {
-                                "uri": "spotify:track:2", "name": "Two",
-                                "artists": [], "album": null, "duration_ms": 2000
-                            }},
-                            {"is_local": false, "item": {
-                                "uri": "spotify:track:3", "name": "Three",
-                                "artists": [], "album": null, "duration_ms": 3000
-                            }}
-                        ],
-                        "next": null, "total": 3
-                    }),
-                ),
                 Response::json(200, serde_json::json!({"id": "user"})),
                 summary(),
             ]),
             tokens(retune_spotify::auth::SCOPES),
         );
-        let mut current = cached();
-        current.playlists[0].owned = false;
-        current.playlists[0].track_count = 3;
-        current.playlists[0].tracks.clear();
+        let current = PlaylistCache::default();
 
-        let filled = sync(&client, &current, &Library::new()).await.unwrap();
-
-        assert_eq!(
-            filled.playlists[0].tracks,
-            ["spotify:track:1", "spotify:track:2", "spotify:track:3"]
-        );
-        let synced_again = sync(&client, &filled, &Library::new()).await.unwrap();
-        assert_eq!(synced_again.playlists[0].tracks, filled.playlists[0].tracks);
+        let skipped = sync(&client, &current, &Library::new()).await.unwrap();
+        assert_eq!(skipped.playlists[0].track_count, 3);
+        let synced_again = sync(&client, &skipped, &Library::new()).await.unwrap();
+        assert!(synced_again.playlists[0].tracks.is_empty());
         assert_eq!(
             client
                 .transport()
@@ -925,7 +916,7 @@ mod tests {
                         .is_ok_and(|url| url.path() == "/v1/playlists/playlist/items")
                 })
                 .count(),
-            1
+            0
         );
     }
 

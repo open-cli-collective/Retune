@@ -39,7 +39,7 @@ use retune_core::{
 };
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
-    client::{Album, HttpTransport, SpotifyClient, Transport},
+    client::{Album, HttpTransport, SpotifyClient, Track as SpotifyTrack, Transport},
     normalize::UNCATEGORIZED,
     tokens::{
         migrate_token_store, CachedTokenStore, EncryptedFsTokenStore, KeychainTokenStore,
@@ -457,6 +457,7 @@ struct PlaylistListView {
     owner: Option<String>,
     contains: bool,
     track_count: usize,
+    items_available: bool,
 }
 
 #[derive(Serialize)]
@@ -1694,6 +1695,9 @@ fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec
             owner: playlist.owner.clone(),
             contains: !uris.is_empty() && uris.iter().all(|uri| playlist.tracks.contains(uri)),
             track_count: playlist.track_count,
+            items_available: playlist.owned
+                || playlist.track_count == 0
+                || !playlist.tracks.is_empty(),
         })
         .collect()
 }
@@ -1708,6 +1712,65 @@ fn playlists_list(
         &state.playlists.lock().expect("playlist mutex poisoned"),
         &uris,
     )
+}
+
+fn spotify_item_url(kind: &str, id: &str) -> Result<String, String> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err("Invalid Spotify ID.".into());
+    }
+    Ok(format!("https://open.spotify.com/{kind}/{id}"))
+}
+
+#[tauri::command]
+fn open_spotify_playlist(id: String) -> Result<(), String> {
+    tauri_plugin_opener::open_url(spotify_item_url("playlist", &id)?, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SpotifyDestination {
+    Album,
+    Artist,
+}
+
+fn spotify_track_destination_url(
+    track: &SpotifyTrack,
+    destination: SpotifyDestination,
+) -> Result<String, String> {
+    let (kind, id) = match destination {
+        SpotifyDestination::Album => ("album", track.album.as_ref().map(|album| album.id.as_str())),
+        SpotifyDestination::Artist => (
+            "artist",
+            track.artists.first().map(|artist| artist.id.as_str()),
+        ),
+    };
+    spotify_item_url(
+        kind,
+        id.ok_or_else(|| format!("Spotify {kind} is unavailable."))?,
+    )
+}
+
+#[tauri::command]
+async fn open_spotify_track_destination(
+    state: tauri::State<'_, AppState>,
+    uri: String,
+    destination: SpotifyDestination,
+) -> Result<(), String> {
+    let id = track_id(&uri).ok_or("This track is not from Spotify.")?;
+    let track = provider_from(&state)?
+        .track(id)
+        .await
+        .map_err(|error| error.to_string())?;
+    tauri_plugin_opener::open_url(
+        spotify_track_destination_url(&track, destination)?,
+        None::<&str>,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2697,6 +2760,8 @@ pub fn run() {
             add_spotify_album,
             remove_spotify_album,
             playlists_list,
+            open_spotify_playlist,
+            open_spotify_track_destination,
             reorder_playlists,
             playlist_unfollow,
             playlist_create,
@@ -3259,12 +3324,39 @@ mod tests {
 
     #[test]
     fn playlist_membership_requires_all_nonempty_uris() {
-        let cache = playlist_cache();
+        let mut cache = playlist_cache();
 
         assert!(playlist_list_views(&cache, &["one".into(), "two".into()])[0].contains);
         assert!(!playlist_list_views(&cache, &["one".into(), "missing".into()])[0].contains);
         assert!(!playlist_list_views(&cache, &["missing".into()])[0].contains);
         assert!(!playlist_list_views(&cache, &[])[0].contains);
+        assert!(playlist_list_views(&cache, &[])[0].items_available);
+        cache.playlists[0].owned = false;
+        cache.playlists[0].tracks.clear();
+        assert!(!playlist_list_views(&cache, &[])[0].items_available);
+    }
+
+    #[test]
+    fn spotify_links_validate_ids_and_track_destinations() {
+        assert_eq!(
+            spotify_item_url("playlist", "abc123").unwrap(),
+            "https://open.spotify.com/playlist/abc123"
+        );
+        assert!(spotify_item_url("playlist", "").is_err());
+        assert!(spotify_item_url("playlist", "../account").is_err());
+
+        let track: SpotifyTrack = serde_json::from_value(serde_json::json!({
+            "uri": "spotify:track:track1", "name": "Song", "artists": [{"id": "artist1", "name": "Artist"}],
+            "album": {"id": "album1", "uri": "spotify:album:album1", "name": "Album"}
+        })).unwrap();
+        assert_eq!(
+            spotify_track_destination_url(&track, SpotifyDestination::Album).unwrap(),
+            "https://open.spotify.com/album/album1"
+        );
+        assert_eq!(
+            spotify_track_destination_url(&track, SpotifyDestination::Artist).unwrap(),
+            "https://open.spotify.com/artist/artist1"
+        );
     }
 
     #[tokio::test]

@@ -998,6 +998,8 @@ pub struct Playlist {
     pub owner: PlaylistOwner,
     #[serde(rename = "items", alias = "tracks")]
     pub tracks: PlaylistTrackCount,
+    #[serde(default)]
+    pub collaborative: bool,
     #[serde(skip)]
     pub owned: bool,
 }
@@ -1615,7 +1617,7 @@ mod tests {
                 200,
                 serde_json::json!({
                     "items": [{
-                        "id": "theirs", "name": "Theirs", "snapshot_id": "s2",
+                        "id": "theirs", "name": "Theirs", "snapshot_id": "s2", "collaborative": true,
                         "owner": {"id": "other"}, "items": {"total": 0}
                     }],
                     "next": null, "total": 2
@@ -1647,6 +1649,7 @@ mod tests {
         let second = client.playlists(1, 1, "user").await.unwrap();
         assert!(first.items[0].owned);
         assert!(!second.items[0].owned);
+        assert!(second.items[0].collaborative);
         assert_eq!(first.items[0].tracks.total, 3);
 
         let tracks = client.playlist_tracks("mine", 0, 100).await.unwrap();
