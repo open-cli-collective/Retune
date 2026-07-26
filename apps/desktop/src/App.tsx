@@ -602,12 +602,6 @@ function App() {
     setBrowserPanes(browserPanes)
     if (!browserPanes[facet]) setActivePane('track')
   }, [setBrowserPanes, state.settings.browserPanes])
-  const cycleRepeat = () => {
-    const repeat: RepeatMode = state.settings.repeat === 'off' ? 'all' : state.settings.repeat === 'all' ? 'one' : 'off'
-    invoke('set_repeat', { mode: repeat })
-      .then(() => dispatch({ type: 'settings', settings: { repeat } }))
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
-  }
   const openInfo = (id?: number) => {
     if (selectedTracks.length > 1) {
       dispatch({ type: 'info', info: { kind: 'multiple', tracks: selectedTracks } })
@@ -813,10 +807,6 @@ function App() {
     dispatch({ type: 'settings', settings: { spotifyClientId } })
     await invoke('set_settings', { settings })
   }
-  const cycleTheme = () => dispatch({
-    type: 'settings',
-    settings: { theme: state.settings.theme === 'system' ? 'light' : state.settings.theme === 'light' ? 'dark' : 'system' },
-  })
   const playingTrack = playbackTracks.find((track) => track.id === state.playing?.trackId)
   const selectedAlbum = state.sel.alb?.length === 1 ? state.sel.alb[0] : undefined
 
@@ -955,20 +945,16 @@ function App() {
         track={playingTrack}
         query={state.query}
         scope={state.scope}
-        theme={state.settings.theme}
         connected={state.connected}
         volume={state.settings.volume}
-        repeat={state.settings.repeat}
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
         onScope={(scope) => dispatch({ type: 'scope', scope })}
         onPlay={player.toggle}
         onPrev={() => player.step(-1)}
         onNext={() => player.step(1)}
-        onRepeat={cycleRepeat}
         onVolume={(volume) => { dispatch({ type: 'settings', settings: { volume } }); player.setVolume(volume) }}
         onSeek={player.seek}
-        onTheme={cycleTheme}
       />
       <div className="body-grid">
         <Sidebar
@@ -1112,12 +1098,12 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
 
 const artworkCache = new Map<string, string | null>()
 
-function TransportBar({ playing, track, query, scope, theme, connected, volume, repeat, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onRepeat, onVolume, onSeek, onTheme }: {
-  playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']; theme: Theme
-  connected: boolean; volume: number; repeat: RepeatMode
+function TransportBar({ playing, track, query, scope, connected, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek }: {
+  playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']
+  connected: boolean; volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
-  onPlay: () => void; onPrev: () => void; onNext: () => void; onRepeat: () => void; onVolume: (volume: number) => void; onTheme: () => void
+  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void
 }) {
   const elapsed = playing?.elapsed ?? 0
   const shown = playing?.external ? {
@@ -1151,14 +1137,14 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
       })
     return () => { current = false }
   }, [uri])
-  const volumeVisible = !connected || playing?.volumeSupported
   return <header className="transport">
     <div className="transport-controls">
-      <button aria-label="Previous track" onClick={onPrev}>◀◀</button>
-      <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '❚❚' : '▶'}</button>
-      <button aria-label="Next track" onClick={onNext}>▶▶</button>
-      <button className={`repeat-button ${repeat !== 'off' ? 'active' : ''}`} aria-label={`Repeat: ${repeat}`} title={`Repeat: ${repeat}`} onClick={onRepeat}>⟳{repeat === 'one' && <sup>1</sup>}</button>
-      {volumeVisible && <><span aria-hidden="true">🔊</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(event) => onVolume(Number(event.target.value))} /></>}
+      <div className="transport-buttons">
+        <button aria-label="Previous track" onClick={onPrev}>⏮</button>
+        <button className="play-button" aria-label={playing?.isPlaying ? 'Pause' : 'Play'} onClick={onPlay}>{playing?.isPlaying ? '⏸' : '▶'}</button>
+        <button aria-label="Next track" onClick={onNext}>⏭</button>
+      </div>
+      <label className="volume-control"><span aria-hidden="true">🔈</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} style={{ '--volume': `${volume}%` } as React.CSSProperties} onChange={(event) => onVolume(Number(event.target.value))} /><span aria-hidden="true">🔊</span></label>
     </div>
     <div className={`lcd ${playing?.external ? 'external' : ''} ${shown ? '' : 'idle'}`}>
       <div className="lcd-artwork">{artwork ? <img src={artwork} alt="" /> : <span aria-hidden="true">♪</span>}</div>
@@ -1178,13 +1164,14 @@ function TransportBar({ playing, track, query, scope, theme, connected, volume, 
       </div>
     </div>
     <div className="search-area">
-      <div className="scope-pills" aria-label="Search scope">
-        <button className={scope === 'library' ? 'active' : ''} onClick={() => onScope('library')}>Library</button>
-        <button className={scope === 'spotify' ? 'active' : ''} onClick={() => onScope('spotify')}>Spotify</button>
-      </div>
-      <span className={`connection-dot ${connected ? 'connected' : ''}`} title={connected ? 'Spotify connected' : 'Spotify not connected'} aria-label={connected ? 'Spotify connected' : 'Spotify not connected'} />
       <input ref={searchRef} className="search" type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
-      <button className="theme-button" aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`} onClick={onTheme}>{theme === 'system' ? '🖥' : theme === 'dark' ? '☾' : '☀'}</button>
+      <div className="search-scope">
+        <span className={`connection-dot ${connected ? 'connected' : ''}`} title={connected ? 'Spotify connected' : 'Spotify not connected'} aria-label={connected ? 'Spotify connected' : 'Spotify not connected'} />
+        <div className="scope-pills" aria-label="Search scope">
+          <button className={scope === 'library' ? 'active' : ''} onClick={() => onScope('library')}>Library</button>
+          <button className={scope === 'spotify' ? 'active' : ''} onClick={() => onScope('spotify')}>Spotify</button>
+        </div>
+      </div>
     </div>
   </header>
 }
