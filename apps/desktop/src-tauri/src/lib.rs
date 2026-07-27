@@ -1,11 +1,15 @@
 mod fixture;
+mod library_commands;
 #[cfg(debug_assertions)]
 mod local_spike;
 mod localfiles;
 mod media_keys;
 mod playback;
+mod playback_commands;
+mod playlist_commands;
 mod playlists;
 mod provider;
+mod spotify_commands;
 mod store;
 mod sync;
 mod sync_orchestrator;
@@ -461,57 +465,6 @@ struct PlaylistTrackView {
     rating: Option<RatingView>,
 }
 
-#[tauri::command]
-fn browse(
-    state: tauri::State<'_, AppState>,
-    source: SourceId,
-    sel: SelectionDto,
-    query: Option<String>,
-) -> BrowseView {
-    let library = state.library.lock().expect("library mutex poisoned");
-    let mut selection = Selection::default();
-    selection.select_cat(sel.cat);
-    selection.select_art(sel.art);
-    selection.select_alb(sel.alb);
-
-    let facet_view = browse::facets(&library, source, &selection);
-    let query = query.unwrap_or_default().trim().to_lowercase();
-    let selected_tracks = browse::tracks(&library, source, &selection)
-        .into_iter()
-        .filter(|track| {
-            query.is_empty()
-                || [&track.name, &track.art, &track.alb, &track.cat]
-                    .iter()
-                    .any(|value| value.to_lowercase().contains(&query))
-        })
-        .collect::<Vec<_>>();
-    let (album_rating, album_rating_artist, album_rating_ambiguous) =
-        album_rating_view(&library, &selection, &selected_tracks);
-    let tracks = selected_tracks
-        .into_iter()
-        .map(|track| TrackView::from_track(track, library.effective_rating(track.id)))
-        .collect();
-
-    BrowseView {
-        facets: FacetsView {
-            cats: facet_view.cats,
-            arts: facet_view.arts,
-            albs: facet_view.albs,
-        },
-        tracks,
-        album_rating,
-        album_rating_artist,
-        album_rating_ambiguous,
-        counts: counts(&library, source, &selection, &query),
-    }
-}
-
-#[tauri::command]
-fn metadata_values(state: tauri::State<'_, AppState>) -> MetadataValues {
-    let library = state.library.lock().expect("library mutex poisoned");
-    collect_metadata_values(&library)
-}
-
 fn collect_metadata_values(library: &Library) -> MetadataValues {
     let mut arts = BTreeSet::new();
     let mut albs = BTreeSet::new();
@@ -616,42 +569,6 @@ fn counts(library: &Library, source: SourceId, selection: &Selection, query: &st
     }
 }
 
-#[tauri::command]
-fn click_track_star(state: tauri::State<'_, AppState>, id: u64, stars: u8) -> Result<(), String> {
-    let rating = Rating::new(stars).ok_or_else(|| "rating must be 1 through 5".to_string())?;
-    mutate_library(&state, |library| {
-        library
-            .click_track_star(TrackId(id), rating)
-            .map_err(|error| error.to_string())
-    })
-}
-
-#[tauri::command]
-fn set_album_rating(
-    state: tauri::State<'_, AppState>,
-    source: SourceId,
-    art: String,
-    alb: String,
-    stars: Option<u8>,
-) -> Result<(), String> {
-    let rating = stars
-        .map(|stars| Rating::new(stars).ok_or_else(|| "rating must be 1 through 5".to_string()))
-        .transpose()?;
-    mutate_library(&state, |library| {
-        library.set_album_rating(AlbumKey { source, art, alb }, rating);
-        Ok(())
-    })
-}
-
-#[tauri::command]
-fn get_track(state: tauri::State<'_, AppState>, id: u64) -> Result<TrackInfoView, String> {
-    let library = state.library.lock().expect("library mutex poisoned");
-    let track = library
-        .get(TrackId(id))
-        .ok_or_else(|| format!("unknown track id {id}"))?;
-    Ok(TrackInfoView::from_track(&library, track))
-}
-
 fn rating_view(rating: EffectiveRating) -> RatingView {
     match rating {
         EffectiveRating::Explicit(rating) => RatingView {
@@ -663,26 +580,6 @@ fn rating_view(rating: EffectiveRating) -> RatingView {
             explicit: false,
         },
     }
-}
-
-#[tauri::command]
-fn edit_track(
-    state: tauri::State<'_, AppState>,
-    id: u64,
-    edit: TrackEditDto,
-) -> Result<(), String> {
-    let rating_change = rating_change(&edit)?;
-    mutate_library(&state, |library| {
-        apply_track_info(library, id, &edit, rating_change)
-    })
-}
-
-#[tauri::command]
-fn set_track_infos(app: tauri::AppHandle, ids: Vec<u64>, edit: TrackEditDto) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    mutate_library(&state, |library| apply_track_infos(library, &ids, &edit))?;
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())
 }
 
 fn rating_change(edit: &TrackEditDto) -> Result<Option<Option<Rating>>, String> {
@@ -864,11 +761,6 @@ fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionS
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn connection_state(state: tauri::State<'_, AppState>) -> Result<ConnectionState, String> {
-    stored_connection_state(&state.token_store)
-}
-
 fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let connection = stored_connection_state(&state.token_store)?;
@@ -877,96 +769,6 @@ fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
         .sync_connection(&connection)
         .map_err(|error| error.to_string())?;
     app.emit("connection-changed", connection)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String> {
-    let client_id = app
-        .state::<AppState>()
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .spotify_client_id
-        .trim()
-        .to_owned();
-    if client_id.is_empty() {
-        return Err("Spotify Client ID is missing. Add it in Preferences, then try again.".into());
-    }
-
-    // Fixed port: Spotify matches redirect URIs exactly, so the dashboard
-    // registration must be http://127.0.0.1:8898/callback.
-    let listener = LoopbackListener::bind_on(8898).map_err(|error| error.to_string())?;
-    let redirect_uri = listener.redirect_uri().map_err(|error| error.to_string())?;
-    let state = auth::random_state();
-    let pkce = Pkce::generate();
-    let url = auth::authorize_url(&client_id, &redirect_uri, &state, &pkce.challenge)
-        .map_err(|error| error.to_string())?;
-    app.opener()
-        .open_url(url.to_string(), None::<String>)
-        .map_err(|error| error.to_string())?;
-    let callback = tauri::async_runtime::spawn_blocking(move || {
-        listener.accept(&state, Duration::from_secs(180))
-    })
-    .await
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())?;
-    let token = auth::exchange_code(
-        &reqwest::Client::new(),
-        &client_id,
-        &callback.code,
-        &redirect_uri,
-        &pkce.verifier,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let refresh = token
-        .refresh_token
-        .ok_or_else(|| "Spotify did not return a refresh token".to_string())?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_secs();
-    let state = app.state::<AppState>();
-    let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.into());
-    state
-        .token_store
-        .save(&Tokens {
-            access: token.access_token,
-            refresh,
-            expires_at: now.saturating_add(token.expires_in),
-            scopes: granted_scopes,
-        })
-        .map_err(|error| error.to_string())?;
-    *state.spotify.lock().expect("spotify mutex poisoned") =
-        spotify_provider(&client_id, Arc::clone(&state.token_store))?;
-    set_auto_connect(&app, true)?;
-    emit_connection_state(&app)?;
-    sync_spotify(&app).await
-}
-
-#[tauri::command]
-async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = state
-        .spotify
-        .lock()
-        .expect("spotify mutex poisoned")
-        .clone();
-    state.playback.stop(client.as_deref()).await?;
-    state.playback.switch_to_connect().await;
-    set_auto_connect(&app, false)?;
-    app.state::<AppState>()
-        .token_store
-        .clear()
-        .map_err(|error| error.to_string())?;
-    emit_connection_state(&app)?;
-    let shuffle = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .shuffle;
-    app.emit("player-state", empty_player_state(shuffle))
         .map_err(|error| error.to_string())
 }
 
@@ -1066,15 +868,6 @@ async fn resolve_track_artwork<T: Transport, S: TokenStore>(
     }
     cache.insert(uri.into(), artwork.clone());
     artwork
-}
-
-#[tauri::command]
-async fn track_artwork(
-    state: tauri::State<'_, AppState>,
-    uri: String,
-) -> Result<Option<String>, String> {
-    let provider = provider_from(&state).ok();
-    Ok(resolve_track_artwork(provider.as_deref(), &state.artwork_cache, &uri).await)
 }
 
 pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerStateEvent) {
@@ -1439,30 +1232,6 @@ fn initial_library(debug: bool) -> Library {
     }
 }
 
-#[tauri::command]
-async fn sync_from_spotify(app: tauri::AppHandle) -> Result<(), String> {
-    sync_spotify(&app).await
-}
-
-#[tauri::command]
-async fn spotify_search(
-    state: tauri::State<'_, AppState>,
-    query: String,
-) -> Result<SearchResults, String> {
-    if query.trim().is_empty() {
-        return Ok(SearchResults {
-            artists: vec![],
-            albums: vec![],
-            tracks: vec![],
-        });
-    }
-    if !stored_connection_state(&state.token_store)?.connected {
-        return Err("Connect to Spotify to search.".into());
-    }
-    let provider = provider_from(&state)?;
-    MediaProvider::search(provider.as_ref(), query.trim()).await
-}
-
 fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
     let artist = album.artists.first();
     let artist_name = artist.map(|artist| artist.name.clone()).unwrap_or_default();
@@ -1536,59 +1305,6 @@ fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
         .map(|track| track.uri.clone())
         .collect::<Vec<_>>();
     library.remove_uris(&uris)
-}
-
-#[tauri::command]
-async fn spotify_album_page(
-    state: tauri::State<'_, AppState>,
-    uri: String,
-) -> Result<AlbumPageView, String> {
-    let provider = provider_from(&state)?;
-    let album = provider
-        .album(spotify_id(&uri))
-        .await
-        .map_err(|error| error.to_string())?;
-    let library = state.library.lock().expect("library mutex poisoned");
-    Ok(album_page_view(&library, album))
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn spotify_artist_page(
-    state: tauri::State<'_, AppState>,
-    artist_id: String,
-) -> Result<ArtistPageView, String> {
-    let provider = provider_from(&state)?;
-    let id = spotify_id(&artist_id);
-    let artist = provider
-        .artist(id)
-        .await
-        .map_err(|error| error.to_string())?;
-    let following = match provider.is_following_artist(id).await {
-        Ok(following) => following,
-        Err(error) => {
-            log::warn!("Could not read Spotify follow state for artist {id}: {error}");
-            false
-        }
-    };
-    Ok(ArtistPageView {
-        id: artist.id.clone(),
-        name: artist.name.clone(),
-        descriptor: artist_descriptor(&artist),
-        image_url: image_url(&artist.images),
-        following,
-    })
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn spotify_follow_artist(
-    state: tauri::State<'_, AppState>,
-    artist_id: String,
-    follow: bool,
-) -> Result<(), String> {
-    provider_from(&state)?
-        .follow_artist(spotify_id(&artist_id), follow)
-        .await
-        .map_err(|error| error.to_string())
 }
 
 async fn artist_albums_outcome<T: Transport, S: TokenStore>(
@@ -1671,85 +1387,6 @@ async fn artist_albums_outcome<T: Transport, S: TokenStore>(
     }
 }
 
-#[tauri::command(rename_all = "camelCase")]
-async fn spotify_artist_albums(
-    state: tauri::State<'_, AppState>,
-    artist_id: String,
-    offset: u32,
-) -> Result<ArtistAlbumsPage, String> {
-    let provider = provider_from(&state)?;
-    artist_albums_outcome(
-        provider.as_ref(),
-        &state.sync_store,
-        &artist_id,
-        offset,
-        unix_now(),
-        chrono::Local::now(),
-    )
-    .await
-}
-
-#[tauri::command]
-async fn add_spotify_album(
-    app: tauri::AppHandle,
-    uri: String,
-    name: String,
-    artist: String,
-) -> Result<(), String> {
-    playlists::reject_local_uris(std::slice::from_ref(&uri), |_| Some(name.clone()))?;
-    let state = app.state::<AppState>();
-    let provider = provider_from(&state)?;
-    let mut tracks = MediaProvider::album_tracks(provider.as_ref(), &uri).await?;
-    for track in &mut tracks {
-        if track.alb.is_empty() {
-            track.alb.clone_from(&name);
-        }
-        if track.art.is_empty() {
-            track.art.clone_from(&artist);
-        }
-    }
-    let uris = tracks
-        .iter()
-        .map(|track| track.uri.clone())
-        .collect::<Vec<_>>();
-    playlists::reject_local_uris(&uris, |uri| {
-        tracks
-            .iter()
-            .find(|track| track.uri == uri)
-            .map(|track| track.name.clone())
-    })?;
-    provider.save_to_spotify(&uris).await?;
-    mutate_library(&state, |library| {
-        for track in tracks {
-            library.add(track);
-        }
-        Ok(())
-    })?;
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn remove_spotify_album(app: tauri::AppHandle, uri: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let provider = provider_from(&state)?;
-    let id = spotify_id(&uri);
-    let album = provider
-        .album(id)
-        .await
-        .map_err(|error| error.to_string())?;
-    provider
-        .remove_saved_album(id)
-        .await
-        .map_err(|error| error.to_string())?;
-    mutate_library(&state, |library| {
-        remove_album_tracks(library, &album);
-        Ok(())
-    })?;
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())
-}
-
 fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec<PlaylistListView> {
     cache
         .playlists
@@ -1766,18 +1403,6 @@ fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec
                 || !playlist.tracks.is_empty(),
         })
         .collect()
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn playlists_list(
-    state: tauri::State<'_, AppState>,
-    uris: Option<Vec<String>>,
-) -> Vec<PlaylistListView> {
-    let uris = uris.unwrap_or_default();
-    playlist_list_views(
-        &state.playlists.lock().expect("playlist mutex poisoned"),
-        &uris,
-    )
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1799,15 +1424,6 @@ fn spotify_item_link(kind: &str, id: &str, target: SpotifyOpenTarget) -> Result<
         SpotifyOpenTarget::App => format!("spotify:{kind}:{id}"),
         SpotifyOpenTarget::Web => format!("https://open.spotify.com/{kind}/{id}"),
     })
-}
-
-#[tauri::command(rename_all = "camelCase")]
-fn open_spotify_playlist(id: String, target: SpotifyOpenTarget) -> Result<(), String> {
-    tauri_plugin_opener::open_url(spotify_item_link("playlist", &id, target)?, None::<&str>)
-        .map_err(|error| match target {
-            SpotifyOpenTarget::App => format!("Could not open the Spotify app: {error}"),
-            SpotifyOpenTarget::Web => error.to_string(),
-        })
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1847,133 +1463,6 @@ fn spotify_track_destination(
     }
 }
 
-#[tauri::command]
-async fn resolve_spotify_track_destination(
-    state: tauri::State<'_, AppState>,
-    uri: String,
-    destination: SpotifyDestination,
-) -> Result<SpotifyNavigation, String> {
-    let id = track_id(&uri).ok_or("This track is not from Spotify.")?;
-    let track = provider_from(&state)?
-        .track(id)
-        .await
-        .map_err(|error| error.to_string())?;
-    spotify_track_destination(&track, destination)
-}
-
-#[tauri::command]
-fn reorder_playlists(app: tauri::AppHandle, ids: Vec<String>) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut cache = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    playlists::reorder_playlists(&mut cache, &ids)?;
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn playlist_unfollow(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    let mut cache = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    playlists::unfollow(client.as_ref(), &mut cache, &id)
-        .await
-        .map_err(|error| playlist_error(&state, error))?;
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn playlist_tracks(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<Vec<PlaylistTrackView>, String> {
-    let playlists = state.playlists.lock().expect("playlist mutex poisoned");
-    let playlist = playlists
-        .playlists
-        .iter()
-        .find(|playlist| playlist.id == id)
-        .ok_or_else(|| format!("Unknown playlist {id}"))?;
-    let library = state.library.lock().expect("library mutex poisoned");
-    Ok(playlist
-        .tracks
-        .iter()
-        .map(|uri| {
-            if let Some(track) = library.tracks().iter().find(|track| &track.uri == uri) {
-                PlaylistTrackView {
-                    id: Some(track.id.0),
-                    uri: track.uri.clone(),
-                    name: track.name.clone(),
-                    art: track.art.clone(),
-                    alb: track.alb.clone(),
-                    duration_secs: track.duration.as_secs(),
-                    rating: library.effective_rating(track.id).map(rating_view),
-                }
-            } else {
-                let cached = playlist
-                    .non_library_tracks
-                    .iter()
-                    .find(|track| &track.uri == uri);
-                PlaylistTrackView {
-                    id: None,
-                    uri: uri.clone(),
-                    name: cached.map(|track| track.name.clone()).unwrap_or_default(),
-                    art: cached.map(|track| track.art.clone()).unwrap_or_default(),
-                    alb: cached.map(|track| track.alb.clone()).unwrap_or_default(),
-                    duration_secs: cached.map_or(0, |track| track.duration / 1000),
-                    rating: None,
-                }
-            }
-        })
-        .collect())
-}
-
-#[tauri::command]
-async fn playlist_create(app: tauri::AppHandle, name: String) -> Result<PlaylistListView, String> {
-    let state = app.state::<AppState>();
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("Playlist name is required.".into());
-    }
-    let mut cache = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    let client = provider_from(&state)?;
-    playlists::create(client.as_ref(), &mut cache, name)
-        .await
-        .map_err(|error| playlist_error(&state, error))?;
-    let created = playlist_list_views(&cache, &[])
-        .pop()
-        .expect("create inserted playlist");
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())?;
-    Ok(created)
-}
-
 async fn playlist_add_inner(
     app: &tauri::AppHandle,
     id: String,
@@ -2006,274 +1495,6 @@ async fn playlist_add_inner(
     *state.playlists.lock().expect("playlist mutex poisoned") = cache;
     app.emit("playlists-changed", ())
         .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn playlist_add(app: tauri::AppHandle, id: String, uris: Vec<String>) -> Result<(), String> {
-    playlist_add_inner(&app, id, uris).await
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn playlist_add_album(
-    app: tauri::AppHandle,
-    id: String,
-    album_uri: String,
-    album_label: Option<String>,
-) -> Result<(), String> {
-    playlists::reject_local_uris(std::slice::from_ref(&album_uri), |_| album_label.clone())?;
-    let provider = provider_from(&app.state::<AppState>())?;
-    let tracks = MediaProvider::album_tracks(provider.as_ref(), &album_uri).await?;
-    let uris = tracks.into_iter().map(|track| track.uri).collect();
-    playlist_add_inner(&app, id, uris).await
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn playlist_reorder(
-    app: tauri::AppHandle,
-    id: String,
-    range_start: u32,
-    insert_before: u32,
-    range_length: u32,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    let mut cache = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
-    let result = playlists::reorder(
-        client.as_ref(),
-        &mut cache,
-        &library,
-        &id,
-        range_start,
-        insert_before,
-        range_length,
-    )
-    .await;
-    match result {
-        Ok(()) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        Err(playlists::PlaylistReorderError::Reloaded) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Err(playlists::STALE_PLAYLIST.into())
-        }
-        Err(playlists::PlaylistReorderError::Spotify(error)) => Err(playlist_error(&state, error)),
-        Err(playlists::PlaylistReorderError::Other(error)) => Err(error),
-    }
-}
-
-#[tauri::command]
-async fn playlist_remove(
-    app: tauri::AppHandle,
-    id: String,
-    indices: Vec<u32>,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state)?;
-    let mut cache = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
-    let result = playlists::remove(client.as_ref(), &mut cache, &library, &id, &indices).await;
-    match result {
-        Ok(()) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        Err(playlists::PlaylistRemoveError::Reloaded) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Err(playlists::STALE_PLAYLIST.into())
-        }
-        Err(playlists::PlaylistRemoveError::Spotify(error)) => Err(playlist_error(&state, error)),
-        Err(playlists::PlaylistRemoveError::Other(error)) => Err(error),
-    }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn play_tracks(
-    app: tauri::AppHandle,
-    snapshot: Vec<SnapshotTrack>,
-    start_index: usize,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state).ok();
-    state.playback.play(client, snapshot, start_index).await
-}
-
-#[tauri::command]
-async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state).ok();
-    state.playback.toggle(client.as_deref()).await
-}
-
-#[tauri::command]
-async fn player_next(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state).ok();
-    state.playback.next(client).await
-}
-
-#[tauri::command]
-async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state).ok();
-    state.playback.prev(client).await
-}
-
-#[tauri::command]
-async fn player_seek(app: tauri::AppHandle, seconds: u64) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state).ok();
-    state.playback.seek(client.as_deref(), seconds).await
-}
-
-#[tauri::command]
-async fn player_set_volume(app: tauri::AppHandle, volume: u8) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    // Persist first: the volume preference must survive even when applying it
-    // live fails (disconnected, no active device).
-    let mut settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    settings.volume = volume;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())?;
-    let client = provider_from(&state).ok();
-    let playback = Arc::clone(&state.playback);
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(playback.set_volume(client.as_deref(), volume))
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn set_repeat(app: tauri::AppHandle, mode: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let client = provider_from(&state).ok();
-    state.playback.set_repeat(client.as_deref(), &mode).await?;
-    let mut settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    settings.repeat = mode;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings;
-    Ok(())
-}
-
-#[tauri::command]
-async fn set_shuffle(app: tauri::AppHandle, shuffle: bool) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    settings.shuffle = shuffle;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())?;
-    let event = state.playback.set_shuffle(shuffle).await;
-    app.emit("player-state", event)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn set_audio_settings(
-    app: tauri::AppHandle,
-    streaming_bitrate: u16,
-    normalize_volume: bool,
-    gapless: bool,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    let changed = settings.streaming_bitrate != streaming_bitrate
-        || settings.normalize_volume != normalize_volume
-        || settings.gapless != gapless;
-    settings.streaming_bitrate = streaming_bitrate;
-    settings.normalize_volume = normalize_volume;
-    settings.gapless = gapless;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())?;
-    state.playback.set_audio(AudioSettings {
-        bitrate: streaming_bitrate,
-        normalize: normalize_volume,
-        gapless,
-    });
-    if changed && state.playback.is_local_active().await {
-        state.playback.invalidate_local().await;
-        if let Ok(client) = provider_from(&state) {
-            if let Err(error) = state.playback.revalidate(client.as_ref()).await {
-                log::warn!("Audio settings applied; session recreation deferred: {error}");
-            }
-        }
-    }
-    Ok(())
 }
 
 fn mutate_library<T>(
@@ -2309,11 +1530,6 @@ fn record_play(
     store.save(&next).map_err(|error| error.to_string())?;
     *current = next;
     Ok(true)
-}
-
-#[tauri::command]
-fn import_local(app: tauri::AppHandle, paths: Vec<String>) {
-    launch_local_import(app, paths.into_iter().map(PathBuf::from).collect());
 }
 
 fn run_local_import(
@@ -2545,7 +1761,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "connect_spotify" => {
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = connect_spotify(handle.clone()).await {
+                if let Err(error) = spotify_commands::connect_spotify(handle.clone()).await {
                     notify_error(&handle, error);
                 }
             });
@@ -2553,7 +1769,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "disconnect_spotify" => {
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = disconnect_spotify(handle.clone()).await {
+                if let Err(error) = spotify_commands::disconnect_spotify(handle.clone()).await {
                     notify_error(&handle, error);
                 }
             });
@@ -2825,49 +2041,49 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            browse,
-            metadata_values,
-            click_track_star,
-            set_album_rating,
-            get_track,
-            edit_track,
-            set_track_infos,
-            import_local,
+            library_commands::browse,
+            library_commands::metadata_values,
+            library_commands::click_track_star,
+            library_commands::set_album_rating,
+            library_commands::get_track,
+            library_commands::edit_track,
+            library_commands::set_track_infos,
+            library_commands::import_local,
             startup_notice,
             get_settings,
             set_settings,
-            connection_state,
-            connect_spotify,
-            disconnect_spotify,
-            sync_from_spotify,
-            spotify_search,
-            spotify_album_page,
-            spotify_artist_page,
-            spotify_follow_artist,
-            spotify_artist_albums,
-            add_spotify_album,
-            remove_spotify_album,
-            playlists_list,
-            open_spotify_playlist,
-            resolve_spotify_track_destination,
-            reorder_playlists,
-            playlist_unfollow,
-            playlist_create,
-            playlist_tracks,
-            playlist_add,
-            playlist_add_album,
-            playlist_reorder,
-            playlist_remove,
-            play_tracks,
-            player_toggle,
-            player_next,
-            player_prev,
-            player_seek,
-            player_set_volume,
-            set_repeat,
-            set_shuffle,
-            set_audio_settings,
-            track_artwork
+            spotify_commands::connection_state,
+            spotify_commands::connect_spotify,
+            spotify_commands::disconnect_spotify,
+            spotify_commands::sync_from_spotify,
+            spotify_commands::spotify_search,
+            spotify_commands::spotify_album_page,
+            spotify_commands::spotify_artist_page,
+            spotify_commands::spotify_follow_artist,
+            spotify_commands::spotify_artist_albums,
+            spotify_commands::add_spotify_album,
+            spotify_commands::remove_spotify_album,
+            playlist_commands::playlists_list,
+            playlist_commands::open_spotify_playlist,
+            playlist_commands::resolve_spotify_track_destination,
+            playlist_commands::reorder_playlists,
+            playlist_commands::playlist_unfollow,
+            playlist_commands::playlist_create,
+            playlist_commands::playlist_tracks,
+            playlist_commands::playlist_add,
+            playlist_commands::playlist_add_album,
+            playlist_commands::playlist_reorder,
+            playlist_commands::playlist_remove,
+            playback_commands::play_tracks,
+            playback_commands::player_toggle,
+            playback_commands::player_next,
+            playback_commands::player_prev,
+            playback_commands::player_seek,
+            playback_commands::player_set_volume,
+            playback_commands::set_repeat,
+            playback_commands::set_shuffle,
+            playback_commands::set_audio_settings,
+            spotify_commands::track_artwork
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -3015,7 +2231,7 @@ pub fn run() {
                     }
                     let result = match startup_action {
                         StartupAction::Sync => sync_spotify(&handle).await,
-                        StartupAction::Connect => connect_spotify(handle.clone()).await,
+                        StartupAction::Connect => spotify_commands::connect_spotify(handle.clone()).await,
                         StartupAction::Nothing => match provider_from(&handle.state::<AppState>()) {
                             Ok(client) => sync_playlists(&handle, client.as_ref()).await,
                             Err(error) => Err(error),
