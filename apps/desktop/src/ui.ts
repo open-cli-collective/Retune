@@ -8,6 +8,12 @@ export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) =>
 export const normalizeZoom = (zoom: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Math.round(zoom * 100) / 100))
 
+export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) =>
+  Math.max(28, Math.round(startWidth + clientX - startX))
+
+export const resizedPaneHeight = (startHeight: number, startY: number, clientY: number, maxHeight: number, zoom: number) =>
+  Math.max(90, Math.min(maxHeight, Math.round(startHeight + (clientY - startY) / zoom)))
+
 export const clearedTrackRating = (inherited: number | null) =>
   inherited === null ? null : { stars: inherited, explicit: false }
 

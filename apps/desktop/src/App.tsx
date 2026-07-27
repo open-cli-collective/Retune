@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange } from './ui.ts'
+import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from './ui.ts'
 
 type Source = 'music' | 'podcasts' | 'audiobooks'
 type Theme = 'light' | 'dark' | 'system'
@@ -951,7 +951,6 @@ function App() {
         track={playingTrack}
         query={state.query}
         scope={state.scope}
-        connected={state.connection.connected}
         volume={state.settings.volume}
         searchRef={search}
         onQuery={(query) => dispatch({ type: 'query', query })}
@@ -1114,9 +1113,9 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
 
 const artworkCache = new Map<string, string | null>()
 
-function TransportBar({ playing, track, query, scope, connected, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek }: {
+function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']
-  connected: boolean; volume: number
+  volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void
@@ -1182,7 +1181,6 @@ function TransportBar({ playing, track, query, scope, connected, volume, searchR
     <div className="search-area">
       <input ref={searchRef} className="search" type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
       <div className="search-scope">
-        <span className={`connection-dot ${connected ? 'connected' : ''}`} title={connected ? 'Spotify connected' : 'Spotify not connected'} aria-label={connected ? 'Spotify connected' : 'Spotify not connected'} />
         <div className="scope-pills" aria-label="Search scope">
           <button className={scope === 'library' ? 'active' : ''} onClick={() => onScope('library')}>Library</button>
           <button className={scope === 'spotify' ? 'active' : ''} onClick={() => onScope('spotify')}>Spotify</button>
@@ -1527,17 +1525,43 @@ function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
   onToggle: (facet: keyof Selection) => void
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number }>()
+  const [height, setHeight] = useState(200)
+  const pane = useRef<HTMLDivElement>(null)
+  const resize = useRef<{ pointerId: number; startY: number; startHeight: number; maxHeight: number; zoom: number } | undefined>(undefined)
   const sourceLabels = labels[state.source].facets
   const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
   const visible = facets.filter((facet) => state.settings.browserPanes[facet])
   if (!state.settings.browserVisible || !visible.length) return null
-  return <div className="browser-pane" style={{ gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
+  const maxHeight = () => Math.max(90, (pane.current?.parentElement?.clientHeight ?? 340) - 140)
+  const adjustHeight = (delta: number) => setHeight((current) => resizedPaneHeight(current, 0, delta, maxHeight(), 1))
+  return <div ref={pane} className="browser-pane" style={{ height, flexBasis: height, gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
     {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
     }} />)}
     {menu && <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={facets.map((facet, index) => ({ key: facet, label: sourceLabels[index], checked: state.settings.browserPanes[facet], onChange: () => onToggle(facet) }))} />}
+    <span className="browser-resize-handle" role="separator" aria-label="Resize column browser" aria-orientation="horizontal" tabIndex={0} onPointerDown={(event) => {
+      if (event.button !== 0 || !pane.current) return
+      event.preventDefault()
+      event.currentTarget.setPointerCapture(event.pointerId)
+      resize.current = {
+        pointerId: event.pointerId,
+        startY: event.clientY,
+        startHeight: Number.parseFloat(getComputedStyle(pane.current).height),
+        maxHeight: maxHeight(),
+        zoom: Number(pane.current.closest<HTMLElement>('.app-shell')?.style.zoom) || 1,
+      }
+    }} onPointerMove={(event) => {
+      const active = resize.current
+      if (!active || active.pointerId !== event.pointerId) return
+      setHeight(resizedPaneHeight(active.startHeight, active.startY, event.clientY, active.maxHeight, active.zoom))
+    }} onPointerUp={(event) => {
+      if (resize.current?.pointerId === event.pointerId) resize.current = undefined
+    }} onPointerCancel={() => { resize.current = undefined }} onKeyDown={(event) => {
+      if (event.key === 'ArrowUp') { event.preventDefault(); adjustHeight(-16) }
+      if (event.key === 'ArrowDown') { event.preventDefault(); adjustHeight(16) }
+    }} />
   </div>
 }
 
@@ -1581,9 +1605,11 @@ function AlbumRatingStrip({ album, rating, onRate }: { album: string; rating: nu
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
-const RESIZABLE_COLUMNS = new Set<ColumnKey>(['name', 'artist', 'album', 'genre', 'kind', 'lastPlayed', 'added'])
-const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, string> = { track: '34px', name: 'minmax(160px, 1.6fr)', time: '52px', artist: '1.1fr', album: '1.1fr', genre: '.9fr', rating: '84px', plays: '48px', kind: '140px', bitrate: '64px', lastPlayed: '88px', added: '88px' }
-const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) => Math.max(60, Math.round(startWidth + clientX - startX))
+const COLUMN_SPECS: Record<ColumnKey, { width: string; numeric?: boolean }> = {
+  track: { width: '34px', numeric: true }, name: { width: 'minmax(160px, 1.6fr)' }, time: { width: '52px', numeric: true }, artist: { width: '1.1fr' },
+  album: { width: '1.1fr' }, genre: { width: '.9fr' }, rating: { width: '84px' }, plays: { width: '48px', numeric: true }, kind: { width: '140px' },
+  bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true },
+}
 
 function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: State['playing']
@@ -1615,7 +1641,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWid
     added: 'Date Added',
   }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
-  const columns = `22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? DEFAULT_COLUMN_WIDTHS[column] : `${liveWidths[column]}px`).join(' ')}`
+  const columns = `22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
@@ -1679,7 +1705,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWid
     <div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
-    }}><span />{visibleColumns.map((column) => <span key={column} data-column={column} className={['track', 'time', 'plays', 'bitrate', 'lastPlayed', 'added'].includes(column) ? 'track-number' : ''} onPointerDown={(event) => {
+    }}><span />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
       if (event.button !== 0) return
       headerDragged.current = false
       columnDrag.current = { column, pointerId: event.pointerId, startX: event.clientX, element: event.currentTarget }
@@ -1690,13 +1716,13 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWid
     }} onClick={() => {
       if (headerDragged.current) return
       onSort(column, sortColumn === column ? !sortDesc : false)
-    }}><span className="track-header-label">{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</span>{RESIZABLE_COLUMNS.has(column) && <span className="column-resize-handle" draggable={false} onPointerDown={(event) => beginResize(event, column)} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={cancelResize} onClick={(event) => {
+    }}><span className="track-header-label">{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</span><span className="column-resize-handle" draggable={false} onPointerDown={(event) => beginResize(event, column)} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={cancelResize} onClick={(event) => {
       event.preventDefault()
       event.stopPropagation()
     }} onDragStart={(event) => {
       event.preventDefault()
       event.stopPropagation()
-    }} />}</span>)}</div>
+    }} /></span>)}</div>
     <div className={`track-scroll ${empty ? 'empty-library' : ''}`}>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id

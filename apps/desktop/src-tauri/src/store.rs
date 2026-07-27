@@ -218,15 +218,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    const RESIZABLE_COLUMNS: [&'static str; 7] = [
-        "name",
-        "artist",
-        "album",
-        "genre",
-        "kind",
-        "lastPlayed",
-        "added",
-    ];
     const COLUMNS: [&'static str; 12] = [
         "name",
         "artist",
@@ -313,10 +304,10 @@ impl Settings {
             ));
         }
         if self.column_widths.iter().any(|(column, width)| {
-            !Self::RESIZABLE_COLUMNS.contains(&column.as_str()) || *width < 60
+            !Self::COLUMNS.contains(&column.as_str()) || *width < 28
         }) {
             return Err(StoreError::InvalidSettings(
-                "settings columnWidths must contain resizable track columns at least 60px wide",
+                "settings columnWidths must contain track columns at least 28px wide",
             ));
         }
         if self
@@ -1034,18 +1025,10 @@ mod tests {
     }
 
     #[test]
-    fn column_widths_only_allow_resizable_columns_at_least_60px() {
-        for column in [
-            "name",
-            "artist",
-            "album",
-            "genre",
-            "kind",
-            "lastPlayed",
-            "added",
-        ] {
+    fn column_widths_allow_every_column_at_least_28px() {
+        for column in Settings::COLUMNS {
             let settings = Settings {
-                column_widths: BTreeMap::from([(column.into(), 60)]),
+                column_widths: BTreeMap::from([(column.into(), 28)]),
                 ..Settings::default()
             };
             assert!(settings.validate().is_ok(), "{column}");
@@ -1054,10 +1037,10 @@ mod tests {
         let mut settings = Settings::default();
         settings.column_widths.insert("name".into(), u32::MAX);
         assert!(settings.validate().is_ok());
-        settings.column_widths.insert("artist".into(), 59);
+        settings.column_widths.insert("artist".into(), 27);
         assert!(settings.validate().is_err());
 
-        for column in ["rating", "composer"] {
+        for column in ["composer"] {
             settings.column_widths = BTreeMap::from([(column.into(), 84)]);
             assert!(settings.validate().is_err(), "{column}");
         }

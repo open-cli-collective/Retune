@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange } from '../src/ui.ts'
+import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
 
 test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
@@ -29,6 +29,13 @@ test('playlist drag ranges reject malformed payloads', () => {
 test('columns move before the header under the pointer', () => {
   assert.deepEqual(moveBefore(['name', 'artist', 'track'], 'track', 'name'), ['track', 'name', 'artist'])
   assert.deepEqual(moveBefore(['name', 'artist', 'track'], 'name'), ['artist', 'track', 'name'])
+})
+
+test('column and browser resizing preserve usable minimums', () => {
+  assert.equal(resizedColumnWidth(34, 100, 90), 28)
+  assert.equal(resizedPaneHeight(200, 100, 600, 420, 1), 420)
+  assert.equal(resizedPaneHeight(200, 100, -100, 420, 1), 90)
+  assert.equal(resizedPaneHeight(200, 100, 300, 420, 2), 300)
 })
 
 test('playlist rows move to the indicated insertion point', () => {
