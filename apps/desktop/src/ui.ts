@@ -1,3 +1,5 @@
+import type { PlaylistSubject } from './types.ts'
+
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
 export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) => {
@@ -57,4 +59,27 @@ export const parseDragRange = (value: string): DragRange | undefined => {
     const range = JSON.parse(value) as Partial<DragRange>
     if (Number.isInteger(range.start) && Number.isInteger(range.length) && range.start! >= 0 && range.length! > 0) return range as DragRange
   } catch {}
+}
+
+export const DRAG_TYPE = 'application/x-retune'
+export const DRAG_LOCAL_TYPE = 'application/x-retune-local'
+export const SYNTHETIC_BASE = 2 ** 40
+
+export const hasLocalTracks = (subject: PlaylistSubject) => subject.kind === 'tracks'
+  ? subject.uris.some((uri) => uri.startsWith('file:'))
+  : subject.albumUri.startsWith('file:')
+
+export const labels = {
+  music: { facets: ['Genre', 'Artist', 'Album'], item: 'song', icons: '♪', name: 'Music' },
+  podcasts: { facets: ['Category', 'Podcaster', 'Show'], item: 'episode', icons: '🎙', name: 'Podcasts' },
+  audiobooks: { facets: ['Category', 'Author', 'Book'], item: 'chapter', icons: '📖', name: 'Audiobooks' },
+} as const
+
+export function formatTime(seconds: number) {
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = Math.floor(seconds % 60)
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${minutes}:${String(secs).padStart(2, '0')}`
 }
