@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::store::FsSyncStore;
+use crate::store::{Cooldown, CooldownKind, FsSyncStore};
 
 const PAGE_SIZE: u32 = 50;
 const SEARCH_PAGE_SIZE: u32 = 10;
@@ -111,6 +111,7 @@ pub struct Snapshot {
     pub batches: Vec<Vec<NewTrack>>,
     pub genres_degraded: bool,
     pub partial: bool,
+    pub quota_exhausted: bool,
     pub progress: Option<SectionProgress>,
 }
 
@@ -175,7 +176,7 @@ impl<'a, T: Transport, S: TokenStore> SpotifySyncProvider<'a, T, S> {
 
 struct SyncRun<'a> {
     store: &'a FsSyncStore,
-    cooldowns: Mutex<BTreeMap<String, u64>>,
+    cooldowns: Mutex<BTreeMap<String, Cooldown>>,
     artist_genres: Mutex<BTreeMap<String, Vec<String>>>,
     pending_music: Mutex<Vec<Vec<PendingTrack>>>,
     artist_lookups: AtomicUsize,
@@ -183,29 +184,29 @@ struct SyncRun<'a> {
 }
 
 impl SyncRun<'_> {
-    fn cooldown(&self, family: &str) -> Option<u64> {
-        let deadline = self
+    fn cooldown(&self, family: &str) -> Option<Cooldown> {
+        let cooldown = self
             .cooldowns
             .lock()
             .expect("cooldown mutex poisoned")
             .get(family)
             .copied()
-            .filter(|deadline| *deadline > unix_now());
-        if let Some(deadline) = deadline {
-            self.note_deadline(deadline);
+            .filter(|cooldown| cooldown.deadline > unix_now());
+        if let Some(cooldown) = cooldown {
+            self.note_deadline(cooldown.deadline);
             log::warn!(
                 "skipping {family} until {}",
-                format_resume_time(deadline, chrono::Local::now())
+                format_resume_time(cooldown.deadline, chrono::Local::now())
             );
         }
-        deadline
+        cooldown
     }
 
-    fn record_rate_limit(&self, endpoint: &str, retry_after_secs: u64) {
+    fn record_cooldown(&self, endpoint: &str, kind: CooldownKind, retry_after_secs: u64) {
         let family = endpoint_family(endpoint);
         let deadline = unix_now().saturating_add(retry_after_secs);
         let mut cooldowns = self.cooldowns.lock().expect("cooldown mutex poisoned");
-        cooldowns.insert(family, deadline);
+        cooldowns.insert(family, Cooldown { kind, deadline });
         self.note_deadline(deadline);
         if let Err(error) = self.store.save_cooldowns(&cooldowns) {
             log::warn!("Could not persist Spotify cooldown: {error}");
@@ -358,6 +359,7 @@ pub fn format_resume_time(deadline: u64, now: chrono::DateTime<chrono::Local>) -
 struct SyncHealth<'a> {
     genres_degraded: AtomicBool,
     partial: AtomicBool,
+    quota_exhausted: AtomicBool,
     run: Option<&'a SyncRun<'a>>,
 }
 
@@ -366,12 +368,16 @@ impl<'a> SyncHealth<'a> {
         Self {
             genres_degraded: AtomicBool::new(false),
             partial: AtomicBool::new(false),
+            quota_exhausted: AtomicBool::new(false),
             run,
         }
     }
 
     fn skip_content_family(&self, family: &str) -> bool {
-        if self.run.and_then(|run| run.cooldown(family)).is_some() {
+        if let Some(cooldown) = self.run.and_then(|run| run.cooldown(family)) {
+            if cooldown.kind == CooldownKind::Quota {
+                self.quota_exhausted.store(true, Ordering::Relaxed);
+            }
             self.partial.store(true, Ordering::Relaxed);
             true
         } else {
@@ -387,11 +393,30 @@ impl<'a> SyncHealth<'a> {
                 retry_after_secs,
             }) => {
                 if let Some(run) = self.run {
-                    run.record_rate_limit(&endpoint, retry_after_secs);
+                    run.record_cooldown(&endpoint, CooldownKind::Transient, retry_after_secs);
+                }
+                if !self.partial.swap(true, Ordering::Relaxed) {
+                    let family = endpoint_family(&endpoint);
+                    log::warn!(
+                        "Spotify library snapshot is partial: family={family} kind=transient retry_delay={retry_after_secs}"
+                    );
+                }
+                Ok(None)
+            }
+            Err(retune_spotify::Error::QuotaExceeded {
+                endpoint,
+                retry_after_secs,
+            }) => {
+                self.quota_exhausted.store(true, Ordering::Relaxed);
+                if let Some(run) = self.run {
+                    if let Some(retry_after_secs) = retry_after_secs {
+                        run.record_cooldown(&endpoint, CooldownKind::Quota, retry_after_secs);
+                    }
                 }
                 if !self.partial.swap(true, Ordering::Relaxed) {
                     log::warn!(
-                        "Spotify library snapshot is partial: Spotify rate limited {endpoint}; retry after {retry_after_secs}s"
+                        "Spotify library snapshot is partial: Development Mode quota exhausted for {}",
+                        endpoint_family(&endpoint)
                     );
                 }
                 Ok(None)
@@ -436,7 +461,11 @@ impl<'c, T: Transport, S: TokenStore> GenreSource<'c, T, S> {
             return Ok(None);
         }
         if let Some(run) = self.health.run {
-            if run.cooldown("/artists").is_some() {
+            if let Some(cooldown) = run.cooldown("/artists") {
+                if cooldown.kind == CooldownKind::Quota {
+                    self.health.quota_exhausted.store(true, Ordering::Relaxed);
+                    self.health.partial.store(true, Ordering::Relaxed);
+                }
                 self.health.genres_degraded.store(true, Ordering::Relaxed);
                 return Ok(None);
             }
@@ -463,11 +492,31 @@ impl<'c, T: Transport, S: TokenStore> GenreSource<'c, T, S> {
                 retry_after_secs,
             }) => {
                 if let Some(run) = self.health.run {
-                    run.record_rate_limit(&endpoint, retry_after_secs);
+                    run.record_cooldown(&endpoint, CooldownKind::Transient, retry_after_secs);
+                }
+                if !self.health.genres_degraded.swap(true, Ordering::Relaxed) {
+                    let family = endpoint_family(&endpoint);
+                    log::warn!(
+                        "Spotify artist genres unavailable for this sync: family={family} kind=transient retry_delay={retry_after_secs}"
+                    );
+                }
+                Ok(None)
+            }
+            Err(retune_spotify::Error::QuotaExceeded {
+                endpoint,
+                retry_after_secs,
+            }) => {
+                self.health.quota_exhausted.store(true, Ordering::Relaxed);
+                self.health.partial.store(true, Ordering::Relaxed);
+                if let Some(run) = self.health.run {
+                    if let Some(retry_after_secs) = retry_after_secs {
+                        run.record_cooldown(&endpoint, CooldownKind::Quota, retry_after_secs);
+                    }
                 }
                 if !self.health.genres_degraded.swap(true, Ordering::Relaxed) {
                     log::warn!(
-                        "Spotify artist genres unavailable for this sync: Spotify rate limited {endpoint}; retry after {retry_after_secs}s"
+                        "Spotify artist genres unavailable: Development Mode quota exhausted for {}",
+                        endpoint_family(&endpoint)
                     );
                 }
                 Ok(None)
@@ -626,6 +675,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
             batches,
             genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
             partial: true,
+            quota_exhausted: health.quota_exhausted.load(Ordering::Relaxed),
             progress: Some(SectionProgress {
                 label,
                 done: 0,
@@ -829,6 +879,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
         batches,
         genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
         partial,
+        quota_exhausted: health.quota_exhausted.load(Ordering::Relaxed),
         progress: partial.then_some(SectionProgress { label, done, total }),
     })
 }
@@ -1009,6 +1060,7 @@ pub struct FakeProvider {
     pub snapshots: std::collections::HashMap<LibraryKind, Vec<Vec<NewTrack>>>,
     pub genres_degraded: bool,
     pub partial: bool,
+    pub quota_exhausted: bool,
 }
 
 #[cfg(test)]
@@ -1032,6 +1084,7 @@ impl MediaProvider for FakeProvider {
             batches,
             genres_degraded: self.genres_degraded,
             partial: self.partial,
+            quota_exhausted: self.quota_exhausted,
             progress: None,
         })
     }
@@ -1081,6 +1134,19 @@ mod tests {
     fn rate_limited() -> Response {
         let mut response = Response::json(429, serde_json::json!({}));
         response.headers.insert("retry-after".into(), "3600".into());
+        response
+    }
+
+    fn quota_limited(retry_after_secs: Option<u64>) -> Response {
+        let mut response = Response::json(
+            429,
+            serde_json::json!({"error": {"reason": "QUOTA_EXCEEDED"}}),
+        );
+        if let Some(retry_after_secs) = retry_after_secs {
+            response
+                .headers
+                .insert("retry-after".into(), retry_after_secs.to_string());
+        }
         response
     }
 
@@ -1358,7 +1424,13 @@ mod tests {
         let store = FsSyncStore::new(dir.path());
         let deadline = unix_now() + 3_600;
         store
-            .save_cooldowns(&BTreeMap::from([("/me/tracks".into(), deadline)]))
+            .save_cooldowns(&BTreeMap::from([(
+                "/me/tracks".into(),
+                Cooldown {
+                    kind: CooldownKind::Transient,
+                    deadline,
+                },
+            )]))
             .unwrap();
         let client = client([]);
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
@@ -1389,7 +1461,10 @@ mod tests {
         store
             .save_cooldowns(&BTreeMap::from([(
                 "/me/tracks".into(),
-                unix_now().saturating_sub(1),
+                Cooldown {
+                    kind: CooldownKind::Transient,
+                    deadline: unix_now().saturating_sub(1),
+                },
             )]))
             .unwrap();
         let client = client([Response::json(
@@ -1423,7 +1498,94 @@ mod tests {
         let cooldowns = FsSyncStore::new(dir.path()).cooldowns(unix_now()).unwrap();
 
         assert!(snapshot.partial);
-        assert!(cooldowns["/me/tracks"] > unix_now());
+        assert!(cooldowns["/me/tracks"].deadline > unix_now());
+        assert_eq!(cooldowns["/me/tracks"].kind, CooldownKind::Transient);
+    }
+
+    #[tokio::test]
+    async fn quota_without_retry_after_is_partial_without_auto_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let client = client([quota_limited(None)]);
+        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+
+        let snapshot = provider
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
+            .await
+            .unwrap();
+
+        assert!(snapshot.partial);
+        assert!(snapshot.quota_exhausted);
+        assert_eq!(provider.earliest_cooldown(), None);
+        assert!(store.cooldowns(unix_now()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn quota_without_deadline_preserves_known_transient_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let client = client([]);
+        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let health = SyncHealth::new(Some(&provider.run));
+
+        health
+            .snapshot_page::<()>(Err(retune_spotify::Error::RateLimited {
+                endpoint: "/me/tracks".into(),
+                retry_after_secs: 3_600,
+            }))
+            .unwrap();
+        let transient_deadline = provider.earliest_cooldown().unwrap();
+        health
+            .snapshot_page::<()>(Err(retune_spotify::Error::QuotaExceeded {
+                endpoint: "/me/albums".into(),
+                retry_after_secs: None,
+            }))
+            .unwrap();
+
+        assert_eq!(provider.earliest_cooldown(), Some(transient_deadline));
+        assert_eq!(store.cooldowns(unix_now()).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn artist_quota_marks_the_music_snapshot_partial() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [{"track": {
+                    "uri": "spotify:track:1", "name": "Song", "duration_ms": 1,
+                    "artists": [{"id": "artist-1", "name": "Artist"}], "album": null
+                }}], "next": null}),
+            ),
+            quota_limited(None),
+        ]);
+
+        let snapshot = client
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
+            .await
+            .unwrap();
+
+        assert!(snapshot.partial);
+        assert!(snapshot.quota_exhausted);
+        assert!(snapshot.genres_degraded);
+    }
+
+    #[tokio::test]
+    async fn quota_with_retry_after_persists_typed_auto_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let client = client([quota_limited(Some(3_600))]);
+        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+
+        let snapshot = provider
+            .library_snapshot(LibraryKind::Tracks, &|_| {})
+            .await
+            .unwrap();
+        let cooldown = store.cooldowns(unix_now()).unwrap()["/me/tracks"];
+
+        assert!(snapshot.partial);
+        assert!(snapshot.quota_exhausted);
+        assert_eq!(cooldown.kind, CooldownKind::Quota);
+        assert_eq!(provider.earliest_cooldown(), Some(cooldown.deadline));
     }
 
     #[test]

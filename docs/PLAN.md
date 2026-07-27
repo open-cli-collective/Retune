@@ -129,6 +129,26 @@ struct AlbumKey { source: SourceId, art: String, alb: String }
   simply retained (overlay is the source of truth for the user's edits; we never
   silently drop their data, and no availability flag is modeled until a real need
   appears).
+- **429 contract (verified 2026-07-27):** Spotify distinguishes the rolling
+  30-second application rate limit (plus possible endpoint-specific limits) from
+  Development Mode quota restrictions; 429 responses may represent either, and
+  transient responses normally carry `Retry-After` in seconds
+  ([rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits),
+  [API calls](https://developer.spotify.com/documentation/web-api/concepts/api-calls)).
+  Development Mode endpoints are grouped into quota buckets whose groupings and
+  limits may change, and all Development Mode Client IDs owned by one developer
+  share the developer account's quota
+  ([quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes),
+  [July 23, 2026 quota update](https://developer.spotify.com/blog/2026-07-23-web-api-quota-updates)).
+  Retune classifies only the documented regular error object's
+  `error.reason = "QUOTA_EXCEEDED"` as quota exhaustion; every unknown or malformed
+  429 remains a transient rate limit. One shared client gate serializes the
+  cooldown wait and Web API send so concurrent callers use one transient deadline.
+  Sync persists cooldown kind plus deadline and keeps partial results. A quota
+  response creates a retry deadline only when Spotify supplied `Retry-After`; an
+  undated quota response never predicts a reset. If the same sync already recorded
+  a transient deadline, that known deadline remains eligible to schedule one mixed
+  sync retry; a later run with only undated quota exhaustion schedules nothing.
 - **Search-to-library mapping**: search returns artists and albums. An *artist* row
   is navigation — it expands to that artist's albums (never a bulk import). An
   *album* row's "+ Add" fetches the album's track listing (paged) and adds every

@@ -303,9 +303,11 @@ impl Settings {
                 "settings hiddenColumns must be unique track columns other than name",
             ));
         }
-        if self.column_widths.iter().any(|(column, width)| {
-            !Self::COLUMNS.contains(&column.as_str()) || *width < 28
-        }) {
+        if self
+            .column_widths
+            .iter()
+            .any(|(column, width)| !Self::COLUMNS.contains(&column.as_str()) || *width < 28)
+        {
             return Err(StoreError::InvalidSettings(
                 "settings columnWidths must contain track columns at least 28px wide",
             ));
@@ -356,6 +358,42 @@ pub struct FsPlaylistStore {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CooldownKind {
+    Transient,
+    Quota,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cooldown {
+    pub kind: CooldownKind,
+    pub deadline: u64,
+}
+
+impl<'de> Deserialize<'de> for Cooldown {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredCooldown {
+            Legacy(u64),
+            Current { kind: CooldownKind, deadline: u64 },
+        }
+
+        Ok(match StoredCooldown::deserialize(deserializer)? {
+            StoredCooldown::Legacy(deadline) => Self {
+                kind: CooldownKind::Transient,
+                deadline,
+            },
+            StoredCooldown::Current { kind, deadline } => Self { kind, deadline },
+        })
+    }
+}
+
 impl FsPlaylistStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
@@ -380,17 +418,17 @@ impl FsSyncStore {
         }
     }
 
-    pub fn cooldowns(&self, now: u64) -> StoreResult<BTreeMap<String, u64>> {
-        let mut cooldowns: BTreeMap<String, u64> = read_json_or_default(&self.cooldowns_path)?;
+    pub fn cooldowns(&self, now: u64) -> StoreResult<BTreeMap<String, Cooldown>> {
+        let mut cooldowns: BTreeMap<String, Cooldown> = read_json_or_default(&self.cooldowns_path)?;
         let original_len = cooldowns.len();
-        cooldowns.retain(|_, deadline| *deadline > now);
+        cooldowns.retain(|_, cooldown| cooldown.deadline > now);
         if cooldowns.len() != original_len {
             atomic_write(&self.cooldowns_path, &serde_json::to_vec(&cooldowns)?)?;
         }
         Ok(cooldowns)
     }
 
-    pub fn save_cooldowns(&self, cooldowns: &BTreeMap<String, u64>) -> StoreResult<()> {
+    pub fn save_cooldowns(&self, cooldowns: &BTreeMap<String, Cooldown>) -> StoreResult<()> {
         atomic_write(&self.cooldowns_path, &serde_json::to_vec(cooldowns)?)
     }
 
@@ -789,17 +827,49 @@ mod tests {
         let store = FsSyncStore::new(dir.path());
         store
             .save_cooldowns(&BTreeMap::from([
-                ("/albums".into(), 200),
-                ("/shows".into(), 50),
+                (
+                    "/albums".into(),
+                    Cooldown {
+                        kind: CooldownKind::Quota,
+                        deadline: 200,
+                    },
+                ),
+                (
+                    "/shows".into(),
+                    Cooldown {
+                        kind: CooldownKind::Transient,
+                        deadline: 50,
+                    },
+                ),
             ]))
             .unwrap();
 
         let reloaded = FsSyncStore::new(dir.path());
         assert_eq!(
             reloaded.cooldowns(100).unwrap(),
-            BTreeMap::from([("/albums".into(), 200)])
+            BTreeMap::from([(
+                "/albums".into(),
+                Cooldown {
+                    kind: CooldownKind::Quota,
+                    deadline: 200,
+                },
+            )])
         );
         assert_eq!(reloaded.cooldowns(201).unwrap(), BTreeMap::new());
+    }
+
+    #[test]
+    fn legacy_numeric_cooldown_loads_as_transient() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("cooldowns.json"), br#"{"/artists":200}"#).unwrap();
+
+        assert_eq!(
+            FsSyncStore::new(dir.path()).cooldowns(100).unwrap()["/artists"],
+            Cooldown {
+                kind: CooldownKind::Transient,
+                deadline: 200,
+            }
+        );
     }
 
     #[test]
@@ -1040,10 +1110,8 @@ mod tests {
         settings.column_widths.insert("artist".into(), 27);
         assert!(settings.validate().is_err());
 
-        for column in ["composer"] {
-            settings.column_widths = BTreeMap::from([(column.into(), 84)]);
-            assert!(settings.validate().is_err(), "{column}");
-        }
+        settings.column_widths = BTreeMap::from([("composer".into(), 84)]);
+        assert!(settings.validate().is_err(), "composer");
     }
 
     #[test]

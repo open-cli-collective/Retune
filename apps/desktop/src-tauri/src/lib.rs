@@ -1253,6 +1253,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         tracks,
         genres_degraded,
         partial,
+        quota_exhausted,
         progress,
         earliest_cooldown,
         request_counts,
@@ -1290,7 +1291,13 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
             .join(", ");
         let message = earliest_cooldown.map_or_else(
             || {
-                if detail.is_empty() {
+                if quota_exhausted {
+                    if detail.is_empty() {
+                        "Partial import — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.".into()
+                    } else {
+                        format!("Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.")
+                    }
+                } else if detail.is_empty() {
                     "Partial import (Spotify rate limit) — run File → Sync later to finish.".into()
                 } else {
                     format!("Partial import ({detail}) — run File → Sync later to finish.")
@@ -1298,7 +1305,11 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
             },
             |deadline| {
                 let time = provider::format_resume_time(deadline, chrono::Local::now());
-                if detail.is_empty() {
+                if quota_exhausted && detail.is_empty() {
+                    format!("Partial import (Spotify Development Mode quota) — will finish automatically after {time}.")
+                } else if quota_exhausted {
+                    format!("Partial import (Spotify Development Mode quota) — {detail} — will finish automatically after {time}.")
+                } else if detail.is_empty() {
                     format!("Partial import — will finish automatically after {time}.")
                 } else {
                     format!("Partial import — {detail} — will finish automatically after {time}.")
@@ -1580,49 +1591,102 @@ async fn spotify_follow_artist(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(rename_all = "camelCase")]
-async fn spotify_artist_albums(
-    state: tauri::State<'_, AppState>,
-    artist_id: String,
+async fn artist_albums_outcome<T: Transport, S: TokenStore>(
+    provider: &SpotifyClient<T, S>,
+    sync_store: &FsSyncStore,
+    artist_id: &str,
     offset: u32,
+    now: u64,
+    display_now: chrono::DateTime<chrono::Local>,
 ) -> Result<ArtistAlbumsPage, String> {
-    let now = unix_now();
-    if let Some(deadline) = state
-        .sync_store
+    if let Some(cooldown) = sync_store
         .cooldowns(now)
         .map_err(|error| error.to_string())?
         .get("/artists")
         .copied()
     {
-        return Err(format!(
-            "Spotify artist albums are rate limited; try again {}.",
-            provider::format_resume_time(deadline, chrono::Local::now())
-        ));
+        let time = provider::format_resume_time(cooldown.deadline, display_now);
+        return Err(match cooldown.kind {
+            store::CooldownKind::Transient => {
+                format!("Spotify artist albums are rate limited; try again {time}.")
+            }
+            store::CooldownKind::Quota => format!(
+                "Spotify Development Mode quota is still exhausted; try artist albums again {time}."
+            ),
+        });
     }
-    let provider = provider_from(&state)?;
-    match artist_albums_page(provider.as_ref(), &artist_id, offset).await {
+    match artist_albums_page(provider, artist_id, offset).await {
         Ok(page) => Ok(page),
         Err(retune_spotify::Error::RateLimited {
             endpoint,
             retry_after_secs,
         }) => {
             let deadline = now.saturating_add(retry_after_secs);
-            let mut cooldowns = state
-                .sync_store
+            let mut cooldowns = sync_store
                 .cooldowns(now)
                 .map_err(|error| error.to_string())?;
-            cooldowns.insert(endpoint_family(&endpoint), deadline);
-            state
-                .sync_store
+            cooldowns.insert(
+                endpoint_family(&endpoint),
+                store::Cooldown {
+                    kind: store::CooldownKind::Transient,
+                    deadline,
+                },
+            );
+            sync_store
                 .save_cooldowns(&cooldowns)
                 .map_err(|error| error.to_string())?;
             Err(format!(
                 "Spotify artist albums are rate limited; try again {}.",
-                provider::format_resume_time(deadline, chrono::Local::now())
+                provider::format_resume_time(deadline, display_now)
             ))
+        }
+        Err(retune_spotify::Error::QuotaExceeded {
+            endpoint,
+            retry_after_secs,
+        }) => {
+            if let Some(retry_after_secs) = retry_after_secs {
+                let deadline = now.saturating_add(retry_after_secs);
+                let mut cooldowns = sync_store
+                    .cooldowns(now)
+                    .map_err(|error| error.to_string())?;
+                cooldowns.insert(
+                    endpoint_family(&endpoint),
+                    store::Cooldown {
+                        kind: store::CooldownKind::Quota,
+                        deadline,
+                    },
+                );
+                sync_store
+                    .save_cooldowns(&cooldowns)
+                    .map_err(|error| error.to_string())?;
+                Err(format!(
+                    "Spotify Development Mode quota is exhausted; try artist albums again {}.",
+                    provider::format_resume_time(deadline, display_now)
+                ))
+            } else {
+                Err("Spotify Development Mode quota is exhausted; try artist albums again after Spotify resets it.".into())
+            }
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn spotify_artist_albums(
+    state: tauri::State<'_, AppState>,
+    artist_id: String,
+    offset: u32,
+) -> Result<ArtistAlbumsPage, String> {
+    let provider = provider_from(&state)?;
+    artist_albums_outcome(
+        provider.as_ref(),
+        &state.sync_store,
+        &artist_id,
+        offset,
+        unix_now(),
+        chrono::Local::now(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3221,6 +3285,81 @@ mod tests {
                 scopes: auth::SCOPES.into(),
             })),
         )
+    }
+
+    fn quota_response(retry_after_secs: Option<&str>) -> Response {
+        let mut response = Response::json(
+            429,
+            serde_json::json!({"error": {"reason": "QUOTA_EXCEEDED"}}),
+        );
+        if let Some(retry_after_secs) = retry_after_secs {
+            response
+                .headers
+                .insert("retry-after".into(), retry_after_secs.into());
+        }
+        response
+    }
+
+    #[tokio::test]
+    async fn artist_albums_reports_persisted_quota_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        store
+            .save_cooldowns(&BTreeMap::from([(
+                "/artists".into(),
+                store::Cooldown {
+                    kind: store::CooldownKind::Quota,
+                    deadline: 200,
+                },
+            )]))
+            .unwrap();
+        let client = playlist_client([]);
+
+        let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("quota is still exhausted"));
+        assert!(client.transport().requests().is_empty());
+        assert_eq!(
+            store.cooldowns(100).unwrap()["/artists"].kind,
+            store::CooldownKind::Quota
+        );
+    }
+
+    #[tokio::test]
+    async fn artist_albums_persists_live_quota_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let client = playlist_client([quota_response(Some("120"))]);
+
+        let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("quota is exhausted; try artist albums again"));
+        assert!(!error.contains("still exhausted"));
+        assert_eq!(
+            store.cooldowns(100).unwrap()["/artists"],
+            store::Cooldown {
+                kind: store::CooldownKind::Quota,
+                deadline: 220,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn artist_albums_does_not_invent_live_quota_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let client = playlist_client([quota_response(None)]);
+
+        let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("after Spotify resets it"));
+        assert!(store.cooldowns(100).unwrap().is_empty());
     }
 
     #[tokio::test]

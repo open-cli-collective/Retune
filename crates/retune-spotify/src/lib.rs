@@ -32,6 +32,11 @@ pub enum Error {
         endpoint: String,
         retry_after_secs: u64,
     },
+    #[error("Spotify Development Mode quota exhausted for {endpoint}")]
+    QuotaExceeded {
+        endpoint: String,
+        retry_after_secs: Option<u64>,
+    },
     #[error("Spotify {endpoint} failed with HTTP {status} after retries")]
     ServerError { endpoint: String, status: u16 },
     #[error("invalid JSON from Spotify {endpoint}: {source}")]

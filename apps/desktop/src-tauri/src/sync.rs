@@ -26,6 +26,7 @@ pub struct SnapshotOutcome {
     pub tracks: Vec<retune_core::model::NewTrack>,
     pub genres_degraded: bool,
     pub partial: bool,
+    pub quota_exhausted: bool,
     pub progress: Vec<SectionProgress>,
     pub earliest_cooldown: Option<u64>,
     pub request_counts: std::collections::BTreeMap<String, u64>,
@@ -39,12 +40,14 @@ pub async fn snapshot<P: MediaProvider>(
     let mut incoming = vec![];
     let mut genres_degraded = false;
     let mut partial = false;
+    let mut quota_exhausted = false;
     let mut section_progress = vec![];
     for kind in crate::provider::LibraryKind::ALL {
         progress(kind.phase());
         let snapshot = provider.library_snapshot(kind, on_batch).await?;
         genres_degraded |= snapshot.genres_degraded;
         partial |= snapshot.partial;
+        quota_exhausted |= snapshot.quota_exhausted;
         if let Some(progress) = snapshot.progress {
             section_progress.push(progress);
         }
@@ -56,6 +59,7 @@ pub async fn snapshot<P: MediaProvider>(
         tracks: incoming,
         genres_degraded,
         partial,
+        quota_exhausted,
         progress: section_progress,
         earliest_cooldown: provider.earliest_cooldown(),
         request_counts: provider.request_counts(),
@@ -189,6 +193,7 @@ mod tests {
             ]),
             genres_degraded: false,
             partial: false,
+            quota_exhausted: false,
         };
         let store = RecordingStore::default();
         let mut phases: Vec<String> = vec![];
@@ -233,6 +238,7 @@ mod tests {
             )]),
             genres_degraded: false,
             partial: true,
+            quota_exhausted: false,
         };
         let store = RecordingStore::default();
         let mut library = Library::new();
