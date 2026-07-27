@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, SYNTHETIC_BASE } from './ui.ts'
+import { DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, insertionIndexAtY, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, SYNTHETIC_BASE } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
@@ -11,7 +11,6 @@ import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, 
 import { ContextMenu } from './viewShared.tsx'
 export type { AlbumPageView, ArtistPageView, PlaylistListView } from './types.ts'
 
-const PLAYLIST_DRAG_TYPE = 'application/x-retune-playlist'
 const PLAYLIST_TRACK_DRAG_TYPE = 'application/x-retune-playlist-track'
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
@@ -1015,10 +1014,14 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [dropTarget, setDropTarget] = useState<string>()
+  const [dragging, setDragging] = useState<string>()
   const [insertBefore, setInsertBefore] = useState<number>()
   const [menu, setMenu] = useState<{ x: number; y: number; playlist: PlaylistListView }>()
   const [confirming, setConfirming] = useState<PlaylistListView>()
   const [busy, setBusy] = useState(false)
+  const playlistDrag = useRef<{ id: string; pointerId: number; startY: number; moved: boolean } | undefined>(undefined)
+  const dragInsertBefore = useRef<number | undefined>(undefined)
+  const suppressPlaylistClick = useRef(false)
   useEffect(() => {
     if (!confirming) return
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) setConfirming(undefined) }
@@ -1044,6 +1047,12 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
     try { await invoke('reorder_playlists', { ids }) }
     catch (error) { onReorder(playlists); onError(String(error)) }
   }
+  const cancelPlaylistDrag = () => {
+    playlistDrag.current = undefined
+    dragInsertBefore.current = undefined
+    setDragging(undefined)
+    setInsertBefore(undefined)
+  }
   const unfollow = async () => {
     if (!confirming) return
     setBusy(true)
@@ -1056,7 +1065,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       setBusy(false)
     }
   }
-  return <><aside className="sidebar" tabIndex={0} onMouseDown={(event) => event.currentTarget.focus()} onKeyDown={(event) => {
+  return <><aside className="sidebar" tabIndex={0} onKeyDown={(event) => {
     if (event.target instanceof HTMLInputElement || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
     event.preventDefault()
     const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.source-row, .playlist-row')]
@@ -1076,23 +1085,42 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       else if (event.key === 'Escape') { setCreating(false); setName('') }
     }} /></div>}
     {!state.settings.plCollapsed && playlists?.map((playlist, index) => <Fragment key={playlist.id}><button
-      className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''} ${insertBefore === index ? 'insert-before' : ''} ${insertBefore === playlists.length && index === playlists.length - 1 ? 'insert-after' : ''}`}
-      onClick={() => onPlaylist(playlist.id)}
-      draggable
-      onDragStart={(event) => {
-        event.dataTransfer.effectAllowed = 'move'
-        event.dataTransfer.setData(PLAYLIST_DRAG_TYPE, playlist.id)
+      className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''} ${dragging === playlist.id ? 'dragging' : ''} ${insertBefore === index ? 'insert-before' : ''} ${insertBefore === playlists.length && index === playlists.length - 1 ? 'insert-after' : ''}`}
+      onClick={(event) => {
+        if (suppressPlaylistClick.current) { suppressPlaylistClick.current = false; event.preventDefault(); return }
+        onPlaylist(playlist.id)
       }}
-      onDragEnd={() => { setInsertBefore(undefined); setDropTarget(undefined) }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return
+        suppressPlaylistClick.current = false
+        playlistDrag.current = { id: playlist.id, pointerId: event.pointerId, startY: event.clientY, moved: false }
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }}
+      onPointerMove={(event) => {
+        const drag = playlistDrag.current
+        if (!drag || drag.pointerId !== event.pointerId || (!drag.moved && Math.abs(event.clientY - drag.startY) < 4)) return
+        drag.moved = true
+        event.preventDefault()
+        setDragging(drag.id)
+        const rows = [...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>('.playlist-row')]
+        const target = insertionIndexAtY(rows.map((row) => { const bounds = row.getBoundingClientRect(); return bounds.top + bounds.height / 2 }), event.clientY)
+        dragInsertBefore.current = target
+        setInsertBefore(target)
+      }}
+      onPointerUp={(event) => {
+        const drag = playlistDrag.current
+        if (!drag || drag.pointerId !== event.pointerId) return
+        const target = dragInsertBefore.current
+        const moved = drag.moved
+        cancelPlaylistDrag()
+        if (!moved || target === undefined) return
+        event.preventDefault()
+        suppressPlaylistClick.current = true
+        window.setTimeout(() => { suppressPlaylistClick.current = false }, 0)
+        void reorder(drag.id, target)
+      }}
+      onPointerCancel={cancelPlaylistDrag}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes(PLAYLIST_DRAG_TYPE)) {
-          event.preventDefault()
-          event.dataTransfer.dropEffect = 'move'
-          const bounds = event.currentTarget.getBoundingClientRect()
-          setInsertBefore(index + (event.clientY > bounds.top + bounds.height / 2 ? 1 : 0))
-          setDropTarget(undefined)
-          return
-        }
         if (!playlist.owned) return
         if (!event.dataTransfer.types.includes(DRAG_TYPE)) return
         if (event.dataTransfer.types.includes(DRAG_LOCAL_TYPE)) { setDropTarget(undefined); return }
@@ -1103,10 +1131,6 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(undefined) }}
       onDrop={(event) => {
         event.preventDefault()
-        if (event.dataTransfer.types.includes(PLAYLIST_DRAG_TYPE)) {
-          void reorder(event.dataTransfer.getData(PLAYLIST_DRAG_TYPE), insertBefore ?? index)
-          return
-        }
         if (!playlist.owned) return
         setDropTarget(undefined)
         try {

@@ -36,6 +36,11 @@ export const moveToIndex = <T>(items: T[], item: T, target: number) => {
   return next
 }
 
+export const insertionIndexAtY = (midpoints: number[], clientY: number) => {
+  const index = midpoints.findIndex((midpoint) => clientY < midpoint)
+  return index < 0 ? midpoints.length : index
+}
+
 export const mergeByUri = <T extends { uri: string }>(current: T[], incoming: T[]) => {
   const seen = new Set(current.map((item) => item.uri))
   return [...current, ...incoming.filter((item) => {

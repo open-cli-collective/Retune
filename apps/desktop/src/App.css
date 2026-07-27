@@ -82,6 +82,7 @@ button { color: inherit; }
 .playlist-row { width: 100%; height: 22px; display: grid; grid-template-columns: 18px minmax(0, 1fr) 28px; align-items: center; padding: 0 10px; border: 0; overflow: hidden; color: var(--text); background: transparent; text-align: left; }
 .playlist-row > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-row.active { color: #fff; background: var(--accent); font-weight: 600; }
+.playlist-row.dragging { opacity: .55; }
 .playlist-row.insert-before { box-shadow: inset 0 2px var(--accent); }
 .playlist-row.insert-after { box-shadow: inset 0 -2px var(--accent); }
 .playlist-new-row { padding: 1px 10px 3px; }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
 
 test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
@@ -41,6 +41,12 @@ test('column and browser resizing preserve usable minimums', () => {
 test('playlist rows move to the indicated insertion point', () => {
   assert.deepEqual(moveToIndex(['a', 'b', 'c'], 'a', 3), ['b', 'c', 'a'])
   assert.deepEqual(moveToIndex(['a', 'b', 'c'], 'c', 1), ['a', 'c', 'b'])
+})
+
+test('playlist pointer drags target the nearest insertion gap', () => {
+  assert.equal(insertionIndexAtY([11, 33, 55], 0), 0)
+  assert.equal(insertionIndexAtY([11, 33, 55], 22), 1)
+  assert.equal(insertionIndexAtY([11, 33, 55], 60), 3)
 })
 
 test('artist album pages append without duplicate releases', () => {
