@@ -176,7 +176,7 @@ button { color: inherit; }
 .spotify-row time { color: var(--dim); }
 .spotify-add:disabled, .spotify-link:disabled { opacity: .65; }
 .spotify-page { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow-y: auto; background: var(--list); }
-.spotify-page-back { width: 100%; height: 29px; padding: 0 13px; border: 0; border-bottom: 1px solid var(--border); color: var(--accent); background: var(--list); text-align: left; }
+.spotify-page-back { width: 100%; padding: 9px 16px; border: 0; border-bottom: 1px solid var(--border); color: var(--accent); background: var(--list); text-align: left; font-size: 12px; }
 .spotify-page-header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 13px; padding: 13px 15px 17px; border-bottom: 1px solid var(--border); }
 .spotify-page-art { flex: none; }
 .spotify-page-art.album-art { width: 120px; height: 120px; }

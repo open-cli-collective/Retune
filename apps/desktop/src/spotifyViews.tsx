@@ -117,7 +117,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
           event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(subject))
         }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, index }) }}>
         <span>{track.trackNo ?? index + 1}</span>
-        <strong>{track.name}</strong>
+        <span>{track.name}</span>
         <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={track.trackId === null ? undefined : (stars) => rateTrack(track.trackId!, stars)} />
         <time>{formatTime(track.durationSecs)}</time>
         {menu?.index === index && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setMenu(undefined); onPlaylist(subject) }}>Add to Playlist…</button></ContextMenu>}
