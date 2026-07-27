@@ -87,7 +87,8 @@ pub struct TrackRecord {
 
 /// Album identity is deliberately the (source, artist-text, album-text)
 /// tuple — iTunes semantics. Editing a track's `art`/`alb` re-parents it;
-/// normalizing two editions to one name merges their groups. See docs/PLAN.md.
+/// normalizing two editions to one name merges their groups. See
+/// docs/architecture/library.md.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AlbumKey {
     pub source: SourceId,

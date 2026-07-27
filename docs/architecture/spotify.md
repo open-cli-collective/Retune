@@ -1,0 +1,63 @@
+# Spotify integration
+
+`retune-spotify` owns authentication, Web API transport, retry policy, and
+normalization. The desktop provider composes it into sync, search, follows,
+library membership, playlists, and playback activation.
+
+## Authentication and tokens
+
+Authentication uses Authorization Code with PKCE (S256), a loopback redirect,
+state validation, and a bounded callback wait. Retune requests the library,
+playback, streaming, playlist, and follow scopes needed by its current features.
+If an existing grant lacks required scopes, the UI asks the user to reconnect.
+
+There is one shared `SpotifyClient`. Access-token refresh is coalesced behind a
+refresh lock; a request that receives 401 refreshes once and retries once. Token
+persistence is described in [Persistence](persistence.md).
+
+## Request discipline
+
+All Web API requests pass through the client's shared request gate. The gate
+serializes the wait and send boundary so concurrent callers cannot release a
+thundering herd when a cooldown expires.
+
+Rate-limit behavior distinguishes two conditions:
+
+- Transient 429: honor `Retry-After`, share the deadline, and retry at most three
+  times. A client waits at most five minutes; longer waits return to the app.
+- Quota exhaustion (`error.reason == "QUOTA_EXCEEDED"`): return a typed quota
+  error immediately and do not blindly retry. Preserve a supplied deadline, but
+  never invent one.
+
+5xx responses retry after one and three seconds before failing. The provider
+records request counts and typed cooldowns by endpoint family; persisted
+cooldowns prevent relaunch from immediately repeating a blocked request.
+
+## Sync and caching
+
+Saved tracks, albums, shows, episodes, and audiobooks are fetched sequentially.
+Each successful batch is normalized and applied immediately; a later failure
+leaves useful partial results. Core upsert preserves local overlay edits.
+
+Artist genres use an in-memory and persistent cache. Uncached artist lookups are
+paced and capped per sync. Artist discography initially requests albums and
+singles ten at a time; the UI explicitly loads later pages, preserves earlier
+pages, and deduplicates requests.
+
+## Writes and playlists
+
+Overlay metadata never writes to Spotify. Explicit content actions may save or
+remove library items, follow/unfollow artists, and create or mutate playlists.
+Any operation containing a local-file URI fails before an HTTP request.
+
+Spotify is canonical for owned-playlist content. Reordering uses snapshot IDs to
+detect concurrent changes, then reloads stale state. Retune does not request or
+mutate item contents for playlists the current user does not own; it may display
+their available metadata and cached counts.
+
+## Contract changes
+
+Spotify endpoints, scopes, quotas, and eligibility rules are external contracts.
+Before changing them, verify current official Spotify documentation and cover
+the transport policy with fake-response tests. Do not bypass the shared client
+for a one-off endpoint.
