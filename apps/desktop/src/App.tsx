@@ -1535,11 +1535,13 @@ function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
   if (!state.settings.browserVisible || !visible.length) return null
   const maxHeight = () => Math.max(90, (pane.current?.parentElement?.clientHeight ?? 340) - 140)
   const adjustHeight = (delta: number) => setHeight((current) => resizedPaneHeight(current, 0, delta, maxHeight(), 1))
-  return <div ref={pane} className="browser-pane" style={{ height, flexBasis: height, gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))` }}>
-    {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
-      event.preventDefault()
-      setMenu({ x: event.clientX, y: event.clientY })
-    }} />)}
+  return <div ref={pane} className="browser-pane" style={{ height, flexBasis: height }}>
+    <div className="browser-scroll"><div className="browser-columns" style={{ minWidth: `${visible.length * 200}px`, gridTemplateColumns: `repeat(${visible.length}, minmax(200px, 1fr))` }}>
+      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
+        event.preventDefault()
+        setMenu({ x: event.clientX, y: event.clientY })
+      }} />)}
+    </div></div>
     {menu && <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={facets.map((facet, index) => ({ key: facet, label: sourceLabels[index], checked: state.settings.browserPanes[facet], onChange: () => onToggle(facet) }))} />}
     <span className="browser-resize-handle" role="separator" aria-label="Resize column browser" aria-orientation="horizontal" tabIndex={0} onPointerDown={(event) => {
       if (event.button !== 0 || !pane.current) return
@@ -1702,7 +1704,7 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWid
   }
   const menuTrack = menu?.trackId === undefined ? undefined : tracks.find((track) => track.id === menu.trackId)
   return <div className="track-list" onMouseDown={onActivate}>
-    <div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
+    <div className={`track-scroll ${empty ? 'empty-library' : ''}`}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
     }}><span />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
@@ -1723,7 +1725,6 @@ function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWid
       event.preventDefault()
       event.stopPropagation()
     }} /></span>)}</div>
-    <div className={`track-scroll ${empty ? 'empty-library' : ''}`}>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = playing?.trackId === track.id
         return <div key={track.id} data-track-id={track.id} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onDragStart={(event) => {
