@@ -127,7 +127,12 @@ pub(super) async fn spotify_search(
         return Err("Connect to Spotify to search.".into());
     }
     let provider = provider_from(&state)?;
-    MediaProvider::search(provider.as_ref(), query.trim()).await
+    let mut results = MediaProvider::search(provider.as_ref(), query.trim()).await?;
+    mark_album_membership(
+        &state.library.lock().expect("library mutex poisoned"),
+        &mut results.albums,
+    );
+    Ok(results)
 }
 
 #[tauri::command]
@@ -190,7 +195,7 @@ pub(super) async fn spotify_artist_albums(
     offset: u32,
 ) -> Result<ArtistAlbumsPage, String> {
     let provider = provider_from(&state)?;
-    artist_albums_outcome(
+    let mut page = artist_albums_outcome(
         provider.as_ref(),
         &state.sync_store,
         &artist_id,
@@ -198,7 +203,12 @@ pub(super) async fn spotify_artist_albums(
         unix_now(),
         chrono::Local::now(),
     )
-    .await
+    .await?;
+    mark_album_membership(
+        &state.library.lock().expect("library mutex poisoned"),
+        &mut page.albums,
+    );
+    Ok(page)
 }
 
 #[tauri::command]

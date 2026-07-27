@@ -78,6 +78,7 @@ pub struct SearchAlbum {
     pub year: Option<String>,
     pub image_url: Option<String>,
     pub album_type: Option<String>,
+    pub in_library: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -926,6 +927,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .map(str::to_owned),
                     image_url: image_url(&album.images),
                     album_type: album.album_type.as_deref().map(title_case),
+                    in_library: false,
                     uri: album.uri,
                     name: album.name,
                 })
@@ -1015,6 +1017,7 @@ pub async fn artist_albums_page<T: Transport, S: TokenStore>(
                     .map(str::to_owned),
                 image_url: image_url(&album.images),
                 album_type: album.album_type.as_deref().map(title_case),
+                in_library: false,
                 uri: album.uri,
                 name: album.name,
             })

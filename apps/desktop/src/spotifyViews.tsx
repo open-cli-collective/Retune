@@ -28,7 +28,7 @@ function SpotifyAlbumRow({ album, adding, added, onAdd, onOpen, onPlaylist, open
   }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }) }}>
     <SpotifyArtwork imageUrl={album.imageUrl} />
     <span className="spotify-copy"><strong>{album.name}</strong><small>{showType ? [album.year, album.albumType].filter(Boolean).join(' · ') : <>{album.artist}{album.year && ` · ${album.year}`}</>}</small></span>
-    <button className="spotify-add" disabled={adding || added} onClick={(event) => { event.stopPropagation(); onAdd() }} onDoubleClick={(event) => event.stopPropagation()}>{added ? '✓ Added' : adding ? 'Adding…' : '+ Add'}</button>
+    <button className="spotify-add" disabled={adding || added} onClick={(event) => { event.stopPropagation(); onAdd() }} onDoubleClick={(event) => event.stopPropagation()}>{added ? '✓ In Library' : adding ? 'Adding…' : '+ Add'}</button>
     {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setMenu(undefined); onPlaylist(subject) }}>Add to Playlist…</button></ContextMenu>}
   </div>
 }
@@ -90,7 +90,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
     }
   }
   const add = async () => {
-    if (await onAdd({ uri: page.uri, name: page.name, artist: page.artist, year: page.year, imageUrl: page.imageUrl, albumType: page.albumType })) refresh()
+    if (await onAdd({ uri: page.uri, name: page.name, artist: page.artist, year: page.year, imageUrl: page.imageUrl, albumType: page.albumType, inLibrary: page.inLibrary })) refresh()
   }
   return <div className="spotify-page">
     <SpotifyPageBack label={backLabel} onBack={onBack} />
@@ -240,7 +240,7 @@ function SpotifyArtistPage({ id, backLabel, adding, added, onBack, onAlbum, onAd
     </header>
     <section className="spotify-page-section">
       <h2>Discography{discography.total ? ` · ${discography.albums.length} of ${discography.total}` : ''}</h2>
-      {discography.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
+      {discography.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={album.inLibrary || added.has(album.uri)} onAdd={() => { void onAdd(album) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
       {loadingAlbums && <p>Loading albums…</p>}
       {albumsError && <div className="spotify-page-load-more"><span>{albumsError}</span><button onClick={() => void loadMore()}>Try again</button></div>}
       {!loadingAlbums && !albumsError && !discography.albums.length && discography.nextOffset === null && <p>No albums or singles found.</p>}
@@ -318,7 +318,7 @@ export function SpotifySearch({ query, searching, results, navigation, onAdd, on
       </section>}
       {(tab === 'all' || tab === 'albums') && <section>
         {tab === 'all' && <h2>Albums</h2>}
-        {results?.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={added.has(album.uri)} onAdd={() => { void add(album) }} onOpen={() => pushAlbum(album.uri)} onPlaylist={onPlaylist} />)}
+        {results?.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={album.inLibrary || added.has(album.uri)} onAdd={() => { void add(album) }} onOpen={() => pushAlbum(album.uri)} onPlaylist={onPlaylist} />)}
         {!results?.albums.length && <p>No albums found.</p>}
       </section>}
       {(tab === 'all' || tab === 'tracks') && <section>

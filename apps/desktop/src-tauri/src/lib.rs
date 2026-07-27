@@ -1296,6 +1296,14 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
     }
 }
 
+fn mark_album_membership(library: &Library, albums: &mut [provider::SearchAlbum]) {
+    for album in albums {
+        album.in_library = library.tracks().iter().any(|track| {
+            track.source == SourceId::Music && track.art == album.artist && track.alb == album.name
+        });
+    }
+}
+
 fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
     let uris = album
         .tracks
@@ -2864,6 +2872,42 @@ mod tests {
         let page = album_page_view(&library, spotify_album());
         assert!(page.in_library);
         assert_eq!(page.album_rating, Some(5));
+    }
+
+    #[test]
+    fn album_rows_reflect_library_album_identity() {
+        let mut library = Library::new();
+        library.add(metadata_track(
+            "spotify:track:one",
+            "Rock",
+            "Sum 41",
+            "All Killer No Filler",
+        ));
+        let mut albums = vec![
+            provider::SearchAlbum {
+                uri: "spotify:album:one".into(),
+                name: "All Killer No Filler".into(),
+                artist: "Sum 41".into(),
+                year: None,
+                image_url: None,
+                album_type: Some("Album".into()),
+                in_library: false,
+            },
+            provider::SearchAlbum {
+                uri: "spotify:album:two".into(),
+                name: "Chuck".into(),
+                artist: "Sum 41".into(),
+                year: None,
+                image_url: None,
+                album_type: Some("Album".into()),
+                in_library: false,
+            },
+        ];
+
+        mark_album_membership(&library, &mut albums);
+
+        assert!(albums[0].in_library);
+        assert!(!albums[1].in_library);
     }
 
     #[test]
