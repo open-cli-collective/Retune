@@ -96,10 +96,10 @@ button { color: inherit; }
 .browser-resize-handle { position: absolute; z-index: 2; right: 0; bottom: -4px; left: 0; height: 9px; cursor: row-resize; touch-action: none; }
 .browser-resize-handle::after { position: absolute; right: 0; bottom: 4px; left: 0; border-bottom: 1px solid var(--border); content: ''; }
 .browser-resize-handle:focus-visible::after { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.facet-column { min-width: 0; border-right: 1px solid var(--border); }
+.facet-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
 .facet-column:last-child { border-right: 0; }
-.column-header { height: 20px; padding: 2px 7px; border-bottom: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; }
-.facet-list { height: calc(100% - 21px); overflow-y: auto; }
+.column-header { box-sizing: border-box; height: 20px; flex: 0 0 20px; padding: 2px 7px; border-bottom: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; }
+.facet-list { min-height: 0; flex: 1; overflow: auto; }
 .facet-list button { display: block; width: 100%; height: 17px; padding: 0 7px; border: 0; overflow: hidden; color: var(--text); background: var(--list); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
 .facet-list button:nth-child(even) { background: var(--alt); }
 .facet-list button.active, .facet-list button.active:nth-child(even) { color: #fff; background: var(--accent); }
