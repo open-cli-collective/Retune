@@ -53,6 +53,7 @@ export type SearchAlbum = {
   year: string | null
   imageUrl: string | null
   albumType: string | null
+  trackCount: number
   inLibrary: boolean
 }
 export type SpotifyResults = {

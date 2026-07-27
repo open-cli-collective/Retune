@@ -1298,21 +1298,34 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
 
 fn mark_album_membership(library: &Library, albums: &mut [provider::SearchAlbum]) {
     for album in albums {
-        album.in_library = library.tracks().iter().any(|track| {
-            track.source == SourceId::Music && track.art == album.artist && track.alb == album.name
-        });
+        // ponytail: local album identity is artist/title; store Spotify album URIs if
+        // same-named editions become a real ambiguity.
+        album.in_library = album.track_count > 0
+            && library
+                .tracks()
+                .iter()
+                .filter(|track| {
+                    track.source == SourceId::Music
+                        && track.art == album.artist
+                        && track.alb == album.name
+                })
+                .count()
+                >= album.track_count as usize;
     }
 }
 
-fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
-    let uris = album
+fn album_track_uris(album: &Album) -> Vec<String> {
+    album
         .tracks
         .as_ref()
         .into_iter()
         .flat_map(|page| &page.items)
         .map(|track| track.uri.clone())
-        .collect::<Vec<_>>();
-    library.remove_uris(&uris)
+        .collect()
+}
+
+fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
+    library.remove_uris(&album_track_uris(album))
 }
 
 async fn artist_albums_outcome<T: Transport, S: TokenStore>(
@@ -2071,6 +2084,8 @@ pub fn run() {
             spotify_commands::spotify_artist_albums,
             spotify_commands::add_spotify_album,
             spotify_commands::remove_spotify_album,
+            spotify_commands::add_spotify_track,
+            spotify_commands::remove_spotify_track,
             playlist_commands::playlists_list,
             playlist_commands::open_spotify_playlist,
             playlist_commands::resolve_spotify_track_destination,
@@ -2453,6 +2468,7 @@ mod tests {
             }],
             release_date: Some("2024-02-03".into()),
             album_type: Some("compilation".into()),
+            total_tracks: 2,
             tracks: Some(Page {
                 items: vec![
                     Track {
@@ -2891,6 +2907,7 @@ mod tests {
                 year: None,
                 image_url: None,
                 album_type: Some("Album".into()),
+                track_count: 2,
                 in_library: false,
             },
             provider::SearchAlbum {
@@ -2900,14 +2917,25 @@ mod tests {
                 year: None,
                 image_url: None,
                 album_type: Some("Album".into()),
+                track_count: 1,
                 in_library: false,
             },
         ];
 
         mark_album_membership(&library, &mut albums);
 
-        assert!(albums[0].in_library);
+        assert!(!albums[0].in_library);
         assert!(!albums[1].in_library);
+
+        library.add(metadata_track(
+            "spotify:track:two",
+            "Rock",
+            "Sum 41",
+            "All Killer No Filler",
+        ));
+        mark_album_membership(&library, &mut albums);
+
+        assert!(albums[0].in_library);
     }
 
     #[test]

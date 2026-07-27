@@ -480,11 +480,6 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         .await
     }
 
-    pub async fn remove_saved_album(&self, id: &str) -> Result<()> {
-        self.change_library(Method::Delete, &[format!("spotify:album:{id}")])
-            .await
-    }
-
     pub async fn search(&self, query: &str, offset: u32, limit: u32) -> Result<SearchResults> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", query)
@@ -642,6 +637,10 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
 
     pub async fn save_to_library(&self, uris: &[String]) -> Result<()> {
         self.change_library(Method::Put, uris).await
+    }
+
+    pub async fn remove_from_library(&self, uris: &[String]) -> Result<()> {
+        self.change_library(Method::Delete, uris).await
     }
 
     async fn change_library(&self, method: Method, uris: &[String]) -> Result<()> {
@@ -1134,6 +1133,8 @@ pub struct Album {
     pub release_date: Option<String>,
     #[serde(default)]
     pub album_type: Option<String>,
+    #[serde(default)]
+    pub total_tracks: u32,
     #[serde(default)]
     pub tracks: Option<Page<AlbumTrack>>,
 }
@@ -1672,14 +1673,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_saved_album_sends_delete() {
+    async fn remove_from_library_sends_track_delete() {
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([Response::json(204, serde_json::Value::Null)]),
             tokens(),
         );
 
-        client.remove_saved_album("album").await.unwrap();
+        client
+            .remove_from_library(&["spotify:track:track".into()])
+            .await
+            .unwrap();
 
         let request = &client.transport().requests()[0];
         assert_eq!(request.method, Method::Delete);
@@ -1687,7 +1691,7 @@ mod tests {
         assert_eq!(url.path(), "/v1/me/library");
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
-            [("uris".into(), "spotify:album:album".into())]
+            [("uris".into(), "spotify:track:track".into())]
         );
     }
 

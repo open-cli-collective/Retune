@@ -78,6 +78,7 @@ pub struct SearchAlbum {
     pub year: Option<String>,
     pub image_url: Option<String>,
     pub album_type: Option<String>,
+    pub track_count: u32,
     pub in_library: bool,
 }
 
@@ -334,6 +335,16 @@ pub(crate) fn image_url(images: &[Image]) -> Option<String> {
         .min_by_key(|image| image.width)
         .or_else(|| images.last())
         .map(|image| image.url.clone())
+}
+
+fn album_track_count(album: &Album) -> u32 {
+    album.total_tracks.max(
+        album
+            .tracks
+            .as_ref()
+            .map(|tracks| tracks.total)
+            .unwrap_or_default(),
+    )
 }
 
 pub(crate) fn spotify_id(value: &str) -> &str {
@@ -927,6 +938,7 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
                         .map(str::to_owned),
                     image_url: image_url(&album.images),
                     album_type: album.album_type.as_deref().map(title_case),
+                    track_count: album_track_count(&album),
                     in_library: false,
                     uri: album.uri,
                     name: album.name,
@@ -1017,6 +1029,7 @@ pub async fn artist_albums_page<T: Transport, S: TokenStore>(
                     .map(str::to_owned),
                 image_url: image_url(&album.images),
                 album_type: album.album_type.as_deref().map(title_case),
+                track_count: album_track_count(&album),
                 in_library: false,
                 uri: album.uri,
                 name: album.name,

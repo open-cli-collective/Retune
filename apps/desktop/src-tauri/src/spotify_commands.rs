@@ -260,12 +260,56 @@ pub(super) async fn remove_spotify_album(app: tauri::AppHandle, uri: String) -> 
         .album(id)
         .await
         .map_err(|error| error.to_string())?;
+    let uris = album_track_uris(&album);
     provider
-        .remove_saved_album(id)
+        .remove_from_library(&uris)
         .await
         .map_err(|error| error.to_string())?;
     mutate_library(&state, |library| {
         remove_album_tracks(library, &album);
+        Ok(())
+    })?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(super) async fn add_spotify_track(app: tauri::AppHandle, uri: String) -> Result<(), String> {
+    let id = track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
+    let state = app.state::<AppState>();
+    let provider = provider_from(&state)?;
+    let track = provider
+        .track(id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let artist = match track.artists.first() {
+        Some(artist) => provider.artist(&artist.id).await.ok(),
+        None => None,
+    };
+    let normalized = retune_spotify::normalize::track(&track, artist.as_ref(), None);
+    provider
+        .save_to_library(std::slice::from_ref(&uri))
+        .await
+        .map_err(|error| error.to_string())?;
+    mutate_library(&state, |library| {
+        library.add(normalized);
+        Ok(())
+    })?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> Result<(), String> {
+    track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
+    let state = app.state::<AppState>();
+    let provider = provider_from(&state)?;
+    provider
+        .remove_from_library(std::slice::from_ref(&uri))
+        .await
+        .map_err(|error| error.to_string())?;
+    mutate_library(&state, |library| {
+        library.remove_uris(std::slice::from_ref(&uri));
         Ok(())
     })?;
     app.emit("library-changed", ())
