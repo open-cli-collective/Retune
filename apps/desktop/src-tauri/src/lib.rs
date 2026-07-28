@@ -1269,7 +1269,7 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
                         name: track.name,
                         track_no: track.track_number,
                         duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
-                        enabled: local.map_or(true, |track| track.enabled),
+                        enabled: local.is_none_or(|track| track.enabled),
                         track_id: local.map(|track| track.id.0),
                         rating: local
                             .and_then(|track| library.effective_rating(track.id).map(rating_view)),
