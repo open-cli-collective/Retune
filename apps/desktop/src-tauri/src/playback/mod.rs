@@ -482,6 +482,9 @@ impl Playback {
         if state.file.is_active() {
             return state.file.toggle();
         }
+        if state.reducer.snapshot().is_none() {
+            return Ok(());
+        }
         let client = require_spotify(client)?;
         self.ensure_valid(&mut state, client).await?;
         state.backend.toggle(client).await
@@ -504,6 +507,9 @@ impl Playback {
         let mut state = self.state.lock().await;
         if state.file.is_active() {
             return state.file.seek(seconds);
+        }
+        if state.reducer.snapshot().is_none() {
+            return Ok(());
         }
         let client = require_spotify(client)?;
         self.ensure_valid(&mut state, client).await?;
@@ -722,7 +728,7 @@ impl Playback {
     ) -> Result<(), String> {
         let wrap = direction > 0 && state.reducer.repeat() == "all";
         let Some(snapshot) = state.reducer.snapshot() else {
-            return Err("Nothing is playing".into());
+            return Ok(());
         };
         let Some(next) = step_index(snapshot.index, snapshot.len(), direction, wrap) else {
             if state.file.is_active() {
@@ -1521,6 +1527,16 @@ mod tests {
             .await;
         assert_eq!(result.unwrap_err(), "preflight failed");
         assert!(!playback.is_local_active().await);
+    }
+
+    #[tokio::test]
+    async fn idle_transport_commands_are_noops() {
+        let playback = Playback::default();
+
+        playback.toggle(None).await.unwrap();
+        playback.next(None).await.unwrap();
+        playback.prev(None).await.unwrap();
+        playback.seek(None, 42).await.unwrap();
     }
 
     #[tokio::test]
