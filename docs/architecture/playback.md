@@ -15,6 +15,10 @@ Shuffle permutes only the future suffix and retains the canonical list so turnin
 shuffle off restores normal order without losing the current track. Repeat off,
 all, and one are controller policies shared by every backend.
 
+Ordinary queues omit overlay tracks disabled by the user. Explicitly starting a
+disabled track includes that track for the run while later advancement still skips
+the other disabled tracks.
+
 ## Backends
 
 - Built-in Spotify uses librespot with the current OAuth token, a soft mixer,

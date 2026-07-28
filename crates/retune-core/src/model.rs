@@ -63,6 +63,10 @@ pub struct TrackRecord {
     pub alb: String,
     pub name: String,
     pub duration: Duration,
+    /// Whether this track participates in ordinary sequential playback.
+    /// Missing serialized values default on; only exclusions occupy the overlay.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_no: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,6 +182,7 @@ impl Library {
             alb: incoming.alb,
             name: incoming.name,
             duration: incoming.duration,
+            enabled: true,
             track_no: incoming.track_no,
             disc_no: incoming.disc_no,
             play_count: 0,
@@ -269,6 +274,16 @@ impl Library {
             .find(|track| track.id == id)
             .ok_or(UnknownTrack(id))?;
         track.rating = rating;
+        Ok(())
+    }
+
+    pub fn set_track_enabled(&mut self, id: TrackId, enabled: bool) -> Result<(), UnknownTrack> {
+        let track = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == id)
+            .ok_or(UnknownTrack(id))?;
+        track.enabled = enabled;
         Ok(())
     }
 
@@ -427,6 +442,14 @@ pub enum EffectiveRating {
 #[error("unknown track id {0:?}")]
 pub struct UnknownTrack(pub TrackId);
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +503,7 @@ mod tests {
         let mut library = Library::new();
         let id = library.add(track("one", "Rock", "Artist", "Album"));
         library.set_track_rating(id, Some(rating(5))).unwrap();
+        library.set_track_enabled(id, false).unwrap();
 
         let mut changed = track("one", "Metal", "Other", "Changed");
         changed.name = "Changed name".into();
@@ -490,6 +514,7 @@ mod tests {
         assert_eq!(record.cat, "Metal");
         assert_eq!(record.name, "one");
         assert_eq!(record.rating, Some(rating(5)));
+        assert!(!record.enabled);
     }
 
     #[test]

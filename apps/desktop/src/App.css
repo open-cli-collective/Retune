@@ -126,7 +126,7 @@ button { color: inherit; }
 .empty-prompt .empty-glyph { color: color-mix(in srgb, var(--dim) 45%, transparent); font-size: 30px; line-height: 1; }
 .empty-prompt strong { color: var(--text); font-size: 13px; }
 .empty-prompt button { margin-top: 3px; padding: 5px 12px; border: 1px solid var(--accent); border-radius: 4px; color: #fff; background: var(--accent); }
-.track-row { min-width: 720px; height: 18px; display: grid; grid-template-columns: 22px minmax(160px, 1.6fr) 52px 1.1fr 1.1fr .9fr 84px; align-items: center; padding: 0 6px; white-space: nowrap; }
+.track-row { min-width: 720px; height: 18px; display: grid; grid-template-columns: 20px 22px minmax(160px, 1.6fr) 52px 1.1fr 1.1fr .9fr 84px; align-items: center; padding: 0 6px; white-space: nowrap; }
 .zebra .track-scroll .track-row:not(.track-header):nth-child(odd) { background: var(--alt); }
 .track-row > span { min-width: 0; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; }
 .track-number { text-align: right; font-variant-numeric: tabular-nums; }
@@ -154,6 +154,8 @@ button { color: inherit; }
 .track-row.playing { font-weight: 700; }
 .playing-marker { color: var(--accent); }
 .selected .playing-marker { color: #fff; }
+.track-enabled-cell { display: grid; place-items: center; padding: 0 !important; }
+.track-enabled-cell input { width: 12px; height: 12px; margin: 0; accent-color: var(--accent); }
 .spotify-stub { min-height: 0; flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 24px; color: var(--dim); background: var(--list); font-size: 12px; }
 .spotify-stub button, .spotify-add { padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px; color: var(--text); background: var(--control); }
 .spotify-results-view { min-height: 0; flex: 1; display: flex; flex-direction: column; }

@@ -98,6 +98,7 @@ pub(super) fn playlist_tracks(
                     art: track.art.clone(),
                     alb: track.alb.clone(),
                     duration_secs: track.duration.as_secs(),
+                    enabled: track.enabled,
                     rating: library.effective_rating(track.id).map(rating_view),
                 }
             } else {
@@ -112,6 +113,7 @@ pub(super) fn playlist_tracks(
                     art: cached.map(|track| track.art.clone()).unwrap_or_default(),
                     alb: cached.map(|track| track.alb.clone()).unwrap_or_default(),
                     duration_secs: cached.map_or(0, |track| track.duration / 1000),
+                    enabled: true,
                     rating: None,
                 }
             }

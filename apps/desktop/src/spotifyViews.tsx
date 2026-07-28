@@ -80,6 +80,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
     art: page.artist,
     alb: page.name,
     durationSecs: track.durationSecs,
+    enabled: track.enabled,
   }))
   const refresh = () => setRevision((current) => current + 1)
   const trackIsInLibrary = (track: AlbumPageView['tracks'][number]) => trackMembership[track.uri] ?? track.trackId !== null

@@ -240,6 +240,7 @@ mod tests {
         assert_eq!(track.added_at, None);
         assert_eq!(track.kind, None);
         assert_eq!(track.bitrate_kbps, None);
+        assert!(track.enabled);
 
         assert_eq!(library.tracks()[0].id.0, 7);
         assert_eq!(library.tracks()[0].orig_cat.as_deref(), Some("Original"));
@@ -247,5 +248,18 @@ mod tests {
             library.album_rating(&AlbumKey::of(&library.tracks()[0])),
             Rating::new(4)
         );
+    }
+
+    #[test]
+    fn playback_exclusions_are_sparse_and_round_trip() {
+        let mut library = library();
+        let id = library.tracks()[0].id;
+        let enabled = String::from_utf8(export_json(&library)).unwrap();
+        assert!(!enabled.contains("\"enabled\""));
+
+        library.set_track_enabled(id, false).unwrap();
+        let disabled = export_json(&library);
+        assert!(String::from_utf8_lossy(&disabled).contains("\"enabled\":false"));
+        assert!(!import(&disabled).unwrap().tracks()[0].enabled);
     }
 }

@@ -66,6 +66,19 @@ pub(super) fn click_track_star(
 }
 
 #[tauri::command]
+pub(super) fn set_track_enabled(
+    state: tauri::State<'_, AppState>,
+    id: u64,
+    enabled: bool,
+) -> Result<(), String> {
+    mutate_library(&state, |library| {
+        library
+            .set_track_enabled(TrackId(id), enabled)
+            .map_err(|error| error.to_string())
+    })
+}
+
+#[tauri::command]
 pub(super) fn set_album_rating(
     state: tauri::State<'_, AppState>,
     source: SourceId,

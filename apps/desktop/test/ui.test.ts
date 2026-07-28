@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
 
 test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
@@ -56,6 +56,16 @@ test('artist album pages append without duplicate releases', () => {
 test('clearing a track rating reveals its inherited album rating', () => {
   assert.deepEqual(clearedTrackRating(4), { stars: 4, explicit: false })
   assert.equal(clearedTrackRating(null), null)
+})
+
+test('sequential playback skips exclusions but an explicit start still plays one', () => {
+  const tracks = [
+    { id: 1, enabled: true },
+    { id: 2, enabled: false },
+    { id: 3, enabled: true },
+  ] as never
+  assert.deepEqual(playbackQueue(tracks, 1).map((track) => track.id), [1, 3])
+  assert.deepEqual(playbackQueue(tracks, 2).map((track) => track.id), [1, 2, 3])
 })
 
 test('release dates sort chronologically with the standard tie-breakers and missing dates last', () => {

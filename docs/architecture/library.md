@@ -9,6 +9,7 @@ network, async, Tauri, or UI code. Callers provide data and persist the result.
 identity; local imports use canonical `file://` URIs. A record contains its
 source, category/artist/album/name overlay, duration, track/disc numbers, release
 date, rating, play count, timestamps, kind, bitrate, and original provider category.
+Tracks are enabled for sequential playback unless the overlay explicitly disables them.
 
 Album identity is deliberately `(source, artist text, album text)`. Editing an
 artist or album therefore re-parents a track, and normalizing two editions to the
@@ -22,6 +23,7 @@ same text merges their Retune album group.
 - Provider upsert refreshes track/disc, release date, kind, bitrate, and provider category.
   It preserves overlay name/artist/album/rating, play history, and added time.
 - Adding or merging deduplicates by URI. Existing overlay values win.
+- Provider refresh preserves each track's playback-enabled overlay value.
 - Restoring replaces the library after validating the imported envelope.
 
 Overlay edits never mutate source-file tags or Spotify metadata.

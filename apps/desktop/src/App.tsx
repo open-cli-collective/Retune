@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { compareTracks, DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, insertionIndexAtY, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, SYNTHETIC_BASE } from './ui.ts'
+import { compareTracks, DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, insertionIndexAtY, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, SYNTHETIC_BASE } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
@@ -261,25 +261,26 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [dispatch])
 
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[]) => {
-    const target = tracks.find((track) => track.id === id)
+    const playable = playbackQueue(tracks, id)
+    const target = playable.find((track) => track.id === id)
     if (target?.uri.startsWith('file:')) {
-      queue.current = tracks
-      run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
+      queue.current = playable
+      run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
       return
     }
     if (!target?.uri.startsWith('spotify:')) {
-      dispatch({ type: 'play', id, queue: tracks })
+      dispatch({ type: 'play', id, queue: playable })
       return
     }
     if (!connected) {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
-      pendingPlay.current = { id, tracks }
+      pendingPlay.current = { id, tracks: playable }
       run('connect_spotify')
       return
     }
-    queue.current = tracks
-    run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
+    queue.current = playable
+    run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
   }, [connected, dispatch, run])
 
   useEffect(() => {
@@ -822,6 +823,7 @@ function App() {
                   }
                 }}
                 onPlay={(id) => player.start(id, displayedTracks)}
+                onEnabled={(id, enabled) => mutate('set_track_enabled', { id, enabled })}
                 onRate={(id, stars) => mutate('click_track_star', { id, stars })}
                 onInfo={openInfo}
                 onPlaylist={setPlaylistSubject}

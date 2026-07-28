@@ -93,9 +93,9 @@ const COLUMN_SPECS: Record<ColumnKey, { width: string; numeric?: boolean }> = {
   bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true }, releaseDate: { width: '88px', numeric: true },
 }
 
-export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
+export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
-  columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void
+  columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
   onColumnWidths: (widths: Partial<Record<ColumnKey, number>>) => void
   onPlaylist: (subject: PlaylistSubject) => void
@@ -124,7 +124,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     releaseDate: 'Release Date',
   }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
-  const columns = `22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
+  const columns = `20px 22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
@@ -189,7 +189,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     <div className={`track-scroll ${empty ? 'empty-library' : ''}`}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
-    }}><span />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
+    }}><span className="track-enabled-cell" /><span />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
       if (event.button !== 0) return
       headerDragged.current = false
       columnDrag.current = { column, pointerId: event.pointerId, startX: event.clientX, element: event.currentTarget }
@@ -220,6 +220,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           if (!selectedIds.has(track.id)) onSelect(track.id, event)
           setMenu({ x: event.clientX, y: event.clientY, trackId: track.id })
         }}>
+          <span className="track-enabled-cell"><input type="checkbox" checked={track.enabled} aria-label={`${track.enabled ? 'Exclude' : 'Include'} ${track.name} from sequential playback`} title={track.enabled ? 'Uncheck to skip during sequential playback' : 'Check to include in sequential playback'} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onChange={(event) => onEnabled(track.id, event.target.checked)} /></span>
           <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
         </div>

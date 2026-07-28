@@ -79,6 +79,7 @@ export type AlbumPageView = {
     name: string
     trackNo: number | null
     durationSecs: number
+    enabled: boolean
     trackId: number | null
     rating: RatingView | null
   }[]
@@ -103,6 +104,7 @@ export type Track = {
   cat: string
   trackNo: number | null
   durationSecs: number
+  enabled: boolean
   playCount: number
   lastPlayedAt: number | null
   addedAt: number | null
@@ -114,7 +116,7 @@ export type Track = {
   rating: RatingView | null
 }
 
-export type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs'>
+export type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs' | 'enabled'>
 export type PlaylistTrack = Omit<PlaybackTrack, 'id'> & { id: number | null; rating: RatingView | null }
 export type PlaylistSubject =
   | { kind: 'tracks'; label: string; uris: string[] }

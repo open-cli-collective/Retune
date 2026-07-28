@@ -282,6 +282,7 @@ struct TrackView {
     cat: String,
     track_no: Option<u32>,
     duration_secs: u64,
+    enabled: bool,
     play_count: u32,
     last_played_at: Option<u64>,
     added_at: Option<u64>,
@@ -304,6 +305,7 @@ impl TrackView {
             cat: track.cat.clone(),
             track_no: track.track_no,
             duration_secs: track.duration.as_secs(),
+            enabled: track.enabled,
             play_count: track.play_count,
             last_played_at: track.last_played_at,
             added_at: track.added_at,
@@ -397,6 +399,7 @@ struct AlbumPageTrackView {
     name: String,
     track_no: Option<u32>,
     duration_secs: u64,
+    enabled: bool,
     track_id: Option<u64>,
     rating: Option<RatingView>,
 }
@@ -464,6 +467,7 @@ struct PlaylistTrackView {
     art: String,
     alb: String,
     duration_secs: u64,
+    enabled: bool,
     rating: Option<RatingView>,
 }
 
@@ -544,6 +548,11 @@ fn counts(library: &Library, source: SourceId, selection: &Selection, query: &st
         .iter()
         .filter(|track| track.rating.is_some())
         .count()
+        + library
+            .tracks()
+            .iter()
+            .filter(|track| !track.enabled)
+            .count()
         + library
             .tracks()
             .iter()
@@ -1260,6 +1269,7 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
                         name: track.name,
                         track_no: track.track_number,
                         duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+                        enabled: local.map_or(true, |track| track.enabled),
                         track_id: local.map(|track| track.id.0),
                         rating: local
                             .and_then(|track| library.effective_rating(track.id).map(rating_view)),
@@ -2067,6 +2077,7 @@ pub fn run() {
             library_commands::browse,
             library_commands::metadata_values,
             library_commands::click_track_star,
+            library_commands::set_track_enabled,
             library_commands::set_album_rating,
             library_commands::get_track,
             library_commands::edit_track,
