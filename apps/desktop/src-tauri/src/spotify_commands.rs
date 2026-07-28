@@ -230,6 +230,13 @@ pub(super) async fn add_spotify_album(
             track.art.clone_from(&artist);
         }
     }
+    {
+        let library = state.library.lock().expect("library mutex poisoned");
+        tracks.retain(|track| spotify_track_match(&library, track).is_none());
+    }
+    if tracks.is_empty() {
+        return Ok(());
+    }
     let uris = tracks
         .iter()
         .map(|track| track.uri.clone())

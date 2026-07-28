@@ -38,7 +38,8 @@ use retune_core::{
     browse::{self, Selection},
     io::{export_json, import},
     model::{
-        AlbumKey, EffectiveRating, Library, Rating, SourceId, TrackEdit, TrackId, TrackRecord,
+        AlbumKey, EffectiveRating, Library, NewTrack, Rating, SourceId, TrackEdit, TrackId,
+        TrackRecord,
     },
 };
 use retune_spotify::{
@@ -1540,6 +1541,22 @@ fn mutate_library<T>(
     state.store.save(&next).map_err(|error| error.to_string())?;
     *current = next;
     Ok(value)
+}
+
+fn spotify_track_match<'a>(library: &'a Library, incoming: &NewTrack) -> Option<&'a TrackRecord> {
+    library.tracks().iter().find(|existing| {
+        existing.uri == incoming.uri
+            || (existing.uri.starts_with("spotify:track:")
+                && incoming.uri.starts_with("spotify:track:")
+                && existing.source == incoming.source
+                && existing.art == incoming.art
+                && existing.alb == incoming.alb
+                && existing.disc_no == incoming.disc_no
+                && existing.track_no == incoming.track_no
+                && existing.name == incoming.name
+                && existing.duration == incoming.duration
+                && existing.release_date == incoming.release_date)
+    })
 }
 
 fn record_play(

@@ -63,8 +63,9 @@ updates state, advances the queue, and records threshold-based play counts.
 
 ## Cross-cutting rules
 
-- Stable provider URI is the deduplication identity; local files use canonical
-  `file://` URIs.
+- Provider URI is the normal deduplication identity; local files use canonical
+  `file://` URIs. Spotify ingestion also collapses alternate track URIs when the
+  album slot and provider metadata match exactly.
 - Album identity is source + overlay artist text + overlay album text.
 - Overlay metadata is local-only. Remote content operations are explicit.
 - Spotify HTTP traffic uses one shared client/request gate and typed cooldowns.

@@ -38,6 +38,11 @@ cooldowns prevent relaunch from immediately repeating a blocked request.
 Saved tracks, albums, shows, episodes, and audiobooks are fetched sequentially.
 Each successful batch is normalized and applied immediately; a later failure
 leaves useful partial results. Core upsert preserves local overlay edits.
+Spotify may return alternate track URIs for the same album slot. The shell
+collapses matches with the same artist, album, disc, track, title, duration, and
+release date during sync and explicit album adds, preserving the existing
+overlay record. This fallback cannot depend on `linked_from`, which Spotify no
+longer returns in Development Mode track responses.
 
 Artist genres use an in-memory and persistent cache. Uncached artist lookups are
 paced and capped per sync. Artist discography initially requests albums and

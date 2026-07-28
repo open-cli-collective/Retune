@@ -7,6 +7,7 @@ use retune_core::{
 
 use crate::{
     provider::{MediaProvider, SectionProgress, SyncBatch},
+    spotify_track_match,
     store::OverlayStore,
 };
 
@@ -99,7 +100,11 @@ pub fn apply_in_memory(library: &mut Library, incoming: Vec<retune_core::model::
                 track.cat.clone_from(existing);
             }
         }
-        library.upsert(track);
+        let is_alias =
+            spotify_track_match(library, &track).is_some_and(|existing| existing.uri != track.uri);
+        if !is_alias {
+            library.upsert(track);
+        }
     }
 }
 
@@ -163,6 +168,33 @@ mod tests {
             kind: Some("Spotify".into()),
             bitrate_kbps: None,
         }
+    }
+
+    #[test]
+    fn sync_collapses_spotify_aliases_for_the_same_album_slot() {
+        let mut library = Library::new();
+        let mut original = track("spotify:track:original", "Song");
+        original.track_no = Some(1);
+        original.disc_no = Some(1);
+        let original_id = library.add(original);
+        let mut alias = track("spotify:track:alias", "Song");
+        alias.track_no = Some(1);
+        alias.disc_no = Some(1);
+        let mut next_track = track("spotify:track:next", "Song");
+        next_track.track_no = Some(2);
+        next_track.disc_no = Some(1);
+        let mut rerelease = track("spotify:track:rerelease", "Song");
+        rerelease.track_no = Some(1);
+        rerelease.disc_no = Some(1);
+        rerelease.release_date = Some("2025-01-01".into());
+
+        apply_in_memory(&mut library, vec![alias, next_track, rerelease]);
+
+        assert_eq!(library.tracks().len(), 3);
+        assert_eq!(library.tracks()[0].id, original_id);
+        assert_eq!(library.tracks()[0].uri, "spotify:track:original");
+        assert_eq!(library.tracks()[1].uri, "spotify:track:next");
+        assert_eq!(library.tracks()[2].uri, "spotify:track:rerelease");
     }
 
     #[tokio::test]
