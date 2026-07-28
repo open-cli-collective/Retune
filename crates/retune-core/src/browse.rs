@@ -160,6 +160,7 @@ mod tests {
             track_no: None,
             disc_no: None,
             added_at: None,
+            release_date: None,
             kind: None,
             bitrate_kbps: None,
         });
@@ -321,6 +322,7 @@ mod tests {
                 track_no,
                 disc_no,
                 added_at: None,
+                release_date: None,
                 kind: None,
                 bitrate_kbps: None,
             });

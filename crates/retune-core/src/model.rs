@@ -74,6 +74,8 @@ pub struct TrackRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<u32>,
@@ -181,6 +183,7 @@ impl Library {
             play_count: 0,
             last_played_at: None,
             added_at: incoming.added_at,
+            release_date: incoming.release_date,
             kind: incoming.kind,
             bitrate_kbps: incoming.bitrate_kbps,
             rating: None,
@@ -200,6 +203,7 @@ impl Library {
             track.disc_no = incoming.disc_no;
             track.kind = incoming.kind;
             track.bitrate_kbps = incoming.bitrate_kbps;
+            track.release_date = incoming.release_date;
             if track.orig_cat.is_some() {
                 track.orig_cat = Some(incoming.cat);
             } else {
@@ -396,6 +400,8 @@ pub struct NewTrack {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<u32>,
@@ -437,6 +443,7 @@ mod tests {
             track_no: None,
             disc_no: None,
             added_at: None,
+            release_date: None,
             kind: None,
             bitrate_kbps: None,
         }
@@ -511,6 +518,7 @@ mod tests {
 
         let mut changed = track("one", "Rock", "Artist", "Album");
         changed.added_at = Some(200);
+        changed.release_date = Some("2024-02-03".into());
         changed.kind = Some("MPEG audio file".into());
         changed.bitrate_kbps = Some(192);
         library.upsert(changed);
@@ -518,6 +526,7 @@ mod tests {
         let track = library.get(id).unwrap();
         assert_eq!((track.play_count, track.last_played_at), (9, Some(123)));
         assert_eq!(track.added_at, Some(100));
+        assert_eq!(track.release_date.as_deref(), Some("2024-02-03"));
         assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
         assert_eq!(track.bitrate_kbps, Some(192));
     }

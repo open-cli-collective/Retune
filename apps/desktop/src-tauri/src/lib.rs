@@ -285,6 +285,7 @@ struct TrackView {
     play_count: u32,
     last_played_at: Option<u64>,
     added_at: Option<u64>,
+    release_date: Option<String>,
     kind: Option<String>,
     bitrate_kbps: Option<u32>,
     overridden: bool,
@@ -306,6 +307,7 @@ impl TrackView {
             play_count: track.play_count,
             last_played_at: track.last_played_at,
             added_at: track.added_at,
+            release_date: track.release_date.clone(),
             kind: track.kind.clone(),
             bitrate_kbps: track.bitrate_kbps,
             overridden: track
@@ -2355,6 +2357,7 @@ mod tests {
             track_no: None,
             disc_no: None,
             added_at: None,
+            release_date: None,
             kind: None,
             bitrate_kbps: None,
         }
@@ -2777,11 +2780,15 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "items": [
-                        {"uri": "spotify:track:one", "name": "One", "artists": []},
-                        {"uri": "spotify:track:two", "name": "Two", "artists": []}
-                    ],
-                    "next": null
+                    "id": "album", "uri": "spotify:album:album", "name": "Album",
+                    "artists": [], "release_date": "2024", "total_tracks": 2,
+                    "tracks": {
+                        "items": [
+                            {"uri": "spotify:track:one", "name": "One", "artists": []},
+                            {"uri": "spotify:track:two", "name": "Two", "artists": []}
+                        ],
+                        "next": null, "total": 2
+                    }
                 }),
             ),
             Response::json(201, serde_json::json!({"snapshot_id": "new"})),
@@ -3188,6 +3195,7 @@ mod tests {
                 "bitrate",
                 "lastPlayed",
                 "added",
+                "releaseDate",
             ]
             .map(String::from)
             .to_vec(),
@@ -3197,6 +3205,7 @@ mod tests {
                 "kind".into(),
                 "bitrate".into(),
                 "added".into(),
+                "releaseDate".into(),
             ],
             sort_column: Some("plays".into()),
             sort_desc: true,
@@ -3330,7 +3339,14 @@ mod tests {
         assert_eq!(settings.column_order, Settings::default().column_order);
         assert_eq!(
             settings.hidden_columns,
-            ["genre", "kind", "bitrate", "lastPlayed", "added"]
+            [
+                "genre",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+                "added",
+                "releaseDate"
+            ]
         );
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);

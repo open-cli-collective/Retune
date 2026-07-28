@@ -159,6 +159,7 @@ mod tests {
             track_no: None,
             disc_no: None,
             added_at: None,
+            release_date: None,
             kind: Some("Spotify".into()),
             bitrate_kbps: None,
         }

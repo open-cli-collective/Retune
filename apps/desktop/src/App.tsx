@@ -3,11 +3,11 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, insertionIndexAtY, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, SYNTHETIC_BASE } from './ui.ts'
+import { compareTracks, DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, insertionIndexAtY, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, SYNTHETIC_BASE } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
-import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
+import type { ActivePane, BrowseView, BrowserPanes, ConnectionState, ImportSummary, InfoDialog, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { ContextMenu } from './viewShared.tsx'
 export type { AlbumPageView, ArtistPageView, PlaylistListView } from './types.ts'
 
@@ -92,9 +92,9 @@ const defaultSettings: Settings = {
   plCollapsed: false,
   browserVisible: true,
   browserPanes: { cat: true, art: true, alb: true },
-  columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added'],
+  columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
   columnWidths: {},
-  hiddenColumns: ['kind', 'bitrate', 'lastPlayed', 'added'],
+  hiddenColumns: ['kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
   sortColumn: null,
   sortDesc: false,
   autoAddSpotifyLibrary: true,
@@ -241,37 +241,6 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-
-const sortValue = (track: Track, column: ColumnKey): string | number | null => {
-  if (column === 'track') return track.trackNo
-  if (column === 'name') return track.name
-  if (column === 'time') return track.durationSecs
-  if (column === 'artist') return track.art
-  if (column === 'album') return track.alb
-  if (column === 'genre') return track.cat
-  if (column === 'rating') return track.rating?.stars ?? null
-  if (column === 'plays') return track.playCount
-  if (column === 'kind') return track.kind
-  if (column === 'bitrate') return track.bitrateKbps
-  if (column === 'lastPlayed') return track.lastPlayedAt
-  return track.addedAt
-}
-
-const compareTracks = (left: Track, right: Track, column: ColumnKey, desc: boolean) => {
-  const columns = [column, ...(['track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => key !== column)]
-  for (const key of columns) {
-    const a = sortValue(left, key)
-    const b = sortValue(right, key)
-    if (a === null && b === null) continue
-    if (a === null) return 1
-    if (b === null) return -1
-    const compared = typeof a === 'number' && typeof b === 'number'
-      ? a - b
-      : String(a).localeCompare(String(b), undefined, { sensitivity: 'base' })
-    if (compared) return desc ? -compared : compared
-  }
-  return 0
-}
 
 function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)

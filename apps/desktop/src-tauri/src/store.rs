@@ -191,11 +191,12 @@ impl Default for Settings {
                 "bitrate",
                 "lastPlayed",
                 "added",
+                "releaseDate",
             ]
             .map(String::from)
             .to_vec(),
             column_widths: BTreeMap::new(),
-            hidden_columns: ["kind", "bitrate", "lastPlayed", "added"]
+            hidden_columns: ["kind", "bitrate", "lastPlayed", "added", "releaseDate"]
                 .map(String::from)
                 .to_vec(),
             sort_column: None,
@@ -218,7 +219,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    const COLUMNS: [&'static str; 12] = [
+    const COLUMNS: [&'static str; 13] = [
         "name",
         "artist",
         "album",
@@ -231,24 +232,42 @@ impl Settings {
         "bitrate",
         "lastPlayed",
         "added",
+        "releaseDate",
     ];
     const OLD_COLUMNS: [&'static str; 7] = [
         "track", "name", "time", "artist", "album", "genre", "rating",
     ];
 
     pub(crate) fn normalize(&mut self) {
+        self.column_order
+            .retain(|column| Self::COLUMNS.contains(&column.as_str()));
+        self.hidden_columns
+            .retain(|column| Self::COLUMNS.contains(&column.as_str()));
+        self.column_widths
+            .retain(|column, _| Self::COLUMNS.contains(&column.as_str()));
+        if self
+            .sort_column
+            .as_deref()
+            .is_some_and(|column| !Self::COLUMNS.contains(&column))
+        {
+            self.sort_column = None;
+        }
         if !self.column_order.iter().any(|column| column == "track") {
             self.column_order.insert(0, "track".into());
         }
         if self.column_order == Self::OLD_COLUMNS {
             self.column_order = Self::default().column_order;
-            self.hidden_columns
-                .extend(["kind", "bitrate", "lastPlayed", "added"].map(String::from));
+            self.hidden_columns.extend(
+                ["kind", "bitrate", "lastPlayed", "added", "releaseDate"].map(String::from),
+            );
         } else {
             for column in Self::COLUMNS {
                 if !self.column_order.iter().any(|item| item == column) {
                     self.column_order.push(column.into());
-                    if matches!(column, "kind" | "bitrate" | "lastPlayed" | "added") {
+                    if matches!(
+                        column,
+                        "kind" | "bitrate" | "lastPlayed" | "added" | "releaseDate"
+                    ) {
                         self.hidden_columns.push(column.into());
                     }
                 }
@@ -652,11 +671,12 @@ mod tests {
                 "bitrate",
                 "lastPlayed",
                 "added",
+                "releaseDate",
             ]
             .map(String::from)
             .to_vec(),
             column_widths: BTreeMap::from([("name".into(), 240), ("lastPlayed".into(), 120)]),
-            hidden_columns: vec!["genre".into(), "added".into()],
+            hidden_columns: vec!["genre".into(), "added".into(), "releaseDate".into()],
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,
@@ -946,11 +966,12 @@ mod tests {
                 "bitrate",
                 "lastPlayed",
                 "added",
+                "releaseDate",
             ]
         );
         assert_eq!(
             settings.hidden_columns,
-            ["kind", "bitrate", "lastPlayed", "added"]
+            ["kind", "bitrate", "lastPlayed", "added", "releaseDate"]
         );
         assert_eq!(settings.playback_backend, "local");
         assert_eq!(settings.repeat, "off");
@@ -1012,16 +1033,52 @@ mod tests {
                 "bitrate",
                 "lastPlayed",
                 "added",
+                "releaseDate",
             ]
         );
         assert_eq!(
             settings.hidden_columns,
-            ["genre", "kind", "bitrate", "lastPlayed", "added"]
+            [
+                "genre",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+                "added",
+                "releaseDate"
+            ]
         );
     }
 
     #[test]
-    fn settings_load_adds_date_added_after_last_played_and_hides_it() {
+    fn settings_load_discards_columns_from_newer_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let mut future = serde_json::to_value(Settings::default()).unwrap();
+        future["columnOrder"]
+            .as_array_mut()
+            .unwrap()
+            .push("futureColumn".into());
+        future["hiddenColumns"]
+            .as_array_mut()
+            .unwrap()
+            .push("futureColumn".into());
+        future["columnWidths"]["futureColumn"] = 80.into();
+        future["sortColumn"] = "futureColumn".into();
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&future).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert_eq!(settings.column_order, Settings::default().column_order);
+        assert_eq!(settings.hidden_columns, Settings::default().hidden_columns);
+        assert!(!settings.column_widths.contains_key("futureColumn"));
+        assert_eq!(settings.sort_column, None);
+    }
+
+    #[test]
+    fn settings_load_adds_optional_date_columns_and_hides_them() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSettingsStore::new(dir.path());
         let legacy = serde_json::json!({
@@ -1037,14 +1094,12 @@ mod tests {
         .unwrap();
 
         let settings = store.load().unwrap().unwrap();
-        assert_eq!(
-            settings.column_order.last().map(String::as_str),
-            Some("added")
-        );
+        assert!(settings
+            .column_order
+            .ends_with(&["added".into(), "releaseDate".into()]));
         assert!(settings
             .hidden_columns
-            .iter()
-            .any(|column| column == "added"));
+            .ends_with(&["added".into(), "releaseDate".into()]));
     }
 
     #[test]

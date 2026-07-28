@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
 
 test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
@@ -56,4 +56,11 @@ test('artist album pages append without duplicate releases', () => {
 test('clearing a track rating reveals its inherited album rating', () => {
   assert.deepEqual(clearedTrackRating(4), { stars: 4, explicit: false })
   assert.equal(clearedTrackRating(null), null)
+})
+
+test('release dates sort chronologically with the standard tie-breakers and missing dates last', () => {
+  const track = (releaseDate: string | null, trackNo: number) => ({ releaseDate, trackNo } as never)
+  const tracks = [track(null, 1), track('2024-01-01', 2), track('2024-01-01', 1), track('2020', 1)]
+  assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'releaseDate', false)), [tracks[3], tracks[2], tracks[1], tracks[0]])
+  assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'releaseDate', true)), [tracks[1], tracks[2], tracks[3], tracks[0]])
 })

@@ -975,25 +975,23 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
         let health = SyncHealth::new(None);
         let genres = GenreSource::new(self, &health);
-        let id = spotify_id(album);
-        let mut offset = 0;
-        let mut normalized = vec![];
-        loop {
-            let page = SpotifyClient::album_tracks(self, id, offset, PAGE_SIZE)
-                .await
-                .map_err(|error| error.to_string())?;
-            let count = (page.items.len() + page.skipped) as u32;
-            for track in page.items {
-                normalized.push(normalized_track(&track, None, None));
-            }
-            if page.next.is_none() || count == 0 {
-                return Ok(enrich_music(&genres, vec![normalized])
-                    .await?
-                    .pop()
-                    .unwrap_or_default());
-            }
-            offset += count;
-        }
+        let album = SpotifyClient::album(self, spotify_id(album))
+            .await
+            .map_err(|error| error.to_string())?;
+        let normalized = album
+            .tracks
+            .as_ref()
+            .map(|page| {
+                page.items
+                    .iter()
+                    .map(|track| normalized_track(track, Some(&album), None))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(enrich_music(&genres, vec![normalized])
+            .await?
+            .pop()
+            .unwrap_or_default())
     }
 
     async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String> {

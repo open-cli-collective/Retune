@@ -35,6 +35,11 @@ pub fn track(
         track_no: value.track_number,
         disc_no: value.disc_number,
         added_at: None,
+        release_date: value
+            .album
+            .as_ref()
+            .and_then(|album| album.release_date.clone())
+            .or_else(|| parent_album.and_then(|album| album.release_date.clone())),
         kind: Some("Spotify".into()),
         bitrate_kbps: None,
     }
@@ -58,6 +63,7 @@ pub fn episode(value: &Episode, parent_show: Option<&Show>) -> NewTrack {
         track_no: None,
         disc_no: None,
         added_at: None,
+        release_date: None,
         kind: Some("Spotify".into()),
         bitrate_kbps: None,
     }
@@ -83,6 +89,7 @@ pub fn chapter(value: &Chapter, book: &Audiobook) -> NewTrack {
         track_no: value.chapter_number,
         disc_no: None,
         added_at: None,
+        release_date: None,
         kind: Some("Spotify".into()),
         bitrate_kbps: None,
     }
@@ -109,6 +116,7 @@ mod tests {
                 id: "album-1".into(),
                 uri: "spotify:album:1".into(),
                 name: "Record".into(),
+                release_date: Some("2024-02-03".into()),
                 images: vec![],
             }),
         }
@@ -128,6 +136,7 @@ mod tests {
         assert_eq!(mapped.cat, "indie");
         assert_eq!(mapped.art, "Primary");
         assert_eq!(mapped.alb, "Record");
+        assert_eq!(mapped.release_date.as_deref(), Some("2024-02-03"));
         assert_eq!((mapped.disc_no, mapped.track_no), (Some(1), Some(2)));
         assert_eq!(mapped.kind.as_deref(), Some("Spotify"));
         assert_eq!(mapped.bitrate_kbps, None);
@@ -162,7 +171,7 @@ mod tests {
                 name: "Parent Artist".into(),
             }],
             images: vec![],
-            release_date: None,
+            release_date: Some("1999".into()),
             album_type: None,
             total_tracks: 0,
             tracks: None,
@@ -170,6 +179,7 @@ mod tests {
         let mapped = track(&value, None, Some(&album));
         assert_eq!(mapped.alb, "Parent Record");
         assert_eq!(mapped.art, "Parent Artist");
+        assert_eq!(mapped.release_date.as_deref(), Some("1999"));
     }
 
     #[test]

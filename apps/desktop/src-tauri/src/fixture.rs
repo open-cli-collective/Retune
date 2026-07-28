@@ -252,6 +252,7 @@ fn add(
         track_no: None,
         disc_no: None,
         added_at: None,
+        release_date: None,
         kind: None,
         bitrate_kbps: None,
     })

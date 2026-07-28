@@ -1,4 +1,4 @@
-import type { PlaylistSubject } from './types.ts'
+import type { ColumnKey, PlaylistSubject, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -18,6 +18,38 @@ export const resizedPaneHeight = (startHeight: number, startY: number, clientY: 
 
 export const clearedTrackRating = (inherited: number | null) =>
   inherited === null ? null : { stars: inherited, explicit: false }
+
+const sortValue = (track: Track, column: ColumnKey): string | number | null => {
+  if (column === 'track') return track.trackNo
+  if (column === 'name') return track.name
+  if (column === 'time') return track.durationSecs
+  if (column === 'artist') return track.art
+  if (column === 'album') return track.alb
+  if (column === 'genre') return track.cat
+  if (column === 'rating') return track.rating?.stars ?? null
+  if (column === 'plays') return track.playCount
+  if (column === 'kind') return track.kind
+  if (column === 'bitrate') return track.bitrateKbps
+  if (column === 'lastPlayed') return track.lastPlayedAt
+  if (column === 'added') return track.addedAt
+  return track.releaseDate
+}
+
+export const compareTracks = (left: Track, right: Track, column: ColumnKey, desc: boolean) => {
+  const columns = [column, ...(['track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => key !== column)]
+  for (const key of columns) {
+    const a = sortValue(left, key)
+    const b = sortValue(right, key)
+    if (a === null && b === null) continue
+    if (a === null) return 1
+    if (b === null) return -1
+    const compared = typeof a === 'number' && typeof b === 'number'
+      ? a - b
+      : String(a).localeCompare(String(b), undefined, { sensitivity: 'base' })
+    if (compared) return desc ? -compared : compared
+  }
+  return 0
+}
 
 export const moveBefore = <T>(items: T[], item: T, target?: T) => {
   if (!items.includes(item) || item === target) return items

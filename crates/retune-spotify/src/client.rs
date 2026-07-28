@@ -1000,6 +1000,8 @@ pub struct AlbumSummary {
     pub uri: String,
     pub name: String,
     #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
     pub images: Vec<Image>,
 }
 

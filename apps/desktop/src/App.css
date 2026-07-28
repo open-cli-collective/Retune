@@ -97,7 +97,7 @@ button { color: inherit; }
 .sidebar-actions button:hover::after, .sidebar-actions button:focus-visible::after { opacity: 1; visibility: visible; }
 .content { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--list); }
 .browser-pane { position: relative; height: 200px; min-height: 90px; max-height: calc(100% - 140px); flex: 0 0 200px; display: flex; flex-direction: column; }
-.browser-scroll { min-width: 0; min-height: 0; flex: 1; overflow: auto; }
+.browser-scroll { min-width: 0; min-height: 0; flex: 1; overflow: auto; contain: paint; }
 .browser-columns { height: 100%; display: grid; }
 .browser-resize-handle { position: relative; z-index: 2; height: 5px; flex: 0 0 5px; cursor: row-resize; touch-action: none; }
 .browser-resize-handle::after { position: absolute; right: 0; bottom: 2px; left: 0; border-bottom: 1px solid var(--border); content: ''; }
@@ -136,7 +136,7 @@ button { color: inherit; }
 .track-name .info-button { margin-left: auto; border: 0; color: inherit; background: transparent; }
 .get-info .file-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track-header { position: sticky; z-index: 3; top: 0; height: 20px; border-bottom: 1px solid var(--border); color: var(--dim); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; user-select: none; }
-.track-header [data-column] { cursor: grab; }
+.track-header [data-column] { cursor: default; }
 .track-header [data-column].dragging { opacity: .45; cursor: grabbing; }
 .track-header > span { position: relative; overflow: visible; }
 .track-header-label { display: block; overflow: hidden; text-overflow: ellipsis; }

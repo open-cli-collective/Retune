@@ -90,7 +90,7 @@ export function AlbumRatingStrip({ album, rating, onRate }: { album: string; rat
 const COLUMN_SPECS: Record<ColumnKey, { width: string; numeric?: boolean }> = {
   track: { width: '34px', numeric: true }, name: { width: 'minmax(160px, 1.6fr)' }, time: { width: '52px', numeric: true }, artist: { width: '1.1fr' },
   album: { width: '1.1fr' }, genre: { width: '.9fr' }, rating: { width: '84px' }, plays: { width: '48px', numeric: true }, kind: { width: '140px' },
-  bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true },
+  bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true }, releaseDate: { width: '88px', numeric: true },
 }
 
 export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
@@ -121,6 +121,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     bitrate: 'Bit Rate',
     lastPlayed: 'Last Played',
     added: 'Date Added',
+    releaseDate: 'Release Date',
   }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
   const columns = `22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
@@ -180,6 +181,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     if (column === 'bitrate') return <span key={column} className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
     if (column === 'lastPlayed') return <span key={column} className="track-number">{track.lastPlayedAt === null ? '' : new Date(track.lastPlayedAt * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
     if (column === 'added') return <span key={column} className="track-number">{track.addedAt === null ? '' : new Date(track.addedAt * 1000).toLocaleDateString()}</span>
+    if (column === 'releaseDate') return <span key={column} className="track-number">{track.releaseDate ?? ''}</span>
     return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
   }
   const menuTrack = menu?.trackId === undefined ? undefined : tracks.find((track) => track.id === menu.trackId)

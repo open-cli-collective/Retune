@@ -115,6 +115,7 @@ fn map_file(file: ImportedFile) -> Result<NewTrack, String> {
                 .expect("system clock is before Unix epoch")
                 .as_secs(),
         ),
+        release_date: None,
         kind,
         bitrate_kbps,
     })
