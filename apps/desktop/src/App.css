@@ -62,12 +62,12 @@ button { color: inherit; }
 .progress-row progress::-webkit-progress-bar { border-radius: 2px; background: color-mix(in srgb, var(--dim) 30%, transparent); }
 .progress-row progress::-webkit-progress-value { border-radius: 2px; background: var(--accent); }
 .progress-row progress::-moz-progress-bar { border-radius: 2px; background: var(--accent); }
-.search-area { width: 218px; justify-self: end; display: flex; flex-direction: column; align-items: stretch; gap: 5px; min-width: 0; }
+.search-area { width: 218px; justify-self: end; display: flex; flex-direction: column; align-items: stretch; gap: 3px; min-width: 0; }
 .search-scope { width: 100%; display: flex; align-items: center; }
-.scope-pills { box-sizing: border-box; width: 100%; display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--control) 80%, transparent); }
-.scope-pills button { min-width: 0; flex: 1; padding: 2px 8px; border-radius: 8px; color: var(--dim); }
+.scope-pills { box-sizing: border-box; width: 100%; height: 22px; display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--control) 80%, transparent); }
+.scope-pills button { min-width: 0; flex: 1; padding: 0 8px; border-radius: 8px; color: var(--dim); }
 .scope-pills .active { color: var(--text); background: var(--list); box-shadow: 0 1px 2px rgb(0 0 0 / .18); font-weight: 600; }
-.search { box-sizing: border-box; width: 100%; height: 24px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--list); outline: 0; }
+.search { box-sizing: border-box; width: 100%; height: 22px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 11px; color: var(--text); background: var(--list); outline: 0; }
 .search:focus { border-color: var(--accent); }
 .body-grid { height: calc(100% - 52px); display: grid; grid-template-columns: 190px minmax(0, 1fr); }
 .sidebar { position: relative; min-height: 0; display: flex; flex-direction: column; padding-top: 7px; overflow: hidden; border-right: 1px solid var(--border); background: linear-gradient(120deg, var(--side1), var(--side2)); }
