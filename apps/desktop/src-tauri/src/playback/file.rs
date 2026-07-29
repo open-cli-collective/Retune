@@ -114,10 +114,17 @@ impl FileEngine {
     }
 
     pub(super) fn toggle(&mut self) -> Result<(), String> {
-        if self.playing {
-            self.pause()
-        } else {
+        self.set_playing(!self.playing)
+    }
+
+    pub(super) fn set_playing(&mut self, playing: bool) -> Result<(), String> {
+        if self.playing == playing {
+            return Ok(());
+        }
+        if playing {
             self.resume()
+        } else {
+            self.pause()
         }
     }
 

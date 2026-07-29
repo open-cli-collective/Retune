@@ -157,11 +157,18 @@ impl LocalBackend {
     }
 
     pub(super) fn toggle(&mut self) -> Result<(), String> {
+        self.set_playing(!self.playing)
+    }
+
+    pub(super) fn set_playing(&mut self, playing: bool) -> Result<(), String> {
+        if self.playing == playing {
+            return Ok(());
+        }
         let runtime = self.runtime.as_ref().ok_or("Nothing is playing")?;
         if self.snapshot.is_none() {
             return Err("Nothing is playing".into());
         }
-        self.playing = !self.playing;
+        self.playing = playing;
         if self.playing {
             runtime.player.play();
         } else {

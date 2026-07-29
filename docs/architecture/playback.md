@@ -32,6 +32,8 @@ the other disabled tracks.
 
 Mixed queues switch at URI boundaries. Only one execution path is allowed to be
 audible; transitions pause or stop the counterpart before starting the next.
+System Play and Pause commands set an explicit state; only Toggle inverts the
+current state.
 
 ## Play history
 

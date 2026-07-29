@@ -104,6 +104,7 @@ impl MediaKeys {
 
 #[derive(Clone, Copy)]
 enum PlaybackCommand {
+    SetPlaying(bool),
     Toggle,
     Next,
     Previous,
@@ -111,22 +112,17 @@ enum PlaybackCommand {
 }
 
 fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
-    let command = match event {
-        MediaControlEvent::Play | MediaControlEvent::Pause | MediaControlEvent::Toggle => {
-            PlaybackCommand::Toggle
-        }
-        MediaControlEvent::Next => PlaybackCommand::Next,
-        MediaControlEvent::Previous => PlaybackCommand::Previous,
-        MediaControlEvent::SetPosition(MediaPosition(position)) => {
-            PlaybackCommand::Seek(position.as_secs())
-        }
-        _ => return,
+    let Some(command) = playback_command(event) else {
+        return;
     };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         let client = crate::provider_from(&state).ok();
         let result = match command {
+            PlaybackCommand::SetPlaying(playing) => {
+                state.playback.set_playing(client.as_deref(), playing).await
+            }
             PlaybackCommand::Toggle => state.playback.toggle(client.as_deref()).await,
             PlaybackCommand::Next => state.playback.next(client).await,
             PlaybackCommand::Previous => state.playback.prev(client).await,
@@ -136,6 +132,20 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
             let _ = app.emit("operation-error", error);
         }
     });
+}
+
+fn playback_command(event: MediaControlEvent) -> Option<PlaybackCommand> {
+    Some(match event {
+        MediaControlEvent::Play => PlaybackCommand::SetPlaying(true),
+        MediaControlEvent::Pause => PlaybackCommand::SetPlaying(false),
+        MediaControlEvent::Toggle => PlaybackCommand::Toggle,
+        MediaControlEvent::Next => PlaybackCommand::Next,
+        MediaControlEvent::Previous => PlaybackCommand::Previous,
+        MediaControlEvent::SetPosition(MediaPosition(position)) => {
+            PlaybackCommand::Seek(position.as_secs())
+        }
+        _ => return None,
+    })
 }
 
 fn metadata_key(event: &PlayerStateEvent) -> Option<MetadataKey> {
@@ -204,6 +214,22 @@ mod tests {
                 progress: Some(MediaPosition(Duration::from_secs(42)))
             }
         );
+    }
+
+    #[test]
+    fn preserves_explicit_media_control_intent() {
+        assert!(matches!(
+            playback_command(MediaControlEvent::Play),
+            Some(PlaybackCommand::SetPlaying(true))
+        ));
+        assert!(matches!(
+            playback_command(MediaControlEvent::Pause),
+            Some(PlaybackCommand::SetPlaying(false))
+        ));
+        assert!(matches!(
+            playback_command(MediaControlEvent::Toggle),
+            Some(PlaybackCommand::Toggle)
+        ));
     }
 
     #[test]

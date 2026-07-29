@@ -194,6 +194,29 @@ impl ConnectBackend {
         let mut state = self.state.lock().await;
         let context = state.context.as_mut().ok_or("Nothing is playing")?;
         let playing = !context.previous.is_playing;
+        Self::set_context_playing(client, context, playing)
+            .await?
+            .ok_or_else(|| "Nothing to toggle".into())
+    }
+
+    async fn set_playing_state<T: Transport, S: TokenStore>(
+        &self,
+        client: &SpotifyClient<T, S>,
+        playing: bool,
+    ) -> Result<Option<NeutralState>, String> {
+        let mut state = self.state.lock().await;
+        let context = state.context.as_mut().ok_or("Nothing is playing")?;
+        Self::set_context_playing(client, context, playing).await
+    }
+
+    async fn set_context_playing<T: Transport, S: TokenStore>(
+        client: &SpotifyClient<T, S>,
+        context: &mut Context,
+        playing: bool,
+    ) -> Result<Option<NeutralState>, String> {
+        if context.previous.is_playing == playing {
+            return Ok(None);
+        }
         if playing {
             client.resume(Some(&context.device_id)).await
         } else {
@@ -202,12 +225,12 @@ impl ConnectBackend {
         .map_err(|error| error.to_string())?;
         context.epoch = context.epoch.wrapping_add(1);
         context.previous.is_playing = playing;
-        Ok(local_state(
+        Ok(Some(local_state(
             &context.snapshot,
             context.previous.elapsed,
             playing,
             context.volume_supported,
-        ))
+        )))
     }
 
     async fn seek_state<T: Transport, S: TokenStore>(
@@ -350,6 +373,17 @@ impl ConnectBackend {
     pub(super) async fn toggle(&self, client: &LiveClient) -> Result<(), String> {
         let state = self.toggle_pause(client).await?;
         self.emit(state);
+        Ok(())
+    }
+
+    pub(super) async fn set_playing(
+        &self,
+        client: &LiveClient,
+        playing: bool,
+    ) -> Result<(), String> {
+        if let Some(state) = self.set_playing_state(client, playing).await? {
+            self.emit(state);
+        }
         Ok(())
     }
 
@@ -1148,7 +1182,17 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(playback
+            .set_playing_state(&client, true)
+            .await
+            .unwrap()
+            .is_none());
         assert!(!playback.toggle_pause(&client).await.unwrap().is_playing);
+        assert!(playback
+            .set_playing_state(&client, false)
+            .await
+            .unwrap()
+            .is_none());
         assert!(playback.toggle_pause(&client).await.unwrap().is_playing);
         assert_eq!(
             playback.next(&client).await.unwrap().uri.as_deref(),

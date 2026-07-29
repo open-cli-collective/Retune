@@ -275,6 +275,13 @@ impl PlayerBackend {
         }
     }
 
+    async fn set_playing(&mut self, client: &LiveClient, playing: bool) -> Result<(), String> {
+        match self {
+            Self::Connect(backend) => backend.set_playing(client, playing).await,
+            Self::Local(backend) => backend.set_playing(playing),
+        }
+    }
+
     async fn step(
         &mut self,
         client: &LiveClient,
@@ -488,6 +495,23 @@ impl Playback {
         let client = require_spotify(client)?;
         self.ensure_valid(&mut state, client).await?;
         state.backend.toggle(client).await
+    }
+
+    pub async fn set_playing(
+        &self,
+        client: Option<&LiveClient>,
+        playing: bool,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if state.file.is_active() {
+            return state.file.set_playing(playing);
+        }
+        if state.reducer.snapshot().is_none() {
+            return Ok(());
+        }
+        let client = require_spotify(client)?;
+        self.ensure_valid(&mut state, client).await?;
+        state.backend.set_playing(client, playing).await
     }
 
     pub async fn next(&self, client: Option<Arc<LiveClient>>) -> Result<(), String> {
