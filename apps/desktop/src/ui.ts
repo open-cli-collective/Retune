@@ -22,6 +22,9 @@ export const clearedTrackRating = (inherited: number | null) =>
 export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: number) =>
   tracks.filter((track) => track.enabled || track.id === requestedId)
 
+export const facetLabel = (title: string, value: string) =>
+  title === 'Genre' && value === 'Uncategorized' ? 'No Genre' : value
+
 const sortValue = (track: Track, column: ColumnKey): string | number | null => {
   if (column === 'disc') return track.discNo ?? 1
   if (column === 'track') return track.trackNo

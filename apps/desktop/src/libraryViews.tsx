@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
-import { DRAG_LOCAL_TYPE, DRAG_TYPE, formatTime, hasLocalTracks, labels, moveBefore, resizedColumnWidth, resizedPaneHeight } from './ui.ts'
+import { DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, labels, moveBefore, resizedColumnWidth, resizedPaneHeight } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 
 export function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
@@ -78,7 +78,11 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
     <div className="column-header">{title}</div>
     <div className="facet-list">
       <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)}>All ({values.length} {title}s)</button>
-      {values.map((value, index) => <button key={value} data-row-index={index + 1} className={selected?.includes(value) ? 'active' : ''} onClick={(event) => select(value, event)} title={value}>{value}</button>)}
+      {values.map((value, index) => {
+        const label = facetLabel(title, value)
+        const meta = label !== value
+        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
+      })}
     </div>
   </div>
 }

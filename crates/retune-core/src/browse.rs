@@ -63,7 +63,8 @@ pub fn facets(library: &Library, source: SourceId, selection: &Selection) -> Fac
         .tracks()
         .iter()
         .filter(|track| track.source == source);
-    let cats = sorted_unique(records.clone().map(|track| track.cat.clone()).collect());
+    let mut cats = sorted_unique(records.clone().map(|track| track.cat.clone()).collect());
+    cats.sort_by_key(|cat| cat != "Uncategorized");
     let arts = sorted_unique(
         records
             .clone()
@@ -227,6 +228,24 @@ mod tests {
                 arts: vec!["alpha".into(), "beta".into()],
                 albs: vec!["Able".into(), "Zoo".into()],
             }
+        );
+    }
+
+    #[test]
+    fn uncategorized_category_is_pinned_first() {
+        let mut library = library();
+        add(
+            &mut library,
+            SourceId::Music,
+            "uncategorized",
+            "Uncategorized",
+            "Artist",
+            "Album",
+        );
+
+        assert_eq!(
+            facets(&library, SourceId::Music, &Selection::default()).cats,
+            ["Uncategorized", "Jazz", "Rock"]
         );
     }
 

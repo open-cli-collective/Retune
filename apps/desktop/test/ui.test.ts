@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, facetLabel, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+
+test('the music catch-all has a user-facing genre label', () => {
+  assert.equal(facetLabel('Genre', 'Uncategorized'), 'No Genre')
+  assert.equal(facetLabel('Category', 'Uncategorized'), 'Uncategorized')
+})
 
 test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
