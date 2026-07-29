@@ -46,17 +46,17 @@ button { color: inherit; }
 .lcd-artwork { box-sizing: border-box; width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--lcd-art-border); border-radius: 4px; color: var(--lcd-art-glyph); background: repeating-linear-gradient(45deg, var(--lcd-art1), var(--lcd-art1) 6px, var(--lcd-art2) 6px, var(--lcd-art2) 12px); font-size: 16px; }
 .lcd-artwork img { width: 100%; height: 100%; object-fit: cover; }
 .lcd-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
-.lcd-line { height: 11px; overflow: hidden; text-align: left; white-space: nowrap; line-height: 11px; }
+.lcd-line { height: 13px; overflow: hidden; text-align: left; white-space: nowrap; line-height: 13px; }
 .marquee { display: inline-block; }
 .marquee.strong { font-weight: 700; }
 .marquee.scrolling { animation: marquee-pingpong linear infinite; }
 @keyframes marquee-pingpong { 0%, 10% { transform: translateX(0); } 45%, 55% { transform: translateX(var(--marquee-distance)); } 90%, 100% { transform: translateX(0); } }
-.lcd-meta { height: 10px; overflow: hidden; color: var(--dim); text-overflow: ellipsis; white-space: nowrap; line-height: 10px; }
+.lcd-meta { height: 11px; overflow: hidden; color: var(--dim); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; line-height: 11px; }
 .lcd-artist { color: var(--lcd-artist); }
 .lcd-album { color: var(--dim); }
 .lcd.idle .lcd-copy { color: var(--dim); }
 .lcd.external .lcd-copy { opacity: .65; }
-.progress-row { display: grid; grid-template-columns: 34px 1fr 38px; align-items: center; gap: 5px; color: var(--dim); font-size: 9.5px; }
+.progress-row { height: 10px; display: grid; grid-template-columns: 34px 1fr 38px; align-items: center; gap: 5px; color: var(--dim); font-size: 9.5px; line-height: 10px; }
 .progress-row time:last-child { text-align: right; }
 .progress-row progress { width: 100%; height: 3px; overflow: hidden; border: 0; border-radius: 2px; accent-color: var(--accent); cursor: pointer; }
 .progress-row progress::-webkit-progress-bar { border-radius: 2px; background: color-mix(in srgb, var(--dim) 30%, transparent); }
