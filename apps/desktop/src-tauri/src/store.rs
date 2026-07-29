@@ -1059,13 +1059,13 @@ mod tests {
                 "time",
                 "genre",
                 "rating",
+                "disc",
                 "plays",
                 "kind",
                 "bitrate",
                 "lastPlayed",
                 "added",
                 "releaseDate",
-                "disc",
             ]
         );
         assert_eq!(
