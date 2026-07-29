@@ -124,7 +124,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     releaseDate: 'Release Date',
   }
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
-  const columns = `20px 22px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
+  const columns = `16px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
@@ -171,7 +171,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   }
   const cell = (track: Track, column: ColumnKey) => {
     if (column === 'track') return <span key={column} className="track-number">{track.trackNo ?? ''}</span>
-    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
+    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{playing?.trackId === track.id && <span className="playing-marker">{playing.isPlaying ? '▶' : '❚❚'}</span>}{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
     if (column === 'time') return <span key={column} className="track-number">{formatTime(track.durationSecs)}</span>
     if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
     if (column === 'album') return <span key={column} title={track.alb}>{track.alb}</span>
@@ -189,7 +189,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     <div className={`track-scroll ${empty ? 'empty-library' : ''}`}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
-    }}><span className="track-enabled-cell" /><span />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
+    }}><span className="track-enabled-cell" />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
       if (event.button !== 0) return
       headerDragged.current = false
       columnDrag.current = { column, pointerId: event.pointerId, startX: event.clientX, element: event.currentTarget }
@@ -221,7 +221,6 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           setMenu({ x: event.clientX, y: event.clientY, trackId: track.id })
         }}>
           <span className="track-enabled-cell"><input type="checkbox" checked={track.enabled} aria-label={`${track.enabled ? 'Exclude' : 'Include'} ${track.name} from sequential playback`} title={track.enabled ? 'Uncheck to skip during sequential playback' : 'Check to include in sequential playback'} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onChange={(event) => onEnabled(track.id, event.target.checked)} /></span>
-          <span className="playing-marker">{isPlaying ? playing.isPlaying ? '▶' : '❚❚' : ''}</span>
           {visibleColumns.map((column) => cell(track, column))}
         </div>
       })}
