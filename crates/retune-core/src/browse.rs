@@ -105,8 +105,7 @@ pub fn tracks<'a>(
             .cmp(&selection_rank(selection, right))
             .then_with(|| left.art.to_lowercase().cmp(&right.art.to_lowercase()))
             .then_with(|| left.alb.to_lowercase().cmp(&right.alb.to_lowercase()))
-            .then_with(|| left.disc_no.is_none().cmp(&right.disc_no.is_none()))
-            .then_with(|| left.disc_no.cmp(&right.disc_no))
+            .then_with(|| left.disc_no.unwrap_or(1).cmp(&right.disc_no.unwrap_or(1)))
             .then_with(|| left.track_no.is_none().cmp(&right.track_no.is_none()))
             .then_with(|| left.track_no.cmp(&right.track_no))
     });
@@ -303,13 +302,14 @@ mod tests {
     }
 
     #[test]
-    fn tracks_sort_by_disc_and_track_with_missing_numbers_last() {
+    fn tracks_sort_by_disc_and_track_with_missing_disc_treated_as_one() {
         let mut library = Library::new();
         for (uri, disc_no, track_no) in [
             ("missing", None, None),
             ("d2t1", Some(2), Some(1)),
             ("d1t2", Some(1), Some(2)),
             ("d1t1", Some(1), Some(1)),
+            ("implicit-d1t3", None, Some(3)),
         ] {
             library.add(NewTrack {
                 uri: uri.into(),
@@ -332,6 +332,9 @@ mod tests {
             .into_iter()
             .map(|track| track.uri.as_str())
             .collect();
-        assert_eq!(uris, ["d1t1", "d1t2", "d2t1", "missing"]);
+        assert_eq!(
+            uris,
+            ["d1t1", "d1t2", "implicit-d1t3", "d2t1", "missing"]
+        );
     }
 }

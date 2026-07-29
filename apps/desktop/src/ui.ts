@@ -23,6 +23,7 @@ export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: num
   tracks.filter((track) => track.enabled || track.id === requestedId)
 
 const sortValue = (track: Track, column: ColumnKey): string | number | null => {
+  if (column === 'disc') return track.discNo ?? 1
   if (column === 'track') return track.trackNo
   if (column === 'name') return track.name
   if (column === 'time') return track.durationSecs
@@ -39,7 +40,8 @@ const sortValue = (track: Track, column: ColumnKey): string | number | null => {
 }
 
 export const compareTracks = (left: Track, right: Track, column: ColumnKey, desc: boolean) => {
-  const columns = [column, ...(['track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => key !== column)]
+  const primary: ColumnKey[] = column === 'track' ? ['disc', 'track'] : [column]
+  const columns = [...primary, ...(['disc', 'track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => !primary.includes(key))]
   for (const key of columns) {
     const a = sortValue(left, key)
     const b = sortValue(right, key)

@@ -68,6 +68,15 @@ test('sequential playback skips exclusions but an explicit start still plays one
   assert.deepEqual(playbackQueue(tracks, 2).map((track) => track.id), [1, 2, 3])
 })
 
+test('track and disc sorts keep multi-disc albums in playback order', () => {
+  const track = (discNo: number | null, trackNo: number) => ({ discNo, trackNo } as never)
+  const tracks = [track(2, 1), track(1, 2), track(null, 1), track(1, 3)]
+  const expected = [tracks[2], tracks[1], tracks[3], tracks[0]]
+  assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'track', false)), expected)
+  assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'disc', false)), expected)
+  assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'track', true)), [...expected].reverse())
+})
+
 test('release dates sort chronologically with the standard tie-breakers and missing dates last', () => {
   const track = (releaseDate: string | null, trackNo: number) => ({ releaseDate, trackNo } as never)
   const tracks = [track(null, 1), track('2024-01-01', 2), track('2024-01-01', 1), track('2020', 1)]

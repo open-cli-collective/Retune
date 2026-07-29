@@ -182,6 +182,7 @@ impl Default for Settings {
                 "name",
                 "artist",
                 "album",
+                "disc",
                 "track",
                 "time",
                 "rating",
@@ -196,7 +197,7 @@ impl Default for Settings {
             .map(String::from)
             .to_vec(),
             column_widths: BTreeMap::new(),
-            hidden_columns: ["kind", "bitrate", "lastPlayed", "added", "releaseDate"]
+            hidden_columns: ["disc", "kind", "bitrate", "lastPlayed", "added", "releaseDate"]
                 .map(String::from)
                 .to_vec(),
             sort_column: None,
@@ -219,10 +220,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-    const COLUMNS: [&'static str; 13] = [
+    const COLUMNS: [&'static str; 14] = [
         "name",
         "artist",
         "album",
+        "disc",
         "track",
         "time",
         "rating",
@@ -258,7 +260,8 @@ impl Settings {
         if self.column_order == Self::OLD_COLUMNS {
             self.column_order = Self::default().column_order;
             self.hidden_columns.extend(
-                ["kind", "bitrate", "lastPlayed", "added", "releaseDate"].map(String::from),
+                ["disc", "kind", "bitrate", "lastPlayed", "added", "releaseDate"]
+                    .map(String::from),
             );
         } else {
             for column in Self::COLUMNS {
@@ -266,7 +269,7 @@ impl Settings {
                     self.column_order.push(column.into());
                     if matches!(
                         column,
-                        "kind" | "bitrate" | "lastPlayed" | "added" | "releaseDate"
+                        "disc" | "kind" | "bitrate" | "lastPlayed" | "added" | "releaseDate"
                     ) {
                         self.hidden_columns.push(column.into());
                     }
@@ -663,6 +666,7 @@ mod tests {
                 "name",
                 "artist",
                 "album",
+                "disc",
                 "genre",
                 "time",
                 "track",
@@ -676,7 +680,12 @@ mod tests {
             .map(String::from)
             .to_vec(),
             column_widths: BTreeMap::from([("name".into(), 240), ("lastPlayed".into(), 120)]),
-            hidden_columns: vec!["genre".into(), "added".into(), "releaseDate".into()],
+            hidden_columns: vec![
+                "disc".into(),
+                "genre".into(),
+                "added".into(),
+                "releaseDate".into(),
+            ],
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,
@@ -957,6 +966,7 @@ mod tests {
                 "name",
                 "artist",
                 "album",
+                "disc",
                 "track",
                 "time",
                 "rating",
@@ -971,7 +981,7 @@ mod tests {
         );
         assert_eq!(
             settings.hidden_columns,
-            ["kind", "bitrate", "lastPlayed", "added", "releaseDate"]
+            ["disc", "kind", "bitrate", "lastPlayed", "added", "releaseDate"]
         );
         assert_eq!(settings.playback_backend, "local");
         assert_eq!(settings.repeat, "off");
@@ -1034,11 +1044,13 @@ mod tests {
                 "lastPlayed",
                 "added",
                 "releaseDate",
+                "disc",
             ]
         );
         assert_eq!(
             settings.hidden_columns,
             [
+                "disc",
                 "genre",
                 "kind",
                 "bitrate",

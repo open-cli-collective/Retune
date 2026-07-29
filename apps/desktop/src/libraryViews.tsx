@@ -88,7 +88,7 @@ export function AlbumRatingStrip({ album, rating, onRate }: { album: string; rat
 }
 
 const COLUMN_SPECS: Record<ColumnKey, { width: string; numeric?: boolean }> = {
-  track: { width: '34px', numeric: true }, name: { width: 'minmax(160px, 1.6fr)' }, time: { width: '52px', numeric: true }, artist: { width: '1.1fr' },
+  disc: { width: '34px', numeric: true }, track: { width: '34px', numeric: true }, name: { width: 'minmax(160px, 1.6fr)' }, time: { width: '52px', numeric: true }, artist: { width: '1.1fr' },
   album: { width: '1.1fr' }, genre: { width: '.9fr' }, rating: { width: '84px' }, plays: { width: '48px', numeric: true }, kind: { width: '140px' },
   bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true }, releaseDate: { width: '88px', numeric: true },
 }
@@ -109,6 +109,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
   useEffect(() => setLiveWidths(columnWidths), [columnWidths])
   const headings: Record<ColumnKey, string> = {
+    disc: 'Disc',
     track: '#',
     name: label.item[0].toUpperCase() + label.item.slice(1),
     time: 'Time',
@@ -170,6 +171,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     setLiveWidths(columnWidths)
   }
   const cell = (track: Track, column: ColumnKey) => {
+    if (column === 'disc') return <span key={column} className="track-number">{track.discNo ?? 1}</span>
     if (column === 'track') return <span key={column} className="track-number">{track.trackNo ?? ''}</span>
     if (column === 'name') return <span key={column} className="track-name" title={track.name}>{playing?.trackId === track.id && <span className="playing-marker">{playing.isPlaying ? '▶' : '❚❚'}</span>}{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
     if (column === 'time') return <span key={column} className="track-number">{formatTime(track.durationSecs)}</span>

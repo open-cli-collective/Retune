@@ -4,7 +4,7 @@ export type PlaybackBackend = 'connect' | 'local'
 export type PlayThresholdPercent = 50 | 75 | 90 | 100
 export type RepeatMode = 'off' | 'all' | 'one'
 export type BrowserPanes = { cat: boolean; art: boolean; alb: boolean }
-export type ColumnKey = 'name' | 'artist' | 'album' | 'track' | 'time' | 'rating' | 'genre' | 'plays' | 'kind' | 'bitrate' | 'lastPlayed' | 'added' | 'releaseDate'
+export type ColumnKey = 'name' | 'artist' | 'album' | 'disc' | 'track' | 'time' | 'rating' | 'genre' | 'plays' | 'kind' | 'bitrate' | 'lastPlayed' | 'added' | 'releaseDate'
 export type Selection = { cat?: string[]; art?: string[]; alb?: string[] }
 export type ActivePane = 'track' | keyof Selection
 
@@ -102,6 +102,7 @@ export type Track = {
   art: string
   alb: string
   cat: string
+  discNo: number | null
   trackNo: number | null
   durationSecs: number
   enabled: boolean

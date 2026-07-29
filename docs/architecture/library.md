@@ -38,12 +38,14 @@ canonical model.
 
 ## Track sorting
 
-An explicit column sort uses that column as its primary key, followed by track
-number, artist, album, and category as stable tie-breakers (omitting the primary
-key when it is already in that list). The selected direction applies to every
-non-empty key. Text comparison is locale-aware and case-insensitive; missing
-values remain last in either direction. With no explicit sort, the browse
-projection's album/disc/track order is preserved.
+An explicit column sort uses that column as its primary key, followed by disc,
+track number, artist, album, and category as stable tie-breakers (omitting the
+primary key when it is already in that list). Sorting by track number treats
+disc as the first key so multi-disc albums remain in playback order. A missing
+disc number means Disc 1; other missing values remain last. The selected
+direction applies to every key. Text comparison is locale-aware and
+case-insensitive. With no explicit sort, the browse projection's
+album/disc/track order is preserved.
 
 ## Serialization
 

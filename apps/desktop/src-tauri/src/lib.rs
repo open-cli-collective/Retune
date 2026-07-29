@@ -281,6 +281,7 @@ struct TrackView {
     art: String,
     alb: String,
     cat: String,
+    disc_no: Option<u32>,
     track_no: Option<u32>,
     duration_secs: u64,
     enabled: bool,
@@ -304,6 +305,7 @@ impl TrackView {
             art: track.art.clone(),
             alb: track.alb.clone(),
             cat: track.cat.clone(),
+            disc_no: track.disc_no,
             track_no: track.track_no,
             duration_secs: track.duration.as_secs(),
             enabled: track.enabled,
@@ -3217,6 +3219,7 @@ mod tests {
                 "rating",
                 "artist",
                 "album",
+                "disc",
                 "genre",
                 "time",
                 "kind",
@@ -3229,6 +3232,7 @@ mod tests {
             .to_vec(),
             column_widths: BTreeMap::from([("name".into(), 260), ("artist".into(), 140)]),
             hidden_columns: vec![
+                "disc".into(),
                 "genre".into(),
                 "kind".into(),
                 "bitrate".into(),
@@ -3368,6 +3372,7 @@ mod tests {
         assert_eq!(
             settings.hidden_columns,
             [
+                "disc",
                 "genre",
                 "kind",
                 "bitrate",
