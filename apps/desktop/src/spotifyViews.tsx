@@ -38,10 +38,11 @@ function SpotifyPageBack({ label, onBack }: { label: string; onBack: () => void 
   return <button className="spotify-page-back" onClick={onBack}>‹ Back to {label}</button>
 }
 
-function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, onRemove, onPlay, onPlaylist, onError }: {
+function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArtist, onAdd, onRemove, onPlay, onPlaylist, onError }: {
   entry: Extract<SpotifyNavEntry, { kind: 'album' }>
   backLabel: string
   adding: boolean
+  playingUri: string | null
   onBack: () => void
   onArtist: (id: string) => void
   onAdd: (album: SearchAlbum) => Promise<boolean>
@@ -143,7 +144,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, onBack, onArtist, onAdd, o
         const subject: PlaylistSubject = { kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri] }
         const inLibrary = trackIsInLibrary(track)
         const mutating = trackBusy === track.uri
-        return <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} draggable className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)} onDragStart={(event) => {
+        return <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} draggable aria-current={playingUri === track.uri ? 'true' : undefined} className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)} onDragStart={(event) => {
           event.dataTransfer.effectAllowed = 'copy'
           event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(subject))
         }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, index }) }}>
@@ -284,11 +285,12 @@ function SpotifyArtistPage({ id, backLabel, adding, added, removed, onBack, onAl
   </div>
 }
 
-export function SpotifySearch({ query, searching, results, navigation, onAdd, onPlay, onPlaylist, onClose, onError }: {
+export function SpotifySearch({ query, searching, results, navigation, playingUri, onAdd, onPlay, onPlaylist, onClose, onError }: {
   query: string
   searching: boolean
   results: SpotifyResults | null
   navigation?: SpotifyNavEntry
+  playingUri: string | null
   onAdd: (album: SpotifyResults['albums'][number]) => Promise<unknown>
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
   onPlaylist: (subject: PlaylistSubject) => void
@@ -340,7 +342,7 @@ export function SpotifySearch({ query, searching, results, navigation, onAdd, on
   const backLabel = below?.kind ?? (navigation ? 'library' : 'results')
   const back = () => nav.length === 1 && navigation ? onClose() : setNav((current) => current.slice(0, -1))
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
-  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} onBack={back} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onRemove={remove} onPlay={onPlay} onPlaylist={onPlaylist} onError={onError} />
+  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} playingUri={playingUri} onBack={back} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onRemove={remove} onPlay={onPlay} onPlaylist={onPlaylist} onError={onError} />
   if (top?.kind === 'artist') return <SpotifyArtistPage id={top.id} backLabel={backLabel} adding={adding} added={added} removed={removed} onBack={back} onAlbum={pushAlbum} onAdd={add} onRemove={remove} onPlaylist={onPlaylist} onError={onError} />
   const counts = {
     artists: results?.artists.length ?? 0,

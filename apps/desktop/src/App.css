@@ -203,6 +203,7 @@ button { color: inherit; }
 .spotify-track-row { min-height: 26px; display: grid; grid-template-columns: 27px minmax(0, 1fr) 82px 42px 52px 68px; align-items: center; gap: 5px; padding: 0 10px 0 12px; border-left: 3px solid transparent; }
 .spotify-track-row:nth-child(even), .spotify-top-track-row:nth-child(odd) { background: var(--alt); }
 .spotify-track-row.highlighted { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--list)); }
+.spotify-track-row[aria-current="true"] { font-weight: 700; }
 .spotify-track-row > span:first-child, .spotify-top-track-row > span:first-child, .spotify-track-row time, .spotify-top-track-row time { color: var(--dim); }
 .spotify-track-row .rating-stars { justify-content: flex-start; }
 .spotify-track-row time, .spotify-top-track-row time { text-align: right; }

@@ -762,6 +762,7 @@ function App() {
               searching={state.spotifySearching}
               results={state.spotifyResults}
               navigation={state.spotifyNavigation}
+              playingUri={state.playing?.uri ?? null}
               onAdd={(album) => invoke('add_spotify_album', album)
                 .catch((error) => {
                   dispatch({ type: 'error', error: String(error) })
