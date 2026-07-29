@@ -2184,7 +2184,8 @@ pub fn run() {
             let menu_checks = install_file_menu(app, &settings)?;
             // Dev builds keep tokens in a 0600 plaintext file. Release keeps
             // only the encryption key in Keychain and migrates legacy tokens.
-            let backing: Box<dyn TokenStore> = if cfg!(debug_assertions) {
+            let use_dev_token_store = cfg!(any(debug_assertions, feature = "dev-token-store"));
+            let backing: Box<dyn TokenStore> = if use_dev_token_store {
                 Box::new(store::FsTokenStore::new(&app_data_dir))
             } else {
                 let encrypted =

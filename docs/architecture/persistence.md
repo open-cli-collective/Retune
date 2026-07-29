@@ -13,7 +13,7 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `cooldowns.json` | Typed Spotify endpoint cooldowns |
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
 | `tokens.enc` | Encrypted release OAuth token state |
-| `dev-tokens.json` | Debug-only token state, mode 0600 |
+| `dev-tokens.json` | Development token state, mode 0600 |
 
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.
@@ -25,8 +25,9 @@ key is stored in macOS Keychain under service `com.rianjs.retune` and account
 `token-file-key`. A legacy Keychain token entry is migrated into the encrypted
 file and then removed. An in-process cache avoids repeated credential prompts.
 
-Debug builds deliberately use the permission-restricted development token file
-to make local iteration practical. That exception must not enter release builds.
+Debug builds and local bundles built with the `dev-token-store` feature use the
+permission-restricted development token file. Ordinary release bundles never
+enable that feature and retain the encrypted-file/Keychain boundary.
 
 ## Recovery and portability
 

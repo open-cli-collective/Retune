@@ -7,8 +7,9 @@
 - A Spotify Premium account and Spotify application client ID for Spotify paths
 
 Configure the Spotify application's redirect URI to the loopback address shown
-by Retune. Development builds can use the app's development token file; release
-builds encrypt tokens and use macOS Keychain for the encryption key.
+by Retune. Debug builds and `scripts/build-install.sh` use the app's development
+token file; release builds encrypt tokens and use macOS Keychain for the
+encryption key.
 
 ## Run
 
@@ -18,7 +19,9 @@ npm ci
 npm exec tauri dev
 ```
 
-Package with `npm exec tauri build` from `apps/desktop`.
+Package a production-like release with `npm exec tauri build` from
+`apps/desktop`. For local release-mode testing without repeated Keychain prompts,
+run `scripts/build-install.sh` from the repository root.
 
 ## Checks
 

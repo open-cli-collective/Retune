@@ -11,7 +11,7 @@ export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cd "$repo/apps/desktop"
 # --bundles app: skip the DMG step (slow, drives Finder via AppleScript,
 # and we install straight into /Applications anyway).
-npx tauri build --bundles app
+npx tauri build --bundles app --features dev-token-store
 
 # Quit a running copy before overwriting it, then install fresh.
 osascript -e 'quit app "Retune"' >/dev/null 2>&1 || true
