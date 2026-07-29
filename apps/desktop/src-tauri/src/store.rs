@@ -197,9 +197,16 @@ impl Default for Settings {
             .map(String::from)
             .to_vec(),
             column_widths: BTreeMap::new(),
-            hidden_columns: ["disc", "kind", "bitrate", "lastPlayed", "added", "releaseDate"]
-                .map(String::from)
-                .to_vec(),
+            hidden_columns: [
+                "disc",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+                "added",
+                "releaseDate",
+            ]
+            .map(String::from)
+            .to_vec(),
             sort_column: None,
             sort_desc: false,
             auto_add_spotify_library: true,
@@ -260,8 +267,15 @@ impl Settings {
         if self.column_order == Self::OLD_COLUMNS {
             self.column_order = Self::default().column_order;
             self.hidden_columns.extend(
-                ["disc", "kind", "bitrate", "lastPlayed", "added", "releaseDate"]
-                    .map(String::from),
+                [
+                    "disc",
+                    "kind",
+                    "bitrate",
+                    "lastPlayed",
+                    "added",
+                    "releaseDate",
+                ]
+                .map(String::from),
             );
         } else {
             for column in Self::COLUMNS {
@@ -981,7 +995,14 @@ mod tests {
         );
         assert_eq!(
             settings.hidden_columns,
-            ["disc", "kind", "bitrate", "lastPlayed", "added", "releaseDate"]
+            [
+                "disc",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+                "added",
+                "releaseDate"
+            ]
         );
         assert_eq!(settings.playback_backend, "local");
         assert_eq!(settings.repeat, "off");
