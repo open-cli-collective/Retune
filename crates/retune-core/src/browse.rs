@@ -332,6 +332,6 @@ mod tests {
             .into_iter()
             .map(|track| track.uri.as_str())
             .collect();
-        assert_eq!(uris, ["d1t1", "d1t2", "implicit-d1t3", "d2t1", "missing"]);
+        assert_eq!(uris, ["d1t1", "d1t2", "implicit-d1t3", "missing", "d2t1"]);
     }
 }
