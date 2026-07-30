@@ -98,6 +98,7 @@ const defaultSettings: Settings = {
   columnOrder: ['name', 'artist', 'album', 'disc', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
   columnWidths: {},
   hiddenColumns: ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
+  playlistHiddenColumns: {},
   sortColumn: null,
   sortDesc: false,
   autoAddSpotifyLibrary: true,
@@ -678,6 +679,9 @@ function App() {
   }, [playlistSubject, state.info, state.preferences, state.setup, state.settings.zoom])
 
   const selectedPlaylist = playlists?.find((playlist) => playlist.id === state.selectedPlaylist)
+  const playlistHiddenColumns = selectedPlaylist
+    ? state.settings.playlistHiddenColumns[selectedPlaylist.id] ?? defaultSettings.hiddenColumns
+    : defaultSettings.hiddenColumns
 
   return (
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: state.settings.zoom }}>
@@ -732,7 +736,7 @@ function App() {
             playing={state.playing}
             columnOrder={state.settings.columnOrder}
             columnWidths={state.settings.columnWidths}
-            hiddenColumns={state.settings.hiddenColumns}
+            hiddenColumns={playlistHiddenColumns}
             onPlay={player.start}
             onRate={(id, stars) => mutate('click_track_star', { id, stars })}
             onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch(fail)}
@@ -741,7 +745,15 @@ function App() {
               if (tracks.length > 1 || tracks[0]?.id === null) dispatch({ type: 'info', info: { kind: 'multiple', tracks } })
               else openInfo(tracks[0]?.id)
             }}
-            onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
+            onHiddenColumns={(hiddenColumns) => dispatch({
+              type: 'settings',
+              settings: {
+                playlistHiddenColumns: {
+                  ...state.settings.playlistHiddenColumns,
+                  [selectedPlaylist.id]: hiddenColumns,
+                },
+              },
+            })}
             onError={(error) => dispatch({ type: 'error', error })}
           />
           : (

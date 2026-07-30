@@ -158,6 +158,8 @@ struct ExportSettings {
     column_widths: BTreeMap<String, u32>,
     hidden_columns: Vec<String>,
     #[serde(default)]
+    playlist_hidden_columns: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     sort_column: Option<String>,
     #[serde(default)]
     sort_desc: bool,
@@ -177,6 +179,7 @@ impl ExportSettings {
             column_order: settings.column_order.clone(),
             column_widths: settings.column_widths.clone(),
             hidden_columns: settings.hidden_columns.clone(),
+            playlist_hidden_columns: settings.playlist_hidden_columns.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
             shuffle: settings.shuffle,
@@ -193,6 +196,7 @@ impl ExportSettings {
         settings.column_order = self.column_order;
         settings.column_widths = self.column_widths;
         settings.hidden_columns = self.hidden_columns;
+        settings.playlist_hidden_columns = self.playlist_hidden_columns;
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
         settings.shuffle = self.shuffle;
@@ -3201,6 +3205,9 @@ mod tests {
                 "added".into(),
                 "releaseDate".into(),
             ],
+            playlist_hidden_columns: BTreeMap::from([
+                ("first".into(), vec!["genre".into(), "plays".into()]),
+            ]),
             sort_column: Some("plays".into()),
             sort_desc: true,
             auto_add_spotify_library: false,
@@ -3243,6 +3250,10 @@ mod tests {
         assert_eq!(restored.column_order, exported.column_order);
         assert_eq!(restored.column_widths, exported.column_widths);
         assert_eq!(restored.hidden_columns, exported.hidden_columns);
+        assert_eq!(
+            restored.playlist_hidden_columns,
+            exported.playlist_hidden_columns
+        );
         assert_eq!(restored.sort_column.as_deref(), Some("plays"));
         assert!(restored.sort_desc);
         assert!(restored.shuffle);

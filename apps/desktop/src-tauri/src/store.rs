@@ -90,6 +90,8 @@ pub struct Settings {
     #[serde(default)]
     pub hidden_columns: Vec<String>,
     #[serde(default)]
+    pub playlist_hidden_columns: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_desc: bool,
@@ -181,6 +183,7 @@ impl Default for Settings {
             column_order: Self::COLUMNS.map(String::from).to_vec(),
             column_widths: BTreeMap::new(),
             hidden_columns: Self::OPTIONAL_COLUMNS.map(String::from).to_vec(),
+            playlist_hidden_columns: BTreeMap::new(),
             sort_column: None,
             sort_desc: false,
             auto_add_spotify_library: true,
@@ -228,8 +231,6 @@ impl Settings {
     pub(crate) fn normalize(&mut self) {
         self.column_order
             .retain(|column| Self::COLUMNS.contains(&column.as_str()));
-        self.hidden_columns
-            .retain(|column| Self::COLUMNS.contains(&column.as_str()));
         self.column_widths
             .retain(|column, _| Self::COLUMNS.contains(&column.as_str()));
         if self
@@ -247,17 +248,16 @@ impl Settings {
                 self.column_order.push(column.into());
                 if Self::OPTIONAL_COLUMNS.contains(&column) {
                     self.hidden_columns.push(column.into());
+                    for hidden_columns in self.playlist_hidden_columns.values_mut() {
+                        hidden_columns.push(column.into());
+                    }
                 }
             }
         }
-        self.hidden_columns.retain(|column| column != "name");
-        self.hidden_columns.sort_by_key(|column| {
-            Self::COLUMNS
-                .iter()
-                .position(|candidate| candidate == column)
-                .unwrap_or(usize::MAX)
-        });
-        self.hidden_columns.dedup();
+        Self::normalize_hidden_columns(&mut self.hidden_columns);
+        for hidden_columns in self.playlist_hidden_columns.values_mut() {
+            Self::normalize_hidden_columns(hidden_columns);
+        }
         if !matches!(self.play_threshold_percent, 50 | 75 | 90 | 100) {
             self.play_threshold_percent = default_play_threshold_percent();
         }
@@ -282,16 +282,12 @@ impl Settings {
                 "settings columnOrder must contain each track column exactly once",
             ));
         }
-        if self.hidden_columns.iter().any(|column| {
-            column == "name"
-                || !Self::COLUMNS.contains(&column.as_str())
-                || self
-                    .hidden_columns
-                    .iter()
-                    .filter(|item| *item == column)
-                    .count()
-                    != 1
-        }) {
+        if !Self::hidden_columns_valid(&self.hidden_columns)
+            || self
+                .playlist_hidden_columns
+                .values()
+                .any(|columns| !Self::hidden_columns_valid(columns))
+        {
             return Err(StoreError::InvalidSettings(
                 "settings hiddenColumns must be unique track columns other than name",
             ));
@@ -335,6 +331,25 @@ impl Settings {
             ));
         }
         Ok(())
+    }
+
+    fn normalize_hidden_columns(columns: &mut Vec<String>) {
+        columns.retain(|column| column != "name" && Self::COLUMNS.contains(&column.as_str()));
+        columns.sort_by_key(|column| {
+            Self::COLUMNS
+                .iter()
+                .position(|candidate| candidate == column)
+                .unwrap_or(usize::MAX)
+        });
+        columns.dedup();
+    }
+
+    fn hidden_columns_valid(columns: &[String]) -> bool {
+        columns.iter().all(|column| {
+            column != "name"
+                && Self::COLUMNS.contains(&column.as_str())
+                && columns.iter().filter(|item| *item == column).count() == 1
+        })
     }
 }
 
@@ -625,6 +640,9 @@ mod tests {
                 "added".into(),
                 "releaseDate".into(),
             ],
+            playlist_hidden_columns: BTreeMap::from([
+                ("road-trip".into(), vec!["genre".into(), "plays".into()]),
+            ]),
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,
@@ -997,6 +1015,7 @@ mod tests {
 
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);
+        assert!(settings.playlist_hidden_columns.is_empty());
     }
 
     #[test]
@@ -1085,6 +1104,16 @@ mod tests {
         settings.hidden_columns = vec!["name".into()];
         assert!(settings.validate().is_err());
         settings.hidden_columns = vec!["unknown".into()];
+        assert!(settings.validate().is_err());
+
+        settings.hidden_columns = vec![];
+        settings
+            .playlist_hidden_columns
+            .insert("playlist".into(), vec!["genre".into()]);
+        assert!(settings.validate().is_ok());
+        settings
+            .playlist_hidden_columns
+            .insert("playlist".into(), vec!["name".into()]);
         assert!(settings.validate().is_err());
     }
 
