@@ -1154,12 +1154,7 @@ async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Res
         .lock()
         .expect("playlist mutex poisoned")
         .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
-    let synced = match playlists::sync(client, &current, &library).await {
+    let synced = match playlists::sync(client, &current).await {
         Ok(synced) => synced,
         Err(error) => {
             let tokens = state.token_store.load().ok().flatten();
@@ -2484,7 +2479,8 @@ mod tests {
                 owner: None,
                 track_count: 2,
                 tracks: vec!["one".into(), "two".into()],
-                non_library_tracks: vec![],
+                track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                spotify_tracks: vec![],
             }],
         }
     }
@@ -2832,7 +2828,7 @@ mod tests {
         );
         assert_eq!(
             cache.playlists[0]
-                .non_library_tracks
+                .spotify_tracks
                 .iter()
                 .map(|track| track.uri.as_str())
                 .collect::<Vec<_>>(),
@@ -3162,7 +3158,8 @@ mod tests {
                     owner: None,
                     track_count: 0,
                     tracks: vec![],
-                    non_library_tracks: vec![],
+                    track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                    spotify_tracks: vec![],
                 })
                 .to_vec(),
         };

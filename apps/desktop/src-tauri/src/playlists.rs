@@ -11,6 +11,7 @@ use url::Url;
 
 const PLAYLIST_PAGE_SIZE: u32 = 50;
 const TRACK_PAGE_SIZE: u32 = 50;
+pub(crate) const TRACK_METADATA_VERSION: u8 = 1;
 pub const RECONNECT_HINT: &str = "Reconnect to Spotify to enable playlists (File → Account).";
 pub const STALE_PLAYLIST: &str = "Playlist changed elsewhere — reloaded.";
 
@@ -31,7 +32,9 @@ pub struct CachedPlaylist {
     pub track_count: usize,
     pub tracks: Vec<String>,
     #[serde(default)]
-    pub non_library_tracks: Vec<CachedTrack>,
+    pub track_metadata_version: u8,
+    #[serde(default, alias = "non_library_tracks")]
+    pub spotify_tracks: Vec<CachedTrack>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -41,12 +44,17 @@ pub struct CachedTrack {
     pub art: String,
     pub alb: String,
     pub duration: u64,
+    #[serde(default)]
+    pub disc_no: Option<u32>,
+    #[serde(default)]
+    pub track_no: Option<u32>,
+    #[serde(default)]
+    pub release_date: Option<String>,
 }
 
 pub async fn sync<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     current: &PlaylistCache,
-    library: &Library,
 ) -> retune_spotify::Result<PlaylistCache> {
     let user_id = client.me().await?.id;
     let mut refreshed = HashMap::new();
@@ -72,7 +80,8 @@ pub async fn sync<T: Transport, S: TokenStore>(
                     owner: None,
                     track_count: 0,
                     tracks: vec![],
-                    non_library_tracks: vec![],
+                    track_metadata_version: TRACK_METADATA_VERSION,
+                    spotify_tracks: vec![],
                 });
                 cached.name = summary.name;
                 cached.snapshot_id = summary.snapshot_id;
@@ -85,6 +94,7 @@ pub async fn sync<T: Transport, S: TokenStore>(
                 summary.id.clone(),
                 if cached.is_some_and(|playlist| {
                     playlist.snapshot_id == summary.snapshot_id
+                        && playlist.track_metadata_version == TRACK_METADATA_VERSION
                         && (playlist.track_count == 0 || !playlist.tracks.is_empty())
                 }) {
                     let mut cached = cached.expect("checked above").clone();
@@ -92,15 +102,9 @@ pub async fn sync<T: Transport, S: TokenStore>(
                     cached.owned = summary.owned;
                     cached.owner = Some(summary.owner.display_name.unwrap_or(summary.owner.id));
                     cached.track_count = summary.tracks.total as usize;
-                    cached.non_library_tracks.retain(|track| {
-                        !library
-                            .tracks()
-                            .iter()
-                            .any(|library_track| library_track.uri == track.uri)
-                    });
                     cached
                 } else {
-                    fetch(client, summary, library).await?
+                    fetch(client, summary).await?
                 },
             );
         }
@@ -169,7 +173,8 @@ pub async fn create<T: Transport, S: TokenStore>(
         owner: None,
         track_count: 0,
         tracks: vec![],
-        non_library_tracks: vec![],
+        track_metadata_version: TRACK_METADATA_VERSION,
+        spotify_tracks: vec![],
     });
     Ok(())
 }
@@ -198,12 +203,13 @@ pub async fn add<T: Transport, S: TokenStore>(
         return Err(PlaylistAddError::ReadOnly);
     }
     let snapshot_id = client.add_playlist_tracks(id, &uris, None).await?;
-    let (track_count, tracks, non_library_tracks) = fetch_tracks(client, id, library).await?;
+    let (track_count, tracks, spotify_tracks) = fetch_tracks(client, id).await?;
     let playlist = &mut cache.playlists[index];
     playlist.snapshot_id = snapshot_id;
     playlist.track_count = track_count;
     playlist.tracks = tracks;
-    playlist.non_library_tracks = non_library_tracks;
+    playlist.track_metadata_version = TRACK_METADATA_VERSION;
+    playlist.spotify_tracks = spotify_tracks;
     Ok(())
 }
 
@@ -261,7 +267,6 @@ impl From<Error> for PlaylistAddError {
 pub async fn reorder<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     cache: &mut PlaylistCache,
-    library: &Library,
     id: &str,
     range_start: u32,
     insert_before: u32,
@@ -293,7 +298,7 @@ pub async fn reorder<T: Transport, S: TokenStore>(
     let result = client
         .reorder_playlist_tracks(id, range_start, insert_before, range_length, &snapshot_id)
         .await;
-    let new_snapshot = recover_stale_snapshot(client, cache, library, id, result).await?;
+    let new_snapshot = recover_stale_snapshot(client, cache, id, result).await?;
     let playlist = cache
         .playlists
         .iter_mut()
@@ -325,7 +330,6 @@ impl From<Error> for PlaylistMutationError {
 async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     cache: &mut PlaylistCache,
-    library: &Library,
     id: &str,
     result: retune_spotify::Result<String>,
 ) -> Result<String, PlaylistMutationError> {
@@ -334,7 +338,7 @@ async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
         Err(Error::Http {
             status: 400 | 409, ..
         }) => {
-            refresh_one(client, cache, library, id)
+            refresh_one(client, cache, id)
                 .await
                 .map_err(PlaylistMutationError::Spotify)?;
             Err(PlaylistMutationError::Reloaded)
@@ -346,7 +350,6 @@ async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
 pub async fn remove<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     cache: &mut PlaylistCache,
-    library: &Library,
     id: &str,
     indices: &[u32],
 ) -> Result<(), PlaylistMutationError> {
@@ -403,8 +406,8 @@ pub async fn remove<T: Transport, S: TokenStore>(
         .collect::<Vec<_>>();
     let snapshot_id = playlist.snapshot_id.clone();
     let result = client.remove_playlist_tracks(id, &uris, &snapshot_id).await;
-    let new_snapshot = recover_stale_snapshot(client, cache, library, id, result).await?;
-    let (track_count, tracks, non_library_tracks) = fetch_tracks(client, id, library).await?;
+    let new_snapshot = recover_stale_snapshot(client, cache, id, result).await?;
+    let (track_count, tracks, spotify_tracks) = fetch_tracks(client, id).await?;
     let playlist = cache
         .playlists
         .iter_mut()
@@ -413,7 +416,8 @@ pub async fn remove<T: Transport, S: TokenStore>(
     playlist.snapshot_id = new_snapshot;
     playlist.track_count = track_count;
     playlist.tracks = tracks;
-    playlist.non_library_tracks = non_library_tracks;
+    playlist.track_metadata_version = TRACK_METADATA_VERSION;
+    playlist.spotify_tracks = spotify_tracks;
     Ok(())
 }
 
@@ -430,7 +434,6 @@ pub fn map_error(error: Error, tokens: Option<&Tokens>) -> String {
 async fn refresh_one<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     cache: &mut PlaylistCache,
-    library: &Library,
     id: &str,
 ) -> retune_spotify::Result<()> {
     let user_id = client.me().await?.id;
@@ -441,7 +444,7 @@ async fn refresh_one<T: Transport, S: TokenStore>(
             .await?;
         let count = (page.items.len() + page.skipped) as u32;
         if let Some(summary) = page.items.into_iter().find(|playlist| playlist.id == id) {
-            let refreshed = fetch(client, summary, library).await?;
+            let refreshed = fetch(client, summary).await?;
             if let Some(existing) = cache
                 .playlists
                 .iter_mut()
@@ -463,10 +466,8 @@ async fn refresh_one<T: Transport, S: TokenStore>(
 async fn fetch<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     summary: Playlist,
-    library: &Library,
 ) -> retune_spotify::Result<CachedPlaylist> {
-    let (track_count, tracks, non_library_tracks) =
-        fetch_tracks(client, &summary.id, library).await?;
+    let (track_count, tracks, spotify_tracks) = fetch_tracks(client, &summary.id).await?;
     Ok(CachedPlaylist {
         id: summary.id,
         name: summary.name,
@@ -475,22 +476,17 @@ async fn fetch<T: Transport, S: TokenStore>(
         owner: Some(summary.owner.display_name.unwrap_or(summary.owner.id)),
         track_count,
         tracks,
-        non_library_tracks,
+        track_metadata_version: TRACK_METADATA_VERSION,
+        spotify_tracks,
     })
 }
 
 async fn fetch_tracks<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     id: &str,
-    library: &Library,
 ) -> retune_spotify::Result<(usize, Vec<String>, Vec<CachedTrack>)> {
-    let library_uris = library
-        .tracks()
-        .iter()
-        .map(|track| track.uri.as_str())
-        .collect::<HashSet<_>>();
     let mut tracks = vec![];
-    let mut non_library_tracks = vec![];
+    let mut spotify_tracks = vec![];
     let mut track_count = None;
     let mut offset = 0;
     loop {
@@ -498,9 +494,7 @@ async fn fetch_tracks<T: Transport, S: TokenStore>(
         track_count.get_or_insert(page.total as usize);
         let count = (page.items.len() + page.skipped) as u32;
         for track in page.items {
-            if !library_uris.contains(track.uri.as_str()) {
-                non_library_tracks.push(cached_track(&track));
-            }
+            spotify_tracks.push(cached_track(&track));
             tracks.push(track.uri);
         }
         offset += count;
@@ -508,7 +502,7 @@ async fn fetch_tracks<T: Transport, S: TokenStore>(
             break;
         }
     }
-    Ok((track_count.unwrap_or_default(), tracks, non_library_tracks))
+    Ok((track_count.unwrap_or_default(), tracks, spotify_tracks))
 }
 
 fn cached_track(track: &Track) -> CachedTrack {
@@ -526,6 +520,12 @@ fn cached_track(track: &Track) -> CachedTrack {
             .map(|album| album.name.clone())
             .unwrap_or_default(),
         duration: track.duration_ms.unwrap_or_default(),
+        disc_no: track.disc_number,
+        track_no: track.track_number,
+        release_date: track
+            .album
+            .as_ref()
+            .and_then(|album| album.release_date.clone()),
     }
 }
 
@@ -579,7 +579,8 @@ mod tests {
                 owner: None,
                 track_count: 2,
                 tracks: vec!["spotify:track:1".into(), "spotify:track:2".into()],
-                non_library_tracks: vec![],
+                track_metadata_version: TRACK_METADATA_VERSION,
+                spotify_tracks: vec![],
             }],
         }
     }
@@ -593,6 +594,28 @@ mod tests {
             cache.playlists.push(playlist);
         }
         cache
+    }
+
+    #[test]
+    fn legacy_track_cache_deserializes_for_refresh() {
+        let playlist: CachedPlaylist = serde_json::from_value(serde_json::json!({
+            "id": "playlist",
+            "name": "Playlist",
+            "snapshot_id": "snapshot",
+            "owned": true,
+            "tracks": ["spotify:track:one"],
+            "non_library_tracks": [{
+                "uri": "spotify:track:one",
+                "name": "Song",
+                "art": "Artist",
+                "alb": "Album",
+                "duration": 180000
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(playlist.track_metadata_version, 0);
+        assert_eq!(playlist.spotify_tracks[0].track_no, None);
     }
 
     #[test]
@@ -715,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_collaborative_playlist_fetches_tracks() {
+    async fn legacy_playlist_cache_refreshes_spotify_metadata_for_all_tracks() {
         let client = fake_client(
             [
                 Response::json(200, serde_json::json!({"id": "user"})),
@@ -723,7 +746,7 @@ mod tests {
                     200,
                     serde_json::json!({
                         "items": [{
-                            "id": "playlist", "name": "Collaborative", "snapshot_id": "changed", "collaborative": true,
+                            "id": "playlist", "name": "Collaborative", "snapshot_id": "same", "collaborative": true,
                             "owner": {"id": "other", "display_name": "Other"},
                             "items": {"total": 2}
                         }],
@@ -736,13 +759,15 @@ mod tests {
                         "items": [
                             {"is_local": false, "item": {
                                 "uri": "spotify:track:1", "name": "Library track",
-                                "artists": [], "album": null, "duration_ms": 1000
+                                "artists": [],
+                                "album": {"id": "one", "uri": "spotify:album:one", "name": "Library Album", "release_date": "1999", "images": []},
+                                "duration_ms": 1000, "disc_number": 2, "track_number": 7
                             }},
                             {"is_local": false, "item": {
                                 "uri": "spotify:track:2", "name": "Followed track",
                                 "artists": [{"id": "artist", "name": "Artist"}],
-                                "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "images": []},
-                                "duration_ms": 2345
+                                "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "release_date": "2024-03-01", "images": []},
+                                "duration_ms": 2345, "disc_number": 1, "track_number": 3
                             }}
                         ],
                         "next": null, "total": 2
@@ -753,24 +778,38 @@ mod tests {
         );
         let mut current = cached();
         current.playlists[0].owned = false;
-        let mut library = Library::new();
-        library.add(local_track("spotify:track:1", "Library track"));
+        current.playlists[0].track_metadata_version = 0;
 
-        let synced = sync(&client, &current, &library).await.unwrap();
+        let synced = sync(&client, &current).await.unwrap();
 
         let playlist = &synced.playlists[0];
         assert_eq!(playlist.track_count, 2);
         assert!(!playlist.owned);
         assert_eq!(playlist.tracks, ["spotify:track:1", "spotify:track:2"]);
         assert_eq!(
-            playlist.non_library_tracks,
-            [CachedTrack {
-                uri: "spotify:track:2".into(),
-                name: "Followed track".into(),
-                art: "Artist".into(),
-                alb: "Album".into(),
-                duration: 2345,
-            }]
+            playlist.spotify_tracks,
+            [
+                CachedTrack {
+                    uri: "spotify:track:1".into(),
+                    name: "Library track".into(),
+                    art: String::new(),
+                    alb: "Library Album".into(),
+                    duration: 1000,
+                    disc_no: Some(2),
+                    track_no: Some(7),
+                    release_date: Some("1999".into()),
+                },
+                CachedTrack {
+                    uri: "spotify:track:2".into(),
+                    name: "Followed track".into(),
+                    art: "Artist".into(),
+                    alb: "Album".into(),
+                    duration: 2345,
+                    disc_no: Some(1),
+                    track_no: Some(3),
+                    release_date: Some("2024-03-01".into()),
+                }
+            ]
         );
         let requests = client.transport().requests();
         assert_eq!(requests.len(), 3);
@@ -802,7 +841,7 @@ mod tests {
         let mut current = cached();
         current.playlists[0].owned = false;
 
-        let synced = sync(&client, &current, &Library::new()).await.unwrap();
+        let synced = sync(&client, &current).await.unwrap();
 
         assert_eq!(synced.playlists[0].name, "New name");
         assert_eq!(synced.playlists[0].owner.as_deref(), Some("Owner Name"));
@@ -837,7 +876,7 @@ mod tests {
         current.playlists[0].track_count = 0;
         current.playlists[0].tracks.clear();
 
-        let synced = sync(&client, &current, &Library::new()).await.unwrap();
+        let synced = sync(&client, &current).await.unwrap();
 
         assert!(synced.playlists[0].tracks.is_empty());
         let requests = client.transport().requests();
@@ -872,9 +911,9 @@ mod tests {
         );
         let current = PlaylistCache::default();
 
-        let skipped = sync(&client, &current, &Library::new()).await.unwrap();
+        let skipped = sync(&client, &current).await.unwrap();
         assert_eq!(skipped.playlists[0].track_count, 3);
-        let synced_again = sync(&client, &skipped, &Library::new()).await.unwrap();
+        let synced_again = sync(&client, &skipped).await.unwrap();
         assert!(synced_again.playlists[0].tracks.is_empty());
         assert_eq!(
             client
@@ -929,7 +968,7 @@ mod tests {
             &retune_spotify::auth::SCOPES,
         );
 
-        let synced = sync(&client, &current, &Library::new()).await.unwrap();
+        let synced = sync(&client, &current).await.unwrap();
 
         assert_eq!(
             synced
@@ -1025,7 +1064,7 @@ mod tests {
         let client = fake_client(stale_refresh_responses(), &retune_spotify::auth::SCOPES);
         let mut cache = cached();
 
-        let error = reorder(&client, &mut cache, &Library::new(), "playlist", 0, 2, 1)
+        let error = reorder(&client, &mut cache, "playlist", 0, 2, 1)
             .await
             .unwrap_err();
 
@@ -1046,7 +1085,7 @@ mod tests {
         );
         let mut cache = cached();
 
-        reorder(&client, &mut cache, &Library::new(), "playlist", 0, 2, 1)
+        reorder(&client, &mut cache, "playlist", 0, 2, 1)
             .await
             .unwrap();
 
@@ -1077,7 +1116,7 @@ mod tests {
         );
         let mut cache = cached();
 
-        remove(&client, &mut cache, &Library::new(), "playlist", &[0])
+        remove(&client, &mut cache, "playlist", &[0])
             .await
             .unwrap();
 
@@ -1097,22 +1136,22 @@ mod tests {
         let mut cache = cached();
 
         assert!(matches!(
-            remove(&client, &mut cache, &Library::new(), "playlist", &[]).await,
+            remove(&client, &mut cache, "playlist", &[]).await,
             Err(PlaylistMutationError::Other(_))
         ));
         assert!(matches!(
-            remove(&client, &mut cache, &Library::new(), "playlist", &[2]).await,
+            remove(&client, &mut cache, "playlist", &[2]).await,
             Err(PlaylistMutationError::Other(_))
         ));
         cache.playlists[0].owned = false;
         assert!(matches!(
-            remove(&client, &mut cache, &Library::new(), "playlist", &[0]).await,
+            remove(&client, &mut cache, "playlist", &[0]).await,
             Err(PlaylistMutationError::Other(_))
         ));
         cache.playlists[0].owned = true;
         cache.playlists[0].track_count = 3;
         assert!(matches!(
-            remove(&client, &mut cache, &Library::new(), "playlist", &[0]).await,
+            remove(&client, &mut cache, "playlist", &[0]).await,
             Err(PlaylistMutationError::Other(_))
         ));
         assert!(client.transport().requests().is_empty());
@@ -1124,7 +1163,7 @@ mod tests {
         let mut cache = cached();
         cache.playlists[0].tracks[1] = cache.playlists[0].tracks[0].clone();
 
-        let error = remove(&client, &mut cache, &Library::new(), "playlist", &[0])
+        let error = remove(&client, &mut cache, "playlist", &[0])
             .await
             .unwrap_err();
 
@@ -1137,7 +1176,7 @@ mod tests {
         let client = fake_client(stale_refresh_responses(), &retune_spotify::auth::SCOPES);
         let mut cache = cached();
 
-        let error = remove(&client, &mut cache, &Library::new(), "playlist", &[0])
+        let error = remove(&client, &mut cache, "playlist", &[0])
             .await
             .unwrap_err();
 
@@ -1159,7 +1198,7 @@ mod tests {
         cache.playlists[0].track_count = 4;
         cache.playlists[0].tracks = ["1", "2", "3", "4"].map(String::from).to_vec();
 
-        reorder(&client, &mut cache, &Library::new(), "playlist", 1, 4, 2)
+        reorder(&client, &mut cache, "playlist", 1, 4, 2)
             .await
             .unwrap();
 
