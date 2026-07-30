@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use super::{empty_event, local_event, NeutralEvent, NeutralState, PlayerStateEvent, Snapshot};
 
@@ -28,7 +28,7 @@ pub(super) struct EventReducer {
     next_intent: u64,
     latest_intent: Option<u64>,
     pending: VecDeque<LoadIntent>,
-    bindings: HashMap<u64, LoadIntent>,
+    current: Option<(u64, LoadIntent)>,
     repeat: String,
     play_threshold_percent: u8,
     previous_position_ms: u32,
@@ -45,7 +45,7 @@ impl Default for EventReducer {
             next_intent: 0,
             latest_intent: None,
             pending: VecDeque::new(),
-            bindings: HashMap::new(),
+            current: None,
             repeat: "off".into(),
             play_threshold_percent: 100,
             previous_position_ms: 0,
@@ -59,7 +59,7 @@ impl EventReducer {
     pub(super) fn activate(&mut self, generation: u64) {
         self.generation = generation;
         self.pending.clear();
-        self.bindings.clear();
+        self.current = None;
         self.latest_intent = None;
         self.reset_playthrough();
     }
@@ -67,7 +67,7 @@ impl EventReducer {
     pub(super) fn recover(&mut self, generation: u64) {
         self.generation = generation;
         self.pending.clear();
-        self.bindings.clear();
+        self.current = None;
         self.latest_intent = None;
     }
 
@@ -149,7 +149,7 @@ impl EventReducer {
             }
             NeutralEvent::RequestIdChanged { request_id, .. } => {
                 if let Some(intent) = self.pending.pop_front() {
-                    self.bindings.insert(request_id, intent);
+                    self.current = Some((request_id, intent));
                 }
                 vec![]
             }
@@ -271,10 +271,16 @@ impl EventReducer {
     }
 
     fn current_intent(&self, request_id: u64, uri: &str) -> Option<LoadIntent> {
-        self.bindings
-            .get(&request_id)
-            .filter(|intent| Some(intent.id) == self.latest_intent && intent.uri == uri)
-            .cloned()
+        match &self.current {
+            Some((id, intent))
+                if *id == request_id
+                    && Some(intent.id) == self.latest_intent
+                    && intent.uri == uri =>
+            {
+                Some(intent.clone())
+            }
+            _ => None,
+        }
     }
 
     fn accepts(&self, request_id: u64, uri: &str) -> bool {
@@ -421,7 +427,7 @@ mod tests {
     fn reducer() -> EventReducer {
         let mut reducer = EventReducer::default();
         reducer.activate(7);
-        reducer.set_snapshot(Some(Snapshot::new(vec![track(1), track(2)], 0, false)));
+        reducer.set_snapshot(Some(Snapshot::new(vec![track(1), track(2)], 0)));
         reducer
     }
 

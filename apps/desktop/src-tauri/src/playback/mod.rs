@@ -50,10 +50,12 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
-    fn new(tracks: Vec<SnapshotTrack>, index: usize, shuffle: bool) -> Self {
-        Self::new_with(tracks, index, shuffle, |suffix| {
-            suffix.shuffle(&mut rand::rng())
-        })
+    fn new(tracks: Vec<SnapshotTrack>, index: usize) -> Self {
+        Self {
+            order: (0..tracks.len()).collect(),
+            tracks,
+            index,
+        }
     }
 
     fn new_with(
@@ -62,11 +64,7 @@ impl Snapshot {
         shuffle: bool,
         permute: impl FnOnce(&mut [usize]),
     ) -> Self {
-        let mut snapshot = Self {
-            order: (0..tracks.len()).collect(),
-            tracks,
-            index,
-        };
+        let mut snapshot = Self::new(tracks, index);
         if shuffle {
             snapshot.set_shuffle_with(true, permute);
         }
@@ -138,7 +136,7 @@ pub struct PlayerStateEvent {
     pub shuffle: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct NeutralState {
     uri: Option<String>,
     position_ms: u32,
@@ -295,31 +293,12 @@ impl PlayerBackend {
         }
     }
 
-    async fn step(
-        &mut self,
-        client: &LiveClient,
-        reducer: &mut EventReducer,
-        direction: i8,
-        wrap: bool,
-    ) -> Result<(), String> {
+    async fn step(&mut self, client: &LiveClient, direction: i8) -> Result<(), String> {
         match self {
             Self::Connect(backend) => backend.step(client, direction).await,
             Self::Local(backend) => {
-                let Some(snapshot) = reducer.snapshot_mut() else {
-                    return Err("Nothing is playing".into());
-                };
-                let Some(next) = step_index(snapshot.index, snapshot.len(), direction, wrap) else {
-                    backend.stop();
-                    return Ok(());
-                };
-                if reject_chapter(&snapshot.track_at(next).uri) {
-                    return Err(AUDIOBOOK_ERROR.into());
-                }
-                snapshot.index = next;
-                let uri = snapshot.current().uri.clone();
-                let snapshot = snapshot.clone();
-                reducer.queue_load(&uri, true);
-                backend.play(snapshot, true, 0)
+                backend.stop();
+                Ok(())
             }
         }
     }
@@ -333,7 +312,7 @@ impl PlayerBackend {
 
     async fn set_volume(&mut self, client: &LiveClient, volume: u8) -> Result<(), String> {
         match self {
-            Self::Connect(backend) => backend.set_live_volume(client, volume).await,
+            Self::Connect(backend) => backend.set_volume(client, volume).await,
             Self::Local(backend) => backend.set_volume(volume),
         }
     }
@@ -344,7 +323,9 @@ impl PlayerBackend {
         repeat: &str,
     ) -> Result<(), String> {
         match (self, client) {
-            (Self::Connect(backend), Some(client)) => backend.set_live_repeat(client, repeat).await,
+            (Self::Connect(backend), Some(client)) => {
+                backend.set_repeat_state(client, repeat).await
+            }
             _ => Ok(()),
         }
     }
@@ -585,17 +566,10 @@ impl Playback {
     }
 
     pub async fn set_shuffle(&self, shuffle: bool) -> PlayerStateEvent {
-        let mut state = self.state.lock().await;
-        state
-            .reducer
-            .set_shuffle_with(shuffle, |suffix| suffix.shuffle(&mut rand::rng()));
-        let snapshot = state.reducer.snapshot().cloned();
-        let repeat = state.reducer.repeat().to_owned();
-        state.backend.set_shuffle_snapshot(snapshot, &repeat).await;
-        state.reducer.state().clone()
+        self.set_shuffle_with(shuffle, |suffix| suffix.shuffle(&mut rand::rng()))
+            .await
     }
 
-    #[cfg(test)]
     async fn set_shuffle_with(
         &self,
         shuffle: bool,
@@ -799,10 +773,7 @@ impl Playback {
             }
             let client = require_spotify(client.as_deref())?;
             self.ensure_player(state, client).await?;
-            let ControllerState {
-                backend, reducer, ..
-            } = state;
-            return backend.step(client, reducer, direction, wrap).await;
+            return state.backend.step(client, direction).await;
         };
         if reject_chapter(&snapshot.track_at(next).uri) {
             return Err(AUDIOBOOK_ERROR.into());
@@ -1098,7 +1069,6 @@ mod tests {
                 SnapshotTrack { id: 3, ..duplicate },
             ],
             0,
-            false,
         );
 
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
@@ -1124,7 +1094,7 @@ mod tests {
                 duration_secs: 60,
             })
             .collect();
-        let mut snapshot = Snapshot::new(tracks, 1, false);
+        let mut snapshot = Snapshot::new(tracks, 1);
 
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
 
@@ -1339,7 +1309,7 @@ mod tests {
             .lock()
             .await
             .reducer
-            .set_snapshot(Some(Snapshot::new(tracks, 0, false)));
+            .set_snapshot(Some(Snapshot::new(tracks, 0)));
 
         for (step, expected_uri) in [(1, "two.mp3"), (-1, "one.mp3")] {
             if step == 1 {
@@ -1551,11 +1521,8 @@ mod tests {
         state.backend = PlayerBackend::Local(LocalBackend::with_snapshot_for_test(Snapshot::new(
             tracks.clone(),
             1,
-            false,
         )));
-        state
-            .reducer
-            .set_snapshot(Some(Snapshot::new(tracks, 0, false)));
+        state.reducer.set_snapshot(Some(Snapshot::new(tracks, 0)));
 
         playback
             .load_current_locked(&mut state, None, true, 0)
@@ -1581,9 +1548,7 @@ mod tests {
         let mut tracks = mixed_tracks();
         tracks.reverse();
         let mut state = playback.state.lock().await;
-        state
-            .reducer
-            .set_snapshot(Some(Snapshot::new(tracks, 0, false)));
+        state.reducer.set_snapshot(Some(Snapshot::new(tracks, 0)));
         let generation = state.generation;
 
         assert_eq!(
@@ -1660,7 +1625,7 @@ mod tests {
 
     #[test]
     fn preload_follows_active_order_and_repeat_policy() {
-        let mut snapshot = Snapshot::new(file_tracks(3), 0, false);
+        let mut snapshot = Snapshot::new(file_tracks(3), 0);
         assert_eq!(preload_track(&snapshot, "off").unwrap().id, 2);
 
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());

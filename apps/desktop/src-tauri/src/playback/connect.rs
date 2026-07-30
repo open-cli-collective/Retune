@@ -64,9 +64,6 @@ pub fn resolve(prev: PolledState, now: PolledState, expected: &Snapshot) -> Play
     }) {
         return PlaybackDecision::Advance;
     }
-    if now.track_id.is_some() {
-        return PlaybackDecision::Takeover;
-    }
     PlaybackDecision::Takeover
 }
 
@@ -116,14 +113,7 @@ impl ConnectBackend {
         snapshot: Snapshot,
         repeat: &str,
     ) -> Result<(), String> {
-        let event = self
-            .begin(
-                client.as_ref(),
-                snapshot.active_tracks(),
-                snapshot.index,
-                repeat,
-            )
-            .await?;
+        let event = self.begin(client.as_ref(), snapshot, repeat).await?;
         let generation = self
             .state
             .lock()
@@ -143,17 +133,10 @@ impl ConnectBackend {
     async fn begin<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
-        tracks: Vec<SnapshotTrack>,
-        index: usize,
+        snapshot: Snapshot,
         repeat: &str,
     ) -> Result<NeutralState, String> {
-        if tracks.is_empty() || index >= tracks.len() {
-            return Err("Choose a track to play".into());
-        }
-        let (snapshot, route_at_end) =
-            connect_snapshot(Snapshot::new(tracks, index, false), repeat);
-        let tracks = snapshot.active_tracks();
-        let index = snapshot.index;
+        let (snapshot, route_at_end) = connect_snapshot(snapshot, repeat);
         let device = select_device(client.devices().await.map_err(|error| error.to_string())?)?;
         let device_id = device.id.expect("selected devices have ids");
         client
@@ -163,11 +146,16 @@ impl ConnectBackend {
             )
             .await
             .map_err(|error| error.to_string())?;
-        play_snapshot(client, &device_id, &tracks, index).await?;
+        play_snapshot(
+            client,
+            &device_id,
+            &snapshot.active_tracks(),
+            snapshot.index,
+        )
+        .await?;
         let mut state = self.state.lock().await;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
-        let snapshot = Snapshot::new(tracks, index, false);
         let event = local_state(&snapshot, 0, true, device.supports_volume);
         state.context = Some(Context {
             previous: PolledState {
@@ -275,7 +263,7 @@ impl ConnectBackend {
                 .await
                 .map_err(|error| error.to_string())?;
             state.context = None;
-            return Ok(empty_state());
+            return Ok(NeutralState::default());
         }
         context.snapshot.index = next;
         play_snapshot(
@@ -300,23 +288,7 @@ impl ConnectBackend {
         ))
     }
 
-    #[cfg(test)]
-    async fn next<T: Transport, S: TokenStore>(
-        &self,
-        client: &SpotifyClient<T, S>,
-    ) -> Result<NeutralState, String> {
-        self.step_state(client, 1).await
-    }
-
-    #[cfg(test)]
-    async fn prev<T: Transport, S: TokenStore>(
-        &self,
-        client: &SpotifyClient<T, S>,
-    ) -> Result<NeutralState, String> {
-        self.step_state(client, -1).await
-    }
-
-    async fn set_volume<T: Transport, S: TokenStore>(
+    pub(super) async fn set_volume<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
         volume: u8,
@@ -332,7 +304,7 @@ impl ConnectBackend {
             .map_err(|error| error.to_string())
     }
 
-    async fn set_repeat_state<T: Transport, S: TokenStore>(
+    pub(super) async fn set_repeat_state<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
         repeat: &str,
@@ -397,22 +369,6 @@ impl ConnectBackend {
         let state = self.step_state(client, direction).await?;
         self.emit(state);
         Ok(())
-    }
-
-    pub(super) async fn set_live_volume(
-        &self,
-        client: &LiveClient,
-        volume: u8,
-    ) -> Result<(), String> {
-        self.set_volume(client, volume).await
-    }
-
-    pub(super) async fn set_live_repeat(
-        &self,
-        client: &LiveClient,
-        repeat: &str,
-    ) -> Result<(), String> {
-        self.set_repeat_state(client, repeat).await
     }
 
     pub(super) async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
@@ -543,7 +499,7 @@ impl ConnectBackend {
                             uri,
                         });
                     } else {
-                        self.emit(empty_state());
+                        self.emit(NeutralState::default());
                     }
                     return;
                 }
@@ -586,7 +542,7 @@ fn connect_snapshot(snapshot: Snapshot, repeat: &str) -> (Snapshot, bool) {
     let route_at_end = end < tracks.len()
         || (repeat == "all" && tracks.iter().any(|track| track.uri.starts_with("file:")));
     (
-        Snapshot::new(tracks[start..end].to_vec(), snapshot.index - start, false),
+        Snapshot::new(tracks[start..end].to_vec(), snapshot.index - start),
         route_at_end,
     )
 }
@@ -690,27 +646,11 @@ fn external_state(player: Option<&PlayerState>) -> NeutralState {
     }
 }
 
+#[cfg(test)]
 impl Default for ConnectBackend {
     fn default() -> Self {
         let (events, _) = mpsc::unbounded_channel();
         Self::new(events, 1)
-    }
-}
-
-#[cfg(test)]
-type Playback = ConnectBackend;
-
-fn empty_state() -> NeutralState {
-    NeutralState {
-        uri: None,
-        position_ms: 0,
-        is_playing: false,
-        external: false,
-        name: None,
-        art: None,
-        alb: None,
-        duration_ms: None,
-        volume_supported: false,
     }
 }
 
@@ -735,7 +675,7 @@ mod tests {
     }
 
     fn snapshot(index: usize) -> Snapshot {
-        Snapshot::new(vec![track(1, 100), track(2, 100)], index, false)
+        Snapshot::new(vec![track(1, 100), track(2, 100)], index)
     }
 
     fn polled(id: Option<&str>, elapsed: u64, playing: bool) -> PolledState {
@@ -795,7 +735,6 @@ mod tests {
                 },
             ],
             0,
-            false,
         );
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
         let (expected, route_at_end) = connect_snapshot(snapshot, "off");
@@ -942,7 +881,7 @@ mod tests {
             },
         ];
 
-        let (snapshot, route_at_end) = connect_snapshot(Snapshot::new(tracks, 0, false), "all");
+        let (snapshot, route_at_end) = connect_snapshot(Snapshot::new(tracks, 0), "all");
         assert_eq!(
             snapshot
                 .tracks
@@ -968,7 +907,7 @@ mod tests {
             },
             track(4, 100),
         ];
-        let mut snapshot = Snapshot::new(std::mem::take(&mut tracks), 0, false);
+        let mut snapshot = Snapshot::new(std::mem::take(&mut tracks), 0);
         snapshot.set_shuffle_with(true, |suffix| {
             suffix.swap(0, 2);
             suffix.swap(1, 2);
@@ -994,7 +933,7 @@ mod tests {
         let (events, _) = mpsc::unbounded_channel();
         let backend = ConnectBackend::new(events, 7);
         backend.state.lock().await.context = Some(Context {
-            snapshot: Snapshot::new(vec![track(1, 100), track(2, 100)], 0, false),
+            snapshot: Snapshot::new(vec![track(1, 100), track(2, 100)], 0),
             device_id: "desk".into(),
             volume_supported: true,
             previous: polled(Some("spotify:track:1"), 40, true),
@@ -1014,7 +953,6 @@ mod tests {
                 track(4, 100),
             ],
             0,
-            false,
         );
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
 
@@ -1070,9 +1008,13 @@ mod tests {
                 scopes: String::new(),
             })),
         );
-        let playback = Playback::default();
+        let playback = ConnectBackend::default();
         let event = playback
-            .begin(&client, vec![track(1, 100), track(2, 100)], 1, "all")
+            .begin(
+                &client,
+                Snapshot::new(vec![track(1, 100), track(2, 100)], 1),
+                "all",
+            )
             .await
             .unwrap();
 
@@ -1113,8 +1055,8 @@ mod tests {
             })),
         );
 
-        let error = Playback::default()
-            .begin(&client, vec![track(1, 100)], 0, "off")
+        let error = ConnectBackend::default()
+            .begin(&client, Snapshot::new(vec![track(1, 100)], 0), "off")
             .await
             .unwrap_err();
         assert_eq!(error, "Open Spotify on your desktop");
@@ -1143,9 +1085,9 @@ mod tests {
                 scopes: String::new(),
             })),
         );
-        let playback = Playback::default();
+        let playback = ConnectBackend::default();
         playback
-            .begin(&client, vec![track(1, 100)], 0, "off")
+            .begin(&client, Snapshot::new(vec![track(1, 100)], 0), "off")
             .await
             .unwrap();
 
@@ -1176,9 +1118,13 @@ mod tests {
                 scopes: String::new(),
             })),
         );
-        let playback = Playback::default();
+        let playback = ConnectBackend::default();
         playback
-            .begin(&client, vec![track(1, 100), track(2, 100)], 0, "off")
+            .begin(
+                &client,
+                Snapshot::new(vec![track(1, 100), track(2, 100)], 0),
+                "off",
+            )
             .await
             .unwrap();
 
@@ -1195,19 +1141,34 @@ mod tests {
             .is_none());
         assert!(playback.toggle_pause(&client).await.unwrap().is_playing);
         assert_eq!(
-            playback.next(&client).await.unwrap().uri.as_deref(),
+            playback
+                .step_state(&client, 1)
+                .await
+                .unwrap()
+                .uri
+                .as_deref(),
             Some("spotify:track:2")
         );
         assert_eq!(
-            playback.prev(&client).await.unwrap().uri.as_deref(),
+            playback
+                .step_state(&client, -1)
+                .await
+                .unwrap()
+                .uri
+                .as_deref(),
             Some("spotify:track:1")
         );
         playback.set_volume(&client, 42).await.unwrap();
         assert_eq!(
-            playback.next(&client).await.unwrap().uri.as_deref(),
+            playback
+                .step_state(&client, 1)
+                .await
+                .unwrap()
+                .uri
+                .as_deref(),
             Some("spotify:track:2")
         );
-        assert_eq!(playback.next(&client).await.unwrap().uri, None);
+        assert_eq!(playback.step_state(&client, 1).await.unwrap().uri, None);
 
         let requests = client.transport().requests();
         assert!(requests[1]
