@@ -27,7 +27,7 @@ button { color: inherit; }
 .native-drop-overlay { position: fixed; z-index: 100; inset: 8px; pointer-events: none; display: grid; place-content: center; gap: 5px; border: 3px solid var(--accent); border-radius: 8px; color: var(--text); background: color-mix(in srgb, var(--accent) 16%, var(--list)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--list) 75%, transparent); text-align: center; }
 .native-drop-overlay strong { font-size: 16px; }
 .native-drop-overlay span { color: var(--dim); }
-.track-list, .browser-pane, .sidebar, .album-rating-strip, .lcd { cursor: default; user-select: none; -webkit-user-select: none; }
+.track-list, .playlist-view, .browser-pane, .sidebar, .album-rating-strip, .lcd { cursor: default; user-select: none; -webkit-user-select: none; }
 .transport { height: 52px; display: grid; grid-template-columns: 200px minmax(260px, 1fr) 268px; align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
 .transport button { border: 0; background: transparent; cursor: default; padding: 2px 4px; }
 .transport-controls { display: flex; flex-direction: column; align-items: center; gap: 5px; padding-right: 8px; }
