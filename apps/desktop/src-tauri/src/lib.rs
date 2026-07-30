@@ -30,7 +30,7 @@ use flate2::read::GzDecoder;
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{
     artist_albums_page, artist_descriptor, image_url, spotify_id, title_case, ArtistAlbumsPage,
-    MediaProvider, SearchResults, SpotifySyncProvider, SyncBatch,
+    SearchResults, SpotifySyncProvider, SyncBatch,
 };
 use retune_core::{
     browse::{self, Selection},
@@ -2818,7 +2818,7 @@ mod tests {
                 }),
             ),
         ]);
-        let tracks = MediaProvider::album_tracks(&client, "spotify:album:album")
+        let tracks = provider::album_tracks(&client, "spotify:album:album")
             .await
             .unwrap();
         let mut cache = playlist_cache();

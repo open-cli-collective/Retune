@@ -124,7 +124,7 @@ pub(super) async fn spotify_search(
         return Err("Connect to Spotify to search.".into());
     }
     let provider = provider_from(&state)?;
-    let mut results = MediaProvider::search(provider.as_ref(), query.trim()).await?;
+    let mut results = provider::search(provider.as_ref(), query.trim()).await?;
     mark_album_membership(
         &state.library.lock().expect("library mutex poisoned"),
         &mut results.albums,
@@ -218,7 +218,7 @@ pub(super) async fn add_spotify_album(
     playlists::reject_local_uris(std::slice::from_ref(&uri), |_| Some(name.clone()))?;
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
-    let mut tracks = MediaProvider::album_tracks(provider.as_ref(), &uri).await?;
+    let mut tracks = provider::album_tracks(provider.as_ref(), &uri).await?;
     for track in &mut tracks {
         if track.alb.is_empty() {
             track.alb.clone_from(&name);
@@ -238,7 +238,10 @@ pub(super) async fn add_spotify_album(
         .iter()
         .map(|track| track.uri.clone())
         .collect::<Vec<_>>();
-    provider.save_to_spotify(&uris).await?;
+    provider
+        .save_to_library(&uris)
+        .await
+        .map_err(|error| error.to_string())?;
     mutate_library(&state, |library| {
         for track in tracks {
             library.add(track);

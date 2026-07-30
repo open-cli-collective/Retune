@@ -153,7 +153,7 @@ pub(super) async fn playlist_add_album(
 ) -> Result<(), String> {
     playlists::reject_local_uris(std::slice::from_ref(&album_uri), |_| album_label.clone())?;
     let provider = provider_from(&app.state::<AppState>())?;
-    let tracks = MediaProvider::album_tracks(provider.as_ref(), &album_uri).await?;
+    let tracks = provider::album_tracks(provider.as_ref(), &album_uri).await?;
     let uris = tracks.into_iter().map(|track| track.uri).collect();
     playlist_add_inner(&app, id, uris).await
 }

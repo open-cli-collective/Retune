@@ -31,6 +31,11 @@ pub enum LibraryKind {
 }
 
 impl LibraryKind {
+    /// Ordering invariant: Audiobooks must remain the final section.
+    /// SpotifySyncProvider parks music batches in `SyncRun::pending_music`
+    /// and flushes + genre-enriches them only when `kind == Audiobooks`
+    /// (see the flush in `spotify_library_snapshot`), so `sync::snapshot`
+    /// must iterate ALL to completion.
     pub const ALL: [Self; 5] = [
         Self::Tracks,
         Self::Albums,
@@ -143,9 +148,6 @@ pub trait MediaProvider: Send + Sync {
     fn request_counts(&self) -> BTreeMap<String, u64> {
         BTreeMap::new()
     }
-    async fn search(&self, query: &str) -> Result<SearchResults, String>;
-    async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String>;
-    async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String>;
 }
 
 pub struct SpotifySyncProvider<'a, T, S> {
@@ -338,6 +340,27 @@ fn album_track_count(album: &Album) -> u32 {
             .map(|tracks| tracks.total)
             .unwrap_or_default(),
     )
+}
+
+fn search_album(album: Album) -> SearchAlbum {
+    SearchAlbum {
+        artist: album
+            .artists
+            .first()
+            .map(|artist| artist.name.clone())
+            .unwrap_or_default(),
+        year: album
+            .release_date
+            .as_deref()
+            .and_then(|date| date.get(..4))
+            .map(str::to_owned),
+        image_url: image_url(&album.images),
+        album_type: album.album_type.as_deref().map(title_case),
+        track_count: album_track_count(&album),
+        in_library: false,
+        uri: album.uri,
+        name: album.name,
+    }
 }
 
 pub(crate) fn spotify_id(value: &str) -> &str {
@@ -727,19 +750,14 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
+                let mut interrupted = false;
                 for saved in page.items {
                     let (tracks, partial) =
                         normalized_album_tracks(client, &health, &saved.album).await?;
                     batch.extend(tracks);
                     if partial {
-                        on_batch(SyncBatch {
-                            tracks: batch.iter().map(|pending| pending.track.clone()).collect(),
-                            done,
-                            total,
-                            section: label,
-                        });
-                        music_batches.push(batch);
-                        break 'pages;
+                        interrupted = true;
+                        break;
                     }
                     done += 1;
                 }
@@ -750,7 +768,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                     section: label,
                 });
                 music_batches.push(batch);
-                (vec![], count, page.next.is_some())
+                (vec![], count, page.next.is_some() && !interrupted)
             }
             LibraryKind::Shows => {
                 let Some(page) =
@@ -761,28 +779,17 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
+                let mut interrupted = false;
                 for saved in page.items {
                     if health.skip_content_family("/shows") {
-                        on_batch(SyncBatch {
-                            tracks: batch.clone(),
-                            done,
-                            total,
-                            section: label,
-                        });
-                        batches.push(batch);
-                        break 'pages;
+                        interrupted = true;
+                        break;
                     }
                     let Some(episodes) = health
                         .snapshot_page(client.show_episodes(&saved.show.id, 0, PAGE_SIZE).await)?
                     else {
-                        on_batch(SyncBatch {
-                            tracks: batch.clone(),
-                            done,
-                            total,
-                            section: label,
-                        });
-                        batches.push(batch);
-                        break 'pages;
+                        interrupted = true;
+                        break;
                     };
                     done += 1;
                     batch.extend(
@@ -792,7 +799,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                             .map(|episode| normalize::episode(episode, Some(&saved.show))),
                     );
                 }
-                (batch, count, page.next.is_some())
+                (batch, count, page.next.is_some() && !interrupted)
             }
             LibraryKind::Episodes => {
                 let Some(page) =
@@ -819,28 +826,17 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
+                let mut interrupted = false;
                 for book in page.items {
                     if health.skip_content_family("/audiobooks") {
-                        on_batch(SyncBatch {
-                            tracks: batch.clone(),
-                            done,
-                            total,
-                            section: label,
-                        });
-                        batches.push(batch);
-                        break 'pages;
+                        interrupted = true;
+                        break;
                     }
                     let Some(chapters) = health
                         .snapshot_page(client.audiobook_chapters(&book.id, 0, PAGE_SIZE).await)?
                     else {
-                        on_batch(SyncBatch {
-                            tracks: batch.clone(),
-                            done,
-                            total,
-                            section: label,
-                        });
-                        batches.push(batch);
-                        break 'pages;
+                        interrupted = true;
+                        break;
                     };
                     done += 1;
                     batch.extend(
@@ -850,7 +846,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                             .map(|chapter| normalize::chapter(chapter, &book)),
                     );
                 }
-                (batch, count, page.next.is_some())
+                (batch, count, page.next.is_some() && !interrupted)
             }
         };
         if !matches!(kind, LibraryKind::Tracks | LibraryKind::Albums) {
@@ -869,6 +865,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
     }
     if let Some(run) = run {
         run.defer_music(music_batches);
+        // Audiobooks is the final section (see LibraryKind::ALL) — flush here.
         if kind == LibraryKind::Audiobooks {
             let mut music = enrich_music(&genres, run.take_pending_music()).await?;
             music.append(&mut batches);
@@ -897,101 +894,79 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     ) -> Result<Snapshot, String> {
         spotify_library_snapshot(self, kind, None, on_batch).await
     }
+}
 
-    async fn search(&self, query: &str) -> Result<SearchResults, String> {
-        let results = SpotifyClient::search(self, query, 0, SEARCH_PAGE_SIZE)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(SearchResults {
-            artists: results
-                .artists
-                .items
-                .into_iter()
-                .map(|artist| SearchArtist {
-                    id: artist.id.clone(),
-                    descriptor: artist_descriptor(&artist),
-                    image_url: image_url(&artist.images),
-                    name: artist.name,
-                })
-                .collect(),
-            albums: results
-                .albums
-                .items
-                .into_iter()
-                .map(|album| SearchAlbum {
-                    artist: album
-                        .artists
-                        .first()
-                        .map(|artist| artist.name.clone())
-                        .unwrap_or_default(),
-                    year: album
-                        .release_date
-                        .as_deref()
-                        .and_then(|date| date.get(..4))
-                        .map(str::to_owned),
-                    image_url: image_url(&album.images),
-                    album_type: album.album_type.as_deref().map(title_case),
-                    track_count: album_track_count(&album),
-                    in_library: false,
-                    uri: album.uri,
-                    name: album.name,
-                })
-                .collect(),
-            tracks: results
-                .tracks
-                .items
-                .into_iter()
-                .map(|track| SearchTrack {
-                    uri: track.uri,
-                    name: track.name,
-                    artist: track
-                        .artists
-                        .first()
-                        .map(|artist| artist.name.clone())
-                        .unwrap_or_default(),
-                    alb: track
-                        .album
-                        .as_ref()
-                        .map(|album| album.name.clone())
-                        .unwrap_or_default(),
-                    duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
-                    image_url: track
-                        .album
-                        .as_ref()
-                        .and_then(|album| image_url(&album.images)),
-                    album_uri: track.album.map(|album| album.uri),
-                })
-                .collect(),
-        })
-    }
-
-    async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
-        let health = SyncHealth::new(None);
-        let genres = GenreSource::new(self, &health);
-        let album = SpotifyClient::album(self, spotify_id(album))
-            .await
-            .map_err(|error| error.to_string())?;
-        let normalized = album
-            .tracks
-            .as_ref()
-            .map(|page| {
-                page.items
-                    .iter()
-                    .map(|track| normalized_track(track, Some(&album), None))
-                    .collect()
+pub async fn search<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+) -> Result<SearchResults, String> {
+    let results = SpotifyClient::search(client, query, 0, SEARCH_PAGE_SIZE)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(SearchResults {
+        artists: results
+            .artists
+            .items
+            .into_iter()
+            .map(|artist| SearchArtist {
+                id: artist.id.clone(),
+                descriptor: artist_descriptor(&artist),
+                image_url: image_url(&artist.images),
+                name: artist.name,
             })
-            .unwrap_or_default();
-        Ok(enrich_music(&genres, vec![normalized])
-            .await?
-            .pop()
-            .unwrap_or_default())
-    }
+            .collect(),
+        albums: results.albums.items.into_iter().map(search_album).collect(),
+        tracks: results
+            .tracks
+            .items
+            .into_iter()
+            .map(|track| SearchTrack {
+                uri: track.uri,
+                name: track.name,
+                artist: track
+                    .artists
+                    .first()
+                    .map(|artist| artist.name.clone())
+                    .unwrap_or_default(),
+                alb: track
+                    .album
+                    .as_ref()
+                    .map(|album| album.name.clone())
+                    .unwrap_or_default(),
+                duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+                image_url: track
+                    .album
+                    .as_ref()
+                    .and_then(|album| image_url(&album.images)),
+                album_uri: track.album.map(|album| album.uri),
+            })
+            .collect(),
+    })
+}
 
-    async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String> {
-        self.save_to_library(uris)
-            .await
-            .map_err(|error| error.to_string())
-    }
+pub async fn album_tracks<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    album: &str,
+) -> Result<Vec<NewTrack>, String> {
+    let health = SyncHealth::new(None);
+    let genres = GenreSource::new(client, &health);
+    let album = SpotifyClient::album(client, spotify_id(album))
+        .await
+        .map_err(|error| error.to_string())?;
+    let normalized = album
+        .tracks
+        .as_ref()
+        .map(|page| {
+            page.items
+                .iter()
+                .map(|track| normalized_track(track, Some(&album), None))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(enrich_music(&genres, vec![normalized])
+        .await?
+        .pop()
+        .unwrap_or_default())
 }
 
 pub async fn artist_albums_page<T: Transport, S: TokenStore>(
@@ -1004,28 +979,7 @@ pub async fn artist_albums_page<T: Transport, S: TokenStore>(
         .await?;
     let count = (page.items.len() + page.skipped) as u32;
     Ok(ArtistAlbumsPage {
-        albums: page
-            .items
-            .into_iter()
-            .map(|album| SearchAlbum {
-                artist: album
-                    .artists
-                    .first()
-                    .map(|artist| artist.name.clone())
-                    .unwrap_or_default(),
-                year: album
-                    .release_date
-                    .as_deref()
-                    .and_then(|date| date.get(..4))
-                    .map(str::to_owned),
-                image_url: image_url(&album.images),
-                album_type: album.album_type.as_deref().map(title_case),
-                track_count: album_track_count(&album),
-                in_library: false,
-                uri: album.uri,
-                name: album.name,
-            })
-            .collect(),
+        albums: page.items.into_iter().map(search_album).collect(),
         next_offset: (page.next.is_some() && count > 0).then_some(offset + count),
         total: page.total,
     })
@@ -1046,18 +1000,6 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifySyncProvider<'_, T, S
 
     fn request_counts(&self) -> BTreeMap<String, u64> {
         self.client.request_counts()
-    }
-
-    async fn search(&self, query: &str) -> Result<SearchResults, String> {
-        MediaProvider::search(self.client, query).await
-    }
-
-    async fn album_tracks(&self, album: &str) -> Result<Vec<NewTrack>, String> {
-        MediaProvider::album_tracks(self.client, album).await
-    }
-
-    async fn save_to_spotify(&self, uris: &[String]) -> Result<(), String> {
-        MediaProvider::save_to_spotify(self.client, uris).await
     }
 }
 
@@ -1094,22 +1036,6 @@ impl MediaProvider for FakeProvider {
             quota_exhausted: self.quota_exhausted,
             progress: None,
         })
-    }
-
-    async fn search(&self, _query: &str) -> Result<SearchResults, String> {
-        Ok(SearchResults {
-            artists: vec![],
-            albums: vec![],
-            tracks: vec![],
-        })
-    }
-
-    async fn album_tracks(&self, _album: &str) -> Result<Vec<NewTrack>, String> {
-        Ok(vec![])
-    }
-
-    async fn save_to_spotify(&self, _uris: &[String]) -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -1753,6 +1679,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_episode_rate_limit_keeps_previously_collected_episodes() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [
+                    {"show": {"id": "show-1", "uri": "spotify:show:1", "name": "Show One",
+                        "publisher": "Publisher", "category": null, "images": []}},
+                    {"show": {"id": "show-2", "uri": "spotify:show:2", "name": "Show Two",
+                        "publisher": "Publisher", "category": null, "images": []}}
+                ], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                    "uri": "spotify:episode:1", "name": "Episode", "duration_ms": 2000,
+                    "show": null
+                }], "next": null}),
+            ),
+            rate_limited(),
+        ]);
+
+        let snapshot = client
+            .library_snapshot(LibraryKind::Shows, &|_| {})
+            .await
+            .unwrap();
+
+        assert!(snapshot.partial);
+        let tracks = snapshot.batches.concat();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].uri, "spotify:episode:1");
+    }
+
+    #[tokio::test]
     async fn saved_episodes_use_embedded_show_metadata() {
         let client = client([Response::json(
             200,
@@ -1836,7 +1795,7 @@ mod tests {
             }),
         )]);
 
-        let results = MediaProvider::search(&client, "artist").await.unwrap();
+        let results = search(&client, "artist").await.unwrap();
 
         assert_eq!(
             results.artists[0],
@@ -1963,20 +1922,6 @@ mod tests {
 
         assert!(snapshot.partial);
         assert!(snapshot.batches.iter().all(|batch| batch.is_empty()));
-    }
-
-    #[tokio::test]
-    async fn album_add_uses_query_only_library_request() {
-        let client = client([Response::json(204, serde_json::Value::Null)]);
-
-        client
-            .save_to_spotify(&["spotify:album:1".into()])
-            .await
-            .unwrap();
-
-        let request = &client.transport().requests()[0];
-        assert!(request.url.contains("/me/library?uris=spotify%3Aalbum%3A1"));
-        assert!(request.body.is_empty());
     }
 
     #[tokio::test]
