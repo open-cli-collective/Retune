@@ -734,6 +734,7 @@ function App() {
             columnWidths={state.settings.columnWidths}
             hiddenColumns={state.settings.hiddenColumns}
             onPlay={player.start}
+            onRate={(id, stars) => mutate('click_track_star', { id, stars })}
             onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch(fail)}
             onPlaylist={setPlaylistSubject}
             onInfo={(tracks) => {
@@ -1087,7 +1088,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   </aside>{confirming && <ModalDialog className="get-info playlist-confirm" labelledBy="playlist-confirm-title" onCancel={busy ? undefined : () => setConfirming(undefined)} onSubmit={busy ? undefined : unfollow} closeOnBackdrop><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button type="submit" className="danger" disabled={busy}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></ModalDialog>}</>
 }
 
-function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onPlay, onOpen, onPlaylist, onInfo, onHiddenColumns, onError }: {
+function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onPlay, onRate, onOpen, onPlaylist, onInfo, onHiddenColumns, onError }: {
   playlist: PlaylistListView
   revision: number
   libraryRevision: number
@@ -1096,6 +1097,7 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onRate: (id: number, stars: number) => void
   onOpen: (target: 'app' | 'web') => void
   onPlaylist: (subject: PlaylistSubject) => void
   onInfo: (tracks: PlaylistTrack[]) => void
@@ -1267,7 +1269,7 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
           if (!selected.has(upstreamIndex)) select(upstreamIndex, event)
           setMenu({ x: event.clientX, y: event.clientY, upstreamIndex })
         }}
-      ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} playing={playing?.trackId === queue[rowIndex].id ? playing.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : (stars) => invoke('click_track_star', { id: track.id, stars }).catch((error) => onError(String(error)))} />)}</div>)}
+      ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} playing={playing?.trackId === queue[rowIndex].id ? playing.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>)}
       {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} onDragOver={(event) => { event.preventDefault(); setInsertBefore(tracks.length) }} onDrop={(event) => { event.preventDefault(); void drop(event, tracks.length) }} />}
     </div>
     {menu && (menu.upstreamIndex === undefined
