@@ -90,10 +90,7 @@ impl<S: TokenStore> CachedTokenStore<S> {
 
 impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
     fn load(&self) -> Result<Option<Tokens>> {
-        let mut cache = self
-            .cache
-            .lock()
-            .map_err(|error| Error::TokenStore(error.to_string()))?;
+        let mut cache = self.cache.lock().map_err(token_error)?;
         if let Some(tokens) = cache.as_ref() {
             return Ok(tokens.clone());
         }
@@ -104,19 +101,13 @@ impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
 
     fn save(&self, tokens: &Tokens) -> Result<()> {
         self.inner.save(tokens)?;
-        *self
-            .cache
-            .lock()
-            .map_err(|error| Error::TokenStore(error.to_string()))? = Some(Some(tokens.clone()));
+        *self.cache.lock().map_err(token_error)? = Some(Some(tokens.clone()));
         Ok(())
     }
 
     fn clear(&self) -> Result<()> {
         self.inner.clear()?;
-        *self
-            .cache
-            .lock()
-            .map_err(|error| Error::TokenStore(error.to_string()))? = Some(None);
+        *self.cache.lock().map_err(token_error)? = Some(None);
         Ok(())
     }
 }
@@ -287,26 +278,16 @@ impl InMemoryTokenStore {
 
 impl TokenStore for InMemoryTokenStore {
     fn load(&self) -> Result<Option<Tokens>> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|error| Error::TokenStore(error.to_string()))?
-            .clone())
+        Ok(self.0.lock().map_err(token_error)?.clone())
     }
 
     fn save(&self, tokens: &Tokens) -> Result<()> {
-        *self
-            .0
-            .lock()
-            .map_err(|error| Error::TokenStore(error.to_string()))? = Some(tokens.clone());
+        *self.0.lock().map_err(token_error)? = Some(tokens.clone());
         Ok(())
     }
 
     fn clear(&self) -> Result<()> {
-        *self
-            .0
-            .lock()
-            .map_err(|error| Error::TokenStore(error.to_string()))? = None;
+        *self.0.lock().map_err(token_error)? = None;
         Ok(())
     }
 }
@@ -442,11 +423,6 @@ mod tests {
                 "user-follow-modify",
             ]
         );
-    }
-
-    #[test]
-    fn scopes_request_string_matches_required_list() {
-        assert_eq!(crate::auth::SCOPES, crate::auth::REQUIRED_SCOPES.join(" "));
     }
 
     #[test]

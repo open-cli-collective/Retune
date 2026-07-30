@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,7 @@ pub const REQUIRED_SCOPES: [&str; 12] = [
     "user-follow-read",
     "user-follow-modify",
 ];
-pub const SCOPES: &str = "user-library-read user-library-modify user-read-playback-state user-modify-playback-state streaming user-read-private playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-follow-read user-follow-modify";
+pub static SCOPES: LazyLock<String> = LazyLock::new(|| REQUIRED_SCOPES.join(" "));
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 
@@ -69,7 +70,7 @@ pub fn authorize_url(
         .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", SCOPES)
+        .append_pair("scope", &SCOPES)
         .append_pair("state", state)
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", challenge);

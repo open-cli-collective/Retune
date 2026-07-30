@@ -2510,7 +2510,7 @@ mod tests {
                 access: "access".into(),
                 refresh: "refresh".into(),
                 expires_at: u64::MAX,
-                scopes: auth::SCOPES.into(),
+                scopes: auth::SCOPES.clone(),
             })),
         )
     }
@@ -3060,7 +3060,7 @@ mod tests {
             scopes: "user-library-read".into(),
         };
         let current = Tokens {
-            scopes: auth::SCOPES.into(),
+            scopes: auth::SCOPES.clone(),
             ..legacy.clone()
         };
 

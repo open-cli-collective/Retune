@@ -55,7 +55,7 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
         .map_err(|error| error.to_string())?
         .as_secs();
     let state = app.state::<AppState>();
-    let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.into());
+    let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.clone());
     state
         .token_store
         .save(&Tokens {

@@ -422,7 +422,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         if let Some(artist) = self
             .artist_cache
             .lock()
-            .map_err(|error| Error::Transport(error.to_string()))?
+            .expect("artist cache mutex poisoned")
             .get(id)
             .cloned()
         {
@@ -431,7 +431,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         let artist: Artist = self.get(&format!("/artists/{id}")).await?;
         self.artist_cache
             .lock()
-            .map_err(|error| Error::Transport(error.to_string()))?
+            .expect("artist cache mutex poisoned")
             .insert(id.into(), artist.clone());
         Ok(artist)
     }
@@ -542,7 +542,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                 "play offset is outside the queue".into(),
             ));
         }
-        let path = device_path("/me/player/play", device_id);
+        let path = player_path("/me/player/play", &[], device_id);
         self.empty(
             Method::Put,
             &path,
@@ -559,21 +559,14 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         if !matches!(state, "off" | "context" | "track") {
             return Err(Error::InvalidRequest("invalid repeat state".into()));
         }
-        let path = {
-            let mut query = url::form_urlencoded::Serializer::new(String::new());
-            query.append_pair("state", state);
-            if let Some(device_id) = device_id {
-                query.append_pair("device_id", device_id);
-            }
-            format!("/me/player/repeat?{}", query.finish())
-        };
+        let path = player_path("/me/player/repeat", &[("state", state)], device_id);
         self.empty(Method::Put, &path, Vec::new()).await
     }
 
     pub async fn resume(&self, device_id: Option<&str>) -> Result<()> {
         self.empty(
             Method::Put,
-            &device_path("/me/player/play", device_id),
+            &player_path("/me/player/play", &[], device_id),
             Vec::new(),
         )
         .await
@@ -582,7 +575,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     pub async fn pause(&self, device_id: Option<&str>) -> Result<()> {
         self.empty(
             Method::Put,
-            &device_path("/me/player/pause", device_id),
+            &player_path("/me/player/pause", &[], device_id),
             Vec::new(),
         )
         .await
@@ -594,32 +587,21 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                 "volume percent must be between 0 and 100".into(),
             ));
         }
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("volume_percent", &volume_percent.to_string());
-        if let Some(device_id) = device_id {
-            query.append_pair("device_id", device_id);
-        }
-        self.empty(
-            Method::Put,
-            &format!("/me/player/volume?{}", query.finish()),
-            Vec::new(),
-        )
-        .await
+        let path = player_path(
+            "/me/player/volume",
+            &[("volume_percent", &volume_percent.to_string())],
+            device_id,
+        );
+        self.empty(Method::Put, &path, Vec::new()).await
     }
 
     pub async fn seek(&self, position_ms: u32, device_id: Option<&str>) -> Result<()> {
-        // Scoped: the Serializer holds a non-Sync dyn Fn and must drop
-        // before the await so command futures stay Send.
-        let query = {
-            let mut query = url::form_urlencoded::Serializer::new(String::new());
-            query.append_pair("position_ms", &position_ms.to_string());
-            if let Some(device_id) = device_id {
-                query.append_pair("device_id", device_id);
-            }
-            query.finish()
-        };
-        self.empty(Method::Put, &format!("/me/player/seek?{query}"), Vec::new())
-            .await
+        let path = player_path(
+            "/me/player/seek",
+            &[("position_ms", &position_ms.to_string())],
+            device_id,
+        );
+        self.empty(Method::Put, &path, Vec::new()).await
     }
 
     pub async fn transfer(&self, device_id: &str, play: bool) -> Result<()> {
@@ -759,7 +741,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         *self
             .request_counts
             .lock()
-            .map_err(|error| Error::Transport(error.to_string()))?
+            .expect("request count mutex poisoned")
             .entry(endpoint_family(path))
             .or_default() += 1;
         let response = self
@@ -895,16 +877,20 @@ pub fn endpoint_family(endpoint: &str) -> String {
     }
 }
 
-fn device_path(path: &str, device_id: Option<&str>) -> String {
-    device_id.map_or_else(
-        || path.into(),
-        |id| {
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("device_id", id)
-                .finish();
-            format!("{path}?{query}")
-        },
-    )
+fn player_path(path: &str, pairs: &[(&str, &str)], device_id: Option<&str>) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in pairs {
+        query.append_pair(key, value);
+    }
+    if let Some(device_id) = device_id {
+        query.append_pair("device_id", device_id);
+    }
+    let query = query.finish();
+    if query.is_empty() {
+        path.into()
+    } else {
+        format!("{path}?{query}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
