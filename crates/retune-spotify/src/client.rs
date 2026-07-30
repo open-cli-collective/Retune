@@ -8,7 +8,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 
 use crate::auth::TokenResponse;
-use crate::tokens::{TokenStore, Tokens};
+use crate::tokens::{InMemoryTokenStore, TokenStore, Tokens};
 use crate::{Error, Result};
 
 const API_BASE: &str = "https://api.spotify.com/v1";
@@ -52,6 +52,30 @@ impl Response {
             headers: HashMap::new(),
             body: serde_json::to_vec(&value).expect("JSON value serializes"),
         }
+    }
+
+    /// Test double: a 429 with a `retry-after` header and an empty JSON body.
+    pub fn rate_limited(retry_after: &str) -> Self {
+        let mut response = Self::json(429, serde_json::json!({}));
+        response
+            .headers
+            .insert("retry-after".into(), retry_after.into());
+        response
+    }
+
+    /// Test double: a 429 classified as Development Mode quota exhaustion,
+    /// with an optional `retry-after` header in seconds.
+    pub fn quota_exceeded(retry_after_secs: Option<u64>) -> Self {
+        let mut response = Self::json(
+            429,
+            serde_json::json!({"error": {"reason": "QUOTA_EXCEEDED"}}),
+        );
+        if let Some(retry_after_secs) = retry_after_secs {
+            response
+                .headers
+                .insert("retry-after".into(), retry_after_secs.to_string());
+        }
+        response
     }
 }
 
@@ -163,6 +187,24 @@ impl Transport for FakeTransport {
                 .ok_or_else(|| Error::Transport("fake response queue exhausted".into()))
         })
     }
+}
+
+/// Test double: a client over [`FakeTransport`] with never-expiring tokens
+/// granting `scopes`.
+pub fn fake_client(
+    responses: impl IntoIterator<Item = Response>,
+    scopes: &str,
+) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
+    SpotifyClient::new(
+        "client",
+        FakeTransport::new(responses),
+        InMemoryTokenStore::new(Some(Tokens {
+            access: "access".into(),
+            refresh: "refresh".into(),
+            expires_at: u64::MAX,
+            scopes: scopes.into(),
+        })),
+    )
 }
 
 pub struct SpotifyClient<T, S> {
@@ -1365,15 +1407,7 @@ mod tests {
     #[tokio::test]
     async fn quota_exhaustion_is_classified_without_retrying() {
         for retry_after_secs in [None, Some(120)] {
-            let mut response = Response::json(
-                429,
-                serde_json::json!({"error": {"status": 429, "message": "quota", "reason": "QUOTA_EXCEEDED"}}),
-            );
-            if let Some(retry_after_secs) = retry_after_secs {
-                response
-                    .headers
-                    .insert("retry-after".into(), retry_after_secs.to_string());
-            }
+            let response = Response::quota_exceeded(retry_after_secs);
             let client = SpotifyClient::new("client", FakeTransport::new([response]), tokens());
 
             let error = client.saved_tracks(0, 1).await.unwrap_err();
@@ -1391,10 +1425,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn malformed_retry_after_is_transient_fallback_but_not_quota_deadline() {
-        let mut transient = Response::json(429, serde_json::json!({}));
-        transient
-            .headers
-            .insert("retry-after".into(), "not a date".into());
+        let transient = Response::rate_limited("not a date");
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([
@@ -1455,10 +1486,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn concurrent_callers_do_not_send_or_retry_together() {
-        let mut limited = Response::json(429, serde_json::json!({}));
-        limited.headers.insert("retry-after".into(), "1".into());
         let transport = OverlapTransport::new([
-            limited,
+            Response::rate_limited("1"),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
         ]);
@@ -1481,10 +1510,8 @@ mod tests {
 
     #[tokio::test]
     async fn retries_rate_limit_and_reports_endpoint_for_bad_json() {
-        let mut limited = Response::json(429, serde_json::json!({}));
-        limited.headers.insert("retry-after".into(), "0".into());
         let transport = FakeTransport::new([
-            limited,
+            Response::rate_limited("0"),
             Response {
                 status: 200,
                 headers: HashMap::new(),
@@ -1499,12 +1526,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_retries_are_capped() {
-        let limited = || {
-            let mut response = Response::json(429, serde_json::json!({}));
-            response.headers.insert("retry-after".into(), "0".into());
-            response
-        };
-        let transport = FakeTransport::new([limited(), limited(), limited(), limited()]);
+        let transport = FakeTransport::new(std::iter::repeat_n(Response::rate_limited("0"), 4));
         let client = SpotifyClient::new("client", transport, tokens());
         let error = client.saved_tracks(0, 1).await.unwrap_err();
         assert!(matches!(error, Error::RateLimited { .. }));
@@ -1513,9 +1535,7 @@ mod tests {
 
     #[tokio::test]
     async fn long_rate_limit_returns_without_retrying() {
-        let mut limited = Response::json(429, serde_json::json!({}));
-        limited.headers.insert("retry-after".into(), "3600".into());
-        let transport = FakeTransport::new([limited]);
+        let transport = FakeTransport::new([Response::rate_limited("3600")]);
         let client = SpotifyClient::new("client", transport, tokens());
         let error = client.saved_tracks(0, 1).await.unwrap_err();
         assert!(matches!(

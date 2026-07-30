@@ -249,12 +249,7 @@ fn add(
         alb: alb.into(),
         name: name.into(),
         duration: Duration::from_secs(seconds),
-        track_no: None,
-        disc_no: None,
-        added_at: None,
-        release_date: None,
-        kind: None,
-        bitrate_kbps: None,
+        ..NewTrack::default()
     })
 }
 

@@ -67,24 +67,19 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::model::{AlbumKey, NewTrack, Rating, SourceId};
+    use crate::model::{AlbumKey, NewTrack, Rating};
 
     fn library() -> Library {
         let mut library = Library::new();
         let id = library.add(NewTrack {
             uri: "spotify:track:one".into(),
-            source: SourceId::Music,
             cat: "Rock".into(),
             art: "Artist".into(),
             alb: "Album".into(),
             name: "Track".into(),
             duration: Duration::from_secs(42),
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
             kind: Some("Spotify".into()),
-            bitrate_kbps: None,
+            ..NewTrack::default()
         });
         library
             .click_track_star(id, Rating::new(5).unwrap())
@@ -155,18 +150,12 @@ mod tests {
         let mut library = import(hostile.as_bytes()).unwrap();
         let id = library.add(NewTrack {
             uri: "b".into(),
-            source: SourceId::Music,
             cat: "Rock".into(),
             art: "A".into(),
             alb: "B".into(),
             name: "M".into(),
             duration: Duration::from_secs(1),
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
-            kind: None,
-            bitrate_kbps: None,
+            ..NewTrack::default()
         });
         assert_eq!(id.0, 8);
     }

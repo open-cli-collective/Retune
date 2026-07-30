@@ -656,10 +656,7 @@ impl Default for ConnectBackend {
 
 #[cfg(test)]
 mod tests {
-    use retune_spotify::{
-        client::{FakeTransport, Response},
-        tokens::{InMemoryTokenStore, Tokens},
-    };
+    use retune_spotify::client::{fake_client, Response};
 
     use super::*;
 
@@ -987,26 +984,19 @@ mod tests {
 
     #[tokio::test]
     async fn start_prefers_active_desktop_and_plays_full_queue_at_offset() {
-        let transport = FakeTransport::new([
-            Response::json(
-                200,
-                serde_json::json!({"devices": [
-                    {"id": "first", "name": "First", "is_restricted": false, "type": "Computer", "is_active": false},
-                    {"id": "active", "name": "Active", "is_restricted": false, "type": "Computer", "is_active": true, "supports_volume": true}
-                ]}),
-            ),
-            Response::json(204, serde_json::Value::Null),
-            Response::json(204, serde_json::Value::Null),
-        ]);
-        let client = SpotifyClient::new(
-            "client",
-            transport,
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: String::new(),
-            })),
+        let client = fake_client(
+            [
+                Response::json(
+                    200,
+                    serde_json::json!({"devices": [
+                        {"id": "first", "name": "First", "is_restricted": false, "type": "Computer", "is_active": false},
+                        {"id": "active", "name": "Active", "is_restricted": false, "type": "Computer", "is_active": true, "supports_volume": true}
+                    ]}),
+                ),
+                Response::json(204, serde_json::Value::Null),
+                Response::json(204, serde_json::Value::Null),
+            ],
+            "",
         );
         let playback = ConnectBackend::default();
         let event = playback
@@ -1037,22 +1027,15 @@ mod tests {
 
     #[tokio::test]
     async fn start_requires_desktop_client() {
-        let transport = FakeTransport::new([Response::json(
-            200,
-            serde_json::json!({"devices": [{
-                "id": "phone", "name": "Phone", "is_restricted": false,
-                "type": "Smartphone", "is_active": true
-            }]}),
-        )]);
-        let client = SpotifyClient::new(
-            "client",
-            transport,
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: String::new(),
-            })),
+        let client = fake_client(
+            [Response::json(
+                200,
+                serde_json::json!({"devices": [{
+                    "id": "phone", "name": "Phone", "is_restricted": false,
+                    "type": "Smartphone", "is_active": true
+                }]}),
+            )],
+            "",
         );
 
         let error = ConnectBackend::default()
@@ -1064,26 +1047,19 @@ mod tests {
 
     #[tokio::test]
     async fn stop_without_client_keeps_active_connect_context() {
-        let transport = FakeTransport::new([
-            Response::json(
-                200,
-                serde_json::json!({"devices": [{
-                    "id": "desk", "name": "Desk", "is_restricted": false,
-                    "type": "Computer", "is_active": true
-                }]}),
-            ),
-            Response::json(204, serde_json::Value::Null),
-            Response::json(204, serde_json::Value::Null),
-        ]);
-        let client = SpotifyClient::new(
-            "client",
-            transport,
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: String::new(),
-            })),
+        let client = fake_client(
+            [
+                Response::json(
+                    200,
+                    serde_json::json!({"devices": [{
+                        "id": "desk", "name": "Desk", "is_restricted": false,
+                        "type": "Computer", "is_active": true
+                    }]}),
+                ),
+                Response::json(204, serde_json::Value::Null),
+                Response::json(204, serde_json::Value::Null),
+            ],
+            "",
         );
         let playback = ConnectBackend::default();
         playback
@@ -1108,16 +1084,7 @@ mod tests {
             }]}),
         )];
         responses.extend((0..9).map(|_| Response::json(204, serde_json::Value::Null)));
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new(responses),
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: String::new(),
-            })),
-        );
+        let client = fake_client(responses, "");
         let playback = ConnectBackend::default();
         playback
             .begin(

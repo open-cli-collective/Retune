@@ -143,7 +143,6 @@ fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
     use crate::model::NewTrack;
@@ -156,13 +155,7 @@ mod tests {
             art: art.into(),
             alb: alb.into(),
             name: uri.into(),
-            duration: Duration::ZERO,
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
-            kind: None,
-            bitrate_kbps: None,
+            ..NewTrack::default()
         });
     }
 
@@ -332,18 +325,13 @@ mod tests {
         ] {
             library.add(NewTrack {
                 uri: uri.into(),
-                source: SourceId::Music,
                 cat: "Rock".into(),
                 art: "Artist".into(),
                 alb: "Album".into(),
                 name: uri.into(),
-                duration: Duration::ZERO,
                 track_no,
                 disc_no,
-                added_at: None,
-                release_date: None,
-                kind: None,
-                bitrate_kbps: None,
+                ..NewTrack::default()
             });
         }
 

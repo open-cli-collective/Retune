@@ -58,10 +58,7 @@ mod tests {
         Arc,
     };
 
-    use retune_spotify::{
-        client::{FakeTransport, Response, SpotifyClient},
-        tokens::{InMemoryTokenStore, Tokens},
-    };
+    use retune_spotify::client::{fake_client, Response};
 
     use super::*;
 
@@ -69,18 +66,12 @@ mod tests {
     async fn concurrent_requests_coalesce_into_one_rerun() {
         let orchestrator = Arc::new(SyncOrchestrator::default());
         let runs = Arc::new(AtomicUsize::new(0));
-        let client = Arc::new(SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = Arc::new(fake_client(
+            [
                 Response::json(200, serde_json::json!({"items": [], "next": null})),
                 Response::json(200, serde_json::json!({"items": [], "next": null})),
-            ]),
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: String::new(),
-            })),
+            ],
+            "",
         ));
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());

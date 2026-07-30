@@ -1043,8 +1043,8 @@ impl MediaProvider for FakeProvider {
 mod tests {
     use retune_core::model::SourceId;
     use retune_spotify::{
-        client::{FakeTransport, Response},
-        tokens::{InMemoryTokenStore, Tokens},
+        client::{fake_client, FakeTransport, Response},
+        tokens::InMemoryTokenStore,
     };
 
     use super::*;
@@ -1052,35 +1052,7 @@ mod tests {
     fn client(
         responses: impl IntoIterator<Item = Response>,
     ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
-        SpotifyClient::new(
-            "client",
-            FakeTransport::new(responses),
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: String::new(),
-            })),
-        )
-    }
-
-    fn rate_limited() -> Response {
-        let mut response = Response::json(429, serde_json::json!({}));
-        response.headers.insert("retry-after".into(), "3600".into());
-        response
-    }
-
-    fn quota_limited(retry_after_secs: Option<u64>) -> Response {
-        let mut response = Response::json(
-            429,
-            serde_json::json!({"error": {"reason": "QUOTA_EXCEEDED"}}),
-        );
-        if let Some(retry_after_secs) = retry_after_secs {
-            response
-                .headers
-                .insert("retry-after".into(), retry_after_secs.to_string());
-        }
-        response
+        fake_client(responses, "")
     }
 
     fn assert_track(
@@ -1273,7 +1245,7 @@ mod tests {
                     "artists": [], "images": []
                 }}], "next": null}),
             ),
-            rate_limited(),
+            Response::rate_limited("3600"),
         ]);
 
         let tracks = client
@@ -1320,7 +1292,7 @@ mod tests {
                 200,
                 serde_json::json!({"items": [], "next": null, "total": 0}),
             ),
-            rate_limited(),
+            Response::rate_limited("3600"),
         ]);
 
         let snapshot = client
@@ -1340,7 +1312,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_saved_tracks_rate_limit_returns_empty_partial_snapshot() {
-        let client = client([rate_limited()]);
+        let client = client([Response::rate_limited("3600")]);
 
         let snapshot = client
             .library_snapshot(LibraryKind::Tracks, &|_| {})
@@ -1421,7 +1393,7 @@ mod tests {
     async fn live_rate_limit_persists_its_endpoint_family() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSyncStore::new(dir.path());
-        let client = client([rate_limited()]);
+        let client = client([Response::rate_limited("3600")]);
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
 
         let snapshot = provider
@@ -1439,7 +1411,7 @@ mod tests {
     async fn quota_without_retry_after_is_partial_without_auto_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSyncStore::new(dir.path());
-        let client = client([quota_limited(None)]);
+        let client = client([Response::quota_exceeded(None)]);
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
 
         let snapshot = provider
@@ -1489,7 +1461,7 @@ mod tests {
                     "artists": [{"id": "artist-1", "name": "Artist"}], "album": null
                 }}], "next": null}),
             ),
-            quota_limited(None),
+            Response::quota_exceeded(None),
         ]);
 
         let snapshot = client
@@ -1506,7 +1478,7 @@ mod tests {
     async fn quota_with_retry_after_persists_typed_auto_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSyncStore::new(dir.path());
-        let client = client([quota_limited(Some(3_600))]);
+        let client = client([Response::quota_exceeded(Some(3_600))]);
         let provider = SpotifySyncProvider::new(&client, &store).unwrap();
 
         let snapshot = provider
@@ -1697,7 +1669,7 @@ mod tests {
                     "show": null
                 }], "next": null}),
             ),
-            rate_limited(),
+            Response::rate_limited("3600"),
         ]);
 
         let snapshot = client
@@ -2118,7 +2090,7 @@ mod tests {
                         "artists": [{"id": "artist-2", "name": "Two"}], "album": null}}
                 ], "next": null}),
             ),
-            rate_limited(),
+            Response::rate_limited("3600"),
         ]);
 
         let snapshot = client

@@ -2298,7 +2298,10 @@ mod tests {
     use retune_core::model::NewTrack;
     use retune_spotify::{
         auth,
-        client::{FakeTransport, Image, Page, Response, SimplifiedArtist, SpotifyClient, Track},
+        client::{
+            fake_client, FakeTransport, Image, Page, Response, SimplifiedArtist, SpotifyClient,
+            Track,
+        },
         tokens::{InMemoryTokenStore, Tokens},
     };
 
@@ -2313,18 +2316,12 @@ mod tests {
     fn metadata_track(uri: &str, cat: &str, art: &str, alb: &str) -> NewTrack {
         NewTrack {
             uri: uri.into(),
-            source: SourceId::Music,
             cat: cat.into(),
             art: art.into(),
             alb: alb.into(),
             name: uri.into(),
             duration: Duration::from_secs(1),
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
-            kind: None,
-            bitrate_kbps: None,
+            ..NewTrack::default()
         }
     }
 
@@ -2483,29 +2480,7 @@ mod tests {
     fn playlist_client(
         responses: impl IntoIterator<Item = Response>,
     ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
-        SpotifyClient::new(
-            "client",
-            FakeTransport::new(responses),
-            InMemoryTokenStore::new(Some(Tokens {
-                access: "access".into(),
-                refresh: "refresh".into(),
-                expires_at: u64::MAX,
-                scopes: auth::SCOPES.clone(),
-            })),
-        )
-    }
-
-    fn quota_response(retry_after_secs: Option<&str>) -> Response {
-        let mut response = Response::json(
-            429,
-            serde_json::json!({"error": {"reason": "QUOTA_EXCEEDED"}}),
-        );
-        if let Some(retry_after_secs) = retry_after_secs {
-            response
-                .headers
-                .insert("retry-after".into(), retry_after_secs.into());
-        }
-        response
+        fake_client(responses, &auth::SCOPES)
     }
 
     #[tokio::test]
@@ -2539,7 +2514,7 @@ mod tests {
     async fn artist_albums_persists_live_quota_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSyncStore::new(dir.path());
-        let client = playlist_client([quota_response(Some("120"))]);
+        let client = playlist_client([Response::quota_exceeded(Some(120))]);
 
         let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
             .await
@@ -2560,7 +2535,7 @@ mod tests {
     async fn artist_albums_does_not_invent_live_quota_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSyncStore::new(dir.path());
-        let client = playlist_client([quota_response(None)]);
+        let client = playlist_client([Response::quota_exceeded(None)]);
 
         let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
             .await

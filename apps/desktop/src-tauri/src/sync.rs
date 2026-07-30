@@ -129,7 +129,7 @@ pub fn without_fixtures(library: &Library) -> Result<Library, String> {
 mod tests {
     use std::{collections::HashMap, sync::Mutex, time::Duration};
 
-    use retune_core::model::{NewTrack, SourceId, TrackEdit};
+    use retune_core::model::{NewTrack, TrackEdit};
 
     use super::*;
     use crate::{
@@ -155,18 +155,13 @@ mod tests {
     fn track(uri: &str, name: &str) -> NewTrack {
         NewTrack {
             uri: uri.into(),
-            source: SourceId::Music,
             cat: "Rock".into(),
             art: "Artist".into(),
             alb: "Album".into(),
             name: name.into(),
             duration: Duration::from_secs(1),
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
             kind: Some("Spotify".into()),
-            bitrate_kbps: None,
+            ..NewTrack::default()
         }
     }
 

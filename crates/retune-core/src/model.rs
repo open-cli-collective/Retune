@@ -402,6 +402,27 @@ pub struct NewTrack {
     pub bitrate_kbps: Option<u32>,
 }
 
+// Manual impl: `SourceId` has no meaningful `Default` to derive from.
+impl Default for NewTrack {
+    fn default() -> Self {
+        Self {
+            uri: String::new(),
+            source: SourceId::Music,
+            cat: String::new(),
+            art: String::new(),
+            alb: String::new(),
+            name: String::new(),
+            duration: Duration::ZERO,
+            track_no: None,
+            disc_no: None,
+            added_at: None,
+            release_date: None,
+            kind: None,
+            bitrate_kbps: None,
+        }
+    }
+}
+
 /// Field edits from Get Info. `None` = leave unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackEdit {
@@ -437,18 +458,12 @@ mod tests {
     fn track(uri: &str, cat: &str, art: &str, alb: &str) -> NewTrack {
         NewTrack {
             uri: uri.into(),
-            source: SourceId::Music,
             cat: cat.into(),
             art: art.into(),
             alb: alb.into(),
             name: uri.into(),
             duration: Duration::from_secs(180),
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
-            kind: None,
-            bitrate_kbps: None,
+            ..NewTrack::default()
         }
     }
 

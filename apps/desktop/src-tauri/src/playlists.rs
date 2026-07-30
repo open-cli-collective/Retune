@@ -561,22 +561,13 @@ fn reorder_uris(uris: &mut Vec<String>, start: usize, insert_before: usize, leng
 #[cfg(test)]
 mod tests {
     use crate::store::FsPlaylistStore;
-    use retune_core::model::{NewTrack, SourceId};
+    use retune_core::model::NewTrack;
     use retune_spotify::{
-        client::{FakeTransport, Method, Response},
+        client::{fake_client, FakeTransport, Method, Response},
         tokens::InMemoryTokenStore,
     };
 
     use super::*;
-
-    fn tokens(scopes: &str) -> InMemoryTokenStore {
-        InMemoryTokenStore::new(Some(Tokens {
-            access: "access".into(),
-            refresh: "refresh".into(),
-            expires_at: u64::MAX,
-            scopes: scopes.into(),
-        }))
-    }
 
     fn cached() -> PlaylistCache {
         PlaylistCache {
@@ -640,18 +631,12 @@ mod tests {
     fn local_track(uri: &str, name: &str) -> NewTrack {
         NewTrack {
             uri: uri.into(),
-            source: SourceId::Music,
             cat: "Genre".into(),
             art: "Artist".into(),
             alb: "Album".into(),
             name: name.into(),
             duration: std::time::Duration::from_secs(1),
-            track_no: None,
-            disc_no: None,
-            added_at: None,
-            release_date: None,
-            kind: None,
-            bitrate_kbps: None,
+            ..NewTrack::default()
         }
     }
 
@@ -686,11 +671,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_mixed_local_uris_before_transport_or_playlist_validation() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::default(),
-            tokens(&retune_spotify::auth::SCOPES),
-        );
+        let client = fake_client([], &retune_spotify::auth::SCOPES);
         let mut library = Library::new();
         library.add(local_track("file:///tmp/local.mp3", "Local song"));
 
@@ -712,15 +693,14 @@ mod tests {
 
     #[tokio::test]
     async fn create_inserts_empty_owned_playlist_and_persists() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([Response::json(
+        let client = fake_client(
+            [Response::json(
                 201,
                 serde_json::json!({
                     "id": "new", "name": "Road Trip", "snapshot_id": "snapshot"
                 }),
-            )]),
-            tokens(&retune_spotify::auth::SCOPES),
+            )],
+            &retune_spotify::auth::SCOPES,
         );
         let mut cache = PlaylistCache::default();
 
@@ -736,9 +716,8 @@ mod tests {
 
     #[tokio::test]
     async fn changed_collaborative_playlist_fetches_tracks() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = fake_client(
+            [
                 Response::json(200, serde_json::json!({"id": "user"})),
                 Response::json(
                     200,
@@ -769,8 +748,8 @@ mod tests {
                         "next": null, "total": 2
                     }),
                 ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
+            ],
+            &retune_spotify::auth::SCOPES,
         );
         let mut current = cached();
         current.playlists[0].owned = false;
@@ -803,9 +782,8 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_followed_playlist_snapshot_skips_track_fetch() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = fake_client(
+            [
                 Response::json(200, serde_json::json!({"id": "user"})),
                 Response::json(
                     200,
@@ -818,8 +796,8 @@ mod tests {
                         "next": null
                     }),
                 ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
+            ],
+            &retune_spotify::auth::SCOPES,
         );
         let mut current = cached();
         current.playlists[0].owned = false;
@@ -838,9 +816,8 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_empty_followed_playlist_snapshot_skips_track_fetch() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = fake_client(
+            [
                 Response::json(200, serde_json::json!({"id": "user"})),
                 Response::json(
                     200,
@@ -852,8 +829,8 @@ mod tests {
                         "next": null
                     }),
                 ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
+            ],
+            &retune_spotify::auth::SCOPES,
         );
         let mut current = cached();
         current.playlists[0].owned = false;
@@ -884,15 +861,14 @@ mod tests {
                 }),
             )
         };
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = fake_client(
+            [
                 Response::json(200, serde_json::json!({"id": "user"})),
                 summary(),
                 Response::json(200, serde_json::json!({"id": "user"})),
                 summary(),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
+            ],
+            &retune_spotify::auth::SCOPES,
         );
         let current = PlaylistCache::default();
 
@@ -932,9 +908,8 @@ mod tests {
                 "owner": {"id": "user"}, "tracks": {"total": 2}
             })
         };
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = fake_client(
+            [
                 Response::json(200, serde_json::json!({"id": "user"})),
                 summaries(serde_json::json!([
                     summary("playlist"),
@@ -950,8 +925,8 @@ mod tests {
                     200,
                     serde_json::json!({"items": [], "next": null, "total": 0}),
                 ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
+            ],
+            &retune_spotify::auth::SCOPES,
         );
 
         let synced = sync(&client, &current, &Library::new()).await.unwrap();
@@ -971,10 +946,9 @@ mod tests {
         for owned in [true, false] {
             let mut cache = cached();
             cache.playlists[0].owned = owned;
-            let client = SpotifyClient::new(
-                "client",
-                FakeTransport::new([Response::json(200, serde_json::Value::Null)]),
-                tokens(&retune_spotify::auth::SCOPES),
+            let client = fake_client(
+                [Response::json(200, serde_json::Value::Null)],
+                &retune_spotify::auth::SCOPES,
             );
             unfollow(&client, &mut cache, "playlist").await.unwrap();
             assert!(cache.playlists.is_empty());
@@ -993,11 +967,7 @@ mod tests {
                 Response::json(status, serde_json::json!({"error": {"message": "no"}})),
                 3,
             );
-            let client = SpotifyClient::new(
-                "client",
-                FakeTransport::new(responses),
-                tokens(&retune_spotify::auth::SCOPES),
-            );
+            let client = fake_client(responses, &retune_spotify::auth::SCOPES);
             assert!(unfollow(&client, &mut cache, "playlist").await.is_err());
             assert_eq!(serde_json::to_vec(&cache).unwrap(), before);
         }
@@ -1020,39 +990,39 @@ mod tests {
         assert!(client.transport().requests().is_empty());
     }
 
+    fn stale_refresh_responses() -> [Response; 4] {
+        [
+            Response::json(
+                409,
+                serde_json::json!({"error": {"message": "Snapshot mismatch"}}),
+            ),
+            Response::json(200, serde_json::json!({"id": "user"})),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [{
+                        "id": "playlist", "name": "Fresh", "snapshot_id": "fresh",
+                        "owner": {"id": "user"}, "tracks": {"total": 1}
+                    }],
+                    "next": null
+                }),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "items": [{"is_local": false, "track": {
+                        "uri": "spotify:track:fresh", "name": "Fresh",
+                        "artists": [], "album": null, "duration_ms": 1000
+                    }}],
+                    "next": null, "total": 1
+                }),
+            ),
+        ]
+    }
+
     #[tokio::test]
     async fn stale_reorder_refreshes_tracks_and_reports_reload() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
-                Response::json(
-                    409,
-                    serde_json::json!({"error": {"message": "Snapshot mismatch"}}),
-                ),
-                Response::json(200, serde_json::json!({"id": "user"})),
-                Response::json(
-                    200,
-                    serde_json::json!({
-                        "items": [{
-                            "id": "playlist", "name": "Fresh", "snapshot_id": "fresh",
-                            "owner": {"id": "user"}, "tracks": {"total": 1}
-                        }],
-                        "next": null
-                    }),
-                ),
-                Response::json(
-                    200,
-                    serde_json::json!({
-                        "items": [{"is_local": false, "track": {
-                            "uri": "spotify:track:fresh", "name": "Fresh",
-                            "artists": [], "album": null, "duration_ms": 1000
-                        }}],
-                        "next": null
-                    }),
-                ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
-        );
+        let client = fake_client(stale_refresh_responses(), &retune_spotify::auth::SCOPES);
         let mut cache = cached();
 
         let error = reorder(&client, &mut cache, &Library::new(), "playlist", 0, 2, 1)
@@ -1067,13 +1037,12 @@ mod tests {
 
     #[tokio::test]
     async fn successful_reorder_updates_cached_order_and_snapshot() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([Response::json(
+        let client = fake_client(
+            [Response::json(
                 200,
                 serde_json::json!({"snapshot_id": "reordered"}),
-            )]),
-            tokens(&retune_spotify::auth::SCOPES),
+            )],
+            &retune_spotify::auth::SCOPES,
         );
         let mut cache = cached();
 
@@ -1090,9 +1059,8 @@ mod tests {
 
     #[tokio::test]
     async fn remove_refreshes_canonical_tracks_after_success() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
+        let client = fake_client(
+            [
                 Response::json(200, serde_json::json!({"snapshot_id": "removed"})),
                 Response::json(
                     200,
@@ -1104,8 +1072,8 @@ mod tests {
                         "next": null, "total": 1
                     }),
                 ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
+            ],
+            &retune_spotify::auth::SCOPES,
         );
         let mut cache = cached();
 
@@ -1125,11 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_rejects_unsafe_selections_before_writing() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::default(),
-            tokens(&retune_spotify::auth::SCOPES),
-        );
+        let client = fake_client([], &retune_spotify::auth::SCOPES);
         let mut cache = cached();
 
         assert!(matches!(
@@ -1156,11 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_rejects_unselected_duplicate_uri() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::default(),
-            tokens(&retune_spotify::auth::SCOPES),
-        );
+        let client = fake_client([], &retune_spotify::auth::SCOPES);
         let mut cache = cached();
         cache.playlists[0].tracks[1] = cache.playlists[0].tracks[0].clone();
 
@@ -1174,37 +1134,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_remove_refreshes_tracks_and_reports_reload() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([
-                Response::json(
-                    409,
-                    serde_json::json!({"error": {"message": "Snapshot mismatch"}}),
-                ),
-                Response::json(200, serde_json::json!({"id": "user"})),
-                Response::json(
-                    200,
-                    serde_json::json!({
-                        "items": [{
-                            "id": "playlist", "name": "Fresh", "snapshot_id": "fresh",
-                            "owner": {"id": "user"}, "tracks": {"total": 1}
-                        }],
-                        "next": null
-                    }),
-                ),
-                Response::json(
-                    200,
-                    serde_json::json!({
-                        "items": [{"is_local": false, "track": {
-                            "uri": "spotify:track:fresh", "name": "Fresh",
-                            "artists": [], "album": null, "duration_ms": 1000
-                        }}],
-                        "next": null, "total": 1
-                    }),
-                ),
-            ]),
-            tokens(&retune_spotify::auth::SCOPES),
-        );
+        let client = fake_client(stale_refresh_responses(), &retune_spotify::auth::SCOPES);
         let mut cache = cached();
 
         let error = remove(&client, &mut cache, &Library::new(), "playlist", &[0])
@@ -1218,13 +1148,12 @@ mod tests {
 
     #[tokio::test]
     async fn block_reorder_preserves_internal_order() {
-        let client = SpotifyClient::new(
-            "client",
-            FakeTransport::new([Response::json(
+        let client = fake_client(
+            [Response::json(
                 200,
                 serde_json::json!({"snapshot_id": "reordered"}),
-            )]),
-            tokens(&retune_spotify::auth::SCOPES),
+            )],
+            &retune_spotify::auth::SCOPES,
         );
         let mut cache = cached();
         cache.playlists[0].track_count = 4;
