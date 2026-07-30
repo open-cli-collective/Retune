@@ -94,13 +94,20 @@ pub(super) async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), Stri
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub(super) async fn track_artwork(
     state: tauri::State<'_, AppState>,
     uri: String,
+    min_width: Option<u32>,
 ) -> Result<Option<String>, String> {
     let provider = provider_from(&state).ok();
-    Ok(resolve_track_artwork(provider.as_deref(), &state.artwork_cache, &uri).await)
+    Ok(resolve_track_artwork(
+        provider.as_deref(),
+        &state.artwork_cache,
+        &uri,
+        min_width.unwrap_or(64).clamp(1, 2048),
+    )
+    .await)
 }
 
 #[tauri::command]

@@ -350,6 +350,7 @@ function App() {
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
+  const [artworkOpen, setArtworkOpen] = useState(false)
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
   const skipSettingsSave = useRef(false)
@@ -711,6 +712,7 @@ function App() {
         onVolume={(volume) => { dispatch({ type: 'settings', settings: { volume } }); player.setVolume(volume) }}
         onSeek={player.seek}
         onOrigin={showPlayingOrigin}
+        onArtwork={() => setArtworkOpen(true)}
       />
       <div className="body-grid">
         <Sidebar
@@ -724,6 +726,11 @@ function App() {
           onRepeat={(repeat) => invoke('set_repeat', { mode: repeat }).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch(fail)}
           onDrop={(id, subject) => addToPlaylist(id, subject).catch(fail)}
           onError={(error) => dispatch({ type: 'error', error })}
+          artwork={artworkOpen && state.playing?.uri ? <ArtworkPanel
+            uri={state.playing.uri}
+            name={state.playing.external ? state.playing.name ?? 'Now Playing' : playingTrack?.name ?? 'Now Playing'}
+            onClose={() => setArtworkOpen(false)}
+          /> : undefined}
         />
         <section className="content">
           {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => invoke('connect_spotify').catch(fail)}>Reconnect</button></div>}
@@ -887,12 +894,63 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
 
 const artworkCache = new Map<string, string | null>()
 
-function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin }: {
+function useArtwork(uri: string | null | undefined, minWidth: number) {
+  const [artwork, setArtwork] = useState<string | null>(null)
+  useEffect(() => {
+    let current = true
+    if (!uri) {
+      setArtwork(null)
+      return () => { current = false }
+    }
+    const key = `${uri}@${minWidth}`
+    if (artworkCache.has(key)) {
+      setArtwork(artworkCache.get(key) ?? null)
+      return () => { current = false }
+    }
+    setArtwork(null)
+    invoke<string | null>('track_artwork', { uri, minWidth })
+      .then((url) => {
+        artworkCache.set(key, url)
+        if (current) setArtwork(url)
+      })
+      .catch(() => {
+        artworkCache.set(key, null)
+        if (current) setArtwork(null)
+      })
+    return () => { current = false }
+  }, [minWidth, uri])
+  return artwork
+}
+
+function ArtworkPanel({ uri, name, onClose }: { uri: string; name: string; onClose: () => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const artwork = useArtwork(uri, 300)
+  return <>
+    <div className="sidebar-artwork">
+      <button type="button" className="sidebar-artwork-close" aria-label="Hide album artwork" onClick={onClose}>×</button>
+      <button type="button" className="sidebar-artwork-open" aria-label={`Enlarge artwork for ${name}`} disabled={!artwork} onClick={() => setExpanded(true)}>
+        {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span aria-hidden="true">♪</span>}
+      </button>
+    </div>
+    {expanded && <ArtworkLightbox uri={uri} name={name} onClose={() => setExpanded(false)} />}
+  </>
+}
+
+function ArtworkLightbox({ uri, name, onClose }: { uri: string; name: string; onClose: () => void }) {
+  const artwork = useArtwork(uri, 640)
+  return <ModalDialog className="artwork-lightbox" labelledBy="artwork-lightbox-title" onCancel={onClose} closeOnBackdrop>
+    <h2 id="artwork-lightbox-title" className="visually-hidden">Artwork for {name}</h2>
+    <button type="button" className="artwork-lightbox-close" aria-label="Close artwork" onClick={onClose}>×</button>
+    {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span className="artwork-placeholder" aria-hidden="true">♪</span>}
+  </ModalDialog>
+}
+
+function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
-  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onOrigin: () => void
+  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onOrigin: () => void; onArtwork: () => void
 }) {
   const elapsed = playing?.elapsed ?? 0
   const shown = playing?.external ? {
@@ -903,29 +961,7 @@ function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery
   } : track
   const duration = shown?.durationSecs ?? 0
   const uri = playing?.external ? playing.uri : track?.uri
-  const [artwork, setArtwork] = useState<string | null>(null)
-  useEffect(() => {
-    let current = true
-    if (!uri) {
-      setArtwork(null)
-      return () => { current = false }
-    }
-    if (artworkCache.has(uri)) {
-      setArtwork(artworkCache.get(uri) ?? null)
-      return () => { current = false }
-    }
-    setArtwork(null)
-    invoke<string | null>('track_artwork', { uri })
-      .then((url) => {
-        artworkCache.set(uri, url)
-        if (current) setArtwork(url)
-      })
-      .catch(() => {
-        artworkCache.set(uri, null)
-        if (current) setArtwork(null)
-      })
-    return () => { current = false }
-  }, [uri])
+  const artwork = useArtwork(uri, 64)
   return <header className="transport">
     <div className="transport-controls">
       <div className="transport-buttons">
@@ -951,7 +987,7 @@ function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery
         onOrigin()
       }}
     >
-      <div className="lcd-artwork">{artwork ? <img src={artwork} alt="" /> : <span aria-hidden="true">♪</span>}</div>
+      <button type="button" className="lcd-artwork" aria-label="Show album artwork" disabled={!uri} onClick={(event) => { event.stopPropagation(); onArtwork() }}>{artwork ? <img src={artwork} alt="" /> : <span aria-hidden="true">♪</span>}</button>
       <div className="lcd-copy">
         <Marquee text={shown?.name ?? 'Retune'} strong />
         <div className="lcd-meta">{shown ? <><span className="lcd-artist">{shown.art}</span><span className="lcd-album"> · {shown.alb}</span></> : 'Not Playing'}</div>
@@ -979,7 +1015,7 @@ function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery
   </header>
 }
 
-function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError }: {
+function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError, artwork }: {
   state: State
   playlists?: PlaylistListView[]
   onSource: (source: Source) => void
@@ -990,6 +1026,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   onRepeat: (repeat: RepeatMode) => void
   onDrop: (id: string, subject: PlaylistSubject) => void
   onError: (error: string) => void
+  artwork?: React.ReactNode
 }) {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
@@ -1119,6 +1156,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       <span>{playlist.owned ? '' : '🌐'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
     </button>{menu?.playlist.id === playlist.id && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setConfirming(playlist); setMenu(undefined) }}>{playlist.owned ? 'Delete Playlist…' : 'Unfollow Playlist…'}</button></ContextMenu>}</Fragment>)}
     </div>
+    {artwork}
     <div className="sidebar-actions">
       <button data-tooltip="New playlist" aria-label="New playlist" onClick={() => { setCreating(true); if (state.settings.plCollapsed) onCollapse() }}><svg aria-hidden="true" width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M9 3.6v10.8M3.6 9h10.8" /></svg></button>
       <button className={state.settings.shuffle ? 'active' : ''} data-tooltip={`Shuffle: ${state.settings.shuffle ? 'on' : 'off'}`} aria-label={`Shuffle: ${state.settings.shuffle ? 'on' : 'off'}`} aria-pressed={state.settings.shuffle} onClick={() => onShuffle(!state.settings.shuffle)}><svg aria-hidden="true" width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.6 5h3.2C7 5 7.9 6.4 9 9s2 4 3.2 4h2.6M2.6 13h3.2C7 13 7.9 11.6 9 9s2-4 3.2-4h2.6M12.9 3.1 15.1 5l-2.2 1.9M12.9 11.1l2.2 1.9-2.2 1.9" /></svg></button>

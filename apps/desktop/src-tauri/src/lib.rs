@@ -29,8 +29,8 @@ use flate2::read::GzDecoder;
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{
-    artist_albums_page, artist_descriptor, image_url, spotify_id, title_case, ArtistAlbumsPage,
-    SearchResults, SpotifySyncProvider, SyncBatch,
+    artist_albums_page, artist_descriptor, image_url, image_url_at_least, spotify_id, title_case,
+    ArtistAlbumsPage, SearchResults, SpotifySyncProvider, SyncBatch,
 };
 use retune_core::{
     browse::{self, Selection},
@@ -76,7 +76,7 @@ struct AppState {
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
-    artwork_cache: Mutex<HashMap<String, Option<String>>>,
+    artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
@@ -820,18 +820,20 @@ fn track_id(uri: &str) -> Option<&str> {
 
 async fn resolve_track_artwork<T: Transport, S: TokenStore>(
     client: Option<&SpotifyClient<T, S>>,
-    cache: &Mutex<HashMap<String, Option<String>>>,
+    cache: &Mutex<HashMap<(String, u32), Option<String>>>,
     uri: &str,
+    min_width: u32,
 ) -> Option<String> {
     let local = uri.starts_with("file:");
     let id = (!local).then(|| track_id(uri)).flatten();
     if !local && id.is_none() {
         return None;
     }
+    let cache_key = (uri.into(), min_width);
     if let Some(cached) = cache
         .lock()
         .expect("artwork cache mutex poisoned")
-        .get(uri)
+        .get(&cache_key)
         .cloned()
     {
         return cached;
@@ -857,13 +859,13 @@ async fn resolve_track_artwork<T: Transport, S: TokenStore>(
             .await
             .ok()
             .and_then(|track| track.album)
-            .and_then(|album| image_url(&album.images))
+            .and_then(|album| image_url_at_least(&album.images, min_width))
     };
     let mut cache = cache.lock().expect("artwork cache mutex poisoned");
     if cache.len() >= 512 {
         cache.clear();
     }
-    cache.insert(uri.into(), artwork.clone());
+    cache.insert(cache_key, artwork.clone());
     artwork
 }
 
@@ -874,6 +876,7 @@ pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerSt
         provider.as_deref(),
         &state.artwork_cache,
         event.uri.as_deref().unwrap_or_default(),
+        300,
     )
     .await
     else {
@@ -2601,25 +2604,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn track_artwork_resolves_smallest_usable_image_and_caches() {
+    async fn track_artwork_resolves_requested_sizes_and_caches_each() {
+        let track = serde_json::json!({
+            "uri": "spotify:track:track",
+            "name": "Track",
+            "album": {
+                "id": "album",
+                "uri": "spotify:album:album",
+                "name": "Album",
+                "images": [
+                    {"url": "large", "width": 300},
+                    {"url": "small", "width": 64},
+                    {"url": "tiny", "width": 63}
+                ]
+            }
+        });
         let client = playlist_client([
-            Response::json(
-                200,
-                serde_json::json!({
-                    "uri": "spotify:track:track",
-                    "name": "Track",
-                    "album": {
-                        "id": "album",
-                        "uri": "spotify:album:album",
-                        "name": "Album",
-                        "images": [
-                            {"url": "large", "width": 300},
-                            {"url": "small", "width": 64},
-                            {"url": "tiny", "width": 63}
-                        ]
-                    }
-                }),
-            ),
+            Response::json(200, track.clone()),
+            Response::json(200, track),
             Response::json(
                 200,
                 serde_json::json!({"uri": "spotify:track:missing", "name": "Missing"}),
@@ -2631,28 +2633,32 @@ mod tests {
         assert_eq!(track_id("spotify:album:album"), None);
         assert_eq!(track_id("spotify:track:"), None);
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track")
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 64)
                 .await
                 .as_deref(),
             Some("small")
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 64).await,
             Some("small".into())
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:album:album").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 300).await,
+            Some("large".into())
+        );
+        assert_eq!(
+            resolve_track_artwork(Some(&client), &cache, "spotify:album:album", 64).await,
             None
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
             None
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
             None
         );
-        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(client.transport().requests().len(), 3);
     }
 
     #[tokio::test]
@@ -2669,6 +2675,7 @@ mod tests {
             None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
             &cache,
             &uri,
+            64,
         )
         .await
         .unwrap();
@@ -2687,7 +2694,8 @@ mod tests {
             resolve_track_artwork(
                 None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
                 &cache,
-                &uri
+                &uri,
+                64
             )
             .await,
             Some(artwork)
@@ -2699,7 +2707,8 @@ mod tests {
             resolve_track_artwork(
                 None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
                 &cache,
-                &localfiles::file_uri(&wav)
+                &localfiles::file_uri(&wav),
+                64
             )
             .await,
             None
