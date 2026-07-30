@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use crate::{Error, Result};
 
 const SERVICE: &str = "com.rianjs.retune";
-const LEGACY_ACCOUNT: &str = "spotify-oauth";
 const KEY_ACCOUNT: &str = "token-file-key";
 const NONCE_LEN: usize = 12;
 
@@ -122,45 +121,6 @@ impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
     }
 }
 
-pub struct KeychainTokenStore {
-    entry: keyring::Entry,
-}
-
-impl KeychainTokenStore {
-    pub fn new() -> Result<Self> {
-        keyring::Entry::new(SERVICE, LEGACY_ACCOUNT)
-            .map(|entry| Self { entry })
-            .map_err(|error| Error::TokenStore(error.to_string()))
-    }
-}
-
-impl TokenStore for KeychainTokenStore {
-    fn load(&self) -> Result<Option<Tokens>> {
-        match self.entry.get_password() {
-            Ok(value) => serde_json::from_str(&value)
-                .map(Some)
-                .map_err(|error| Error::TokenStore(error.to_string())),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(Error::TokenStore(error.to_string())),
-        }
-    }
-
-    fn save(&self, tokens: &Tokens) -> Result<()> {
-        let value =
-            serde_json::to_string(tokens).map_err(|error| Error::TokenStore(error.to_string()))?;
-        self.entry
-            .set_password(&value)
-            .map_err(|error| Error::TokenStore(error.to_string()))
-    }
-
-    fn clear(&self) -> Result<()> {
-        match self.entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(Error::TokenStore(error.to_string())),
-        }
-    }
-}
-
 trait KeySource: Send + Sync {
     fn load_or_create(&self) -> Result<[u8; 32]>;
 }
@@ -235,18 +195,6 @@ impl EncryptedFsTokenStore {
             .copied()
             .map_err(|error| Error::TokenStore(error.clone()))
     }
-
-    fn file_exists(&self) -> Result<bool> {
-        match fs::metadata(&self.path) {
-            Ok(metadata) if metadata.is_file() => Ok(true),
-            Ok(_) => Err(Error::TokenStore(format!(
-                "{} is not a regular file",
-                self.path.display()
-            ))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(token_error(error)),
-        }
-    }
 }
 
 impl TokenStore for EncryptedFsTokenStore {
@@ -300,27 +248,6 @@ impl TokenStore for EncryptedFsTokenStore {
             Err(error) => Err(token_error(error)),
         }
     }
-}
-
-pub fn migrate_token_store(
-    legacy: &(impl TokenStore + ?Sized),
-    encrypted: &EncryptedFsTokenStore,
-) -> Result<()> {
-    if encrypted.file_exists()? {
-        return Ok(());
-    }
-    if let Some(tokens) = legacy.load()? {
-        encrypted.save(&tokens)?;
-        if let Err(error) = legacy.clear() {
-            if let Err(cleanup_error) = encrypted.clear() {
-                log::warn!(
-                    "Could not remove encrypted Spotify tokens after migration failed: {cleanup_error}"
-                );
-            }
-            return Err(error);
-        }
-    }
-    Ok(())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -401,7 +328,6 @@ mod tests {
         saves: AtomicUsize,
         clears: AtomicUsize,
         fail_save: AtomicBool,
-        fail_clear: AtomicBool,
     }
 
     impl TokenStore for CountingStore {
@@ -421,9 +347,6 @@ mod tests {
 
         fn clear(&self) -> Result<()> {
             self.clears.fetch_add(1, Ordering::Relaxed);
-            if self.fail_clear.load(Ordering::Relaxed) {
-                return Err(Error::TokenStore("clear failed".into()));
-            }
             *self.tokens.lock().unwrap() = None;
             Ok(())
         }
@@ -624,63 +547,5 @@ mod tests {
             .unwrap();
         fs::write(&path, [nonce.as_slice(), ciphertext.as_slice()].concat()).unwrap();
         assert_eq!(store.load().unwrap(), None);
-    }
-
-    #[test]
-    fn migration_moves_legacy_tokens_only_when_encrypted_file_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let encrypted = encrypted_store(dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
-        let legacy = CountingStore {
-            tokens: Mutex::new(Some(tokens("legacy"))),
-            ..Default::default()
-        };
-
-        migrate_token_store(&legacy, &encrypted).unwrap();
-        assert_eq!(encrypted.load().unwrap(), Some(tokens("legacy")));
-        assert_eq!(legacy.loads.load(Ordering::Relaxed), 1);
-        assert_eq!(legacy.clears.load(Ordering::Relaxed), 1);
-
-        legacy.save(&tokens("new-legacy")).unwrap();
-        migrate_token_store(&legacy, &encrypted).unwrap();
-        assert_eq!(legacy.loads.load(Ordering::Relaxed), 1);
-        assert_eq!(encrypted.load().unwrap(), Some(tokens("legacy")));
-    }
-
-    #[test]
-    fn migration_leaves_empty_or_failed_legacy_store_untouched() {
-        let empty_dir = tempfile::tempdir().unwrap();
-        let empty_encrypted =
-            encrypted_store(empty_dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
-        let empty = CountingStore::default();
-        migrate_token_store(&empty, &empty_encrypted).unwrap();
-        assert_eq!(empty.loads.load(Ordering::Relaxed), 1);
-        assert_eq!(empty.clears.load(Ordering::Relaxed), 0);
-
-        let failed_dir = tempfile::tempdir().unwrap();
-        fs::create_dir(failed_dir.path().join("tokens.enc")).unwrap();
-        let failed_encrypted =
-            encrypted_store(failed_dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
-        let legacy = CountingStore {
-            tokens: Mutex::new(Some(tokens("legacy"))),
-            ..Default::default()
-        };
-        assert!(migrate_token_store(&legacy, &failed_encrypted).is_err());
-        assert_eq!(legacy.clears.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn migration_removes_encrypted_file_when_legacy_clear_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let encrypted = encrypted_store(dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
-        let legacy = CountingStore {
-            tokens: Mutex::new(Some(tokens("legacy"))),
-            fail_clear: AtomicBool::new(true),
-            ..Default::default()
-        };
-
-        assert!(migrate_token_store(&legacy, &encrypted).is_err());
-        assert_eq!(legacy.load().unwrap(), Some(tokens("legacy")));
-        assert_eq!(encrypted.load().unwrap(), None);
-        assert!(!dir.path().join("tokens.enc").exists());
     }
 }

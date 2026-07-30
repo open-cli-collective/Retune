@@ -243,10 +243,6 @@ impl Settings {
         "added",
         "releaseDate",
     ];
-    const OLD_COLUMNS: [&'static str; 7] = [
-        "track", "name", "time", "artist", "album", "genre", "rating",
-    ];
-
     pub(crate) fn normalize(&mut self) {
         self.column_order
             .retain(|column| Self::COLUMNS.contains(&column.as_str()));
@@ -264,29 +260,14 @@ impl Settings {
         if !self.column_order.iter().any(|column| column == "track") {
             self.column_order.insert(0, "track".into());
         }
-        if self.column_order == Self::OLD_COLUMNS {
-            self.column_order = Self::default().column_order;
-            self.hidden_columns.extend(
-                [
-                    "disc",
-                    "kind",
-                    "bitrate",
-                    "lastPlayed",
-                    "added",
-                    "releaseDate",
-                ]
-                .map(String::from),
-            );
-        } else {
-            for column in Self::COLUMNS {
-                if !self.column_order.iter().any(|item| item == column) {
-                    self.column_order.push(column.into());
-                    if matches!(
-                        column,
-                        "disc" | "kind" | "bitrate" | "lastPlayed" | "added" | "releaseDate"
-                    ) {
-                        self.hidden_columns.push(column.into());
-                    }
+        for column in Self::COLUMNS {
+            if !self.column_order.iter().any(|item| item == column) {
+                self.column_order.push(column.into());
+                if matches!(
+                    column,
+                    "disc" | "kind" | "bitrate" | "lastPlayed" | "added" | "releaseDate"
+                ) {
+                    self.hidden_columns.push(column.into());
                 }
             }
         }
@@ -300,9 +281,6 @@ impl Settings {
         self.hidden_columns.dedup();
         if !matches!(self.play_threshold_percent, 50 | 75 | 90 | 100) {
             self.play_threshold_percent = default_play_threshold_percent();
-        }
-        if self.streaming_bitrate == 256 {
-            self.streaming_bitrate = 320;
         }
     }
 
@@ -401,33 +379,11 @@ pub enum CooldownKind {
     Quota,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cooldown {
     pub kind: CooldownKind,
     pub deadline: u64,
-}
-
-impl<'de> Deserialize<'de> for Cooldown {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum StoredCooldown {
-            Legacy(u64),
-            Current { kind: CooldownKind, deadline: u64 },
-        }
-
-        Ok(match StoredCooldown::deserialize(deserializer)? {
-            StoredCooldown::Legacy(deadline) => Self {
-                kind: CooldownKind::Transient,
-                deadline,
-            },
-            StoredCooldown::Current { kind, deadline } => Self { kind, deadline },
-        })
-    }
 }
 
 impl FsPlaylistStore {
@@ -495,17 +451,7 @@ impl FsSettingsStore {
     pub fn load(&self) -> StoreResult<Option<Settings>> {
         match fs::read(&self.path) {
             Ok(bytes) => {
-                let mut json: serde_json::Value = serde_json::from_slice(&bytes)?;
-                let legacy_browser = json.get("browserVisible").is_none();
-                let mut settings: Settings = serde_json::from_value(json.take())?;
-                if legacy_browser {
-                    settings.browser_visible = settings.browser_panes.cat
-                        || settings.browser_panes.art
-                        || settings.browser_panes.alb;
-                    if !settings.browser_visible {
-                        settings.browser_panes = BrowserPanes::default();
-                    }
-                }
+                let mut settings: Settings = serde_json::from_slice(&bytes)?;
                 settings.normalize();
                 settings.validate()?;
                 Ok(Some(settings))
@@ -723,47 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hidden_browser_migrates_to_independent_visibility() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = FsSettingsStore::new(dir.path());
-        let mut json = serde_json::to_value(Settings::default()).unwrap();
-        json.as_object_mut().unwrap().remove("browserVisible");
-        json["browserPanes"] = serde_json::json!({"cat": false, "art": false, "alb": false});
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::to_vec(&json).unwrap(),
-        )
-        .unwrap();
-
-        let settings = store.load().unwrap().unwrap();
-        assert!(!settings.browser_visible);
-        assert_eq!(settings.browser_panes, BrowserPanes::default());
-    }
-
-    #[test]
-    fn legacy_visible_browser_preserves_panes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = FsSettingsStore::new(dir.path());
-        let panes = BrowserPanes {
-            cat: false,
-            art: true,
-            alb: false,
-        };
-        let mut json = serde_json::to_value(Settings::default()).unwrap();
-        json.as_object_mut().unwrap().remove("browserVisible");
-        json["browserPanes"] = serde_json::to_value(panes).unwrap();
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::to_vec(&json).unwrap(),
-        )
-        .unwrap();
-
-        let settings = store.load().unwrap().unwrap();
-        assert!(settings.browser_visible);
-        assert_eq!(settings.browser_panes, panes);
-    }
-
-    #[test]
     fn settings_load_preserves_96_kbps_streaming_quality() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSettingsStore::new(dir.path());
@@ -776,21 +681,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(store.load().unwrap().unwrap().streaming_bitrate, 96);
-    }
-
-    #[test]
-    fn settings_load_migrates_legacy_256_kbps_streaming_quality() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = FsSettingsStore::new(dir.path());
-        let mut json = serde_json::to_value(Settings::default()).unwrap();
-        json["streamingBitrate"] = 256.into();
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::to_vec(&json).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(store.load().unwrap().unwrap().streaming_bitrate, 320);
     }
 
     #[test]
@@ -917,20 +807,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_numeric_cooldown_loads_as_transient() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("cooldowns.json"), br#"{"/artists":200}"#).unwrap();
-
-        assert_eq!(
-            FsSyncStore::new(dir.path()).cooldowns(100).unwrap()["/artists"],
-            Cooldown {
-                kind: CooldownKind::Transient,
-                deadline: 200,
-            }
-        );
-    }
-
-    #[test]
     fn artist_genres_persist_across_reloads() {
         let dir = tempfile::tempdir().unwrap();
         FsSyncStore::new(dir.path())
@@ -992,14 +868,14 @@ mod tests {
         assert_eq!(
             settings.column_order,
             [
+                "track",
                 "name",
+                "time",
                 "artist",
                 "album",
-                "disc",
-                "track",
-                "time",
-                "rating",
                 "genre",
+                "rating",
+                "disc",
                 "plays",
                 "kind",
                 "bitrate",
@@ -1025,26 +901,6 @@ mod tests {
         assert_eq!(settings.streaming_bitrate, 320);
         assert!(!settings.normalize_volume);
         assert!(settings.gapless);
-    }
-
-    #[test]
-    fn settings_load_upgrades_exact_old_default_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = FsSettingsStore::new(dir.path());
-        let legacy = serde_json::json!({
-            "theme": "system", "zoom": 1.0, "zebra": true,
-            "columnOrder": ["track", "name", "time", "artist", "album", "genre", "rating"],
-            "autoAddSpotifyLibrary": true
-        });
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::to_vec(&legacy).unwrap(),
-        )
-        .unwrap();
-
-        let settings = store.load().unwrap().unwrap();
-        assert_eq!(settings.column_order, Settings::default().column_order);
-        assert_eq!(settings.hidden_columns, Settings::default().hidden_columns);
     }
 
     #[test]

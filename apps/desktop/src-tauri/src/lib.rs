@@ -46,10 +46,7 @@ use retune_spotify::{
         endpoint_family, Album, HttpTransport, SpotifyClient, Track as SpotifyTrack, Transport,
     },
     normalize::UNCATEGORIZED,
-    tokens::{
-        migrate_token_store, CachedTokenStore, EncryptedFsTokenStore, KeychainTokenStore,
-        TokenStore, Tokens,
-    },
+    tokens::{CachedTokenStore, EncryptedFsTokenStore, TokenStore, Tokens},
 };
 use serde::{Deserialize, Serialize};
 use store::{
@@ -1927,24 +1924,7 @@ fn import_with_settings(
         .as_object_mut()
         .and_then(|object| object.remove("settings"))
         .filter(|_| restore)
-        .map(|mut value| {
-            if value.get("browserVisible").is_none() {
-                let visible = value
-                    .get("browserPanes")
-                    .and_then(serde_json::Value::as_object)
-                    .is_none_or(|panes| {
-                        ["cat", "art", "alb"].into_iter().any(|pane| {
-                            panes.get(pane).and_then(serde_json::Value::as_bool) != Some(false)
-                        })
-                    });
-                value["browserVisible"] = visible.into();
-                if !visible {
-                    value["browserPanes"] =
-                        serde_json::json!({"cat": true, "art": true, "alb": true});
-                }
-            }
-            serde_json::from_value(value)
-        })
+        .map(serde_json::from_value)
         .transpose()
         .map_err(|error| error.to_string())?;
     let playlists = envelope
@@ -2163,18 +2143,12 @@ pub fn run() {
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
             // Dev builds keep tokens in a 0600 plaintext file. Release keeps
-            // only the encryption key in Keychain and migrates legacy tokens.
+            // only the encryption key in Keychain.
             let use_dev_token_store = cfg!(any(debug_assertions, feature = "dev-token-store"));
             let backing: Box<dyn TokenStore> = if use_dev_token_store {
                 Box::new(store::FsTokenStore::new(&app_data_dir))
             } else {
-                let encrypted =
-                    EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?;
-                let legacy = KeychainTokenStore::new().map_err(std::io::Error::other)?;
-                if let Err(error) = migrate_token_store(&legacy, &encrypted) {
-                    log::warn!("Could not migrate legacy Spotify tokens: {error}");
-                }
-                Box::new(encrypted)
+                Box::new(EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?)
             };
             let token_store = Arc::new(CachedTokenStore::new(backing));
             // Keychain access can fail transiently; start disconnected rather
@@ -3272,50 +3246,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_visual_settings_default_all_browser_panes_visible() {
-        let mut json =
-            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
-        json.as_object_mut().unwrap().remove("browserPanes");
-
-        let visual: VisualSettings = serde_json::from_value(json).unwrap();
-
-        assert_eq!(visual.browser_panes, BrowserPanes::default());
-    }
-
-    #[test]
-    fn legacy_visual_settings_default_playlists_expanded() {
-        let mut json =
-            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
-        json.as_object_mut().unwrap().remove("plCollapsed");
-
-        let visual: VisualSettings = serde_json::from_value(json).unwrap();
-
-        assert!(!visual.pl_collapsed);
-    }
-
-    #[test]
-    fn legacy_export_defaults_shuffle_off_and_visual_settings_exclude_it() {
-        let visual =
-            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
-        assert!(visual.get("shuffle").is_none());
-
-        let exported: ExportSettings = serde_json::from_value(visual).unwrap();
-
-        assert!(!exported.behavioral.shuffle);
-    }
-
-    #[test]
-    fn legacy_visual_settings_default_column_widths_to_empty() {
-        let mut json =
-            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
-        json.as_object_mut().unwrap().remove("columnWidths");
-
-        let visual: VisualSettings = serde_json::from_value(json).unwrap();
-
-        assert!(visual.column_widths.is_empty());
-    }
-
-    #[test]
     fn visual_settings_apply_restored_browser_visibility() {
         let mut settings = Settings::default();
         let mut visual = VisualSettings::from_settings(&settings);
@@ -3354,7 +3284,25 @@ mod tests {
 
         visual.apply_to(&mut settings);
 
-        assert_eq!(settings.column_order, Settings::default().column_order);
+        assert_eq!(
+            settings.column_order,
+            [
+                "track",
+                "name",
+                "time",
+                "artist",
+                "album",
+                "genre",
+                "rating",
+                "disc",
+                "plays",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+                "added",
+                "releaseDate",
+            ]
+        );
         assert_eq!(
             settings.hidden_columns,
             [
