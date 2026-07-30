@@ -130,8 +130,8 @@ Test-only. Sequence late — earlier commits change some of these sites. Est. �
 
 Doc-only. Depends on Commit 2 (gzip removal changes what io.rs should say).
 
-- [ ] Rewrite `crates/retune-core/src/io.rs:53-55`: it claims import "runs version migrations so any older schema still loads" — no migrations exist; io.rs:72-79 rejects any version != 1. State actual behavior: plain-JSON, schema v1 only (post-gzip-removal), with `handwritten_v1_envelope_loads` (io.rs:212) as the forever-pin. Also update the module doc at io.rs:1-3 which mentions `.json.gz`.
-- [ ] Rewrite `crates/retune-core/src/browse.rs:50-53`: it claims Facets carries "counts for the 'All (N …)' header rows" — the struct (55-59) holds only three Vec<String>; counts live in the shell (library_commands.rs:44). Describe only the three filtered, sorted, deduplicated facet lists.
+- [x] Rewrite `crates/retune-core/src/io.rs:53-55`: it claims import "runs version migrations so any older schema still loads" — no migrations exist; io.rs:72-79 rejects any version != 1. State actual behavior: plain-JSON, schema v1 only (post-gzip-removal), with `handwritten_v1_envelope_loads` (io.rs:212) as the forever-pin. Also update the module doc at io.rs:1-3 which mentions `.json.gz`.
+- [x] Rewrite `crates/retune-core/src/browse.rs:50-53`: it claims Facets carries "counts for the 'All (N …)' header rows" — the struct (55-59) holds only three Vec<String>; counts live in the shell (library_commands.rs:44). Describe only the three filtered, sorted, deduplicated facet lists.
 
 ## Commit 13 — `docs: remove completed yagni-solid worklist`
 

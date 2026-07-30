@@ -1,6 +1,6 @@
-//! Versioned serialization of the overlay library: export/import for
-//! backup (`.json`), compressed export (`.json.gz`), restore, and merge.
-//! Pure bytes-in/bytes-out — file paths and the filesystem live in the shell.
+//! Versioned serialization of the overlay library: plain-JSON export/import
+//! for backup, restore, and merge. Pure bytes-in/bytes-out — file paths,
+//! compression, and the filesystem live in the shell.
 
 use serde::Serialize;
 
@@ -36,8 +36,8 @@ pub fn export_json(library: &Library) -> Vec<u8> {
     .expect("Library is always serializable")
 }
 
-/// Accepts the output of [`export_json`]. Runs version migrations so any
-/// older schema still loads; a fixture test pins that v1 files load forever.
+/// Accepts the output of [`export_json`]: plain JSON, schema v1 only.
+/// A handwritten-envelope fixture test pins that v1 files load forever.
 pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
     let envelope: serde_json::Value = serde_json::from_slice(bytes)?;
     let object = envelope.as_object().ok_or(ImportError::MissingEnvelope)?;

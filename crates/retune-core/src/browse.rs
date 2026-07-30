@@ -49,8 +49,8 @@ impl Selection {
 
 /// The three facet columns for the current selection: every column reflects
 /// the *broader* selections (artists are limited to the chosen category;
-/// albums to the chosen category + artist), with counts for the "All (N …)"
-/// header rows. Lists are sorted, case-insensitively, and deduplicated.
+/// albums to the chosen category + artist). Lists are filtered, sorted
+/// case-insensitively, and deduplicated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facets {
     pub cats: Vec<String>,
