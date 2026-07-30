@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, dialogTabTarget, facetLabel, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, parseDragRange, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, parseDragRange, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
 
 test('the music catch-all has a user-facing genre label', () => {
   assert.equal(facetLabel('Genre', 'Uncategorized'), 'No Genre')
@@ -71,6 +71,12 @@ test('sequential playback skips exclusions but an explicit start still plays one
   ] as never
   assert.deepEqual(playbackQueue(tracks, 1).map((track) => track.id), [1, 3])
   assert.deepEqual(playbackQueue(tracks, 2).map((track) => track.id), [1, 2, 3])
+})
+
+test('playlist highlights require both the synthetic id and Spotify URI', () => {
+  const playing = { trackId: SYNTHETIC_BASE + 15, uri: 'spotify:track:better-days' }
+  assert.equal(isCurrentTrack(playing, { id: SYNTHETIC_BASE + 15, uri: 'spotify:track:silent-thanks' }), false)
+  assert.equal(isCurrentTrack(playing, { id: SYNTHETIC_BASE + 15, uri: 'spotify:track:better-days' }), true)
 })
 
 test('track and disc sorts keep multi-disc albums in playback order', () => {
