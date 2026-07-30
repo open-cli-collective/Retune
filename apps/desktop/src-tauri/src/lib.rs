@@ -1187,13 +1187,7 @@ async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Res
             return Ok(());
         }
     };
-    state
-        .playlist_store
-        .save(&synced)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = synced;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())
+    save_playlists(app, synced)
 }
 
 fn playlist_error(state: &AppState, error: retune_spotify::Error) -> String {
@@ -1519,6 +1513,11 @@ async fn playlist_add_inner(
             playlists::PlaylistAddError::ReadOnly => "Only your playlists can be changed.".into(),
             playlists::PlaylistAddError::Spotify(error) => playlist_error(&state, error),
         })?;
+    save_playlists(app, cache)
+}
+
+fn save_playlists(app: &tauri::AppHandle, cache: playlists::PlaylistCache) -> Result<(), String> {
+    let state = app.state::<AppState>();
     state
         .playlist_store
         .save(&cache)
@@ -1998,12 +1997,10 @@ fn apply_import(
                 }
             }
             if let Some(playlists) = imported_playlists {
-                if let Err(error) = state.playlist_store.save(&playlists) {
-                    notify_error(app, error.to_string());
+                if let Err(error) = save_playlists(app, playlists) {
+                    notify_error(app, error);
                     return;
                 }
-                *state.playlists.lock().expect("playlist mutex poisoned") = playlists;
-                let _ = app.emit("playlists-changed", ());
             }
             let _ = app.emit("library-changed", ());
         }

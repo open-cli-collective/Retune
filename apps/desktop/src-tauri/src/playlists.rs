@@ -266,19 +266,19 @@ pub async fn reorder<T: Transport, S: TokenStore>(
     range_start: u32,
     insert_before: u32,
     range_length: u32,
-) -> Result<(), PlaylistReorderError> {
+) -> Result<(), PlaylistMutationError> {
     let playlist = cache
         .playlists
         .iter()
         .find(|playlist| playlist.id == id)
-        .ok_or_else(|| PlaylistReorderError::Other(format!("Unknown playlist {id}")))?;
+        .ok_or_else(|| PlaylistMutationError::Other(format!("Unknown playlist {id}")))?;
     if !playlist.owned {
-        return Err(PlaylistReorderError::Other(
+        return Err(PlaylistMutationError::Other(
             "Only your playlists can be reordered.".into(),
         ));
     }
     if playlist.tracks.len() != playlist.track_count {
-        return Err(PlaylistReorderError::Other(
+        return Err(PlaylistMutationError::Other(
             "This playlist contains items Retune cannot safely reorder.".into(),
         ));
     }
@@ -288,23 +288,12 @@ pub async fn reorder<T: Transport, S: TokenStore>(
         insert_before,
         range_length,
     )
-    .map_err(PlaylistReorderError::Other)?;
+    .map_err(PlaylistMutationError::Other)?;
     let snapshot_id = playlist.snapshot_id.clone();
-    let new_snapshot = match client
+    let result = client
         .reorder_playlist_tracks(id, range_start, insert_before, range_length, &snapshot_id)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(Error::Http {
-            status: 400 | 409, ..
-        }) => {
-            refresh_one(client, cache, library, id)
-                .await
-                .map_err(PlaylistReorderError::Spotify)?;
-            return Err(PlaylistReorderError::Reloaded);
-        }
-        Err(error) => return Err(PlaylistReorderError::Spotify(error)),
-    };
+        .await;
+    let new_snapshot = recover_stale_snapshot(client, cache, library, id, result).await?;
     let playlist = cache
         .playlists
         .iter_mut()
@@ -321,10 +310,37 @@ pub async fn reorder<T: Transport, S: TokenStore>(
 }
 
 #[derive(Debug)]
-pub enum PlaylistReorderError {
+pub enum PlaylistMutationError {
     Reloaded,
     Spotify(Error),
     Other(String),
+}
+
+impl From<Error> for PlaylistMutationError {
+    fn from(error: Error) -> Self {
+        Self::Spotify(error)
+    }
+}
+
+async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    cache: &mut PlaylistCache,
+    library: &Library,
+    id: &str,
+    result: retune_spotify::Result<String>,
+) -> Result<String, PlaylistMutationError> {
+    match result {
+        Ok(snapshot) => Ok(snapshot),
+        Err(Error::Http {
+            status: 400 | 409, ..
+        }) => {
+            refresh_one(client, cache, library, id)
+                .await
+                .map_err(PlaylistMutationError::Spotify)?;
+            Err(PlaylistMutationError::Reloaded)
+        }
+        Err(error) => Err(PlaylistMutationError::Spotify(error)),
+    }
 }
 
 pub async fn remove<T: Transport, S: TokenStore>(
@@ -333,24 +349,24 @@ pub async fn remove<T: Transport, S: TokenStore>(
     library: &Library,
     id: &str,
     indices: &[u32],
-) -> Result<(), PlaylistRemoveError> {
+) -> Result<(), PlaylistMutationError> {
     let playlist = cache
         .playlists
         .iter()
         .find(|playlist| playlist.id == id)
-        .ok_or_else(|| PlaylistRemoveError::Other(format!("Unknown playlist {id}")))?;
+        .ok_or_else(|| PlaylistMutationError::Other(format!("Unknown playlist {id}")))?;
     if !playlist.owned {
-        return Err(PlaylistRemoveError::Other(
+        return Err(PlaylistMutationError::Other(
             "Only your playlists can be changed.".into(),
         ));
     }
     if playlist.tracks.len() != playlist.track_count {
-        return Err(PlaylistRemoveError::Other(
+        return Err(PlaylistMutationError::Other(
             "This playlist contains items Retune cannot safely remove.".into(),
         ));
     }
     if indices.is_empty() {
-        return Err(PlaylistRemoveError::Other(
+        return Err(PlaylistMutationError::Other(
             "Select at least one track to remove.".into(),
         ));
     }
@@ -361,7 +377,7 @@ pub async fn remove<T: Transport, S: TokenStore>(
     if selected.len() != indices.len()
         || selected.iter().any(|index| *index >= playlist.tracks.len())
     {
-        return Err(PlaylistRemoveError::Other(
+        return Err(PlaylistMutationError::Other(
             "Playlist removal selection is invalid.".into(),
         ));
     }
@@ -375,7 +391,7 @@ pub async fn remove<T: Transport, S: TokenStore>(
         .enumerate()
         .any(|(index, uri)| selected_uris.contains(uri.as_str()) && !selected.contains(&index))
     {
-        return Err(PlaylistRemoveError::Other(
+        return Err(PlaylistMutationError::Other(
             "Select every occurrence of a duplicate track before removing it.".into(),
         ));
     }
@@ -386,18 +402,8 @@ pub async fn remove<T: Transport, S: TokenStore>(
         .filter(|uri| seen.insert(uri.clone()))
         .collect::<Vec<_>>();
     let snapshot_id = playlist.snapshot_id.clone();
-    let new_snapshot = match client.remove_playlist_tracks(id, &uris, &snapshot_id).await {
-        Ok(snapshot) => snapshot,
-        Err(Error::Http {
-            status: 400 | 409, ..
-        }) => {
-            refresh_one(client, cache, library, id)
-                .await
-                .map_err(PlaylistRemoveError::Spotify)?;
-            return Err(PlaylistRemoveError::Reloaded);
-        }
-        Err(error) => return Err(PlaylistRemoveError::Spotify(error)),
-    };
+    let result = client.remove_playlist_tracks(id, &uris, &snapshot_id).await;
+    let new_snapshot = recover_stale_snapshot(client, cache, library, id, result).await?;
     let (track_count, tracks, non_library_tracks) = fetch_tracks(client, id, library).await?;
     let playlist = cache
         .playlists
@@ -409,19 +415,6 @@ pub async fn remove<T: Transport, S: TokenStore>(
     playlist.tracks = tracks;
     playlist.non_library_tracks = non_library_tracks;
     Ok(())
-}
-
-#[derive(Debug)]
-pub enum PlaylistRemoveError {
-    Reloaded,
-    Spotify(Error),
-    Other(String),
-}
-
-impl From<Error> for PlaylistRemoveError {
-    fn from(error: Error) -> Self {
-        Self::Spotify(error)
-    }
 }
 
 pub fn map_error(error: Error, tokens: Option<&Tokens>) -> String {
@@ -1066,7 +1059,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, PlaylistReorderError::Reloaded));
+        assert!(matches!(error, PlaylistMutationError::Reloaded));
         assert_eq!(cache.playlists[0].snapshot_id, "fresh");
         assert_eq!(cache.playlists[0].owner.as_deref(), Some("user"));
         assert_eq!(cache.playlists[0].tracks, ["spotify:track:fresh"]);
@@ -1141,22 +1134,22 @@ mod tests {
 
         assert!(matches!(
             remove(&client, &mut cache, &Library::new(), "playlist", &[]).await,
-            Err(PlaylistRemoveError::Other(_))
+            Err(PlaylistMutationError::Other(_))
         ));
         assert!(matches!(
             remove(&client, &mut cache, &Library::new(), "playlist", &[2]).await,
-            Err(PlaylistRemoveError::Other(_))
+            Err(PlaylistMutationError::Other(_))
         ));
         cache.playlists[0].owned = false;
         assert!(matches!(
             remove(&client, &mut cache, &Library::new(), "playlist", &[0]).await,
-            Err(PlaylistRemoveError::Other(_))
+            Err(PlaylistMutationError::Other(_))
         ));
         cache.playlists[0].owned = true;
         cache.playlists[0].track_count = 3;
         assert!(matches!(
             remove(&client, &mut cache, &Library::new(), "playlist", &[0]).await,
-            Err(PlaylistRemoveError::Other(_))
+            Err(PlaylistMutationError::Other(_))
         ));
         assert!(client.transport().requests().is_empty());
     }
@@ -1175,7 +1168,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, PlaylistRemoveError::Other(_)));
+        assert!(matches!(error, PlaylistMutationError::Other(_)));
         assert!(client.transport().requests().is_empty());
     }
 
@@ -1218,7 +1211,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, PlaylistRemoveError::Reloaded));
+        assert!(matches!(error, PlaylistMutationError::Reloaded));
         assert_eq!(cache.playlists[0].snapshot_id, "fresh");
         assert_eq!(cache.playlists[0].tracks, ["spotify:track:fresh"]);
     }

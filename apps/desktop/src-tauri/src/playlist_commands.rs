@@ -44,13 +44,7 @@ pub(super) fn reorder_playlists(app: tauri::AppHandle, ids: Vec<String>) -> Resu
         .expect("playlist mutex poisoned")
         .clone();
     playlists::reorder_playlists(&mut cache, &ids)?;
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())
+    save_playlists(&app, cache)
 }
 
 #[tauri::command]
@@ -65,13 +59,7 @@ pub(super) async fn playlist_unfollow(app: tauri::AppHandle, id: String) -> Resu
     playlists::unfollow(client.as_ref(), &mut cache, &id)
         .await
         .map_err(|error| playlist_error(&state, error))?;
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())
+    save_playlists(&app, cache)
 }
 
 #[tauri::command]
@@ -143,13 +131,7 @@ pub(super) async fn playlist_create(
     let created = playlist_list_views(&cache, &[])
         .pop()
         .expect("create inserted playlist");
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())?;
+    save_playlists(&app, cache)?;
     Ok(created)
 }
 
@@ -206,29 +188,23 @@ pub(super) async fn playlist_reorder(
         range_length,
     )
     .await;
+    finish_playlist_mutation(&app, &state, cache, result)
+}
+
+fn finish_playlist_mutation(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    cache: playlists::PlaylistCache,
+    result: Result<(), playlists::PlaylistMutationError>,
+) -> Result<(), String> {
     match result {
-        Ok(()) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        Err(playlists::PlaylistReorderError::Reloaded) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
+        Ok(()) => save_playlists(app, cache),
+        Err(playlists::PlaylistMutationError::Reloaded) => {
+            save_playlists(app, cache)?;
             Err(playlists::STALE_PLAYLIST.into())
         }
-        Err(playlists::PlaylistReorderError::Spotify(error)) => Err(playlist_error(&state, error)),
-        Err(playlists::PlaylistReorderError::Other(error)) => Err(error),
+        Err(playlists::PlaylistMutationError::Spotify(error)) => Err(playlist_error(state, error)),
+        Err(playlists::PlaylistMutationError::Other(error)) => Err(error),
     }
 }
 
@@ -251,28 +227,5 @@ pub(super) async fn playlist_remove(
         .expect("library mutex poisoned")
         .clone();
     let result = playlists::remove(client.as_ref(), &mut cache, &library, &id, &indices).await;
-    match result {
-        Ok(()) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        }
-        Err(playlists::PlaylistRemoveError::Reloaded) => {
-            state
-                .playlist_store
-                .save(&cache)
-                .map_err(|error| error.to_string())?;
-            *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-            app.emit("playlists-changed", ())
-                .map_err(|error| error.to_string())?;
-            Err(playlists::STALE_PLAYLIST.into())
-        }
-        Err(playlists::PlaylistRemoveError::Spotify(error)) => Err(playlist_error(&state, error)),
-        Err(playlists::PlaylistRemoveError::Other(error)) => Err(error),
-    }
+    finish_playlist_mutation(&app, &state, cache, result)
 }
