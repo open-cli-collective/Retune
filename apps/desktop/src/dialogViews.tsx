@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { BrowserPanes, MetadataValues, PlaybackBackend, PlayThresholdPercent, Settings, Theme, Track, TrackInfo } from './types.ts'
+import type { MetadataValues, PlayThresholdPercent, Settings, Theme, Track, TrackInfo } from './types.ts'
 import { clearedTrackRating } from './ui.ts'
 import { RatingStars } from './viewShared.tsx'
 
@@ -149,7 +149,7 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
   settings: Settings
   onZoom: (zoom: number) => void
   onCancel: () => void
-  onSave: (theme: Theme, browserVisible: boolean, browserPanes: BrowserPanes, autoAdd: boolean, autoConnect: boolean, clientId: string, playbackBackend: PlaybackBackend, streamingBitrate: number, normalizeVolume: boolean, gapless: boolean, playThresholdPercent: PlayThresholdPercent) => void
+  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent'>) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
@@ -223,7 +223,7 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
           </div></section>
         </>}
       </div>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave(theme, browserVisible, browserPanes, autoAdd, autoConnect, clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent)}>OK</button></div>
+      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent })}>OK</button></div>
     </div>
   </div>
 }

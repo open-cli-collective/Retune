@@ -214,8 +214,7 @@ button { color: inherit; }
 .top-tracks { padding-bottom: 12px; }
 .spotify-top-track-row { min-height: 22px; display: grid; grid-template-columns: 27px minmax(120px, 1fr) minmax(120px, 1fr) 42px; align-items: center; gap: 5px; padding: 0 10px 0 15px; }
 .spotify-top-track-row > strong, .spotify-top-track-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-bar { height: 26px; flex: 0 0 26px; display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; align-items: center; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); }
-.status-bar button { justify-self: start; height: 19px; margin-left: 7px; border: 1px solid var(--border); border-radius: 2px; background: var(--control); }
+.status-bar { height: 26px; flex: 0 0 26px; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); }
 .status-bar > span { text-align: center; }
 .sync-status { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .sync-meter { width: 120px; height: 5px; accent-color: var(--accent); }

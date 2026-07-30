@@ -16,6 +16,9 @@ const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlist
 const emptyTracks: Track[] = []
 const ZOOM_MIN = 0.7
 const ZOOM_MAX = 1.8
+// Settings persisted by set_repeat / set_audio_settings — excluded from the
+// generic settings-save effect (set_settings also switches playback backends).
+const EXCLUDED = ['repeat', 'streamingBitrate', 'normalizeVolume', 'gapless'] as const
 
 type State = {
   source: Source
@@ -91,9 +94,10 @@ const defaultSettings: Settings = {
   plCollapsed: false,
   browserVisible: true,
   browserPanes: { cat: true, art: true, alb: true },
-  columnOrder: ['name', 'artist', 'album', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
+  // Mirrors Settings::default() in src-tauri/src/store.rs — keep in sync
+  columnOrder: ['name', 'artist', 'album', 'disc', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
   columnWidths: {},
-  hiddenColumns: ['kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
+  hiddenColumns: ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
   sortColumn: null,
   sortDesc: false,
   autoAddSpotifyLibrary: true,
@@ -241,6 +245,15 @@ function reducer(state: State, action: Action): State {
 }
 
 
+function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void) {
+  const ref = useRef(handler)
+  ref.current = handler
+  useEffect(() => {
+    const sub = listen<T>(event, ({ payload }) => ref.current(payload))
+    return () => { void sub.then((stop) => stop()) }
+  }, [event])
+}
+
 function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[] } | null>(null)
@@ -248,38 +261,35 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   const volumeTimer = useRef<number>(undefined)
   playingRef.current = playing
 
-  useEffect(() => {
-    const playerState = listen<PlayerState>('player-state', ({ payload }) => {
-      dispatch({ type: 'playerState', player: payload, queue: queue.current })
-    })
-    return () => { void playerState.then((stop) => stop()) }
-  }, [dispatch])
+  useTauriEvent<PlayerState>('player-state', (player) => {
+    dispatch({ type: 'playerState', player, queue: queue.current })
+  })
 
   const run = useCallback((command: string, args?: Record<string, unknown>) => {
     invoke(command, args).catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [dispatch])
 
+  const liveBackend = useCallback(() => {
+    const current = playingRef.current
+    return !current?.simulated && (connected || current?.uri?.startsWith('file:'))
+  }, [connected])
+
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[]) => {
     const playable = playbackQueue(tracks, id)
     const target = playable.find((track) => track.id === id)
-    if (target?.uri.startsWith('file:')) {
-      queue.current = playable
-      run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
-      return
-    }
-    if (!target?.uri.startsWith('spotify:')) {
-      dispatch({ type: 'play', id, queue: playable })
-      return
-    }
-    if (!connected) {
+    if (target?.uri.startsWith('spotify:') && !connected) {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
       pendingPlay.current = { id, tracks: playable }
       run('connect_spotify')
       return
     }
-    queue.current = playable
-    run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+    if (target?.uri.startsWith('file:') || target?.uri.startsWith('spotify:')) {
+      queue.current = playable
+      run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+      return
+    }
+    dispatch({ type: 'play', id, queue: playable })
   }, [connected, dispatch, run])
 
   useEffect(() => {
@@ -291,40 +301,37 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   }, [connected, run])
 
   const toggle = useCallback(() => {
-    const current = playingRef.current
-    if (!current?.simulated && (connected || current?.uri?.startsWith('file:'))) {
+    if (liveBackend()) {
       if (playingRef.current && !playingRef.current.external) run('player_toggle')
     }
     else dispatch({ type: 'togglePlay' })
-  }, [connected, dispatch, run])
+  }, [dispatch, liveBackend, run])
 
   const step = useCallback((direction: number) => {
     const current = playingRef.current
-    if (!current?.simulated && (connected || current?.uri?.startsWith('file:'))) {
-      if (playingRef.current && !playingRef.current.external) run(direction < 0 ? 'player_prev' : 'player_next')
+    if (liveBackend()) {
+      if (current && !current.external) run(direction < 0 ? 'player_prev' : 'player_next')
       return
     }
     if (!current?.queue.length || current.trackId === null) return
     const index = current.queue.findIndex((track) => track.id === current.trackId)
     const next = current.queue[(index + direction + current.queue.length) % current.queue.length]
     dispatch({ type: 'step', id: next.id })
-  }, [connected, dispatch, run])
+  }, [dispatch, liveBackend, run])
 
   const setVolume = useCallback((volume: number) => {
-    const current = playingRef.current
-    if (current?.simulated || (!connected && !current?.uri?.startsWith('file:'))) return
+    if (!liveBackend()) return
     window.clearTimeout(volumeTimer.current)
     volumeTimer.current = window.setTimeout(() => run('player_set_volume', { volume }), 150)
-  }, [connected, run])
+  }, [liveBackend, run])
 
   const seek = useCallback((seconds: number) => {
-    const current = playingRef.current
-    if (!current?.simulated && (connected || current?.uri?.startsWith('file:'))) {
+    if (liveBackend()) {
       if (playingRef.current && !playingRef.current.external) run('player_seek', { seconds })
       return
     }
     dispatch({ type: 'seek', elapsed: seconds })
-  }, [connected, dispatch, run])
+  }, [dispatch, liveBackend, run])
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
@@ -333,6 +340,7 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
+  const fail = useCallback((error: unknown) => dispatch({ type: 'error', error: String(error) }), [])
   const [nativeDragActive, setNativeDragActive] = useState(false)
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
@@ -342,7 +350,6 @@ function App() {
   const skipSettingsSave = useRef(false)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
-  const typeaheadExpires = useRef(0)
   const view = state.view
   const tracks = view?.tracks ?? emptyTracks
   const displayedTracks = useMemo(() => state.settings.sortColumn
@@ -390,7 +397,7 @@ function App() {
     if (target === undefined) return
     invoke<TrackInfo>('get_track', { id: target })
       .then((track) => dispatch({ type: 'info', info: { kind: 'single', track } }))
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+      .catch(fail)
   }
 
   useEffect(() => {
@@ -400,17 +407,17 @@ function App() {
       sel: { cat: state.sel.cat ?? [], art: state.sel.art ?? [], alb: state.sel.alb ?? [] },
       query: state.scope === 'library' && state.query.trim() ? state.query : undefined,
     }).then((next) => active && dispatch({ type: 'view', view: next }))
-      .catch((error) => active && dispatch({ type: 'error', error: String(error) }))
+      .catch((error) => active && fail(error))
     return () => { active = false }
-  }, [state.source, state.sel, state.query, state.scope, state.revision])
+  }, [state.source, state.sel, state.query, state.scope, state.revision, fail])
 
   useEffect(() => {
     let active = true
     invoke<PlaylistListView[]>('playlists_list')
       .then((rows) => active && setPlaylists(rows))
-      .catch((error) => active && dispatch({ type: 'error', error: String(error) }))
+      .catch((error) => active && fail(error))
     return () => { active = false }
-  }, [state.playlistRevision])
+  }, [state.playlistRevision, fail])
 
   useEffect(() => {
     if (playlists && state.selectedPlaylist && !playlists.some((playlist) => playlist.id === state.selectedPlaylist)) {
@@ -421,14 +428,19 @@ function App() {
   useEffect(() => {
     invoke<Settings>('get_settings')
       .then((settings) => dispatch({ type: 'hydrateSettings', settings }))
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+      .catch(fail)
     invoke<string | null>('startup_notice')
       .then((notice) => dispatch({ type: 'notice', notice: notice ?? undefined }))
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+      .catch(fail)
     invoke<ConnectionState>('connection_state')
       .then((connection) => dispatch({ type: 'connection', connection }))
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
-  }, [])
+      .catch(fail)
+  }, [fail])
+
+  const saveKey = useMemo(
+    () => JSON.stringify(state.settings, (key, value: unknown) => (EXCLUDED as readonly string[]).includes(key) ? undefined : value),
+    [state.settings],
+  )
 
   useEffect(() => {
     if (!state.settingsHydrated || state.preferences) return
@@ -437,71 +449,30 @@ function App() {
       return
     }
     invoke('set_settings', { settings: state.settings })
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
-  }, [
-    state.settings.theme,
-    state.settings.zoom,
-    state.settings.zebra,
-    state.settings.plCollapsed,
-    state.settings.browserVisible,
-    state.settings.browserPanes,
-    state.settings.columnOrder,
-    state.settings.columnWidths,
-    state.settings.hiddenColumns,
-    state.settings.sortColumn,
-    state.settings.sortDesc,
-    state.settings.autoAddSpotifyLibrary,
-    state.settings.autoConnect,
-    state.settings.spotifyClientId,
-    state.settings.spotifySyncCompleted,
-    state.settings.playbackBackend,
-    state.settings.shuffle,
-    state.settings.playThresholdPercent,
-    state.settings.volume,
-    state.settingsHydrated,
-    state.preferences,
-  ])
+      .catch(fail)
+  }, [saveKey, state.settingsHydrated, state.preferences, fail])
 
-  useEffect(() => {
-    const unlisten = listen('get-info', () => openInfo())
-    return () => { void unlisten.then((stop) => stop()) }
-  }, [state.selectedTrackIds, displayedTracks])
-
-  useEffect(() => {
-    const changed = listen('library-changed', () => dispatch({ type: 'refresh' }))
-    const failed = listen<string>('operation-error', ({ payload }) => dispatch({ type: 'error', error: payload }))
-    const recovered = listen('operation-recovered', () => dispatch({ type: 'clear-error' }))
-    const connection = listen<ConnectionState>('connection-changed', ({ payload }) => dispatch({ type: 'connection', connection: payload }))
-    const settings = listen<Settings>('settings-changed', ({ payload }) => dispatch({ type: 'hydrateSettings', settings: payload }))
-    const progress = listen<string>('sync-progress', ({ payload }) => dispatch({ type: 'syncPhase', phase: payload || undefined }))
-    const progressCount = listen<{ tracks: number; fraction: number }>('sync-progress-count', ({ payload }) => dispatch({ type: 'syncProgress', progress: payload }))
-    const playlistsChanged = listen('playlists-changed', () => dispatch({ type: 'playlistsRefresh' }))
-    const importing = listen('local-import-started', () => dispatch({ type: 'importStarted' }))
-    const imported = listen<ImportSummary>('local-import-complete', ({ payload }) => dispatch({ type: 'importComplete', summary: payload }))
-    const importFailed = listen('local-import-failed', () => dispatch({ type: 'importFailed' }))
-    return () => {
-      void changed.then((stop) => stop())
-      void failed.then((stop) => stop())
-      void recovered.then((stop) => stop())
-      void connection.then((stop) => stop())
-      void settings.then((stop) => stop())
-      void progress.then((stop) => stop())
-      void progressCount.then((stop) => stop())
-      void playlistsChanged.then((stop) => stop())
-      void importing.then((stop) => stop())
-      void imported.then((stop) => stop())
-      void importFailed.then((stop) => stop())
-    }
-  }, [])
+  useTauriEvent('get-info', () => openInfo())
+  useTauriEvent('library-changed', () => dispatch({ type: 'refresh' }))
+  useTauriEvent<string>('operation-error', (error) => dispatch({ type: 'error', error }))
+  useTauriEvent('operation-recovered', () => dispatch({ type: 'clear-error' }))
+  useTauriEvent<ConnectionState>('connection-changed', (connection) => dispatch({ type: 'connection', connection }))
+  useTauriEvent<Settings>('settings-changed', (settings) => dispatch({ type: 'hydrateSettings', settings }))
+  useTauriEvent<string>('sync-progress', (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
+  useTauriEvent<{ tracks: number; fraction: number }>('sync-progress-count', (progress) => dispatch({ type: 'syncProgress', progress }))
+  useTauriEvent('playlists-changed', () => dispatch({ type: 'playlistsRefresh' }))
+  useTauriEvent('local-import-started', () => dispatch({ type: 'importStarted' }))
+  useTauriEvent<ImportSummary>('local-import-complete', (summary) => dispatch({ type: 'importComplete', summary }))
+  useTauriEvent('local-import-failed', () => dispatch({ type: 'importFailed' }))
 
   useEffect(() => {
     const unlisten = getCurrentWindow().onDragDropEvent(({ payload }) => {
       setNativeDragActive((active) => nextNativeDragActive(active, payload))
       if (payload.type === 'drop' && payload.paths.length) invoke('import_local', { paths: payload.paths })
-        .catch((error) => dispatch({ type: 'error', error: String(error) }))
+        .catch(fail)
     })
     return () => { void unlisten.then((stop) => stop()) }
-  }, [])
+  }, [fail])
 
   useEffect(() => {
     if (!state.importStatus || state.importStatus === 'Importing local files…') return
@@ -523,14 +494,14 @@ function App() {
         .catch((error) => {
           if (!active) return
           dispatch({ type: 'spotifySearching', searching: false })
-          dispatch({ type: 'error', error: String(error) })
+          fail(error)
         })
     }, 300)
     return () => {
       active = false
       window.clearTimeout(timer)
     }
-  }, [state.scope, state.query, state.connection.connected])
+  }, [state.scope, state.query, state.connection.connected, fail])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -548,8 +519,8 @@ function App() {
 
   useEffect(() => {
     const title = state.source === 'music' ? 'Retune — Library' : `Retune — ${labels[state.source].name}`
-    getCurrentWindow().setTitle(title).catch((error) => dispatch({ type: 'error', error: String(error) }))
-  }, [state.source])
+    getCurrentWindow().setTitle(title).catch(fail)
+  }, [state.source, fail])
 
   useEffect(() => {
     if (!state.playing?.simulated) return
@@ -567,11 +538,11 @@ function App() {
   const mutate = (command: string, args: Record<string, unknown>) => {
     invoke(command, args)
       .then(() => dispatch({ type: 'refresh' }))
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+      .catch(fail)
   }
   const navigateSpotify = (track: Track, destination: 'album' | 'artist') => invoke<SpotifyNavEntry>('resolve_spotify_track_destination', { uri: track.uri, destination })
     .then((entry) => dispatch({ type: 'spotifyNavigate', entry }))
-    .catch((error) => dispatch({ type: 'error', error: String(error) }))
+    .catch(fail)
   const setZoom = (zoom: number) => dispatch({
     type: 'settings',
     settings: { zoom: normalizeZoom(zoom, ZOOM_MIN, ZOOM_MAX) },
@@ -594,122 +565,107 @@ function App() {
   const playingTrack = playbackTracks.find((track) => track.id === state.playing?.trackId)
   const selectedAlbum = state.sel.alb?.length === 1 ? state.sel.alb[0] : undefined
 
-  useEffect(() => {
-    const viewActions = listen<string>('view-action', ({ payload }) => {
-      if (payload === 'zoom_in') setZoom(state.settings.zoom + 0.1)
-      else if (payload === 'zoom_out') setZoom(state.settings.zoom - 0.1)
-      else if (payload === 'actual_size') setZoom(1)
-      else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
-      else if (payload === 'toggle_browser') toggleBrowser()
-      else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
-    })
-    const playerActions = listen<string>('player-action', ({ payload }) => {
-      if (payload === 'play_pause') player.toggle()
-      else player.step(payload === 'previous' ? -1 : 1)
-    })
-    const preferences = listen('open-preferences', openPreferences)
-    const setup = listen('open-setup', () => dispatch({ type: 'setup', open: true }))
-    return () => {
-      void viewActions.then((stop) => stop())
-      void playerActions.then((stop) => stop())
-      void preferences.then((stop) => stop())
-      void setup.then((stop) => stop())
-    }
-  }, [state.settings, player, toggleBrowser, toggleBrowserPane])
+  useTauriEvent<string>('view-action', (payload) => {
+    if (payload === 'zoom_in') setZoom(state.settings.zoom + 0.1)
+    else if (payload === 'zoom_out') setZoom(state.settings.zoom - 0.1)
+    else if (payload === 'actual_size') setZoom(1)
+    else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
+    else if (payload === 'toggle_browser') toggleBrowser()
+    else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
+  })
+  useTauriEvent<string>('player-action', (payload) => {
+    if (payload === 'play_pause') player.toggle()
+    else player.step(payload === 'previous' ? -1 : 1)
+  })
+  useTauriEvent('open-preferences', openPreferences)
+  useTauriEvent('open-setup', () => dispatch({ type: 'setup', open: true }))
 
-  useEffect(() => {
-    if (typeahead.current.buffer) {
-      const remaining = typeaheadExpires.current - Date.now()
-      if (remaining > 0) typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, remaining)
-      else typeahead.current.buffer = ''
+  const onKeyDown = useRef<(event: KeyboardEvent) => void>(() => {})
+  onKeyDown.current = (event: KeyboardEvent) => {
+    const modalOpen = Boolean(state.info || state.preferences || state.setup || playlistSubject)
+    if (event.key === 'Escape' && modalOpen) {
+      event.preventDefault()
+      if (state.info) dispatch({ type: 'info' })
+      else if (state.preferences) cancelPreferences()
+      else if (state.setup) dispatch({ type: 'setup', open: false })
+      else setPlaylistSubject(undefined)
+      return
     }
-    const onKeyDown = (event: KeyboardEvent) => {
-      const modalOpen = Boolean(state.info || state.preferences || state.setup || playlistSubject)
-      if (event.key === 'Escape' && modalOpen) {
-        event.preventDefault()
-        if (state.info) dispatch({ type: 'info' })
-        else if (state.preferences) cancelPreferences()
-        else if (state.setup) dispatch({ type: 'setup', open: false })
-        else setPlaylistSubject(undefined)
-        return
-      }
-      const target = event.target as HTMLElement | null
-      if (modalOpen || target?.closest('input, textarea, select')) return
-      const command = event.metaKey || event.ctrlKey
-      if (command && ['=', '+', '-', '0'].includes(event.key)) {
-        event.preventDefault()
-        setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
-      } else if (command && event.key.toLowerCase() === 'a' && activePane === 'track' && tracklistVisible) {
-        event.preventDefault()
-        const anchor = displayedTracks.some((track) => track.id === state.selectionAnchor)
-          ? state.selectionAnchor
-          : displayedTracks[0]?.id
-        dispatch({ type: 'selection', ids: new Set(displayedTracks.map((track) => track.id)), anchor })
-      } else if (command && event.key.toLowerCase() === 'i') {
-        event.preventDefault()
-        openInfo()
-      } else if (command && event.key.toLowerCase() === 'l') {
-        event.preventDefault()
-        dispatch({ type: 'scope', scope: 'library' })
-        window.requestAnimationFrame(() => search.current?.focus())
-      } else if (command && event.key === ',') {
-        event.preventDefault()
-        openPreferences()
-      } else if (!command && event.key === ' ' && !typeahead.current.buffer) {
-        event.preventDefault()
-        player.toggle()
-      } else if (!command && event.key.length === 1) {
-        event.preventDefault()
-        typeahead.current.buffer += event.key
-        window.clearTimeout(typeahead.current.timer)
-        typeaheadExpires.current = Date.now() + 1000
-        typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, 1000)
-        const prefix = typeahead.current.buffer.toLocaleLowerCase()
-        if (activePane === 'track') {
-          const track = displayedTracks.find((track) => track.name.toLocaleLowerCase().startsWith(prefix))
-          if (!track) return
-          dispatch({ type: 'selectTrack', id: track.id })
-          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${track.id}"]`)?.scrollIntoView({ block: 'nearest' }))
-        } else {
-          const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
-          const facetTitle = labels[state.source].facets[activePane === 'cat' ? 0 : activePane === 'art' ? 1 : 2]
-          const index = facetValues.findIndex((value) => facetLabel(facetTitle, value).toLocaleLowerCase().startsWith(prefix))
-          if (index < 0) return
-          selectFacet(activePane, [facetValues[index]], facetValues[index])
-          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index + 1}"]`)?.scrollIntoView({ block: 'nearest' }))
-        }
-      } else if (!command && event.key === 'ArrowLeft') {
-        event.preventDefault()
-        player.step(-1)
-      } else if (!command && event.key === 'ArrowRight') {
-        event.preventDefault()
-        player.step(1)
-      } else if (!command && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-        if (event.target instanceof Element && event.target.closest('.sidebar')) return
-        event.preventDefault()
-        const direction = event.key === 'ArrowUp' ? -1 : 1
-        if (activePane === 'track') {
-          if (!displayedTracks.length) return
-          const current = displayedTracks.findIndex((track) => track.id === state.selectionAnchor)
-          const index = current < 0 ? 0 : Math.max(0, Math.min(displayedTracks.length - 1, current + direction))
-          dispatch({ type: 'selectTrack', id: displayedTracks[index].id })
-          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${displayedTracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
-        } else {
-          const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
-          const values: (string | undefined)[] = [undefined, ...facetValues]
-          const current = values.indexOf(facetAnchors.current[activePane] ?? state.sel[activePane]?.[0])
-          const index = Math.max(0, Math.min(values.length - 1, current + direction))
-          selectFacet(activePane, values[index] === undefined ? [] : [values[index]], values[index])
-          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index}"]`)?.scrollIntoView({ block: 'nearest' }))
-        }
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
+    const target = event.target as HTMLElement | null
+    if (modalOpen || target?.closest('input, textarea, select')) return
+    const command = event.metaKey || event.ctrlKey
+    if (command && ['=', '+', '-', '0'].includes(event.key)) {
+      event.preventDefault()
+      setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
+    } else if (command && event.key.toLowerCase() === 'a' && activePane === 'track' && tracklistVisible) {
+      event.preventDefault()
+      const anchor = displayedTracks.some((track) => track.id === state.selectionAnchor)
+        ? state.selectionAnchor
+        : displayedTracks[0]?.id
+      dispatch({ type: 'selection', ids: new Set(displayedTracks.map((track) => track.id)), anchor })
+    } else if (command && event.key.toLowerCase() === 'i') {
+      event.preventDefault()
+      openInfo()
+    } else if (command && event.key.toLowerCase() === 'l') {
+      event.preventDefault()
+      dispatch({ type: 'scope', scope: 'library' })
+      window.requestAnimationFrame(() => search.current?.focus())
+    } else if (command && event.key === ',') {
+      event.preventDefault()
+      openPreferences()
+    } else if (!command && event.key === ' ' && !typeahead.current.buffer) {
+      event.preventDefault()
+      player.toggle()
+    } else if (!command && event.key.length === 1) {
+      event.preventDefault()
+      typeahead.current.buffer += event.key
       window.clearTimeout(typeahead.current.timer)
-      window.removeEventListener('keydown', onKeyDown)
+      typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, 1000)
+      const prefix = typeahead.current.buffer.toLocaleLowerCase()
+      if (activePane === 'track') {
+        const track = displayedTracks.find((track) => track.name.toLocaleLowerCase().startsWith(prefix))
+        if (!track) return
+        dispatch({ type: 'selectTrack', id: track.id })
+        window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${track.id}"]`)?.scrollIntoView({ block: 'nearest' }))
+      } else {
+        const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+        const facetTitle = labels[state.source].facets[activePane === 'cat' ? 0 : activePane === 'art' ? 1 : 2]
+        const index = facetValues.findIndex((value) => facetLabel(facetTitle, value).toLocaleLowerCase().startsWith(prefix))
+        if (index < 0) return
+        selectFacet(activePane, [facetValues[index]], facetValues[index])
+        window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index + 1}"]`)?.scrollIntoView({ block: 'nearest' }))
+      }
+    } else if (!command && event.key === 'ArrowLeft') {
+      event.preventDefault()
+      player.step(-1)
+    } else if (!command && event.key === 'ArrowRight') {
+      event.preventDefault()
+      player.step(1)
+    } else if (!command && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      if (event.target instanceof Element && event.target.closest('.sidebar')) return
+      event.preventDefault()
+      const direction = event.key === 'ArrowUp' ? -1 : 1
+      if (activePane === 'track') {
+        if (!displayedTracks.length) return
+        const current = displayedTracks.findIndex((track) => track.id === state.selectionAnchor)
+        const index = current < 0 ? 0 : Math.max(0, Math.min(displayedTracks.length - 1, current + direction))
+        dispatch({ type: 'selectTrack', id: displayedTracks[index].id })
+        window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${displayedTracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
+      } else {
+        const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+        const values: (string | undefined)[] = [undefined, ...facetValues]
+        const current = values.indexOf(facetAnchors.current[activePane] ?? state.sel[activePane]?.[0])
+        const index = Math.max(0, Math.min(values.length - 1, current + direction))
+        selectFacet(activePane, values[index] === undefined ? [] : [values[index]], values[index])
+        window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index}"]`)?.scrollIntoView({ block: 'nearest' }))
+      }
     }
-  }, [activePane, playlistSubject, state.info, state.preferences, state.setup, state.sel, state.selectedTrackIds, state.selectionAnchor, state.settings.zoom, state.source, state.view, displayedTracks, tracklistVisible, player, selectFacet])
+  }
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => onKeyDown.current(event)
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -748,13 +704,13 @@ function App() {
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
           onReorder={setPlaylists}
           onCollapse={() => dispatch({ type: 'settings', settings: { plCollapsed: !state.settings.plCollapsed } })}
-          onShuffle={(shuffle) => invoke('set_shuffle', { shuffle }).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch((error) => dispatch({ type: 'error', error: String(error) }))}
-          onRepeat={(repeat) => invoke('set_repeat', { mode: repeat }).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch((error) => dispatch({ type: 'error', error: String(error) }))}
-          onDrop={(id, subject) => addToPlaylist(id, subject).catch((error) => dispatch({ type: 'error', error: String(error) }))}
+          onShuffle={(shuffle) => invoke('set_shuffle', { shuffle }).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch(fail)}
+          onRepeat={(repeat) => invoke('set_repeat', { mode: repeat }).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch(fail)}
+          onDrop={(id, subject) => addToPlaylist(id, subject).catch(fail)}
           onError={(error) => dispatch({ type: 'error', error })}
         />
         <section className="content">
-          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Reconnect</button></div>}
+          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => invoke('connect_spotify').catch(fail)}>Reconnect</button></div>}
           {spotifySearchActive ? (
             state.connection.connected ? <SpotifySearch
               query={state.query.trim()}
@@ -763,16 +719,13 @@ function App() {
               navigation={state.spotifyNavigation}
               playingUri={state.playing?.uri ?? null}
               onAdd={(album) => invoke('add_spotify_album', album)
-                .catch((error) => {
-                  dispatch({ type: 'error', error: String(error) })
-                  throw error
-                })}
+                .catch((error) => { fail(error); throw error })}
               onPlay={player.start}
               onPlaylist={setPlaylistSubject}
               onClose={() => dispatch({ type: 'scope', scope: 'library' })}
               onError={(error) => dispatch({ type: 'error', error })}
-            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch((error) => dispatch({ type: 'error', error: String(error) }))}>Connect to Spotify</button></div>
-          ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch((error) => dispatch({ type: 'error', error: String(error) }))} onError={(error) => dispatch({ type: 'error', error })} />
+            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch(fail)}>Connect to Spotify</button></div>
+          ) : selectedPlaylist ? <PlaylistView playlist={selectedPlaylist} revision={state.playlistRevision} playing={state.playing} onPlay={player.start} onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch(fail)} onError={(error) => dispatch({ type: 'error', error })} />
           : (
             <>
               <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onToggle={toggleBrowserPane} />
@@ -848,23 +801,20 @@ function App() {
       {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={() => dispatch({ type: 'info' })} onSaved={() => dispatch({ type: 'info' })} onError={(error) => dispatch({ type: 'error', error })} />}
       {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
         .then(() => invoke('connect_spotify'))
-        .catch((error) => dispatch({ type: 'error', error: String(error) }))} onSync={(clientId) => saveSetupClientId(clientId)
+        .catch(fail)} onSync={(clientId) => saveSetupClientId(clientId)
         .then(() => {
           dispatch({ type: 'setup', open: false })
           return invoke('sync_from_spotify')
         })
-        .catch((error) => dispatch({ type: 'error', error: String(error) }))} />}
-      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={(theme, browserVisible, browserPanes, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent) => {
-        const audioChanged = streamingBitrate !== state.settings.streamingBitrate
-          || normalizeVolume !== state.settings.normalizeVolume
-          || gapless !== state.settings.gapless
-        dispatch({
-          type: 'settings',
-          settings: { theme, browserVisible, autoAddSpotifyLibrary, autoConnect, spotifyClientId, playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent },
-        })
+        .catch(fail)} />}
+      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={({ browserPanes, ...settings }) => {
+        const audioChanged = settings.streamingBitrate !== state.settings.streamingBitrate
+          || settings.normalizeVolume !== state.settings.normalizeVolume
+          || settings.gapless !== state.settings.gapless
+        dispatch({ type: 'settings', settings })
         dispatch({ type: 'browserPanes', browserPanes })
-        if (audioChanged) invoke('set_audio_settings', { streamingBitrate, normalizeVolume, gapless })
-          .catch((error) => dispatch({ type: 'error', error: String(error) }))
+        if (audioChanged) invoke('set_audio_settings', { streamingBitrate: settings.streamingBitrate, normalizeVolume: settings.normalizeVolume, gapless: settings.gapless })
+          .catch(fail)
         dispatch({ type: 'preferences', open: false })
       }} />}
       {playlistSubject && <AddToPlaylist subject={playlistSubject} revision={state.playlistRevision} onAdd={addToPlaylist} onClose={() => setPlaylistSubject(undefined)} onError={(error) => dispatch({ type: 'error', error })} />}
@@ -1290,7 +1240,7 @@ function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, empty }:
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
-  return <footer className="status-bar"><button aria-label="Add">+</button>{syncProgress
+  return <footer className="status-bar">{syncProgress
     ? <span className="sync-status"><span>⟳ Syncing from Spotify…</span><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></span>
     : <span>{syncPhase ?? importStatus ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span>}</footer>
 }
