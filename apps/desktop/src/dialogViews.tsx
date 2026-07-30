@@ -5,8 +5,8 @@ import { clearedTrackRating } from './ui.ts'
 import { RatingStars } from './viewShared.tsx'
 
 const streamingQualities = [
-  ['Normal', 160],
-  ['High', 256],
+  ['Normal', 96],
+  ['High', 160],
   ['Very High', 320],
 ] as const
 const playThresholds: PlayThresholdPercent[] = [50, 75, 90, 100]

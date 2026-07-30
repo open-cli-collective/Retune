@@ -119,12 +119,26 @@ pub(super) async fn set_audio_settings(
         .lock()
         .expect("settings mutex poisoned")
         .clone();
-    let changed = settings.streaming_bitrate != streaming_bitrate
-        || settings.normalize_volume != normalize_volume
-        || settings.gapless != gapless;
+    let previous_audio = (
+        settings.streaming_bitrate,
+        settings.normalize_volume,
+        settings.gapless,
+    );
     settings.streaming_bitrate = streaming_bitrate;
     settings.normalize_volume = normalize_volume;
     settings.gapless = gapless;
+    settings.normalize();
+    let changed = previous_audio
+        != (
+            settings.streaming_bitrate,
+            settings.normalize_volume,
+            settings.gapless,
+        );
+    let audio = AudioSettings {
+        bitrate: settings.streaming_bitrate,
+        normalize: settings.normalize_volume,
+        gapless: settings.gapless,
+    };
     state
         .settings_store
         .save(&settings)
@@ -132,11 +146,7 @@ pub(super) async fn set_audio_settings(
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     app.emit("settings-changed", settings)
         .map_err(|error| error.to_string())?;
-    state.playback.set_audio(AudioSettings {
-        bitrate: streaming_bitrate,
-        normalize: normalize_volume,
-        gapless,
-    });
+    state.playback.set_audio(audio);
     if changed && state.playback.is_local_active().await {
         state.playback.invalidate_local().await;
         if let Ok(client) = provider_from(&state) {

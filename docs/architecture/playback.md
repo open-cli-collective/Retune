@@ -22,18 +22,70 @@ the other disabled tracks.
 ## Backends
 
 - Built-in Spotify uses librespot with the current OAuth token, a soft mixer,
-  configurable bitrate/normalization/gapless behavior, read-ahead, and an
-  app-data audio cache. The workspace pins a patched librespot fork.
+  normalization, gapless playback, compressed-audio read-ahead, and an app-data
+  audio cache. Its quality tiers are Normal (96 kbps), High (160 kbps), and Very
+  High (320 kbps).
 - Spotify Connect controls the active Spotify device through the Web API and
   polls its state. It distinguishes natural completion, external takeover, and
-  device disappearance. The Spotify desktop app is needed only for this mode.
+  device disappearance. Spotify owns audio download, buffering, quality, and
+  output in this mode; the Spotify desktop app is needed only for this mode.
 - The local-file engine uses `retune-audio` and routes `file://` tracks there
-  regardless of the selected Spotify backend. It works while signed out.
+  regardless of the selected Spotify backend. It decodes the source file through
+  rodio and works while signed out; Spotify quality and cache settings do not
+  apply.
 
 Mixed queues switch at URI boundaries. Only one execution path is allowed to be
 audible; transitions pause or stop the counterpart before starting the next.
 System Play and Pause commands set an explicit state; only Toggle inverts the
 current state.
+
+## Built-in Spotify data path
+
+The Spotify access-point session supplies track metadata and the audio key. The
+CDN supplies encrypted, compressed audio ranges identified by Spotify `FileId`.
+
+```text
+Spotify AP (metadata + audio key)       Spotify CDN (encrypted audio ranges)
+                 │                                      │
+                 └──────────────────┐                   ▼
+                                    │       sparse temporary download
+                                    │          │                 │
+                                    │          │ complete        │ available ranges
+                                    │          ▼                 │
+                                    │       FileId cache         │
+                                    │          └────────┬────────┘
+                                    ▼                   ▼
+                                  decrypt → decode → ~0.5 s PCM queue
+                                                       │
+                                                       ▼
+                                                rodio → CoreAudio
+```
+
+An incomplete download remains a sparse temporary file and is never promoted to
+the persistent cache. A cache hit bypasses the CDN download, but still requires
+decryption and decoding. Library and search results share cache entries whenever
+they resolve to the same `FileId`; the Retune view that supplied the URI is not
+part of cache identity.
+
+During playback Retune requests about 30 seconds of compressed audio ahead of the
+decoder, calculated from the nominal bitrate. This is an asynchronous request
+window, not a guaranteed startup buffer. The decoded rodio queue remains about
+half a second so pause, seek, and track changes stay responsive.
+
+The AP session and player have separate lifetimes. If the session becomes
+invalid, Retune leaves current playback alone. Before the next Spotify load or
+preload, it reconnects the session and installs it on the existing player,
+preserving the current decoder, CDN download, cache handle, mixer, output queue,
+and playback position. Unexpected player-thread failure rebuilds the local
+runtime and resumes from the millisecond position reported by the player. Explicit
+backend and audio-setting changes may also replace the runtime.
+
+Near the end of a track, librespot asks Retune to preload the next item. The
+controller rejects stale generation, request, or URI signals, then selects the
+next built-in Spotify track from the active queue order. Shuffle order is already
+reflected there; repeat-all may wrap, while repeat-one, the end of a repeat-off
+queue, and a transition to a local file do not issue a built-in preload. A ready
+preload supplies the next load for gapless playback.
 
 ## Play history
 

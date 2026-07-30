@@ -95,13 +95,7 @@ impl LocalBackend {
             move || sink(None, AudioFormat::default()),
         );
         let receiver = player.get_player_event_channel();
-        monitor(
-            receiver,
-            session.clone(),
-            Arc::clone(&player),
-            events,
-            generation,
-        );
+        monitor(receiver, events, generation);
         Ok(Self {
             runtime: Some(Runtime {
                 session,
@@ -123,10 +117,49 @@ impl LocalBackend {
         self.volume
     }
 
-    pub(super) fn is_invalid(&self) -> bool {
+    pub(super) fn player_is_invalid(&self) -> bool {
         self.runtime
             .as_ref()
-            .is_none_or(|runtime| runtime.session.is_invalid() || runtime.player.is_invalid())
+            .is_none_or(|runtime| runtime.player.is_invalid())
+    }
+
+    pub(super) fn session_is_invalid(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.session.is_invalid())
+    }
+
+    pub(super) async fn refresh_session(&mut self, client: &LiveClient) -> Result<(), String> {
+        let access = client
+            .access_token()
+            .await
+            .map_err(|error| error.to_string())?;
+        let (config, cache) = {
+            let runtime = self
+                .runtime
+                .as_ref()
+                .ok_or("Local playback is unavailable")?;
+            (
+                runtime.session.config().clone(),
+                runtime.session.cache().map(|cache| cache.as_ref().clone()),
+            )
+        };
+        let session = Session::new(config, cache);
+        session
+            .connect(Credentials::with_access_token(access), false)
+            .await
+            .map_err(|error| error.to_string())?;
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or("Local playback is unavailable")?;
+        if runtime.player.is_invalid() {
+            session.shutdown();
+            return Err("Local playback stopped while reconnecting to Spotify".into());
+        }
+        runtime.player.set_session(session.clone());
+        runtime.session = session;
+        Ok(())
     }
 
     pub(super) fn play(
@@ -154,6 +187,19 @@ impl LocalBackend {
         runtime.player.load(uri, start_playing, position_ms);
         self.playing = start_playing;
         Ok(())
+    }
+
+    pub(super) fn preload(&self, uri: &str) -> Result<bool, String> {
+        let uri = SpotifyUri::from_uri(uri).map_err(|error| error.to_string())?;
+        if !uri.is_playable() {
+            return Ok(false);
+        }
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or("Local playback is unavailable")?;
+        runtime.player.preload(uri);
+        Ok(true)
     }
 
     pub(super) fn toggle(&mut self) -> Result<(), String> {
@@ -216,6 +262,16 @@ impl LocalBackend {
         }
         self.playing = false;
     }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn invalidate_session_for_debug(&self) -> Result<(), String> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or("Built-in playback is not active")?;
+        runtime.session.shutdown();
+        Ok(())
+    }
 }
 
 fn bitrate(value: u16) -> Bitrate {
@@ -254,29 +310,21 @@ pub(super) fn soft_volume(volume: u8) -> u16 {
 
 fn monitor(
     mut receiver: mpsc::UnboundedReceiver<PlayerEvent>,
-    session: Session,
-    player: Arc<Player>,
     events: mpsc::UnboundedSender<NeutralEvent>,
     generation: u64,
 ) {
     tauri::async_runtime::spawn(async move {
-        let mut health = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            tokio::select! {
-                event = receiver.recv() => {
-                    let Some(event) = event else { return };
-                    if let Some(event) = neutral_event(event, generation) {
-                        let _ = events.send(event);
-                    }
-                }
-                _ = health.tick() => {
-                    if session.is_invalid() || player.is_invalid() {
-                        let _ = events.send(NeutralEvent::Disconnected { generation });
-                        return;
-                    }
+        while let Some(event) = receiver.recv().await {
+            if let PlayerEvent::Preloading { track_id } = &event {
+                if let Ok(uri) = track_id.to_uri() {
+                    log::info!("Preload ready: generation={generation} uri={uri}");
                 }
             }
+            if let Some(event) = neutral_event(event, generation) {
+                let _ = events.send(event);
+            }
         }
+        let _ = events.send(NeutralEvent::Disconnected { generation });
     });
 }
 
@@ -365,6 +413,14 @@ fn neutral_event(event: PlayerEvent, generation: u64) -> Option<NeutralEvent> {
             request_id: play_request_id,
             uri: uri(track_id)?,
         }),
+        PlayerEvent::TimeToPreloadNextTrack {
+            play_request_id,
+            track_id,
+        } => Some(NeutralEvent::PreloadSuggested {
+            generation,
+            request_id: play_request_id,
+            uri: uri(track_id)?,
+        }),
         PlayerEvent::EndOfTrack {
             play_request_id,
             track_id,
@@ -380,6 +436,41 @@ fn neutral_event(event: PlayerEvent, generation: u64) -> Option<NeutralEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn monitor_reports_only_player_event_channel_closure() {
+        let (player_events, receiver) = mpsc::unbounded_channel();
+        let (events, mut event_receiver) = mpsc::unbounded_channel();
+        monitor(receiver, events, 7);
+
+        tokio::task::yield_now().await;
+        assert!(event_receiver.try_recv().is_err());
+        drop(player_events);
+
+        assert!(matches!(
+            event_receiver.recv().await,
+            Some(NeutralEvent::Disconnected { generation: 7 })
+        ));
+    }
+
+    #[test]
+    fn maps_preload_suggestion() {
+        let track_id = SpotifyUri::from_uri("spotify:track:5sWHDYs0csV6RS48xBl0tH").unwrap();
+        assert!(matches!(
+            neutral_event(
+                PlayerEvent::TimeToPreloadNextTrack {
+                    play_request_id: 42,
+                    track_id,
+                },
+                7,
+            ),
+            Some(NeutralEvent::PreloadSuggested {
+                generation: 7,
+                request_id: 42,
+                ref uri,
+            }) if uri == "spotify:track:5sWHDYs0csV6RS48xBl0tH"
+        ));
+    }
 
     #[test]
     fn maps_streaming_bitrate() {

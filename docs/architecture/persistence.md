@@ -18,6 +18,24 @@ All JSON state writes use a temporary file followed by atomic rename.
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.
 
+## Spotify audio cache
+
+The audio cache contains complete encrypted Spotify audio files keyed by
+Spotify `FileId`. A cache miss downloads ranges into a sparse temporary file;
+only a completed download is copied into `audio-cache`. Interrupted and abandoned
+downloads therefore do not become persistent cache entries.
+
+The cache has a fixed 2 GiB limit. When a completed file pushes it over the
+limit, the least-recently-used entries are removed until it fits. Hits update the
+in-process access order. After relaunch, that order is reconstructed from
+filesystem access time, with modification or creation time as fallbacks, so
+eviction is LRU-like rather than a durable exact playback history.
+
+Cache identity is independent of Retune's library and search projections. Both
+reuse the same entry when Spotify resolves them to the same `FileId`; a different
+audio format or quality may resolve to a different file. The cache is disposable
+and excluded from backup and restore.
+
 ## OAuth token security
 
 Release builds encrypt `tokens.enc` with authenticated encryption. A random file

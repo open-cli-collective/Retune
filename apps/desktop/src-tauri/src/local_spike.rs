@@ -1,6 +1,6 @@
 #![cfg(debug_assertions)]
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use librespot_core::{
     authentication::Credentials, config::SessionConfig, session::Session, spotify_uri::SpotifyUri,
@@ -12,26 +12,44 @@ use librespot_playback::{
     player::Player,
 };
 use retune_spotify::tokens::TokenStore;
-use tauri::{menu::Submenu, Emitter, Manager};
+use tauri::{
+    menu::{MenuItemBuilder, Submenu},
+    Emitter, Manager,
+};
 
 use crate::AppState;
 
 const MENU_ID: &str = "local_playback_spike";
+const SESSION_LOSS_MENU_ID: &str = "invalidate_spotify_control_session";
 
 pub fn menu(app: &tauri::App) -> tauri::Result<Submenu<tauri::Wry>> {
+    let session_loss = MenuItemBuilder::with_id(
+        SESSION_LOSS_MENU_ID,
+        "Simulate Spotify Control Session Loss",
+    )
+    .accelerator("CmdOrCtrl+Shift+L")
+    .build(app)?;
     tauri::menu::SubmenuBuilder::new(app, "Debug")
         .text(MENU_ID, "Local Playback Spike")
+        .item(&session_loss)
         .build()
 }
 
 pub fn handles(id: &str) -> bool {
-    id == MENU_ID
+    matches!(id, MENU_ID | SESSION_LOSS_MENU_ID)
 }
 
-pub fn start(app: &tauri::AppHandle) {
+pub fn start(app: &tauri::AppHandle, id: &str) {
     let app = app.clone();
+    let invalidate_session = id == SESSION_LOSS_MENU_ID;
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = run(&app).await {
+        let result = if invalidate_session {
+            let playback = Arc::clone(&app.state::<AppState>().playback);
+            playback.invalidate_local_session_for_debug().await
+        } else {
+            run(&app).await
+        };
+        if let Err(error) = result {
             log::error!("{error}");
             let _ = app.emit("operation-error", error);
         }

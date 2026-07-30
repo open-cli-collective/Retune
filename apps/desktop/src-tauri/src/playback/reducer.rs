@@ -8,6 +8,7 @@ pub(super) enum ReducerAction {
     Error(String),
     TrackCompleted(String),
     Advance,
+    PreloadNext,
     Reload,
     Invalidate,
     Reconnect,
@@ -63,6 +64,13 @@ impl EventReducer {
         self.reset_playthrough();
     }
 
+    pub(super) fn recover(&mut self, generation: u64) {
+        self.generation = generation;
+        self.pending.clear();
+        self.bindings.clear();
+        self.latest_intent = None;
+    }
+
     pub(super) fn set_snapshot(&mut self, snapshot: Option<Snapshot>) {
         self.snapshot = snapshot;
     }
@@ -77,6 +85,10 @@ impl EventReducer {
 
     pub(super) fn state(&self) -> &PlayerStateEvent {
         &self.state
+    }
+
+    pub(super) fn position_ms(&self) -> u32 {
+        self.previous_position_ms
     }
 
     pub(super) fn repeat(&self) -> &str {
@@ -125,9 +137,9 @@ impl EventReducer {
         match event {
             NeutralEvent::ConnectState { state, .. } => self.connect_state(state),
             NeutralEvent::Error { message, .. } => vec![ReducerAction::Error(message)],
-            // Idle disconnects are routine and recover lazily. Active playback
-            // invalidates first, then retries in the controller so brief drops
-            // stay invisible and only exhausted retries surface a hard error.
+            // Disconnected means the local player/event channel died, not that
+            // the Spotify control session dropped. Rebuild active playback now;
+            // leave idle playback invalid until it is used again.
             NeutralEvent::Disconnected { .. } => {
                 if self.state.is_playing {
                     vec![ReducerAction::Invalidate, ReducerAction::Reconnect]
@@ -182,6 +194,15 @@ impl EventReducer {
                 position_ms,
                 ..
             } => self.position_changed(request_id, &uri, position_ms),
+            NeutralEvent::PreloadSuggested {
+                request_id, uri, ..
+            } => {
+                if self.accepts(request_id, &uri) {
+                    vec![ReducerAction::PreloadNext]
+                } else {
+                    vec![]
+                }
+            }
             NeutralEvent::Seeked {
                 request_id,
                 uri,
@@ -431,6 +452,63 @@ mod tests {
                 position_ms: 1000,
             })
             .is_empty());
+    }
+
+    #[test]
+    fn current_preload_suggestion_is_accepted() {
+        let mut reducer = reducer();
+        bind(&mut reducer, "spotify:track:1", true, 1);
+
+        assert_eq!(
+            reducer.handle(NeutralEvent::PreloadSuggested {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            }),
+            [ReducerAction::PreloadNext]
+        );
+    }
+
+    #[test]
+    fn exact_position_is_preserved() {
+        let mut reducer = reducer();
+        bind(&mut reducer, "spotify:track:1", true, 1);
+        reducer.handle(NeutralEvent::Playing {
+            generation: 7,
+            request_id: 1,
+            uri: "spotify:track:1".into(),
+            position_ms: 1_234,
+        });
+
+        reducer.recover(8);
+
+        assert_eq!(reducer.position_ms(), 1_234);
+    }
+
+    #[test]
+    fn stale_preload_suggestions_are_discarded() {
+        let mut reducer = reducer();
+        bind(&mut reducer, "spotify:track:1", true, 1);
+
+        for event in [
+            NeutralEvent::PreloadSuggested {
+                generation: 6,
+                request_id: 1,
+                uri: "spotify:track:1".into(),
+            },
+            NeutralEvent::PreloadSuggested {
+                generation: 7,
+                request_id: 2,
+                uri: "spotify:track:1".into(),
+            },
+            NeutralEvent::PreloadSuggested {
+                generation: 7,
+                request_id: 1,
+                uri: "spotify:track:2".into(),
+            },
+        ] {
+            assert!(reducer.handle(event).is_empty());
+        }
     }
 
     #[test]

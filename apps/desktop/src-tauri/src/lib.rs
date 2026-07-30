@@ -1846,7 +1846,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
             let _ = app.emit("player-action", event.id().as_ref());
         }
         #[cfg(debug_assertions)]
-        id if local_spike::handles(id) => local_spike::start(app),
+        id if local_spike::handles(id) => local_spike::start(app, id),
         _ => {}
     });
     Ok(MenuChecks {

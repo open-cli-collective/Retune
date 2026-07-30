@@ -301,8 +301,8 @@ impl Settings {
         if !matches!(self.play_threshold_percent, 50 | 75 | 90 | 100) {
             self.play_threshold_percent = default_play_threshold_percent();
         }
-        if self.streaming_bitrate < 160 {
-            self.streaming_bitrate = 160;
+        if self.streaming_bitrate == 256 {
+            self.streaming_bitrate = 320;
         }
     }
 
@@ -372,9 +372,9 @@ impl Settings {
                 "settings volume must be between 0 and 100",
             ));
         }
-        if !matches!(self.streaming_bitrate, 160 | 256 | 320) {
+        if !matches!(self.streaming_bitrate, 96 | 160 | 320) {
             return Err(StoreError::InvalidSettings(
-                "settings streamingBitrate must be 160, 256, or 320",
+                "settings streamingBitrate must be 96, 160, or 320",
             ));
         }
         Ok(())
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_load_normalizes_legacy_streaming_quality() {
+    fn settings_load_preserves_96_kbps_streaming_quality() {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSettingsStore::new(dir.path());
         let mut json = serde_json::to_value(Settings::default()).unwrap();
@@ -775,7 +775,22 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(store.load().unwrap().unwrap().streaming_bitrate, 160);
+        assert_eq!(store.load().unwrap().unwrap().streaming_bitrate, 96);
+    }
+
+    #[test]
+    fn settings_load_migrates_legacy_256_kbps_streaming_quality() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json["streamingBitrate"] = 256.into();
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap().streaming_bitrate, 320);
     }
 
     #[test]
@@ -1171,6 +1186,28 @@ mod tests {
         assert_eq!(settings.repeat, "off");
         settings.repeat = "sometimes".into();
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn streaming_bitrate_accepts_supported_qualities_only() {
+        for streaming_bitrate in [96, 160, 320] {
+            let settings = Settings {
+                streaming_bitrate,
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_ok(), "{streaming_bitrate}");
+        }
+        for streaming_bitrate in [0, 95, 97, 256, u16::MAX] {
+            let settings = Settings {
+                streaming_bitrate,
+                ..Settings::default()
+            };
+            assert_eq!(
+                settings.validate().unwrap_err().to_string(),
+                "settings streamingBitrate must be 96, 160, or 320",
+                "{streaming_bitrate}"
+            );
+        }
     }
 
     #[test]

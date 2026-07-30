@@ -207,6 +207,11 @@ pub(super) enum NeutralEvent {
         request_id: u64,
         uri: String,
     },
+    PreloadSuggested {
+        generation: u64,
+        request_id: u64,
+        uri: String,
+    },
     EndOfTrack {
         generation: u64,
         request_id: u64,
@@ -238,6 +243,7 @@ impl NeutralEvent {
             | Self::PositionCorrection { generation, .. }
             | Self::Unavailable { generation, .. }
             | Self::Stopped { generation, .. }
+            | Self::PreloadSuggested { generation, .. }
             | Self::EndOfTrack { generation, .. }
             | Self::ConnectBoundary { generation, .. }
             | Self::Error { generation, .. }
@@ -265,6 +271,13 @@ impl PlayerBackend {
         match self {
             Self::Connect(backend) => backend.play(client, snapshot, repeat).await,
             Self::Local(backend) => backend.play(snapshot, true, 0),
+        }
+    }
+
+    fn preload(&self, uri: &str) -> Result<bool, String> {
+        match self {
+            Self::Connect(_) => Ok(false),
+            Self::Local(backend) => backend.preload(uri),
         }
     }
 
@@ -493,7 +506,7 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_valid(&mut state, client).await?;
+        self.ensure_player(&mut state, client).await?;
         state.backend.toggle(client).await
     }
 
@@ -510,7 +523,7 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_valid(&mut state, client).await?;
+        self.ensure_player(&mut state, client).await?;
         state.backend.set_playing(client, playing).await
     }
 
@@ -536,7 +549,7 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_valid(&mut state, client).await?;
+        self.ensure_player(&mut state, client).await?;
         state.backend.seek(client, seconds).await
     }
 
@@ -551,7 +564,7 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_valid(&mut state, client).await?;
+        self.ensure_player(&mut state, client).await?;
         state.backend.set_volume(client, volume).await?;
         state.volume = volume;
         Ok(())
@@ -675,6 +688,19 @@ impl Playback {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub async fn invalidate_local_session_for_debug(&self) -> Result<(), String> {
+        let state = self.state.lock().await;
+        let PlayerBackend::Local(local) = &state.backend else {
+            return Err("Built-in playback is not active".into());
+        };
+        log::info!(
+            "TEST: invalidating Spotify control session generation={}",
+            state.generation
+        );
+        local.invalidate_session_for_debug()
+    }
+
     /// Whether the LOCAL backend is what commands currently dispatch to —
     /// can differ from the persisted setting when activation failed and
     /// playback fell back to Connect.
@@ -682,26 +708,27 @@ impl Playback {
         self.state.lock().await.backend.is_local()
     }
 
-    /// Recreate an invalidated local session now rather than lazily on the
+    /// Recreate an invalidated local player now rather than lazily on the
     /// next command, so playback resumes on its own after a config change.
     pub async fn revalidate(&self, client: &LiveClient) -> Result<(), String> {
         let mut state = self.state.lock().await;
         if !state.backend.is_local() || state.reducer.snapshot().is_none() {
             return Ok(());
         }
-        self.ensure_valid(&mut state, client).await
+        self.ensure_player(&mut state, client).await
     }
 
-    async fn ensure_valid(
+    async fn ensure_player(
         &self,
         state: &mut ControllerState,
         client: &LiveClient,
     ) -> Result<(), String> {
-        let invalid = matches!(&state.backend, PlayerBackend::Local(local) if local.is_invalid());
+        let invalid =
+            matches!(&state.backend, PlayerBackend::Local(local) if local.player_is_invalid());
         if !invalid {
             return Ok(());
         }
-        log::info!("Recreating local playback session");
+        log::info!("Recreating local playback player");
         let generation = state.generation.wrapping_add(1);
         let audio = *self.audio.lock().expect("audio settings mutex poisoned");
         let mut local = LocalBackend::activate(
@@ -715,8 +742,7 @@ impl Playback {
         .await?;
         let restore = state.reducer.snapshot().cloned().map(|snapshot| {
             let playing = state.reducer.state().is_playing;
-            let position_ms = u32::try_from(state.reducer.state().elapsed.saturating_mul(1000))
-                .unwrap_or(u32::MAX);
+            let position_ms = state.reducer.position_ms();
             (snapshot, playing, position_ms)
         });
         state.generation = generation;
@@ -730,6 +756,31 @@ impl Playback {
         Ok(())
     }
 
+    async fn ensure_session(
+        &self,
+        state: &mut ControllerState,
+        client: &LiveClient,
+    ) -> Result<(), String> {
+        self.ensure_player(state, client).await?;
+        let invalid =
+            matches!(&state.backend, PlayerBackend::Local(local) if local.session_is_invalid());
+        if !invalid {
+            return Ok(());
+        }
+        log::info!(
+            "Refreshing Spotify control session; active player preserved generation={}",
+            state.generation
+        );
+        if let PlayerBackend::Local(local) = &mut state.backend {
+            local.refresh_session(client).await?;
+        }
+        log::info!(
+            "Spotify control session replaced; active player preserved generation={}",
+            state.generation
+        );
+        Ok(())
+    }
+
     /// Outcome of one reconnect attempt. Superseded means a newer
     /// generation exists or there is nothing to resume — stop retrying.
     async fn try_reconnect(&self, client: &LiveClient, generation: u64) -> Result<bool, String> {
@@ -740,7 +791,7 @@ impl Playback {
         {
             return Ok(false);
         }
-        self.ensure_valid(&mut state, client).await?;
+        self.ensure_player(&mut state, client).await?;
         Ok(true)
     }
 
@@ -760,7 +811,7 @@ impl Playback {
                 return Ok(());
             }
             let client = require_spotify(client.as_deref())?;
-            self.ensure_valid(state, client).await?;
+            self.ensure_player(state, client).await?;
             let ControllerState {
                 backend, reducer, ..
             } = state;
@@ -794,7 +845,7 @@ impl Playback {
 
         state.file.stop_silently();
         let client = client.ok_or_else(missing_spotify)?;
-        self.ensure_valid(state, client.as_ref()).await?;
+        self.ensure_session(state, client.as_ref()).await?;
         state.reducer.queue_load(&uri, playing);
         let repeat = state.reducer.repeat().to_owned();
         state.backend.play(client, snapshot, &repeat).await
@@ -825,6 +876,32 @@ impl Playback {
                     let _ = app.emit("operation-error", error);
                 }
                 ReducerAction::TrackCompleted(uri) => on_track_completed(uri),
+                ReducerAction::PreloadNext => {
+                    let repeat = state.reducer.repeat().to_owned();
+                    let candidate = state.reducer.snapshot().and_then(|snapshot| {
+                        preload_track(snapshot, &repeat)
+                            .map(|track| (snapshot.current().uri.clone(), track.uri.clone()))
+                    });
+                    let Some((current, uri)) = candidate else {
+                        continue;
+                    };
+                    if is_file_uri(&uri) || reject_chapter(&uri) {
+                        continue;
+                    }
+                    log::info!("Preload suggested: current={current} next={uri}");
+                    let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
+                    let result = async {
+                        let client = require_spotify(client.as_deref())?;
+                        self.ensure_session(&mut state, client).await?;
+                        state.backend.preload(&uri)
+                    }
+                    .await;
+                    match result {
+                        Ok(true) => log::info!("Preload requested: {uri}"),
+                        Ok(false) => log::debug!("Preload ignored: {uri}"),
+                        Err(error) => log::warn!("Unable to preload {uri}: {error}"),
+                    }
+                }
                 ReducerAction::Advance => {
                     let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
                     if let Err(error) = self.step_locked(&mut state, client, 1).await {
@@ -839,11 +916,11 @@ impl Playback {
                     }
                 }
                 ReducerAction::Invalidate => {
-                    log::info!("Local playback session lost; will reconnect on next use");
+                    log::info!("Local playback player stopped; will recreate on next use");
                     state.generation = state.generation.wrapping_add(1);
                     let generation = state.generation;
                     state.file.set_generation(generation);
-                    state.reducer.activate(generation);
+                    state.reducer.recover(generation);
                     if let PlayerBackend::Local(local) = &mut state.backend {
                         local.teardown();
                     }
@@ -885,16 +962,16 @@ impl Playback {
                                         attempt + 1
                                     );
                                     if attempt == 0 {
-                                        let _ =
-                                            app.emit("operation-error", "Reconnecting to Spotify…");
+                                        let _ = app.emit(
+                                            "operation-error",
+                                            "Restarting built-in playback…",
+                                        );
                                     }
                                 }
                             }
                         }
-                        let _ = app.emit(
-                            "operation-error",
-                            "Spotify playback lost its network connection.",
-                        );
+                        let _ =
+                            app.emit("operation-error", "Built-in playback stopped unexpectedly.");
                     });
                 }
             }
@@ -910,6 +987,14 @@ fn step_index(index: usize, len: usize, direction: i8, wrap: bool) -> Option<usi
     } else {
         wrap.then_some(0)
     }
+}
+
+fn preload_track<'a>(snapshot: &'a Snapshot, repeat: &str) -> Option<&'a SnapshotTrack> {
+    if repeat == "one" {
+        return None;
+    }
+    let next = step_index(snapshot.index, snapshot.len(), 1, repeat == "all")?;
+    Some(snapshot.track_at(next))
 }
 
 fn reject_chapter(uri: &str) -> bool {
@@ -1584,5 +1669,19 @@ mod tests {
     fn repeat_all_wraps_and_off_stops_at_queue_end() {
         assert_eq!(step_index(1, 2, 1, true), Some(0));
         assert_eq!(step_index(1, 2, 1, false), None);
+    }
+
+    #[test]
+    fn preload_follows_active_order_and_repeat_policy() {
+        let mut snapshot = Snapshot::new(file_tracks(3), 0, false);
+        assert_eq!(preload_track(&snapshot, "off").unwrap().id, 2);
+
+        snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
+        assert_eq!(preload_track(&snapshot, "off").unwrap().id, 3);
+
+        snapshot.index = 2;
+        assert!(preload_track(&snapshot, "off").is_none());
+        assert_eq!(preload_track(&snapshot, "all").unwrap().id, 1);
+        assert!(preload_track(&snapshot, "one").is_none());
     }
 }
