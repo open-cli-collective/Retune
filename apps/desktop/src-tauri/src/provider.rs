@@ -10,10 +10,10 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::store::{Cooldown, CooldownKind, FsSyncStore};
+use crate::unix_now;
 
 const PAGE_SIZE: u32 = 50;
 const SEARCH_PAGE_SIZE: u32 = 10;
@@ -275,13 +275,6 @@ impl SyncRun<'_> {
                 .expect("pending music mutex poisoned"),
         )
     }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn compact_count(count: u64) -> String {

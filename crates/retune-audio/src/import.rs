@@ -19,13 +19,10 @@ pub struct ImportedFile {
 }
 
 /// Finds supported files without following directory symlinks.
-pub fn scan_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+pub fn scan_path(path: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    for path in paths {
-        let mut root = Vec::new();
-        if scan(path, &mut root).is_ok() {
-            found.extend(root);
-        }
+    if scan(path, &mut found).is_err() {
+        return Vec::new();
     }
     found.sort();
     found

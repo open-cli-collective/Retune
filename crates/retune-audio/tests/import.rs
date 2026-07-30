@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use retune_audio::{audio_kind, import_file, scan_paths};
+use retune_audio::{audio_kind, import_file, scan_path};
 use tempfile::tempdir;
 
 fn fixture(name: &str) -> PathBuf {
@@ -25,7 +25,7 @@ fn scan_is_sorted_recursive_and_filters_extensions() {
         fs::write(root.join(name), []).unwrap();
     }
 
-    let files = scan_paths(std::slice::from_ref(&root));
+    let files = scan_path(&root);
     assert_eq!(
         files,
         [
@@ -55,11 +55,11 @@ fn scan_skips_hidden_entries_and_directory_symlinks_but_accepts_file_symlinks() 
     symlink(root.join("real/song.mp3"), root.join("linked-song.mp3")).unwrap();
 
     assert_eq!(
-        scan_paths(std::slice::from_ref(&root)),
+        scan_path(&root),
         [root.join("real/song.mp3").canonicalize().unwrap()]
     );
-    assert!(scan_paths(&[root.join(".hidden.mp3")]).is_empty());
-    assert!(scan_paths(&[root.join(".hidden")]).is_empty());
+    assert!(scan_path(&root.join(".hidden.mp3")).is_empty());
+    assert!(scan_path(&root.join(".hidden")).is_empty());
 }
 
 #[test]

@@ -50,10 +50,7 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
     let refresh = token
         .refresh_token
         .ok_or_else(|| "Spotify did not return a refresh token".to_string())?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_secs();
+    let now = unix_now();
     let state = app.state::<AppState>();
     let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.clone());
     state

@@ -1,16 +1,16 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-use retune_audio::{audio_kind, import_file, scan_paths, ImportedFile};
+use retune_audio::{audio_kind, import_file, scan_path, ImportedFile};
 use retune_core::model::{Library, NewTrack, SourceId};
 use retune_spotify::normalize::UNCATEGORIZED;
 use serde::Serialize;
 use url::Url;
 
 use crate::store::OverlayStore;
+use crate::unix_now;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,14 +45,14 @@ pub(crate) fn import_paths(
             });
             continue;
         }
-        for path in scan_paths(&[supplied.to_owned()]) {
+        for path in scan_path(supplied) {
             if !uris.insert(file_uri(&path)) {
                 summary.duplicates += 1;
                 continue;
             }
             match import_file(&path)
+                .map(map_file)
                 .map_err(|error| error.to_string())
-                .and_then(map_file)
             {
                 Ok(track) => {
                     library.add(track);
@@ -80,26 +80,23 @@ pub(crate) fn import_transaction(
     Ok(summary)
 }
 
-fn map_file(file: ImportedFile) -> Result<NewTrack, String> {
+fn map_file(file: ImportedFile) -> NewTrack {
     let kind = audio_kind(Some(file.info.codec), &file.canonical_path).map(str::to_owned);
     let bitrate_kbps = std::fs::metadata(&file.canonical_path)
         .ok()
-        .and_then(|metadata| {
-            file.info
-                .duration
-                .and_then(|duration| average_bitrate(metadata.len(), duration))
-        });
+        .and_then(|metadata| average_bitrate(metadata.len(), file.tags.duration));
     let name = file
         .tags
         .title
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
+        .unwrap_or_else(|| {
             file.canonical_path
                 .file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .ok_or_else(|| format!("{} has no filename", file.canonical_path.display()))?;
-    Ok(NewTrack {
+                .expect("canonical file path has a file stem")
+                .to_string_lossy()
+                .into_owned()
+        });
+    NewTrack {
         uri: file_uri(&file.canonical_path),
         source: SourceId::Music,
         cat: nonempty(file.tags.genre, UNCATEGORIZED),
@@ -109,16 +106,11 @@ fn map_file(file: ImportedFile) -> Result<NewTrack, String> {
         duration: file.tags.duration,
         track_no: file.tags.track_no,
         disc_no: file.tags.disc_no,
-        added_at: Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is before Unix epoch")
-                .as_secs(),
-        ),
+        added_at: Some(unix_now()),
         release_date: None,
         kind,
         bitrate_kbps,
-    })
+    }
 }
 
 fn average_bitrate(bytes: u64, duration: std::time::Duration) -> Option<u32> {
@@ -128,10 +120,7 @@ fn average_bitrate(bytes: u64, duration: std::time::Duration) -> Option<u32> {
 
 pub(crate) fn backfill_metadata(library: &mut Library) -> bool {
     let mut changed = false;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before Unix epoch")
-        .as_secs();
+    let now = unix_now();
     for track in library.tracks_mut() {
         if track.added_at.is_none() {
             track.added_at = Some(now);
@@ -231,7 +220,7 @@ mod tests {
     #[test]
     fn mapping_carries_tags_and_uses_required_fallbacks() {
         let tagged = import_file(fixture("cc0-audio-tagged.mp3")).unwrap();
-        let track = map_file(tagged).unwrap();
+        let track = map_file(tagged);
         assert_eq!(track.source, SourceId::Music);
         assert_eq!(track.name, "Fixture Song");
         assert_eq!(track.art, "Fixture Artist");
@@ -247,15 +236,15 @@ mod tests {
         assert!(track.duration.as_secs_f64() > 2.0);
 
         let untagged = import_file(fixture("cc0-audio.wav")).unwrap();
-        let track = map_file(untagged).unwrap();
+        let track = map_file(untagged);
         assert_eq!(track.name, "cc0-audio");
         assert_eq!(track.art, "Unknown Artist");
         assert_eq!(track.alb, "Unknown Album");
         assert_eq!(track.cat, "Uncategorized");
 
-        let aac = map_file(import_file(fixture("cc0-audio-aac-lc.m4a")).unwrap()).unwrap();
+        let aac = map_file(import_file(fixture("cc0-audio-aac-lc.m4a")).unwrap());
         assert_eq!(aac.kind.as_deref(), Some("AAC audio file"));
-        let alac = map_file(import_file(fixture("cc0-audio-alac.m4a")).unwrap()).unwrap();
+        let alac = map_file(import_file(fixture("cc0-audio-alac.m4a")).unwrap());
         assert_eq!(alac.kind.as_deref(), Some("Apple Lossless audio file"));
     }
 
@@ -368,13 +357,13 @@ mod tests {
     #[test]
     fn backfill_sets_spotify_and_local_metadata_then_is_a_noop() {
         let mut library = Library::new();
-        let mut local = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
+        let mut local = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
         local.kind = None;
         local.bitrate_kbps = None;
         let local_id = library.add(local.clone());
         local.uri = "file:///definitely/missing/song.flac".into();
         let missing_id = library.add(local);
-        let mut spotify = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
+        let mut spotify = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
         spotify.uri = "spotify:track:one".into();
         spotify.kind = None;
         spotify.bitrate_kbps = None;
@@ -407,7 +396,7 @@ mod tests {
             fail: false,
         };
         let mut library = Library::new();
-        let mut track = map_file(import_file(fixture("cc0-audio.mp3")).unwrap()).unwrap();
+        let mut track = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
         track.added_at = None;
         library.add(track);
 

@@ -2,7 +2,7 @@
 
 mod import;
 
-pub use import::{ImportedFile, import_file, scan_paths};
+pub use import::{ImportedFile, import_file, scan_path};
 
 use std::{fs::File, path::Path, sync::OnceLock, time::Duration};
 
