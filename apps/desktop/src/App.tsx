@@ -3,11 +3,11 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { COLUMN_SPECS, compareTracks, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { COLUMN_SPECS, compareTracks, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackOriginAction, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
-import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
+import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 
 const PLAYLIST_TRACK_DRAG_TYPE = 'application/x-retune-playlist-track'
@@ -60,12 +60,12 @@ type Action =
   | { type: 'scope'; scope: State['scope'] }
   | { type: 'selectTrack'; id: number }
   | { type: 'selection'; ids: Set<number>; anchor?: number }
-  | { type: 'play'; id: number; queue: readonly PlaybackTrack[] }
+  | { type: 'play'; id: number; queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
   | { type: 'seek'; elapsed: number }
-  | { type: 'playerState'; player: PlayerState; queue: readonly PlaybackTrack[] }
+  | { type: 'playerState'; player: PlayerState; queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
   | { type: 'hydrateSettings'; settings: Settings }
   | { type: 'settings'; settings: Partial<Settings> }
   | { type: 'browserPanes'; browserPanes: BrowserPanes }
@@ -172,7 +172,7 @@ function reducer(state: State, action: Action): State {
           trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
           uri: action.queue.find((track) => track.id === action.id)?.uri ?? null,
           external: false, name: null, art: null, alb: null, durationSecs: null,
-          shuffle: state.settings.shuffle, simulated: true,
+          shuffle: state.settings.shuffle, origin: action.origin, simulated: true,
         },
       }
     case 'togglePlay':
@@ -193,7 +193,7 @@ function reducer(state: State, action: Action): State {
         ? { ...state, playing: null }
         : {
             ...state,
-            playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue },
+            playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue, origin: action.origin },
           }
     case 'seek':
       return state.playing
@@ -257,13 +257,15 @@ function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void
 
 function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
-  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[] } | null>(null)
+  const origin = useRef<PlaybackOrigin | undefined>(undefined)
+  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin } | null>(null)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
   playingRef.current = playing
 
   useTauriEvent<PlayerState>('player-state', (player) => {
-    dispatch({ type: 'playerState', player, queue: queue.current })
+    if (player.external) origin.current = undefined
+    dispatch({ type: 'playerState', player, queue: queue.current, origin: origin.current })
   })
 
   const run = useCallback((command: string, args?: Record<string, unknown>) => {
@@ -275,29 +277,31 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
     return !current?.simulated && (connected || current?.uri?.startsWith('file:'))
   }, [connected])
 
-  const start = useCallback((id: number, tracks: readonly PlaybackTrack[]) => {
+  const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin) => {
     const playable = playbackQueue(tracks, id)
     const target = playable.find((track) => track.id === id)
     if (target?.uri.startsWith('spotify:') && !connected) {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
-      pendingPlay.current = { id, tracks: playable }
+      pendingPlay.current = { id, tracks: playable, origin: launchOrigin }
       run('connect_spotify')
       return
     }
     if (target?.uri.startsWith('file:') || target?.uri.startsWith('spotify:')) {
       queue.current = playable
+      origin.current = launchOrigin
       run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
       return
     }
-    dispatch({ type: 'play', id, queue: playable })
+    dispatch({ type: 'play', id, queue: playable, origin: launchOrigin })
   }, [connected, dispatch, run])
 
   useEffect(() => {
     if (!connected || !pendingPlay.current) return
-    const { id, tracks } = pendingPlay.current
+    const { id, tracks, origin: launchOrigin } = pendingPlay.current
     pendingPlay.current = null
     queue.current = tracks
+    origin.current = launchOrigin
     run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
   }, [connected, run])
 
@@ -682,6 +686,13 @@ function App() {
   const playlistHiddenColumns = selectedPlaylist
     ? state.settings.playlistHiddenColumns[selectedPlaylist.id] ?? defaultSettings.hiddenColumns
     : defaultSettings.hiddenColumns
+  const showPlayingOrigin = () => {
+    const origin = state.playing?.origin
+    if (!origin) return
+    facetAnchors.current = {}
+    dispatch({ type: 'scope', scope: 'library' })
+    dispatch(playbackOriginAction(origin))
+  }
 
   return (
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: state.settings.zoom }}>
@@ -699,6 +710,7 @@ function App() {
         onNext={() => player.step(1)}
         onVolume={(volume) => { dispatch({ type: 'settings', settings: { volume } }); player.setVolume(volume) }}
         onSeek={player.seek}
+        onOrigin={showPlayingOrigin}
       />
       <div className="body-grid">
         <Sidebar
@@ -737,7 +749,7 @@ function App() {
             columnOrder={state.settings.columnOrder}
             columnWidths={state.settings.columnWidths}
             hiddenColumns={playlistHiddenColumns}
-            onPlay={player.start}
+            onPlay={(id, tracks) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id })}
             onRate={(id, stars) => mutate('click_track_star', { id, stars })}
             onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch(fail)}
             onPlaylist={setPlaylistSubject}
@@ -807,7 +819,7 @@ function App() {
                     dispatch({ type: 'selectTrack', id })
                   }
                 }}
-                onPlay={(id) => player.start(id, displayedTracks)}
+                onPlay={(id) => player.start(id, displayedTracks, { kind: 'library', source: state.source })}
                 onEnabled={(id, enabled) => mutate('set_track_enabled', { id, enabled })}
                 onRate={(id, stars) => mutate('click_track_star', { id, stars })}
                 onInfo={openInfo}
@@ -875,12 +887,12 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
 
 const artworkCache = new Map<string, string | null>()
 
-function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek }: {
+function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
-  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void
+  onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onOrigin: () => void
 }) {
   const elapsed = playing?.elapsed ?? 0
   const shown = playing?.external ? {
@@ -923,7 +935,22 @@ function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery
       </div>
       <label className="volume-control"><span aria-hidden="true">−</span><input aria-label="Volume" type="range" min="0" max="100" value={volume} style={{ '--volume': `${volume}%` } as React.CSSProperties} onChange={(event) => onVolume(Number(event.target.value))} /><span aria-hidden="true">+</span></label>
     </div>
-    <div className={`lcd ${playing?.external ? 'external' : ''} ${shown ? '' : 'idle'}`}>
+    <div
+      className={`lcd ${playing?.external ? 'external' : ''} ${shown ? '' : 'idle'} ${playing?.origin ? 'returnable' : ''}`}
+      role={playing?.origin ? 'button' : undefined}
+      tabIndex={playing?.origin ? 0 : undefined}
+      aria-label={playing?.origin ? 'Show playing source' : undefined}
+      title={playing?.origin ? 'Show playing source' : undefined}
+      onClick={(event) => {
+        if (!playing?.origin || (event.target as Element).closest('progress')) return
+        onOrigin()
+      }}
+      onKeyDown={(event) => {
+        if (!playing?.origin || (event.key !== 'Enter' && event.key !== ' ')) return
+        event.preventDefault()
+        onOrigin()
+      }}
+    >
       <div className="lcd-artwork">{artwork ? <img src={artwork} alt="" /> : <span aria-hidden="true">♪</span>}</div>
       <div className="lcd-copy">
         <Marquee text={shown?.name ?? 'Retune'} strong />

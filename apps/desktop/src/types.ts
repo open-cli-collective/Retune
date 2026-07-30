@@ -119,6 +119,7 @@ export type Track = {
 }
 
 export type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs' | 'enabled'>
+export type PlaybackOrigin = { kind: 'library'; source: Source } | { kind: 'playlist'; id: string }
 export type PlaylistTrack = Omit<Track, 'id'> & { id: number | null }
 export type PlaylistSubject =
   | { kind: 'tracks'; label: string; uris: string[] }
@@ -138,7 +139,7 @@ export type PlayerState = {
 }
 
 // `simulated` marks fixture tracks whose URIs must never reach a real backend.
-export type Playing = PlayerState & { queue: readonly PlaybackTrack[]; simulated?: boolean }
+export type Playing = PlayerState & { queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin; simulated?: boolean }
 
 export type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }

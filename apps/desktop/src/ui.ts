@@ -1,4 +1,4 @@
-import type { ColumnKey, PlaybackTrack, PlaylistSubject, Source, Track } from './types.ts'
+import type { ColumnKey, PlaybackOrigin, PlaybackTrack, PlaylistSubject, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -21,6 +21,10 @@ export const clearedTrackRating = (inherited: number | null) =>
 
 export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: number) =>
   tracks.filter((track) => track.enabled || track.id === requestedId)
+
+export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
+  ? { type: 'playlist' as const, id: origin.id }
+  : { type: 'source' as const, source: origin.source }
 
 export const isCurrentTrack = (
   playing: { trackId: number | null; uri: string | null } | null,

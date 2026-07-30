@@ -43,6 +43,8 @@ button { color: inherit; }
 .volume-control input::-moz-range-progress { height: 5px; border-radius: 3px; background: var(--dim); }
 .volume-control input::-moz-range-thumb { width: 13px; height: 13px; border: 1px solid var(--volume-knob-border); border-radius: 50%; background: linear-gradient(#fff, #e4e4e4); box-shadow: 0 1px 2px rgb(0 0 0 / .28); }
 .lcd { box-sizing: border-box; height: 40px; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: linear-gradient(var(--lcd1), var(--lcd2)); box-shadow: inset 0 1px 2px rgb(0 0 0 / .12); }
+.lcd.returnable { cursor: pointer; }
+.lcd.returnable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .lcd-artwork { box-sizing: border-box; width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--lcd-art-border); border-radius: 4px; color: var(--lcd-art-glyph); background: repeating-linear-gradient(45deg, var(--lcd-art1), var(--lcd-art1) 6px, var(--lcd-art2) 6px, var(--lcd-art2) 12px); font-size: 16px; }
 .lcd-artwork img { width: 100%; height: 100%; object-fit: cover; }
 .lcd-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
