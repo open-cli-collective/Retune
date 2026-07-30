@@ -64,7 +64,7 @@ pub fn facets(library: &Library, source: SourceId, selection: &Selection) -> Fac
         .iter()
         .filter(|track| track.source == source);
     let mut cats = sorted_unique(records.clone().map(|track| track.cat.clone()).collect());
-    cats.sort_by_key(|cat| cat != "Uncategorized");
+    cats.sort_by_key(|cat| cat != crate::UNCATEGORIZED);
     let arts = sorted_unique(
         records
             .clone()

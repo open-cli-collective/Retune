@@ -15,7 +15,7 @@ mod sync_orchestrator;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -25,7 +25,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use flate2::read::GzDecoder;
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{
@@ -1795,7 +1795,7 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         }
         "add_local_files" => import_local_files(app),
         "add_local_folder" => import_local_folder(app),
-        "export_library" => export_library(app, false),
+        "export_library" => export_library(app),
         "restore_library" => import_library(app, true),
         "merge_library" => import_library(app, false),
         "sync_spotify" => {
@@ -1854,17 +1854,12 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     })
 }
 
-fn export_library(app: &tauri::AppHandle, compressed: bool) {
+fn export_library(app: &tauri::AppHandle) {
     let handle = app.clone();
-    let (name, extensions) = if compressed {
-        ("Retune Library.json.gz", &["json.gz"] as &[_])
-    } else {
-        ("Retune Library.json", &["json"] as &[_])
-    };
     app.dialog()
         .file()
-        .set_file_name(name)
-        .add_filter("Retune Library", extensions)
+        .set_file_name("Retune Library.json")
+        .add_filter("Retune Library", &["json"])
         .save_file(move |path| {
             let Some(path) = path else { return };
             let result = (|| -> Result<(), String> {
@@ -1873,7 +1868,7 @@ fn export_library(app: &tauri::AppHandle, compressed: bool) {
                 let library = state.library.lock().expect("library mutex poisoned");
                 let settings = state.settings.lock().expect("settings mutex poisoned");
                 let playlists = state.playlists.lock().expect("playlist mutex poisoned");
-                let bytes = export_with_settings(&library, &settings, &playlists, compressed)?;
+                let bytes = export_with_settings(&library, &settings, &playlists)?;
                 fs::write(path, bytes).map_err(|error| error.to_string())
             })();
             if let Err(error) = result {
@@ -1886,7 +1881,6 @@ fn export_with_settings(
     library: &Library,
     settings: &Settings,
     playlists: &playlists::PlaylistCache,
-    compressed: bool,
 ) -> Result<Vec<u8>, String> {
     let mut envelope: serde_json::Value =
         serde_json::from_slice(&export_json(library)).map_err(|error| error.to_string())?;
@@ -1905,15 +1899,7 @@ fn export_with_settings(
             "playlists".into(),
             serde_json::to_value(playlists).map_err(|error| error.to_string())?,
         );
-    let json = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
-    if !compressed {
-        return Ok(json);
-    }
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&json)
-        .map_err(|error| error.to_string())?;
-    encoder.finish().map_err(|error| error.to_string())
+    serde_json::to_vec(&envelope).map_err(|error| error.to_string())
 }
 
 fn import_with_settings(
@@ -3250,7 +3236,12 @@ mod tests {
             gapless: false,
             play_threshold_percent: 100,
         };
-        let bytes = export_with_settings(&library, &exported, &playlists, true).unwrap();
+        let plain = export_with_settings(&library, &exported, &playlists).unwrap();
+        // Gzip the export ourselves so import's GzDecoder path stays covered
+        // (the import file filter still accepts .gz).
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &plain).unwrap();
+        let bytes = encoder.finish().unwrap();
         let (restored_library, visual, restored_playlists) =
             import_with_settings(&bytes, true).unwrap();
         let mut restored = Settings {
@@ -3387,7 +3378,6 @@ mod tests {
             &library,
             &Settings::default(),
             &playlists::PlaylistCache::default(),
-            false,
         )
         .unwrap();
         let (merged, visual, playlists) = import_with_settings(&bytes, false).unwrap();

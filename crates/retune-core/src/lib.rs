@@ -9,4 +9,4 @@ pub mod browse;
 pub mod io;
 pub mod model;
 
-pub use model::{AlbumKey, Library, Rating, SourceId, TrackId, TrackRecord};
+pub use model::{AlbumKey, Library, Rating, SourceId, TrackId, TrackRecord, UNCATEGORIZED};

@@ -4,7 +4,7 @@ use retune_core::model::{NewTrack, SourceId};
 
 use crate::client::{Album, Artist, Audiobook, Chapter, Episode, Show, Track};
 
-pub const UNCATEGORIZED: &str = "Uncategorized";
+pub use retune_core::UNCATEGORIZED;
 
 pub fn track(
     value: &Track,

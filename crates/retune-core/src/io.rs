@@ -2,9 +2,6 @@
 //! backup (`.json`), compressed export (`.json.gz`), restore, and merge.
 //! Pure bytes-in/bytes-out — file paths and the filesystem live in the shell.
 
-use std::io::{Read, Write};
-
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::Serialize;
 
 use crate::model::Library;
@@ -20,8 +17,6 @@ pub enum ImportError {
     MissingEnvelope,
     #[error("schema version {0} is newer than this app understands ({SCHEMA_VERSION})")]
     FromTheFuture(u32),
-    #[error("gzip: {0}")]
-    Gzip(std::io::Error),
     #[error("invalid library data: {0}")]
     Invalid(String),
 }
@@ -41,29 +36,10 @@ pub fn export_json(library: &Library) -> Vec<u8> {
     .expect("Library is always serializable")
 }
 
-/// [`export_json`], gzip-compressed.
-pub fn export_json_gz(library: &Library) -> Vec<u8> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&export_json(library))
-        .expect("writing to memory cannot fail");
-    encoder.finish().expect("writing to memory cannot fail")
-}
-
-/// Accepts the output of either export function — sniffs the gzip magic
-/// bytes. Runs version migrations so any older schema still loads; a
-/// fixture test pins that v1 files load forever.
+/// Accepts the output of [`export_json`]. Runs version migrations so any
+/// older schema still loads; a fixture test pins that v1 files load forever.
 pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
-    let json = if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut json = Vec::new();
-        GzDecoder::new(bytes)
-            .read_to_end(&mut json)
-            .map_err(ImportError::Gzip)?;
-        json
-    } else {
-        bytes.to_vec()
-    };
-    let envelope: serde_json::Value = serde_json::from_slice(&json)?;
+    let envelope: serde_json::Value = serde_json::from_slice(bytes)?;
     let object = envelope.as_object().ok_or(ImportError::MissingEnvelope)?;
     let version = object
         .get("version")
@@ -127,10 +103,9 @@ mod tests {
     }
 
     #[test]
-    fn json_and_gzip_exports_round_trip_everything() {
+    fn json_export_round_trips_everything() {
         let library = library();
         assert_eq!(import(&export_json(&library)).unwrap(), library);
-        assert_eq!(import(&export_json_gz(&library)).unwrap(), library);
     }
 
     #[test]
@@ -142,10 +117,6 @@ mod tests {
         assert!(matches!(
             import(br#"{"library":{}}"#),
             Err(ImportError::MissingEnvelope)
-        ));
-        assert!(matches!(
-            import(&[0x1f, 0x8b, 0]),
-            Err(ImportError::Gzip(_))
         ));
     }
 

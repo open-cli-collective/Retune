@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// Sentinel genre for tracks whose provider metadata carries no genre.
+pub const UNCATEGORIZED: &str = "Uncategorized";
+
 /// Stable local identifier, assigned when a record enters the library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TrackId(pub u64);
@@ -164,6 +167,13 @@ impl Library {
         self.tracks.iter().find(|track| track.id == id)
     }
 
+    fn track_mut(&mut self, id: TrackId) -> Result<&mut TrackRecord, UnknownTrack> {
+        self.tracks
+            .iter_mut()
+            .find(|track| track.id == id)
+            .ok_or(UnknownTrack(id))
+    }
+
     /// Adds a record for `uri` if absent, assigning a fresh [`TrackId`].
     /// If a record with the same `uri` exists, it is left untouched (its
     /// overlay edits win) and its id is returned.
@@ -224,11 +234,7 @@ impl Library {
     /// back to the original leaves `orig_cat` in place (the marker equality
     /// check hides it).
     pub fn edit(&mut self, id: TrackId, edit: TrackEdit) -> Result<(), UnknownTrack> {
-        let track = self
-            .tracks
-            .iter_mut()
-            .find(|track| track.id == id)
-            .ok_or(UnknownTrack(id))?;
+        let track = self.track_mut(id)?;
         if let Some(name) = edit.name {
             track.name = name;
         }
@@ -252,11 +258,7 @@ impl Library {
     /// that clicking the value matching the current *explicit* override
     /// clears it (reverts to inherited).
     pub fn click_track_star(&mut self, id: TrackId, stars: Rating) -> Result<(), UnknownTrack> {
-        let track = self
-            .tracks
-            .iter_mut()
-            .find(|track| track.id == id)
-            .ok_or(UnknownTrack(id))?;
+        let track = self.track_mut(id)?;
         track.rating = (track.rating != Some(stars)).then_some(stars);
         Ok(())
     }
@@ -268,21 +270,13 @@ impl Library {
         id: TrackId,
         rating: Option<Rating>,
     ) -> Result<(), UnknownTrack> {
-        let track = self
-            .tracks
-            .iter_mut()
-            .find(|track| track.id == id)
-            .ok_or(UnknownTrack(id))?;
+        let track = self.track_mut(id)?;
         track.rating = rating;
         Ok(())
     }
 
     pub fn set_track_enabled(&mut self, id: TrackId, enabled: bool) -> Result<(), UnknownTrack> {
-        let track = self
-            .tracks
-            .iter_mut()
-            .find(|track| track.id == id)
-            .ok_or(UnknownTrack(id))?;
+        let track = self.track_mut(id)?;
         track.enabled = enabled;
         Ok(())
     }
@@ -370,17 +364,12 @@ impl Library {
                 return Err(format!("duplicate track uri {:?}", track.uri));
             }
         }
-        let past_max = self
-            .tracks
-            .iter()
-            .map(|track| {
-                track
-                    .id
-                    .0
-                    .checked_add(1)
-                    .ok_or_else(|| format!("track id {} exhausts the id space", track.id.0))
-            })
-            .try_fold(0u64, |acc, next| next.map(|n| acc.max(n)))?;
+        let past_max = match self.tracks.iter().map(|track| track.id.0).max() {
+            None => 0,
+            Some(max) => max
+                .checked_add(1)
+                .ok_or_else(|| format!("track id {max} exhausts the id space"))?,
+        };
         // Recomputed outright so deleted ids can be skipped safely and a
         // hostile stored value like u64::MAX is neutralized.
         self.next_id = past_max;
@@ -388,9 +377,6 @@ impl Library {
     }
 
     fn fresh_id(&mut self) -> TrackId {
-        while self.tracks.iter().any(|track| track.id.0 == self.next_id) {
-            self.next_id = self.next_id.checked_add(1).expect("track ids exhausted");
-        }
         let id = TrackId(self.next_id);
         self.next_id = self.next_id.checked_add(1).expect("track ids exhausted");
         id
