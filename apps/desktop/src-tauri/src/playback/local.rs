@@ -262,16 +262,6 @@ impl LocalBackend {
         }
         self.playing = false;
     }
-
-    #[cfg(debug_assertions)]
-    pub(super) fn invalidate_session_for_debug(&self) -> Result<(), String> {
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or("Built-in playback is not active")?;
-        runtime.session.shutdown();
-        Ok(())
-    }
 }
 
 fn bitrate(value: u16) -> Bitrate {

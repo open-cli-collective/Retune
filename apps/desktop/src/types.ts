@@ -34,7 +34,7 @@ export type Settings = {
   playThresholdPercent: PlayThresholdPercent
 }
 
-export type ConnectionState = { connected: boolean; needs_reauth: boolean; missing_scopes: string[] }
+export type ConnectionState = { connected: boolean; needs_reauth: boolean }
 export type ImportSummary = { imported: number; duplicates: number; failed: { path: string; reason: string }[] }
 export type PlaylistListView = {
   id: string
@@ -133,7 +133,6 @@ export type PlayerState = {
   art: string | null
   alb: string | null
   durationSecs: number | null
-  volumeSupported: boolean
   shuffle: boolean
 }
 

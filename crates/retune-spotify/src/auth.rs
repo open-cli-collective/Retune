@@ -105,22 +105,6 @@ pub async fn exchange_code(
     .await
 }
 
-pub async fn refresh(
-    client: &reqwest::Client,
-    client_id: &str,
-    refresh_token: &str,
-) -> Result<TokenResponse> {
-    token_request(
-        client,
-        &[
-            ("client_id", client_id),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ],
-    )
-    .await
-}
-
 async fn token_request(client: &reqwest::Client, form: &[(&str, &str)]) -> Result<TokenResponse> {
     let response = client
         .post(TOKEN_URL)

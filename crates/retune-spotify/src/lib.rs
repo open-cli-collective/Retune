@@ -49,8 +49,6 @@ pub enum Error {
     TokenStore(String),
     #[error("no Spotify tokens are stored")]
     MissingToken,
-    #[error("Spotify refresh response did not contain a refresh token or a stored fallback")]
-    MissingRefreshToken,
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 }

@@ -1100,8 +1100,6 @@ struct SnapshotResponse {
     snapshot_id: String,
 }
 
-pub type AlbumTrack = Track;
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SavedTrack {
     #[serde(default, deserialize_with = "deserialize_added_at")]
@@ -1138,7 +1136,7 @@ pub struct Album {
     #[serde(default)]
     pub total_tracks: u32,
     #[serde(default)]
-    pub tracks: Option<Page<AlbumTrack>>,
+    pub tracks: Option<Page<Track>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

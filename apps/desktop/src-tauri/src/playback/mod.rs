@@ -688,19 +688,6 @@ impl Playback {
         }
     }
 
-    #[cfg(debug_assertions)]
-    pub async fn invalidate_local_session_for_debug(&self) -> Result<(), String> {
-        let state = self.state.lock().await;
-        let PlayerBackend::Local(local) = &state.backend else {
-            return Err("Built-in playback is not active".into());
-        };
-        log::info!(
-            "TEST: invalidating Spotify control session generation={}",
-            state.generation
-        );
-        local.invalidate_session_for_debug()
-    }
-
     /// Whether the LOCAL backend is what commands currently dispatch to —
     /// can differ from the persisted setting when activation failed and
     /// playback fell back to Connect.

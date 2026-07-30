@@ -9,7 +9,6 @@ import { AlbumRatingStrip, BrowserPane, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ConnectionState, ImportSummary, InfoDialog, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { ContextMenu } from './viewShared.tsx'
-export type { AlbumPageView, ArtistPageView, PlaylistListView } from './types.ts'
 
 const PLAYLIST_TRACK_DRAG_TYPE = 'application/x-retune-playlist-track'
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
@@ -125,7 +124,7 @@ const initialState: State = {
   revision: 0,
   preferences: false,
   setup: false,
-  connection: { connected: false, needs_reauth: false, missing_scopes: [] },
+  connection: { connected: false, needs_reauth: false },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,
@@ -168,7 +167,7 @@ function reducer(state: State, action: Action): State {
           trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
           uri: action.queue.find((track) => track.id === action.id)?.uri ?? null,
           external: false, name: null, art: null, alb: null, durationSecs: null,
-          volumeSupported: false, shuffle: state.settings.shuffle, simulated: true,
+          shuffle: state.settings.shuffle, simulated: true,
         },
       }
     case 'togglePlay':

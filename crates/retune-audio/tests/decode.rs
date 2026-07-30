@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use retune_audio::{AudioError, FileSource, probe, probe_duration};
+use retune_audio::{AudioError, FileSource, probe};
 use rodio::Source;
 
 const FORMATS: &[&str] = &[
@@ -56,12 +56,6 @@ fn wav_reports_48_khz() {
     assert_eq!(source.sample_rate(), 48_000);
     assert_eq!(source.channels(), 2);
     assert!((source.duration().unwrap().as_secs_f64() - 2.4).abs() <= 0.5);
-}
-
-#[test]
-fn duration_helper_reports_container_duration() {
-    let duration = probe_duration(fixture("cc0-audio.flac")).unwrap();
-    assert!((duration.as_secs_f64() - 2.4).abs() <= 0.5);
 }
 
 #[test]

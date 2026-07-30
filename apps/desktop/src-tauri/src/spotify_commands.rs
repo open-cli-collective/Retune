@@ -241,12 +241,6 @@ pub(super) async fn add_spotify_album(
         .iter()
         .map(|track| track.uri.clone())
         .collect::<Vec<_>>();
-    playlists::reject_local_uris(&uris, |uri| {
-        tracks
-            .iter()
-            .find(|track| track.uri == uri)
-            .map(|track| track.name.clone())
-    })?;
     provider.save_to_spotify(&uris).await?;
     mutate_library(&state, |library| {
         for track in tracks {

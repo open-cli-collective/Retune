@@ -399,7 +399,7 @@ impl Library {
 
 /// A record as it arrives from a provider sync or an import — everything but
 /// the local id, which [`Library::add`] assigns.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTrack {
     pub uri: String,
     pub source: SourceId,
@@ -408,17 +408,11 @@ pub struct NewTrack {
     pub alb: String,
     pub name: String,
     pub duration: Duration,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_no: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disc_no: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate_kbps: Option<u32>,
 }
 

@@ -1,7 +1,5 @@
 mod fixture;
 mod library_commands;
-#[cfg(debug_assertions)]
-mod local_spike;
 mod localfiles;
 mod media_keys;
 mod playback;
@@ -1786,8 +1784,6 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         &account,
         &window_menu,
     ]);
-    #[cfg(debug_assertions)]
-    let menu = menu.item(&local_spike::menu(app)?);
     let menu = menu.item(&help).build()?;
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
@@ -1845,8 +1841,6 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
         "play_pause" | "previous" | "next" => {
             let _ = app.emit("player-action", event.id().as_ref());
         }
-        #[cfg(debug_assertions)]
-        id if local_spike::handles(id) => local_spike::start(app, id),
         _ => {}
     });
     Ok(MenuChecks {

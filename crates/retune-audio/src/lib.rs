@@ -38,9 +38,6 @@ pub enum AudioError {
     /// An audio packet could not be decoded.
     #[error("audio decode failed: {0}")]
     Decode(String),
-    /// The container does not declare a duration.
-    #[error("audio duration is unavailable")]
-    DurationUnavailable,
     /// File access failed.
     #[error("audio I/O failed: {0}")]
     Io(#[from] std::io::Error),
@@ -240,11 +237,6 @@ impl Source for FileSource {
 /// Probes an audio file without opening an audio device.
 pub fn probe(path: impl AsRef<Path>) -> Result<AudioInfo, AudioError> {
     open(path.as_ref()).map(|(_, _, _, info, _)| info)
-}
-
-/// Returns the container duration without opening an audio device.
-pub fn probe_duration(path: impl AsRef<Path>) -> Result<Duration, AudioError> {
-    probe(path)?.duration.ok_or(AudioError::DurationUnavailable)
 }
 
 /// Returns the iTunes-style kind for a codec/path pair.
