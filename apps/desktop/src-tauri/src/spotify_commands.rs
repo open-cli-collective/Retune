@@ -276,28 +276,64 @@ pub(super) async fn remove_spotify_album(app: tauri::AppHandle, uri: String) -> 
 
 #[tauri::command]
 pub(super) async fn add_spotify_track(app: tauri::AppHandle, uri: String) -> Result<(), String> {
-    let id = track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
+    add_spotify_tracks(app, vec![uri]).await.map(|_| ())
+}
+
+#[tauri::command]
+pub(super) async fn add_spotify_tracks(
+    app: tauri::AppHandle,
+    uris: Vec<String>,
+) -> Result<Vec<u64>, String> {
     let state = app.state::<AppState>();
+    let mut seen = HashSet::new();
+    let mut uris = uris
+        .into_iter()
+        .filter(|uri| seen.insert(uri.clone()))
+        .collect::<Vec<_>>();
+    if uris.iter().any(|uri| track_id(uri).is_none()) {
+        return Err("Expected Spotify track URIs".into());
+    }
+    let mut ids = vec![];
+    {
+        let library = state.library.lock().expect("library mutex poisoned");
+        uris.retain(|uri| match library.tracks().iter().find(|track| &track.uri == uri) {
+            Some(track) => {
+                ids.push(track.id.0);
+                false
+            }
+            None => true,
+        });
+    }
+    if uris.is_empty() {
+        return Ok(ids);
+    }
     let provider = provider_from(&state)?;
-    let track = provider
-        .track(id)
-        .await
-        .map_err(|error| error.to_string())?;
-    let artist = match track.artists.first() {
-        Some(artist) => provider.artist(&artist.id).await.ok(),
-        None => None,
-    };
-    let normalized = retune_spotify::normalize::track(&track, artist.as_ref(), None);
+    let mut tracks = Vec::with_capacity(uris.len());
+    for uri in &uris {
+        let track = provider
+            .track(track_id(uri).expect("validated above"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let artist = match track.artists.first() {
+            Some(artist) => provider.artist(&artist.id).await.ok(),
+            None => None,
+        };
+        tracks.push(retune_spotify::normalize::track(
+            &track,
+            artist.as_ref(),
+            None,
+        ));
+    }
     provider
-        .save_to_library(std::slice::from_ref(&uri))
+        .save_to_library(&uris)
         .await
         .map_err(|error| error.to_string())?;
-    mutate_library(&state, |library| {
-        library.add(normalized);
-        Ok(())
-    })?;
+    ids.extend(mutate_library(&state, |library| {
+        Ok(tracks.into_iter().map(|track| library.add(track).0).collect::<Vec<_>>())
+    })?);
     app.emit("library-changed", ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(ids)
 }
 
 #[tauri::command]

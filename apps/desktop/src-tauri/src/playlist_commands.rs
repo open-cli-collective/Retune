@@ -85,8 +85,22 @@ pub(super) fn playlist_tracks(
                     name: track.name.clone(),
                     art: track.art.clone(),
                     alb: track.alb.clone(),
+                    cat: track.cat.clone(),
+                    disc_no: track.disc_no,
+                    track_no: track.track_no,
                     duration_secs: track.duration.as_secs(),
                     enabled: track.enabled,
+                    play_count: track.play_count,
+                    last_played_at: track.last_played_at,
+                    added_at: track.added_at,
+                    release_date: track.release_date.clone(),
+                    kind: track.kind.clone(),
+                    bitrate_kbps: track.bitrate_kbps,
+                    overridden: track
+                        .orig_cat
+                        .as_ref()
+                        .is_some_and(|original| original != &track.cat),
+                    is_local: false,
                     rating: library.effective_rating(track.id).map(rating_view),
                 }
             } else {
@@ -100,8 +114,19 @@ pub(super) fn playlist_tracks(
                     name: cached.map(|track| track.name.clone()).unwrap_or_default(),
                     art: cached.map(|track| track.art.clone()).unwrap_or_default(),
                     alb: cached.map(|track| track.alb.clone()).unwrap_or_default(),
+                    cat: String::new(),
+                    disc_no: None,
+                    track_no: None,
                     duration_secs: cached.map_or(0, |track| track.duration / 1000),
                     enabled: true,
+                    play_count: 0,
+                    last_played_at: None,
+                    added_at: None,
+                    release_date: None,
+                    kind: None,
+                    bitrate_kbps: None,
+                    overridden: false,
+                    is_local: false,
                     rating: None,
                 }
             }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, facetLabel, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, dialogTabTarget, facetLabel, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, parseDragRange, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
 
 test('the music catch-all has a user-facing genre label', () => {
   assert.equal(facetLabel('Genre', 'Uncategorized'), 'No Genre')
@@ -80,6 +80,26 @@ test('track and disc sorts keep multi-disc albums in playback order', () => {
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'track', false)), expected)
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'disc', false)), expected)
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'track', true)), [...expected].reverse())
+})
+
+test('playlist sorting is view-only and clearing it restores Spotify order', () => {
+  const tracks = [{ name: 'Zulu' }, { name: 'Alpha' }, { name: 'Mike' }] as never
+  assert.deepEqual(playlistRows(tracks, 'name', false).map((row) => row.upstreamIndex), [1, 2, 0])
+  assert.deepEqual(playlistRows(tracks, null, false).map((row) => row.upstreamIndex), [0, 1, 2])
+})
+
+test('dialog tabs wrap in both directions', () => {
+  assert.equal(dialogTabTarget(2, 3, false), 0)
+  assert.equal(dialogTabTarget(0, 3, true), 2)
+  assert.equal(dialogTabTarget(1, 3, false), null)
+})
+
+test('overlay edits separate Library tracks from unique missing playlist tracks', () => {
+  assert.deepEqual(overlayEditTargets([
+    { id: 7, uri: 'spotify:track:in' },
+    { id: null, uri: 'spotify:track:out' },
+    { id: null, uri: 'spotify:track:out' },
+  ]), { ids: [7], missingUris: ['spotify:track:out'] })
 })
 
 test('release dates sort chronologically with the standard tie-breakers and missing dates last', () => {

@@ -118,7 +118,7 @@ export type Track = {
 }
 
 export type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs' | 'enabled'>
-export type PlaylistTrack = Omit<PlaybackTrack, 'id'> & { id: number | null; rating: RatingView | null }
+export type PlaylistTrack = Omit<Track, 'id'> & { id: number | null }
 export type PlaylistSubject =
   | { kind: 'tracks'; label: string; uris: string[] }
   | { kind: 'album'; label: string; albumUri: string }
@@ -171,4 +171,4 @@ export type MetadataValues = { arts: string[]; albs: string[]; cats: string[] }
 
 export type InfoDialog =
   | { kind: 'single'; track: TrackInfo }
-  | { kind: 'multiple'; tracks: Track[] }
+  | { kind: 'multiple'; tracks: PlaylistTrack[] }

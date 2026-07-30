@@ -13,7 +13,7 @@ mod sync;
 mod sync_orchestrator;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Read,
     path::PathBuf,
@@ -437,8 +437,19 @@ struct PlaylistTrackView {
     name: String,
     art: String,
     alb: String,
+    cat: String,
+    disc_no: Option<u32>,
+    track_no: Option<u32>,
     duration_secs: u64,
     enabled: bool,
+    play_count: u32,
+    last_played_at: Option<u64>,
+    added_at: Option<u64>,
+    release_date: Option<String>,
+    kind: Option<String>,
+    bitrate_kbps: Option<u32>,
+    overridden: bool,
+    is_local: bool,
     rating: Option<RatingView>,
 }
 
@@ -2057,6 +2068,7 @@ pub fn run() {
             spotify_commands::add_spotify_album,
             spotify_commands::remove_spotify_album,
             spotify_commands::add_spotify_track,
+            spotify_commands::add_spotify_tracks,
             spotify_commands::remove_spotify_track,
             playlist_commands::playlists_list,
             playlist_commands::open_spotify_playlist,
