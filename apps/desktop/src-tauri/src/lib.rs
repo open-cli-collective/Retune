@@ -143,7 +143,7 @@ impl ConnectionState {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VisualSettings {
+struct ExportSettings {
     theme: Theme,
     zoom: f64,
     zebra: bool,
@@ -161,40 +161,11 @@ struct VisualSettings {
     sort_column: Option<String>,
     #[serde(default)]
     sort_desc: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BehavioralSettings {
     #[serde(default)]
     shuffle: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct ExportSettings {
-    #[serde(flatten)]
-    visual: VisualSettings,
-    #[serde(flatten)]
-    behavioral: BehavioralSettings,
-}
-
 impl ExportSettings {
-    fn from_settings(settings: &Settings) -> Self {
-        Self {
-            visual: VisualSettings::from_settings(settings),
-            behavioral: BehavioralSettings {
-                shuffle: settings.shuffle,
-            },
-        }
-    }
-
-    fn apply_to(self, settings: &mut Settings) {
-        self.visual.apply_to(settings);
-        settings.shuffle = self.behavioral.shuffle;
-    }
-}
-
-impl VisualSettings {
     fn from_settings(settings: &Settings) -> Self {
         Self {
             theme: settings.theme,
@@ -208,6 +179,7 @@ impl VisualSettings {
             hidden_columns: settings.hidden_columns.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
+            shuffle: settings.shuffle,
         }
     }
 
@@ -223,6 +195,7 @@ impl VisualSettings {
         settings.hidden_columns = self.hidden_columns;
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
+        settings.shuffle = self.shuffle;
         settings.normalize();
     }
 }
@@ -1001,23 +974,51 @@ impl SyncProgressState {
     }
 }
 
+const GENRES_DEGRADED_MSG: &str =
+    "Imported without genres (Spotify rate limit) — genres will fill in on a later sync.";
+
+fn partial_import_message(
+    detail: &str,
+    quota_exhausted: bool,
+    earliest_cooldown: Option<u64>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    earliest_cooldown.map_or_else(
+        || {
+            if quota_exhausted {
+                if detail.is_empty() {
+                    "Partial import — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.".into()
+                } else {
+                    format!("Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.")
+                }
+            } else if detail.is_empty() {
+                "Partial import (Spotify rate limit) — run File → Sync later to finish.".into()
+            } else {
+                format!("Partial import ({detail}) — run File → Sync later to finish.")
+            }
+        },
+        |deadline| {
+            let time = provider::format_resume_time(deadline, now);
+            if quota_exhausted && detail.is_empty() {
+                format!("Partial import (Spotify Development Mode quota) — will finish automatically after {time}.")
+            } else if quota_exhausted {
+                format!("Partial import (Spotify Development Mode quota) — {detail} — will finish automatically after {time}.")
+            } else if detail.is_empty() {
+                format!("Partial import — will finish automatically after {time}.")
+            } else {
+                format!("Partial import — {detail} — will finish automatically after {time}.")
+            }
+        },
+    )
+}
+
 async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, String> {
     log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
     if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify before syncing.".into());
     }
-    let client_id = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .spotify_client_id
-        .clone();
-    let provider =
-        spotify_provider(&client_id, Arc::clone(&state.token_store))?.ok_or_else(|| {
-            "Spotify Client ID is missing. Add it in Preferences, then try again.".to_string()
-        })?;
-    *state.spotify.lock().expect("spotify mutex poisoned") = Some(provider.clone());
+    let provider = provider_from(&state)?;
     let sync_provider = SpotifySyncProvider::new(provider.as_ref(), &state.sync_store)?;
     let first_sync = !state
         .settings
@@ -1091,46 +1092,21 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let message = earliest_cooldown.map_or_else(
-            || {
-                if quota_exhausted {
-                    if detail.is_empty() {
-                        "Partial import — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.".into()
-                    } else {
-                        format!("Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.")
-                    }
-                } else if detail.is_empty() {
-                    "Partial import (Spotify rate limit) — run File → Sync later to finish.".into()
-                } else {
-                    format!("Partial import ({detail}) — run File → Sync later to finish.")
-                }
-            },
-            |deadline| {
-                let time = provider::format_resume_time(deadline, chrono::Local::now());
-                if quota_exhausted && detail.is_empty() {
-                    format!("Partial import (Spotify Development Mode quota) — will finish automatically after {time}.")
-                } else if quota_exhausted {
-                    format!("Partial import (Spotify Development Mode quota) — {detail} — will finish automatically after {time}.")
-                } else if detail.is_empty() {
-                    format!("Partial import — will finish automatically after {time}.")
-                } else {
-                    format!("Partial import — {detail} — will finish automatically after {time}.")
-                }
-            },
+        let message = partial_import_message(
+            &detail,
+            quota_exhausted,
+            earliest_cooldown,
+            chrono::Local::now(),
         );
         log::warn!("{message}");
         if genres_degraded {
-            log::warn!(
-                "Imported without genres (Spotify rate limit) — genres will fill in on a later sync."
-            );
+            log::warn!("{GENRES_DEGRADED_MSG}");
         }
         app.emit("sync-progress", message)
             .map_err(|error| error.to_string())?;
     } else if genres_degraded {
-        let message =
-            "Imported without genres (Spotify rate limit) — genres will fill in on a later sync.";
-        log::warn!("{message}");
-        app.emit("sync-progress", message)
+        log::warn!("{GENRES_DEGRADED_MSG}");
+        app.emit("sync-progress", GENRES_DEGRADED_MSG)
             .map_err(|error| error.to_string())?;
     }
     {
@@ -1332,6 +1308,25 @@ fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
     library.remove_uris(&album_track_uris(album))
 }
 
+fn record_cooldown(
+    sync_store: &FsSyncStore,
+    endpoint: &str,
+    kind: store::CooldownKind,
+    deadline: u64,
+    now: u64,
+) -> Result<(), String> {
+    let mut cooldowns = sync_store
+        .cooldowns(now)
+        .map_err(|error| error.to_string())?;
+    cooldowns.insert(
+        endpoint_family(endpoint),
+        store::Cooldown { kind, deadline },
+    );
+    sync_store
+        .save_cooldowns(&cooldowns)
+        .map_err(|error| error.to_string())
+}
+
 async fn artist_albums_outcome<T: Transport, S: TokenStore>(
     provider: &SpotifyClient<T, S>,
     sync_store: &FsSyncStore,
@@ -1363,19 +1358,13 @@ async fn artist_albums_outcome<T: Transport, S: TokenStore>(
             retry_after_secs,
         }) => {
             let deadline = now.saturating_add(retry_after_secs);
-            let mut cooldowns = sync_store
-                .cooldowns(now)
-                .map_err(|error| error.to_string())?;
-            cooldowns.insert(
-                endpoint_family(&endpoint),
-                store::Cooldown {
-                    kind: store::CooldownKind::Transient,
-                    deadline,
-                },
-            );
-            sync_store
-                .save_cooldowns(&cooldowns)
-                .map_err(|error| error.to_string())?;
+            record_cooldown(
+                sync_store,
+                &endpoint,
+                store::CooldownKind::Transient,
+                deadline,
+                now,
+            )?;
             Err(format!(
                 "Spotify artist albums are rate limited; try again {}.",
                 provider::format_resume_time(deadline, display_now)
@@ -1387,19 +1376,13 @@ async fn artist_albums_outcome<T: Transport, S: TokenStore>(
         }) => {
             if let Some(retry_after_secs) = retry_after_secs {
                 let deadline = now.saturating_add(retry_after_secs);
-                let mut cooldowns = sync_store
-                    .cooldowns(now)
-                    .map_err(|error| error.to_string())?;
-                cooldowns.insert(
-                    endpoint_family(&endpoint),
-                    store::Cooldown {
-                        kind: store::CooldownKind::Quota,
-                        deadline,
-                    },
-                );
-                sync_store
-                    .save_cooldowns(&cooldowns)
-                    .map_err(|error| error.to_string())?;
+                record_cooldown(
+                    sync_store,
+                    &endpoint,
+                    store::CooldownKind::Quota,
+                    deadline,
+                    now,
+                )?;
                 Err(format!(
                     "Spotify Development Mode quota is exhausted; try artist albums again {}.",
                     provider::format_resume_time(deadline, display_now)
@@ -2587,6 +2570,49 @@ mod tests {
         assert!(store.cooldowns(100).unwrap().is_empty());
     }
 
+    #[test]
+    fn partial_import_message_covers_the_variant_matrix() {
+        let now = chrono::Local::now();
+        let time = provider::format_resume_time(90, now);
+        let detail = "2 of 5 albums";
+        assert_eq!(
+            partial_import_message("", true, None, now),
+            "Partial import — Spotify Development Mode quota is exhausted; sync again after Spotify resets it."
+        );
+        assert_eq!(
+            partial_import_message(detail, true, None, now),
+            format!("Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.")
+        );
+        assert_eq!(
+            partial_import_message("", false, None, now),
+            "Partial import (Spotify rate limit) — run File → Sync later to finish."
+        );
+        assert_eq!(
+            partial_import_message(detail, false, None, now),
+            format!("Partial import ({detail}) — run File → Sync later to finish.")
+        );
+        assert_eq!(
+            partial_import_message("", true, Some(90), now),
+            format!(
+                "Partial import (Spotify Development Mode quota) — will finish automatically after {time}."
+            )
+        );
+        assert_eq!(
+            partial_import_message(detail, true, Some(90), now),
+            format!(
+                "Partial import (Spotify Development Mode quota) — {detail} — will finish automatically after {time}."
+            )
+        );
+        assert_eq!(
+            partial_import_message("", false, Some(90), now),
+            format!("Partial import — will finish automatically after {time}.")
+        );
+        assert_eq!(
+            partial_import_message(detail, false, Some(90), now),
+            format!("Partial import — {detail} — will finish automatically after {time}.")
+        );
+    }
+
     #[tokio::test]
     async fn track_artwork_resolves_smallest_usable_image_and_caches() {
         let client = playlist_client([
@@ -3245,7 +3271,7 @@ mod tests {
     #[test]
     fn visual_settings_apply_restored_browser_visibility() {
         let mut settings = Settings::default();
-        let mut visual = VisualSettings::from_settings(&settings);
+        let mut visual = ExportSettings::from_settings(&settings);
         visual.browser_panes = BrowserPanes {
             cat: true,
             art: false,
@@ -3267,7 +3293,7 @@ mod tests {
     #[test]
     fn visual_settings_apply_normalizes_legacy_columns() {
         let mut json =
-            serde_json::to_value(VisualSettings::from_settings(&Settings::default())).unwrap();
+            serde_json::to_value(ExportSettings::from_settings(&Settings::default())).unwrap();
         let object = json.as_object_mut().unwrap();
         object.insert(
             "columnOrder".into(),
@@ -3276,7 +3302,7 @@ mod tests {
         object.insert("hiddenColumns".into(), serde_json::json!(["name", "genre"]));
         object.remove("sortColumn");
         object.remove("sortDesc");
-        let visual: VisualSettings = serde_json::from_value(json).unwrap();
+        let visual: ExportSettings = serde_json::from_value(json).unwrap();
         let mut settings = Settings::default();
 
         visual.apply_to(&mut settings);

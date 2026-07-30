@@ -178,35 +178,9 @@ impl Default for Settings {
             pl_collapsed: false,
             browser_visible: true,
             browser_panes: BrowserPanes::default(),
-            column_order: [
-                "name",
-                "artist",
-                "album",
-                "disc",
-                "track",
-                "time",
-                "rating",
-                "genre",
-                "plays",
-                "kind",
-                "bitrate",
-                "lastPlayed",
-                "added",
-                "releaseDate",
-            ]
-            .map(String::from)
-            .to_vec(),
+            column_order: Self::COLUMNS.map(String::from).to_vec(),
             column_widths: BTreeMap::new(),
-            hidden_columns: [
-                "disc",
-                "kind",
-                "bitrate",
-                "lastPlayed",
-                "added",
-                "releaseDate",
-            ]
-            .map(String::from)
-            .to_vec(),
+            hidden_columns: Self::OPTIONAL_COLUMNS.map(String::from).to_vec(),
             sort_column: None,
             sort_desc: false,
             auto_add_spotify_library: true,
@@ -243,6 +217,14 @@ impl Settings {
         "added",
         "releaseDate",
     ];
+    const OPTIONAL_COLUMNS: [&'static str; 6] = [
+        "disc",
+        "kind",
+        "bitrate",
+        "lastPlayed",
+        "added",
+        "releaseDate",
+    ];
     pub(crate) fn normalize(&mut self) {
         self.column_order
             .retain(|column| Self::COLUMNS.contains(&column.as_str()));
@@ -263,10 +245,7 @@ impl Settings {
         for column in Self::COLUMNS {
             if !self.column_order.iter().any(|item| item == column) {
                 self.column_order.push(column.into());
-                if matches!(
-                    column,
-                    "disc" | "kind" | "bitrate" | "lastPlayed" | "added" | "releaseDate"
-                ) {
+                if Self::OPTIONAL_COLUMNS.contains(&column) {
                     self.hidden_columns.push(column.into());
                 }
             }
