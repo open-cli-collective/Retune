@@ -68,16 +68,28 @@ pub(super) fn playlist_tracks(
     id: String,
 ) -> Result<Vec<PlaylistTrackView>, String> {
     let playlists = state.playlists.lock().expect("playlist mutex poisoned");
+    let library = state.library.lock().expect("library mutex poisoned");
+    playlist_track_views(&playlists, &library, &id)
+}
+
+fn playlist_track_views(
+    playlists: &playlists::PlaylistCache,
+    library: &Library,
+    id: &str,
+) -> Result<Vec<PlaylistTrackView>, String> {
     let playlist = playlists
         .playlists
         .iter()
         .find(|playlist| playlist.id == id)
         .ok_or_else(|| format!("Unknown playlist {id}"))?;
-    let library = state.library.lock().expect("library mutex poisoned");
     Ok(playlist
         .tracks
         .iter()
         .map(|uri| {
+            let cached = playlist
+                .spotify_tracks
+                .iter()
+                .find(|track| &track.uri == uri);
             if let Some(track) = library.tracks().iter().find(|track| &track.uri == uri) {
                 PlaylistTrackView {
                     id: Some(track.id.0),
@@ -85,28 +97,104 @@ pub(super) fn playlist_tracks(
                     name: track.name.clone(),
                     art: track.art.clone(),
                     alb: track.alb.clone(),
+                    cat: track.cat.clone(),
+                    disc_no: track
+                        .disc_no
+                        .or_else(|| cached.and_then(|track| track.disc_no)),
+                    track_no: track
+                        .track_no
+                        .or_else(|| cached.and_then(|track| track.track_no)),
                     duration_secs: track.duration.as_secs(),
                     enabled: track.enabled,
+                    play_count: track.play_count,
+                    last_played_at: track.last_played_at,
+                    added_at: track.added_at,
+                    release_date: track
+                        .release_date
+                        .clone()
+                        .or_else(|| cached.and_then(|track| track.release_date.clone())),
+                    kind: track.kind.clone(),
+                    bitrate_kbps: track.bitrate_kbps,
+                    overridden: track
+                        .orig_cat
+                        .as_ref()
+                        .is_some_and(|original| original != &track.cat),
+                    is_local: false,
                     rating: library.effective_rating(track.id).map(rating_view),
                 }
             } else {
-                let cached = playlist
-                    .non_library_tracks
-                    .iter()
-                    .find(|track| &track.uri == uri);
                 PlaylistTrackView {
                     id: None,
                     uri: uri.clone(),
                     name: cached.map(|track| track.name.clone()).unwrap_or_default(),
                     art: cached.map(|track| track.art.clone()).unwrap_or_default(),
                     alb: cached.map(|track| track.alb.clone()).unwrap_or_default(),
+                    cat: String::new(),
+                    disc_no: cached.and_then(|track| track.disc_no),
+                    track_no: cached.and_then(|track| track.track_no),
                     duration_secs: cached.map_or(0, |track| track.duration / 1000),
                     enabled: true,
+                    play_count: 0,
+                    last_played_at: None,
+                    added_at: None,
+                    release_date: cached.and_then(|track| track.release_date.clone()),
+                    kind: None,
+                    bitrate_kbps: None,
+                    overridden: false,
+                    is_local: false,
                     rating: None,
                 }
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use retune_core::model::NewTrack;
+
+    use super::*;
+
+    #[test]
+    fn playlist_view_fills_missing_library_fields_from_spotify() {
+        let mut library = Library::new();
+        let id = library.add(NewTrack {
+            uri: "spotify:track:one".into(),
+            name: "Song".into(),
+            duration: Duration::from_secs(180),
+            ..NewTrack::default()
+        });
+        let playlists = playlists::PlaylistCache {
+            playlists: vec![playlists::CachedPlaylist {
+                id: "playlist".into(),
+                name: "Playlist".into(),
+                snapshot_id: "snapshot".into(),
+                owned: true,
+                owner: None,
+                track_count: 1,
+                tracks: vec!["spotify:track:one".into()],
+                track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                spotify_tracks: vec![playlists::CachedTrack {
+                    uri: "spotify:track:one".into(),
+                    name: "Song".into(),
+                    art: "Artist".into(),
+                    alb: "Album".into(),
+                    duration: 180_000,
+                    disc_no: Some(2),
+                    track_no: Some(7),
+                    release_date: Some("1999".into()),
+                }],
+            }],
+        };
+
+        let tracks = playlist_track_views(&playlists, &library, "playlist").unwrap();
+
+        assert_eq!(tracks[0].id, Some(id.0));
+        assert_eq!((tracks[0].disc_no, tracks[0].track_no), (Some(2), Some(7)));
+        assert_eq!(tracks[0].release_date.as_deref(), Some("1999"));
+    }
 }
 
 #[tauri::command]
@@ -173,15 +261,9 @@ pub(super) async fn playlist_reorder(
         .lock()
         .expect("playlist mutex poisoned")
         .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
     let result = playlists::reorder(
         client.as_ref(),
         &mut cache,
-        &library,
         &id,
         range_start,
         insert_before,
@@ -221,11 +303,6 @@ pub(super) async fn playlist_remove(
         .lock()
         .expect("playlist mutex poisoned")
         .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
-    let result = playlists::remove(client.as_ref(), &mut cache, &library, &id, &indices).await;
+    let result = playlists::remove(client.as_ref(), &mut cache, &id, &indices).await;
     finish_playlist_mutation(&app, &state, cache, result)
 }

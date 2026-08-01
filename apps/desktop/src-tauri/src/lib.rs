@@ -13,7 +13,7 @@ mod sync;
 mod sync_orchestrator;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Read,
     path::PathBuf,
@@ -29,8 +29,8 @@ use flate2::read::GzDecoder;
 
 use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
 use provider::{
-    artist_albums_page, artist_descriptor, image_url, spotify_id, title_case, ArtistAlbumsPage,
-    SearchResults, SpotifySyncProvider, SyncBatch,
+    artist_albums_page, artist_descriptor, image_url, image_url_at_least, spotify_id, title_case,
+    ArtistAlbumsPage, SearchResults, SpotifySyncProvider, SyncBatch,
 };
 use retune_core::{
     browse::{self, Selection},
@@ -76,7 +76,7 @@ struct AppState {
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
-    artwork_cache: Mutex<HashMap<String, Option<String>>>,
+    artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
@@ -158,6 +158,8 @@ struct ExportSettings {
     column_widths: BTreeMap<String, u32>,
     hidden_columns: Vec<String>,
     #[serde(default)]
+    playlist_hidden_columns: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     sort_column: Option<String>,
     #[serde(default)]
     sort_desc: bool,
@@ -177,6 +179,7 @@ impl ExportSettings {
             column_order: settings.column_order.clone(),
             column_widths: settings.column_widths.clone(),
             hidden_columns: settings.hidden_columns.clone(),
+            playlist_hidden_columns: settings.playlist_hidden_columns.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
             shuffle: settings.shuffle,
@@ -193,6 +196,7 @@ impl ExportSettings {
         settings.column_order = self.column_order;
         settings.column_widths = self.column_widths;
         settings.hidden_columns = self.hidden_columns;
+        settings.playlist_hidden_columns = self.playlist_hidden_columns;
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
         settings.shuffle = self.shuffle;
@@ -437,8 +441,19 @@ struct PlaylistTrackView {
     name: String,
     art: String,
     alb: String,
+    cat: String,
+    disc_no: Option<u32>,
+    track_no: Option<u32>,
     duration_secs: u64,
     enabled: bool,
+    play_count: u32,
+    last_played_at: Option<u64>,
+    added_at: Option<u64>,
+    release_date: Option<String>,
+    kind: Option<String>,
+    bitrate_kbps: Option<u32>,
+    overridden: bool,
+    is_local: bool,
     rating: Option<RatingView>,
 }
 
@@ -805,18 +820,20 @@ fn track_id(uri: &str) -> Option<&str> {
 
 async fn resolve_track_artwork<T: Transport, S: TokenStore>(
     client: Option<&SpotifyClient<T, S>>,
-    cache: &Mutex<HashMap<String, Option<String>>>,
+    cache: &Mutex<HashMap<(String, u32), Option<String>>>,
     uri: &str,
+    min_width: u32,
 ) -> Option<String> {
     let local = uri.starts_with("file:");
     let id = (!local).then(|| track_id(uri)).flatten();
     if !local && id.is_none() {
         return None;
     }
+    let cache_key = (uri.into(), min_width);
     if let Some(cached) = cache
         .lock()
         .expect("artwork cache mutex poisoned")
-        .get(uri)
+        .get(&cache_key)
         .cloned()
     {
         return cached;
@@ -842,13 +859,13 @@ async fn resolve_track_artwork<T: Transport, S: TokenStore>(
             .await
             .ok()
             .and_then(|track| track.album)
-            .and_then(|album| image_url(&album.images))
+            .and_then(|album| image_url_at_least(&album.images, min_width))
     };
     let mut cache = cache.lock().expect("artwork cache mutex poisoned");
     if cache.len() >= 512 {
         cache.clear();
     }
-    cache.insert(uri.into(), artwork.clone());
+    cache.insert(cache_key, artwork.clone());
     artwork
 }
 
@@ -859,6 +876,7 @@ pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerSt
         provider.as_deref(),
         &state.artwork_cache,
         event.uri.as_deref().unwrap_or_default(),
+        300,
     )
     .await
     else {
@@ -1143,12 +1161,7 @@ async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Res
         .lock()
         .expect("playlist mutex poisoned")
         .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
-    let synced = match playlists::sync(client, &current, &library).await {
+    let synced = match playlists::sync(client, &current).await {
         Ok(synced) => synced,
         Err(error) => {
             let tokens = state.token_store.load().ok().flatten();
@@ -2057,6 +2070,7 @@ pub fn run() {
             spotify_commands::add_spotify_album,
             spotify_commands::remove_spotify_album,
             spotify_commands::add_spotify_track,
+            spotify_commands::add_spotify_tracks,
             spotify_commands::remove_spotify_track,
             playlist_commands::playlists_list,
             playlist_commands::open_spotify_playlist,
@@ -2472,7 +2486,8 @@ mod tests {
                 owner: None,
                 track_count: 2,
                 tracks: vec!["one".into(), "two".into()],
-                non_library_tracks: vec![],
+                track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                spotify_tracks: vec![],
             }],
         }
     }
@@ -2589,25 +2604,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn track_artwork_resolves_smallest_usable_image_and_caches() {
+    async fn track_artwork_resolves_requested_sizes_and_caches_each() {
+        let track = serde_json::json!({
+            "uri": "spotify:track:track",
+            "name": "Track",
+            "album": {
+                "id": "album",
+                "uri": "spotify:album:album",
+                "name": "Album",
+                "images": [
+                    {"url": "large", "width": 300},
+                    {"url": "small", "width": 64},
+                    {"url": "tiny", "width": 63}
+                ]
+            }
+        });
         let client = playlist_client([
-            Response::json(
-                200,
-                serde_json::json!({
-                    "uri": "spotify:track:track",
-                    "name": "Track",
-                    "album": {
-                        "id": "album",
-                        "uri": "spotify:album:album",
-                        "name": "Album",
-                        "images": [
-                            {"url": "large", "width": 300},
-                            {"url": "small", "width": 64},
-                            {"url": "tiny", "width": 63}
-                        ]
-                    }
-                }),
-            ),
+            Response::json(200, track.clone()),
+            Response::json(200, track),
             Response::json(
                 200,
                 serde_json::json!({"uri": "spotify:track:missing", "name": "Missing"}),
@@ -2619,28 +2633,32 @@ mod tests {
         assert_eq!(track_id("spotify:album:album"), None);
         assert_eq!(track_id("spotify:track:"), None);
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track")
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 64)
                 .await
                 .as_deref(),
             Some("small")
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 64).await,
             Some("small".into())
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:album:album").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 300).await,
+            Some("large".into())
+        );
+        assert_eq!(
+            resolve_track_artwork(Some(&client), &cache, "spotify:album:album", 64).await,
             None
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
             None
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing").await,
+            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
             None
         );
-        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(client.transport().requests().len(), 3);
     }
 
     #[tokio::test]
@@ -2657,6 +2675,7 @@ mod tests {
             None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
             &cache,
             &uri,
+            64,
         )
         .await
         .unwrap();
@@ -2675,7 +2694,8 @@ mod tests {
             resolve_track_artwork(
                 None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
                 &cache,
-                &uri
+                &uri,
+                64
             )
             .await,
             Some(artwork)
@@ -2687,7 +2707,8 @@ mod tests {
             resolve_track_artwork(
                 None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
                 &cache,
-                &localfiles::file_uri(&wav)
+                &localfiles::file_uri(&wav),
+                64
             )
             .await,
             None
@@ -2820,7 +2841,7 @@ mod tests {
         );
         assert_eq!(
             cache.playlists[0]
-                .non_library_tracks
+                .spotify_tracks
                 .iter()
                 .map(|track| track.uri.as_str())
                 .collect::<Vec<_>>(),
@@ -3150,7 +3171,8 @@ mod tests {
                     owner: None,
                     track_count: 0,
                     tracks: vec![],
-                    non_library_tracks: vec![],
+                    track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                    spotify_tracks: vec![],
                 })
                 .to_vec(),
         };
@@ -3192,6 +3214,10 @@ mod tests {
                 "added".into(),
                 "releaseDate".into(),
             ],
+            playlist_hidden_columns: BTreeMap::from([(
+                "first".into(),
+                vec!["genre".into(), "plays".into()],
+            )]),
             sort_column: Some("plays".into()),
             sort_desc: true,
             auto_add_spotify_library: false,
@@ -3234,6 +3260,10 @@ mod tests {
         assert_eq!(restored.column_order, exported.column_order);
         assert_eq!(restored.column_widths, exported.column_widths);
         assert_eq!(restored.hidden_columns, exported.hidden_columns);
+        assert_eq!(
+            restored.playlist_hidden_columns,
+            exported.playlist_hidden_columns
+        );
         assert_eq!(restored.sort_column.as_deref(), Some("plays"));
         assert!(restored.sort_desc);
         assert!(restored.shuffle);

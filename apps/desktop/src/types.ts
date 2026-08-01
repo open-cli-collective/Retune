@@ -18,6 +18,7 @@ export type Settings = {
   columnOrder: ColumnKey[]
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
+  playlistHiddenColumns: Record<string, ColumnKey[]>
   sortColumn: ColumnKey | null
   sortDesc: boolean
   autoAddSpotifyLibrary: boolean
@@ -118,7 +119,8 @@ export type Track = {
 }
 
 export type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs' | 'enabled'>
-export type PlaylistTrack = Omit<PlaybackTrack, 'id'> & { id: number | null; rating: RatingView | null }
+export type PlaybackOrigin = { kind: 'library'; source: Source } | { kind: 'playlist'; id: string }
+export type PlaylistTrack = Omit<Track, 'id'> & { id: number | null }
 export type PlaylistSubject =
   | { kind: 'tracks'; label: string; uris: string[] }
   | { kind: 'album'; label: string; albumUri: string }
@@ -137,7 +139,7 @@ export type PlayerState = {
 }
 
 // `simulated` marks fixture tracks whose URIs must never reach a real backend.
-export type Playing = PlayerState & { queue: readonly PlaybackTrack[]; simulated?: boolean }
+export type Playing = PlayerState & { queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin; simulated?: boolean }
 
 export type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }
@@ -171,4 +173,4 @@ export type MetadataValues = { arts: string[]; albs: string[]; cats: string[] }
 
 export type InfoDialog =
   | { kind: 'single'; track: TrackInfo }
-  | { kind: 'multiple'; tracks: Track[] }
+  | { kind: 'multiple'; tracks: PlaylistTrack[] }

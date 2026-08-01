@@ -1,6 +1,44 @@
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { menuPosition } from './ui.ts'
+import { dialogTabTarget, menuPosition } from './ui.ts'
+
+const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'
+
+export function ModalDialog({ className, labelledBy, onCancel, onSubmit, closeOnBackdrop = false, children }: {
+  className: string
+  labelledBy: string
+  onCancel?: () => void
+  onSubmit?: () => void | Promise<void>
+  closeOnBackdrop?: boolean
+  children: ReactNode
+}) {
+  const dialog = useRef<HTMLFormElement>(null)
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
+    const element = dialog.current
+    if (element && !element.contains(document.activeElement)) (element.querySelector<HTMLElement>('[autofocus]') ?? element.querySelector<HTMLElement>(FOCUSABLE) ?? element).focus()
+    return () => previous?.focus()
+  }, [])
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+    if (closeOnBackdrop && event.target === event.currentTarget) onCancel?.()
+  }}><form ref={dialog} className={className} role="dialog" aria-modal="true" aria-labelledby={labelledBy} tabIndex={-1} onSubmit={(event) => {
+    event.preventDefault()
+    void onSubmit?.()
+  }} onKeyDown={(event) => {
+    if (event.key === 'Escape' && onCancel) {
+      event.preventDefault()
+      event.stopPropagation()
+      onCancel()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)]
+    const target = dialogTabTarget(focusable.indexOf(document.activeElement as HTMLElement), focusable.length, event.shiftKey)
+    if (target === null) return
+    event.preventDefault()
+    focusable[target].focus()
+  }}>{children}</form></div>
+}
 
 export function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
   const menu = useRef<HTMLDivElement>(null)
@@ -41,6 +79,6 @@ export function CheckboxMenu({ x, y, onClose, items }: {
 }
 export function RatingStars({ rating, explicit = false, onRate }: { rating: number | null; explicit?: boolean; onRate?: (stars: number) => void }) {
   return <span className={`rating-stars ${rating ? explicit ? 'explicit' : 'inherited' : 'empty'} ${onRate ? '' : 'inert'}`} aria-label={rating ? `${rating} out of 5 stars` : 'Unrated'}>
-    {[1, 2, 3, 4, 5].map((star) => <button key={star} disabled={!onRate} aria-label={`${star} stars`} onClick={(event) => { event.stopPropagation(); onRate?.(star) }}>{star <= (rating ?? 0) ? '★' : '☆'}</button>)}
+    {[1, 2, 3, 4, 5].map((star) => <button type="button" key={star} disabled={!onRate} aria-label={`${star} stars`} onClick={(event) => { event.stopPropagation(); onRate?.(star) }}>{star <= (rating ?? 0) ? '★' : '☆'}</button>)}
   </span>
 }

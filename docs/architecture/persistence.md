@@ -18,6 +18,13 @@ All JSON state writes use a temporary file followed by atomic rename.
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.
 
+The playlist cache retains Spotify display metadata for every fetched track,
+including disc/track numbers and album release date. Older caches deserialize
+with defaults and are refreshed once before snapshot-based fetch skipping resumes.
+
+Column visibility is UI state in `settings.json`: the Library has one hidden-column
+list, and playlists have independent lists keyed by Spotify playlist ID.
+
 ## Spotify audio cache
 
 The audio cache contains complete encrypted Spotify audio files keyed by

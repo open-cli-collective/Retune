@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { MetadataValues, PlayThresholdPercent, Settings, Theme, Track, TrackInfo } from './types.ts'
-import { clearedTrackRating } from './ui.ts'
-import { RatingStars } from './viewShared.tsx'
+import { useEffect, useMemo, useState } from 'react'
+import type { MetadataValues, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
+import { clearedTrackRating, overlayEditTargets } from './ui.ts'
+import { ModalDialog, RatingStars } from './viewShared.tsx'
 
 const streamingQualities = [
   ['Normal', 96],
@@ -34,9 +34,7 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
   const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat === 'Uncategorized' ? '' : track.cat })
   const [suggestions, setSuggestions] = useState<MetadataValues>({ arts: [], albs: [], cats: [] })
   const [rating, setRating] = useState(track.rating)
-  const dialog = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    dialog.current?.focus()
     invoke<MetadataValues>('metadata_values').then(setSuggestions).catch((error) => onError(String(error)))
   }, [])
   const genres = useMemo(() => [...new Map([...suggestions.cats, ...track.genres].filter((genre) => genre && genre !== 'Uncategorized').map((genre) => [genre.toLowerCase(), genre] as const)).values()]
@@ -58,8 +56,7 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
     value: draft[key],
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, [key]: event.target.value }),
   })
-  return <div className="modal-backdrop" role="presentation">
-    <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="get-info-title" tabIndex={-1} ref={dialog}>
+  return <ModalDialog className="get-info" labelledBy="get-info-title" onCancel={onCancel} onSubmit={save}>
       <h2 id="get-info-title">Get Info</h2>
       {track.localPath ? <label>File<input className="file-path" value={track.localPath} title={track.localPath} readOnly /></label> : <label>Spotify ID<input value={track.uri} readOnly /></label>}
       <label>Name<input {...field('name')} /></label>
@@ -67,33 +64,35 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
       <label>Album<AutocompleteInput suggestions={suggestions.albs} value={draft.alb} onValue={(alb) => setDraft({ ...draft, alb })} /></label>
       <label>Genre<AutocompleteInput suggestions={genres} value={draft.cat} onValue={(cat) => setDraft({ ...draft, cat })} placeholder={track.cat === 'Uncategorized' ? 'Uncategorized' : undefined} /></label>
       <div className="genre-hint">normalize freely, e.g. “Operatic Rock” → “Rock”</div>
-      <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /><button disabled={!rating?.explicit} onClick={() => setRating(clearedTrackRating(track.inheritedRating))}>Clear rating</button></div>
+      <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /><button type="button" disabled={!rating?.explicit} onClick={() => setRating(clearedTrackRating(track.inheritedRating))}>Clear rating</button></div>
       {track.origCat && draft.cat !== track.origCat && <div className="override-banner">Spotify reports this as “{track.origCat}”. Your overlay wins in Retune.</div>}
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
-    </div>
-  </div>
+      <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">Save Overlay</button></div>
+  </ModalDialog>
 }
 
-export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: { tracks: Track[]; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
+export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: { tracks: PlaylistTrack[]; onCancel: () => void; onSaved: () => void; onError: (error: string) => void }) {
   type Field = 'art' | 'alb' | 'cat'
   const [draft, setDraft] = useState<Partial<Record<Field, string>>>({})
   const [suggestions, setSuggestions] = useState<MetadataValues>({ arts: [], albs: [], cats: [] })
   const [rating, setRating] = useState<number | null | undefined>(undefined)
-  const dialog = useRef<HTMLDivElement>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [saving, setSaving] = useState(false)
   useEffect(() => {
-    dialog.current?.focus()
     invoke<MetadataValues>('metadata_values').then(setSuggestions).catch((error) => onError(String(error)))
   }, [])
   const placeholder = (key: Field) => tracks.every((track) => track[key] === tracks[0][key]) ? tracks[0][key] : 'Mixed'
-  const save = async () => {
+  const { ids, missingUris } = overlayEditTargets(tracks)
+  const save = async (addMissing: boolean) => {
+    setSaving(true)
     try {
-      await invoke('set_track_infos', {
-        ids: tracks.map((track) => track.id),
-        edit: { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) },
-      })
+      const addedIds = addMissing ? await invoke<number[]>('add_spotify_tracks', { uris: missingUris }) : []
+      const targetIds = [...new Set([...ids, ...addedIds])]
+      if (targetIds.length) await invoke('set_track_infos', { ids: targetIds, edit: { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) } })
       onSaved()
     } catch (error) {
       onError(String(error))
+    } finally {
+      setSaving(false)
     }
   }
   const field = (key: Field, values: string[]) => ({
@@ -107,16 +106,19 @@ export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: 
       return next
     }),
   })
-  return <div className="modal-backdrop" role="presentation">
-    <div className="get-info" role="dialog" aria-modal="true" aria-labelledby="multiple-item-information-title" tabIndex={-1} ref={dialog}>
+  if (confirming) return <ModalDialog key="confirm" className="get-info playlist-confirm" labelledBy="add-missing-tracks-title" onCancel={saving ? undefined : () => setConfirming(false)} onSubmit={saving ? undefined : () => save(true)}>
+      <h2 id="add-missing-tracks-title">Add missing tracks?</h2>
+      <p>{missingUris.length} of the {tracks.length} selected {tracks.length === 1 ? 'track is' : 'tracks are'} not in your Library. Add {missingUris.length === 1 ? 'it' : 'them'} before applying this overlay?</p>
+      <div className="modal-actions"><button type="button" disabled={saving} onClick={() => setConfirming(false)}>Cancel</button><button type="button" disabled={saving} onClick={() => void save(false)}>No</button><button type="submit" className="primary" autoFocus disabled={saving}>{saving ? 'Working…' : 'Yes'}</button></div>
+  </ModalDialog>
+  return <ModalDialog key="edit" className="get-info" labelledBy="multiple-item-information-title" onCancel={onCancel} onSubmit={() => missingUris.length ? setConfirming(true) : save(false)}>
       <h2 id="multiple-item-information-title">Editing {tracks.length} items</h2>
       <label>Artist<AutocompleteInput {...field('art', suggestions.arts)} /></label>
       <label>Album<AutocompleteInput {...field('alb', suggestions.albs)} /></label>
       <label>Genre<AutocompleteInput {...field('cat', suggestions.cats)} /></label>
-      <div className="info-rating bulk-rating"><span>Rating</span><RatingStars rating={rating ?? null} explicit={rating !== undefined && rating !== null} onRate={setRating} /><button className={rating === undefined ? 'active' : ''} onClick={() => setRating(undefined)}>No Change</button><button className={rating === null ? 'active' : ''} onClick={() => setRating(null)}>Clear</button></div>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => void save()}>Save Overlay</button></div>
-    </div>
-  </div>
+      <div className="info-rating bulk-rating"><span>Rating</span><RatingStars rating={rating ?? null} explicit={rating !== undefined && rating !== null} onRate={setRating} /><button type="button" className={rating === undefined ? 'active' : ''} onClick={() => setRating(undefined)}>No Change</button><button type="button" className={rating === null ? 'active' : ''} onClick={() => setRating(null)}>Clear</button></div>
+      <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={saving}>Save Overlay</button></div>
+  </ModalDialog>
 }
 
 export function SetupLibrary({ settings, connected, onCancel, onConnect, onSync }: {
@@ -128,21 +130,18 @@ export function SetupLibrary({ settings, connected, onCancel, onConnect, onSync 
 }) {
   const [clientId, setClientId] = useState(settings.spotifyClientId)
   const [webApi, setWebApi] = useState(true)
-  const dialog = useRef<HTMLDivElement>(null)
-  useEffect(() => { dialog.current?.focus() }, [])
   const trimmedClientId = clientId.trim()
-  return <div className="modal-backdrop" role="presentation">
-    <div className="get-info preferences setup-library" role="dialog" aria-modal="true" aria-labelledby="setup-library-title" tabIndex={-1} ref={dialog}>
+  const canSync = Boolean(trimmedClientId && webApi && connected)
+  return <ModalDialog className="get-info preferences setup-library" labelledBy="setup-library-title" onCancel={onCancel} onSubmit={canSync ? () => onSync(trimmedClientId) : undefined}>
       <h2 id="setup-library-title">Set Up Your Library</h2>
       <div className="setup-content">
         <p>Retune reads your Spotify library through the Web API and builds a local overlay. Confirm three things, then sync.</p>
         <div className="setup-step"><span className="step-number">1</span><label><strong>Spotify app Client ID</strong><input value={clientId} onChange={(event) => setClientId(event.target.value)} /><small>Create one at developer.spotify.com → Dashboard → your app.</small></label></div>
         <div className="setup-step"><span className="step-number">2</span><div><label className="setup-check"><input type="checkbox" checked={webApi} onChange={(event) => setWebApi(event.target.checked)} /><strong>Web API enabled</strong></label><small>The app must have the Web API scope turned on in its dashboard settings.</small></div></div>
-        <div className="setup-step"><span className="step-number">3</span><div><strong>Spotify connection</strong><div className={`setup-status ${connected ? 'connected' : ''}`}><span className="connection-dot" /><span>{connected ? 'Connected' : 'Not connected'}</span>{connected ? <span className="detected">✓ auto-detected</span> : <button onClick={() => onConnect(trimmedClientId)}>Connect…</button>}</div></div></div>
+        <div className="setup-step"><span className="step-number">3</span><div><strong>Spotify connection</strong><div className={`setup-status ${connected ? 'connected' : ''}`}><span className="connection-dot" /><span>{connected ? 'Connected' : 'Not connected'}</span>{connected ? <span className="detected">✓ auto-detected</span> : <button type="button" onClick={() => onConnect(trimmedClientId)}>Connect…</button>}</div></div></div>
       </div>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" disabled={!trimmedClientId || !webApi || !connected} onClick={() => onSync(trimmedClientId)}>Sync</button></div>
-    </div>
-  </div>
+      <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!canSync}>Sync</button></div>
+  </ModalDialog>
 }
 
 export function Preferences({ settings, onZoom, onCancel, onSave }: {
@@ -164,8 +163,6 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
   const [normalizeVolume, setNormalizeVolume] = useState(settings.normalizeVolume)
   const [gapless, setGapless] = useState(settings.gapless)
   const [playThresholdPercent, setPlayThresholdPercent] = useState(settings.playThresholdPercent)
-  const dialog = useRef<HTMLDivElement>(null)
-  useEffect(() => { dialog.current?.focus() }, [])
   const tabs: [PreferenceTab, string, string][] = [
     ['appearance', '◑', 'Appearance'],
     ['library', '♫', 'Library'],
@@ -176,11 +173,11 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
     ['light', 'Light', 'Always use the light theme.'],
     ['dark', 'Dark', 'Always use the dark theme.'],
   ]
-  return <div className="modal-backdrop" role="presentation">
-    <div className="get-info preferences" role="dialog" aria-modal="true" aria-labelledby="preferences-title" tabIndex={-1} ref={dialog}>
+  const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent })
+  return <ModalDialog className="get-info preferences" labelledBy="preferences-title" onCancel={onCancel} onSubmit={save}>
       <h2 id="preferences-title">Preferences</h2>
       <div className="preference-toolbar" role="tablist">
-        {tabs.map(([value, glyph, label]) => <button key={value} id={`preferences-${value}-tab`} className={tab === value ? 'active' : ''} role="tab" aria-selected={tab === value} aria-controls={`preferences-${value}`} onClick={() => setTab(value)}><span aria-hidden="true">{glyph}</span>{label}</button>)}
+        {tabs.map(([value, glyph, label]) => <button type="button" key={value} id={`preferences-${value}-tab`} className={tab === value ? 'active' : ''} role="tab" aria-selected={tab === value} aria-controls={`preferences-${value}`} onClick={() => setTab(value)}><span aria-hidden="true">{glyph}</span>{label}</button>)}
       </div>
       <div className="preference-content" id={`preferences-${tab}`} role="tabpanel" aria-labelledby={`preferences-${tab}-tab`}>
         {tab === 'appearance' && <>
@@ -223,7 +220,6 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
           </div></section>
         </>}
       </div>
-      <div className="modal-actions"><button onClick={onCancel}>Cancel</button><button className="primary" onClick={() => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent })}>OK</button></div>
-    </div>
-  </div>
+      <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">OK</button></div>
+  </ModalDialog>
 }

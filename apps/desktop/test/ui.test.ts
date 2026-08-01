@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, facetLabel, insertionIndexAtY, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackQueue, resizedColumnWidth, resizedPaneHeight } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
 
 test('the music catch-all has a user-facing genre label', () => {
   assert.equal(facetLabel('Genre', 'Uncategorized'), 'No Genre')
@@ -25,10 +25,10 @@ test('menu coordinates stay under the pointer and inside a zoomed viewport', () 
   assert.deepEqual(menuPosition(1085, 700, 150, 200, 1120, 720, 1.2), { left: 964 / 1.2, top: 500 / 1.2 })
 })
 
-test('playlist drag ranges reject malformed payloads', () => {
-  assert.deepEqual(parseDragRange('{"start":2,"length":3}'), { start: 2, length: 3 })
-  assert.equal(parseDragRange('{"start":-1,"length":3}'), undefined)
-  assert.equal(parseDragRange('nope'), undefined)
+test('playlist drags accept only contiguous selections', () => {
+  assert.deepEqual(contiguousRange([4, 2, 3]), { start: 2, length: 3 })
+  assert.equal(contiguousRange([2, 4]), undefined)
+  assert.equal(contiguousRange([]), undefined)
 })
 
 test('columns move before the header under the pointer', () => {
@@ -73,6 +73,17 @@ test('sequential playback skips exclusions but an explicit start still plays one
   assert.deepEqual(playbackQueue(tracks, 2).map((track) => track.id), [1, 2, 3])
 })
 
+test('playlist highlights require both the synthetic id and Spotify URI', () => {
+  const playing = { trackId: SYNTHETIC_BASE + 15, uri: 'spotify:track:better-days' }
+  assert.equal(isCurrentTrack(playing, { id: SYNTHETIC_BASE + 15, uri: 'spotify:track:silent-thanks' }), false)
+  assert.equal(isCurrentTrack(playing, { id: SYNTHETIC_BASE + 15, uri: 'spotify:track:better-days' }), true)
+})
+
+test('playback origins return to the launching library or playlist', () => {
+  assert.deepEqual(playbackOriginAction({ kind: 'library', source: 'podcasts' }), { type: 'source', source: 'podcasts' })
+  assert.deepEqual(playbackOriginAction({ kind: 'playlist', id: 'road-trip' }), { type: 'playlist', id: 'road-trip' })
+})
+
 test('track and disc sorts keep multi-disc albums in playback order', () => {
   const track = (discNo: number | null, trackNo: number) => ({ discNo, trackNo } as never)
   const tracks = [track(2, 1), track(1, 2), track(null, 1), track(1, 3)]
@@ -80,6 +91,26 @@ test('track and disc sorts keep multi-disc albums in playback order', () => {
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'track', false)), expected)
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'disc', false)), expected)
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'track', true)), [...expected].reverse())
+})
+
+test('playlist sorting is view-only and clearing it restores Spotify order', () => {
+  const tracks = [{ name: 'Zulu' }, { name: 'Alpha' }, { name: 'Mike' }] as never
+  assert.deepEqual(playlistRows(tracks, 'name', false).map((row) => row.upstreamIndex), [1, 2, 0])
+  assert.deepEqual(playlistRows(tracks, null, false).map((row) => row.upstreamIndex), [0, 1, 2])
+})
+
+test('dialog tabs wrap in both directions', () => {
+  assert.equal(dialogTabTarget(2, 3, false), 0)
+  assert.equal(dialogTabTarget(0, 3, true), 2)
+  assert.equal(dialogTabTarget(1, 3, false), null)
+})
+
+test('overlay edits separate Library tracks from unique missing playlist tracks', () => {
+  assert.deepEqual(overlayEditTargets([
+    { id: 7, uri: 'spotify:track:in' },
+    { id: null, uri: 'spotify:track:out' },
+    { id: null, uri: 'spotify:track:out' },
+  ]), { ids: [7], missingUris: ['spotify:track:out'] })
 })
 
 test('release dates sort chronologically with the standard tie-breakers and missing dates last', () => {

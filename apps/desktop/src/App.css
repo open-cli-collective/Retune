@@ -27,7 +27,7 @@ button { color: inherit; }
 .native-drop-overlay { position: fixed; z-index: 100; inset: 8px; pointer-events: none; display: grid; place-content: center; gap: 5px; border: 3px solid var(--accent); border-radius: 8px; color: var(--text); background: color-mix(in srgb, var(--accent) 16%, var(--list)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--list) 75%, transparent); text-align: center; }
 .native-drop-overlay strong { font-size: 16px; }
 .native-drop-overlay span { color: var(--dim); }
-.track-list, .browser-pane, .sidebar, .album-rating-strip, .lcd { cursor: default; user-select: none; -webkit-user-select: none; }
+.track-list, .playlist-view, .browser-pane, .sidebar, .album-rating-strip, .lcd { cursor: default; user-select: none; -webkit-user-select: none; }
 .transport { height: 52px; display: grid; grid-template-columns: 200px minmax(260px, 1fr) 268px; align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
 .transport button { border: 0; background: transparent; cursor: default; padding: 2px 4px; }
 .transport-controls { display: flex; flex-direction: column; align-items: center; gap: 5px; padding-right: 8px; }
@@ -43,7 +43,10 @@ button { color: inherit; }
 .volume-control input::-moz-range-progress { height: 5px; border-radius: 3px; background: var(--dim); }
 .volume-control input::-moz-range-thumb { width: 13px; height: 13px; border: 1px solid var(--volume-knob-border); border-radius: 50%; background: linear-gradient(#fff, #e4e4e4); box-shadow: 0 1px 2px rgb(0 0 0 / .28); }
 .lcd { box-sizing: border-box; height: 40px; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: linear-gradient(var(--lcd1), var(--lcd2)); box-shadow: inset 0 1px 2px rgb(0 0 0 / .12); }
-.lcd-artwork { box-sizing: border-box; width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--lcd-art-border); border-radius: 4px; color: var(--lcd-art-glyph); background: repeating-linear-gradient(45deg, var(--lcd-art1), var(--lcd-art1) 6px, var(--lcd-art2) 6px, var(--lcd-art2) 12px); font-size: 16px; }
+.lcd.returnable { cursor: pointer; }
+.lcd.returnable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.lcd-artwork { box-sizing: border-box; width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; overflow: hidden; border: 1px solid var(--lcd-art-border); border-radius: 4px; color: var(--lcd-art-glyph); background: repeating-linear-gradient(45deg, var(--lcd-art1), var(--lcd-art1) 6px, var(--lcd-art2) 6px, var(--lcd-art2) 12px); font-size: 16px; cursor: pointer; }
+.lcd-artwork:disabled { cursor: default; }
 .lcd-artwork img { width: 100%; height: 100%; object-fit: cover; }
 .lcd-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .lcd-line { height: 13px; overflow: hidden; text-align: left; white-space: nowrap; line-height: 13px; }
@@ -87,6 +90,11 @@ button { color: inherit; }
 .playlist-row.insert-after { box-shadow: inset 0 -2px var(--accent); }
 .playlist-new-row { padding: 1px 10px 3px; }
 .playlist-new-row input { width: 100%; height: 20px; box-sizing: border-box; border: 1px solid var(--accent); border-radius: 2px; color: var(--text); background: var(--list); font: inherit; outline: 0; }
+.sidebar-artwork { position: relative; width: 100%; flex: 0 0 auto; aspect-ratio: 1; overflow: hidden; border-top: 1px solid var(--border); background: var(--control); }
+.sidebar-artwork-open { width: 100%; height: 100%; display: grid; place-items: center; padding: 0; border: 0; color: var(--lcd-art-glyph); background: transparent; font-size: 38px; cursor: pointer; }
+.sidebar-artwork-open:disabled { cursor: default; }
+.sidebar-artwork-open img { width: 100%; height: 100%; object-fit: contain; }
+.sidebar-artwork-close, .artwork-lightbox-close { position: absolute; z-index: 1; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: rgb(0 0 0 / .58); font: inherit; font-size: 16px; line-height: 22px; cursor: pointer; }
 .sidebar-actions { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 10px; border-top: 1px solid var(--border); }
 .sidebar-actions button { position: relative; width: 27px; height: 22px; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--border); border-radius: 5px; color: var(--dim); background: linear-gradient(var(--list), var(--control)); box-shadow: 0 1px 0 rgb(255 255 255 / .5); font: inherit; font-size: 13px; cursor: default; }
 .sidebar-actions button.active { border-color: var(--gel-border); color: #fff; background: linear-gradient(var(--gel-top), var(--gel-bottom)); }
@@ -223,6 +231,10 @@ button { color: inherit; }
 .startup-notice button { border: 0; color: inherit; background: transparent; font-size: 16px; }
 .reauth-notice button { padding: 3px 8px; border: 1px solid currentColor; border-radius: 3px; font-size: inherit; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgb(0 0 0 / .38); }
+.artwork-lightbox { position: relative; box-sizing: border-box; width: min(72vw, 72vh); aspect-ratio: 1; display: grid; place-items: center; padding: 0; overflow: hidden; border: 0; background: #111; box-shadow: 0 18px 60px rgb(0 0 0 / .55); }
+.artwork-lightbox img { width: 100%; height: 100%; object-fit: contain; }
+.artwork-placeholder { color: var(--lcd-art-glyph); font-size: 72px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .playlist-popover { width: min(360px, calc(100vw - 40px)); overflow: hidden; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--list); box-shadow: 0 12px 40px rgb(0 0 0 / .35); }
 .playlist-popover > header { padding: 12px 14px 9px; border-bottom: 1px solid var(--border); }
 .playlist-popover h2 { margin: 0; font-size: 15px; }
@@ -246,6 +258,9 @@ button { color: inherit; }
 .playlist-header button:disabled { opacity: .45; }
 .playlist-track-header, .playlist-track-row { min-width: 620px; display: grid; grid-template-columns: 35px minmax(160px, 1.5fr) 55px minmax(110px, 1fr) minmax(110px, 1fr); align-items: center; padding: 0 9px; }
 .playlist-track-header { height: 20px; flex: 0 0 20px; border-bottom: 1px solid var(--border); color: var(--dim); background: linear-gradient(var(--head1), var(--head2)); font-size: 10px; }
+.playlist-track-header > button { min-width: 0; padding: 0 3px; overflow: hidden; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-track-header > button:first-child, .playlist-track-header > button.track-number { text-align: right; }
+.playlist-track-header > button.active { color: var(--text); font-weight: 700; }
 .playlist-track-scroll { min-height: 0; flex: 1; overflow: auto; }
 .playlist-unavailable { min-height: 0; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); text-align: center; }
 .playlist-unavailable strong { color: var(--text); font-size: 13px; }
@@ -260,7 +275,7 @@ button { color: inherit; }
 .playlist-track-row > :first-child, .playlist-track-row time { color: var(--dim); font-weight: 400; }
 .playlist-track-row.playing { font-weight: 700; }
 .playlist-track-row.insert-before, .playlist-end-drop.insert-before { border-top-color: var(--accent); }
-.playlist-track-row[draggable="true"], .spotify-row[draggable="true"], .spotify-track-row[draggable="true"] { cursor: grab; }
+.spotify-row[draggable="true"], .spotify-track-row[draggable="true"] { cursor: grab; }
 .playlist-end-drop { height: 12px; border-top: 2px solid transparent; }
 .get-info { width: min(440px, calc(100vw - 40px)); padding: 16px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--list); box-shadow: 0 12px 40px rgb(0 0 0 / .35); outline: 0; }
 .get-info h2 { margin: 0 0 14px; font-size: 16px; }

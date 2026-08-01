@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
-import { DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, labels, moveBefore, resizedColumnWidth, resizedPaneHeight } from './ui.ts'
+import { COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 
 export function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
@@ -91,20 +91,40 @@ export function AlbumRatingStrip({ album, rating, onRate }: { album: string; rat
   return <div className="album-rating-strip"><strong>{album}</strong><RatingStars rating={rating} explicit onRate={(stars) => onRate(stars === rating ? null : stars)} /></div>
 }
 
-const COLUMN_SPECS: Record<ColumnKey, { width: string; numeric?: boolean }> = {
-  disc: { width: '34px', numeric: true }, track: { width: '34px', numeric: true }, name: { width: 'minmax(160px, 1.6fr)' }, time: { width: '52px', numeric: true }, artist: { width: '1.1fr' },
-  album: { width: '1.1fr' }, genre: { width: '.9fr' }, rating: { width: '84px' }, plays: { width: '48px', numeric: true }, kind: { width: '140px' },
-  bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true }, releaseDate: { width: '88px', numeric: true },
+type TrackCellData = Omit<Track, 'id'> & { id: number | null }
+
+export function TrackCell({ track, column, playing, selected, onInfo, onRate }: {
+  track: TrackCellData
+  column: ColumnKey
+  playing: false | 'playing' | 'paused'
+  selected: boolean
+  onInfo?: () => void
+  onRate?: (stars: number) => void
+}) {
+  if (column === 'disc') return <span className="track-number">{track.discNo ?? 1}</span>
+  if (column === 'track') return <span className="track-number">{track.trackNo ?? ''}</span>
+  if (column === 'name') return <span className="track-name" title={track.name}>{playing && <span className="playing-marker">{playing === 'playing' ? '▶' : '❚❚'}</span>}{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selected && onInfo && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo() }}>ⓘ</button>}</span>
+  if (column === 'time') return <span className="track-number">{formatTime(track.durationSecs)}</span>
+  if (column === 'artist') return <span title={track.art}>{track.art}</span>
+  if (column === 'album') return <span title={track.alb}>{track.alb}</span>
+  if (column === 'genre') return <span title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
+  if (column === 'plays') return <span className="track-number">{track.playCount || ''}</span>
+  if (column === 'kind') return <span title={track.kind ?? undefined}>{track.kind ?? ''}</span>
+  if (column === 'bitrate') return <span className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
+  if (column === 'lastPlayed') return <span className="track-number">{track.lastPlayedAt === null ? '' : new Date(track.lastPlayedAt * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
+  if (column === 'added') return <span className="track-number">{track.addedAt === null ? '' : new Date(track.addedAt * 1000).toLocaleDateString()}</span>
+  if (column === 'releaseDate') return <span className="track-number">{track.releaseDate ?? ''}</span>
+  return <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={onRate} />
 }
 
-export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
+export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
   columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
   onColumnWidths: (widths: Partial<Record<ColumnKey, number>>) => void
   onPlaylist: (subject: PlaylistSubject) => void
   onGoToAlbum: (track: Track) => void; onGoToArtist: (track: Track) => void
-  onActivate: () => void; onSetup: () => void; onHiddenColumns: (columns: ColumnKey[]) => void; onSort: (column: ColumnKey, desc: boolean) => void
+  onActivate: () => void; onSetup: () => void; onClearSelection: () => void; onHiddenColumns: (columns: ColumnKey[]) => void; onSort: (column: ColumnKey, desc: boolean) => void
 }) {
   const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
@@ -112,24 +132,9 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLSpanElement } | undefined>(undefined)
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
   useEffect(() => setLiveWidths(columnWidths), [columnWidths])
-  const headings: Record<ColumnKey, string> = {
-    disc: 'Disc',
-    track: '#',
-    name: label.item[0].toUpperCase() + label.item.slice(1),
-    time: 'Time',
-    artist: label.facets[1],
-    album: label.facets[2],
-    genre: label.facets[0],
-    rating: 'Rating',
-    plays: 'Plays',
-    kind: 'Kind',
-    bitrate: 'Bit Rate',
-    lastPlayed: 'Last Played',
-    added: 'Date Added',
-    releaseDate: 'Release Date',
-  }
+  const headings = trackColumnHeadings(label)
   const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
-  const columns = `16px ${visibleColumns.map((column) => liveWidths[column] === undefined ? COLUMN_SPECS[column].width : `${liveWidths[column]}px`).join(' ')}`
+  const columns = trackGridColumns(visibleColumns, liveWidths)
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
@@ -174,25 +179,9 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     resize.current = undefined
     setLiveWidths(columnWidths)
   }
-  const cell = (track: Track, column: ColumnKey) => {
-    if (column === 'disc') return <span key={column} className="track-number">{track.discNo ?? 1}</span>
-    if (column === 'track') return <span key={column} className="track-number">{track.trackNo ?? ''}</span>
-    if (column === 'name') return <span key={column} className="track-name" title={track.name}>{playing?.trackId === track.id && <span className="playing-marker">{playing.isPlaying ? '▶' : '❚❚'}</span>}{track.isLocal && <span className="local-glyph" aria-label="Local file">⌂</span>}<span className="track-title">{track.name}</span>{selectedIds.has(track.id) && <button className="info-button" aria-label={`Get info for ${track.name}`} onClick={(event) => { event.stopPropagation(); onInfo(track.id) }}>ⓘ</button>}</span>
-    if (column === 'time') return <span key={column} className="track-number">{formatTime(track.durationSecs)}</span>
-    if (column === 'artist') return <span key={column} title={track.art}>{track.art}</span>
-    if (column === 'album') return <span key={column} title={track.alb}>{track.alb}</span>
-    if (column === 'genre') return <span key={column} title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
-    if (column === 'plays') return <span key={column} className="track-number">{track.playCount || ''}</span>
-    if (column === 'kind') return <span key={column} title={track.kind ?? undefined}>{track.kind ?? ''}</span>
-    if (column === 'bitrate') return <span key={column} className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
-    if (column === 'lastPlayed') return <span key={column} className="track-number">{track.lastPlayedAt === null ? '' : new Date(track.lastPlayedAt * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}</span>
-    if (column === 'added') return <span key={column} className="track-number">{track.addedAt === null ? '' : new Date(track.addedAt * 1000).toLocaleDateString()}</span>
-    if (column === 'releaseDate') return <span key={column} className="track-number">{track.releaseDate ?? ''}</span>
-    return <RatingStars key={column} rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={(stars) => onRate(track.id, stars)} />
-  }
   const menuTrack = menu?.trackId === undefined ? undefined : tracks.find((track) => track.id === menu.trackId)
   return <div className="track-list" onMouseDown={onActivate}>
-    <div className={`track-scroll ${empty ? 'empty-library' : ''}`}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
+    <div className={`track-scroll ${empty ? 'empty-library' : ''}`} onClick={(event) => { if (event.target === event.currentTarget) onClearSelection() }}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
     }}><span className="track-enabled-cell" />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
@@ -214,7 +203,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
       event.stopPropagation()
     }} /></span>)}</div>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
-        const isPlaying = playing?.trackId === track.id
+        const isPlaying = isCurrentTrack(playing, track)
         return <div key={track.id} data-track-id={track.id} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onDragStart={(event) => {
           const dragged = selectedIds.has(track.id) ? tracks.filter((candidate) => selectedIds.has(candidate.id)) : [track]
           event.dataTransfer.effectAllowed = 'copy'
@@ -227,7 +216,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           setMenu({ x: event.clientX, y: event.clientY, trackId: track.id })
         }}>
           <span className="track-enabled-cell"><input type="checkbox" checked={track.enabled} aria-label={`${track.enabled ? 'Exclude' : 'Include'} ${track.name} from sequential playback`} title={track.enabled ? 'Uncheck to skip during sequential playback' : 'Check to include in sequential playback'} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onChange={(event) => onEnabled(track.id, event.target.checked)} /></span>
-          {visibleColumns.map((column) => cell(track, column))}
+          {visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} playing={isPlaying ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selectedIds.has(track.id)} onInfo={() => onInfo(track.id)} onRate={(stars) => onRate(track.id, stars)} />)}
         </div>
       })}
     </div>

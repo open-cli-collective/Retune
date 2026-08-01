@@ -324,11 +324,15 @@ pub(crate) fn artist_descriptor(artist: &Artist) -> String {
 }
 
 pub(crate) fn image_url(images: &[Image]) -> Option<String> {
+    image_url_at_least(images, 64)
+}
+
+pub(crate) fn image_url_at_least(images: &[Image], min_width: u32) -> Option<String> {
     images
         .iter()
-        .filter(|image| image.width.is_some_and(|width| width >= 64))
+        .filter(|image| image.width.is_some_and(|width| width >= min_width))
         .min_by_key(|image| image.width)
-        .or_else(|| images.last())
+        .or_else(|| images.iter().max_by_key(|image| image.width))
         .map(|image| image.url.clone())
 }
 
@@ -1822,6 +1826,7 @@ mod tests {
             },
         ];
         assert_eq!(image_url(&images).as_deref(), Some("small"));
+        assert_eq!(image_url_at_least(&images, 300).as_deref(), Some("large"));
         assert_eq!(
             image_url(&[Image {
                 url: "fallback".into(),

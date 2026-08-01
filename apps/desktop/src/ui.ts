@@ -1,4 +1,4 @@
-import type { ColumnKey, PlaybackTrack, PlaylistSubject, Track } from './types.ts'
+import type { ColumnKey, PlaybackOrigin, PlaybackTrack, PlaylistSubject, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -22,10 +22,21 @@ export const clearedTrackRating = (inherited: number | null) =>
 export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: number) =>
   tracks.filter((track) => track.enabled || track.id === requestedId)
 
+export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
+  ? { type: 'playlist' as const, id: origin.id }
+  : { type: 'source' as const, source: origin.source }
+
+export const isCurrentTrack = (
+  playing: { trackId: number | null; uri: string | null } | null,
+  track: { id: number; uri: string },
+) => playing?.trackId === track.id && playing.uri === track.uri
+
 export const facetLabel = (title: string, value: string) =>
   title === 'Genre' && value === 'Uncategorized' ? 'No Genre' : value
 
-const sortValue = (track: Track, column: ColumnKey): string | number | null => {
+type SortableTrack = Pick<Track, 'discNo' | 'trackNo' | 'name' | 'durationSecs' | 'art' | 'alb' | 'cat' | 'rating' | 'playCount' | 'kind' | 'bitrateKbps' | 'lastPlayedAt' | 'addedAt' | 'releaseDate'>
+
+const sortValue = (track: SortableTrack, column: ColumnKey): string | number | null => {
   if (column === 'disc') return track.discNo ?? 1
   if (column === 'track') return track.trackNo
   if (column === 'name') return track.name
@@ -42,7 +53,7 @@ const sortValue = (track: Track, column: ColumnKey): string | number | null => {
   return track.releaseDate
 }
 
-export const compareTracks = (left: Track, right: Track, column: ColumnKey, desc: boolean) => {
+export const compareTracks = (left: SortableTrack, right: SortableTrack, column: ColumnKey, desc: boolean) => {
   const primary: ColumnKey[] = column === 'track' ? ['disc', 'track'] : [column]
   const columns = [...primary, ...(['disc', 'track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => !primary.includes(key))]
   for (const key of columns) {
@@ -58,6 +69,37 @@ export const compareTracks = (left: Track, right: Track, column: ColumnKey, desc
   }
   return 0
 }
+
+export const playlistRows = <T extends SortableTrack>(tracks: readonly T[], column: ColumnKey | null, desc: boolean) => {
+  const rows = tracks.map((track, upstreamIndex) => ({ track, upstreamIndex }))
+  return column ? rows.sort((left, right) => compareTracks(left.track, right.track, column, desc)) : rows
+}
+
+export const dialogTabTarget = (current: number, count: number, backward: boolean) => {
+  if (!count) return null
+  if (current < 0) return backward ? count - 1 : 0
+  if (backward && current === 0) return count - 1
+  if (!backward && current === count - 1) return 0
+  return null
+}
+
+export const overlayEditTargets = (tracks: readonly { id: number | null; uri: string }[]) => ({
+  ids: [...new Set(tracks.flatMap((track) => track.id === null ? [] : [track.id]))],
+  missingUris: [...new Set(tracks.filter((track) => track.id === null).map((track) => track.uri))],
+})
+
+export const COLUMN_SPECS: Record<ColumnKey, { width: string; numeric?: boolean }> = {
+  disc: { width: '34px', numeric: true }, track: { width: '34px', numeric: true }, name: { width: 'minmax(160px, 1.6fr)' }, time: { width: '52px', numeric: true }, artist: { width: '1.1fr' },
+  album: { width: '1.1fr' }, genre: { width: '.9fr' }, rating: { width: '84px' }, plays: { width: '48px', numeric: true }, kind: { width: '140px' },
+  bitrate: { width: '64px', numeric: true }, lastPlayed: { width: '88px', numeric: true }, added: { width: '88px', numeric: true }, releaseDate: { width: '88px', numeric: true },
+}
+
+export const trackColumnHeadings = (label: (typeof labels)[Source]): Record<ColumnKey, string> => ({
+  disc: 'Disc', track: '#', name: label.item[0].toUpperCase() + label.item.slice(1), time: 'Time', artist: label.facets[1], album: label.facets[2], genre: label.facets[0], rating: 'Rating', plays: 'Plays', kind: 'Kind', bitrate: 'Bit Rate', lastPlayed: 'Last Played', added: 'Date Added', releaseDate: 'Release Date',
+})
+
+export const trackGridColumns = (columns: ColumnKey[], widths: Partial<Record<ColumnKey, number>>, leading = '16px') =>
+  `${leading} ${columns.map((column) => widths[column] === undefined ? COLUMN_SPECS[column].width : `${widths[column]}px`).join(' ')}`
 
 export const moveBefore = <T>(items: T[], item: T, target?: T) => {
   if (!items.includes(item) || item === target) return items
@@ -97,13 +139,11 @@ export const menuPosition = (x: number, y: number, width: number, height: number
   return { left: left / zoom, top: top / zoom }
 }
 
-export type DragRange = { start: number; length: number }
-
-export const parseDragRange = (value: string): DragRange | undefined => {
-  try {
-    const range = JSON.parse(value) as Partial<DragRange>
-    if (Number.isInteger(range.start) && Number.isInteger(range.length) && range.start! >= 0 && range.length! > 0) return range as DragRange
-  } catch {}
+export const contiguousRange = (indices: number[]) => {
+  const sorted = [...indices].sort((left, right) => left - right)
+  return sorted.length && sorted.every((row, offset) => row === sorted[0] + offset)
+    ? { start: sorted[0], length: sorted.length }
+    : undefined
 }
 
 export const DRAG_TYPE = 'application/x-retune'
