@@ -640,9 +640,10 @@ mod tests {
                 "added".into(),
                 "releaseDate".into(),
             ],
-            playlist_hidden_columns: BTreeMap::from([
-                ("road-trip".into(), vec!["genre".into(), "plays".into()]),
-            ]),
+            playlist_hidden_columns: BTreeMap::from([(
+                "road-trip".into(),
+                vec!["genre".into(), "plays".into()],
+            )]),
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,

@@ -303,13 +303,15 @@ pub(super) async fn add_spotify_tracks(
     let mut ids = vec![];
     {
         let library = state.library.lock().expect("library mutex poisoned");
-        uris.retain(|uri| match library.tracks().iter().find(|track| &track.uri == uri) {
-            Some(track) => {
-                ids.push(track.id.0);
-                false
-            }
-            None => true,
-        });
+        uris.retain(
+            |uri| match library.tracks().iter().find(|track| &track.uri == uri) {
+                Some(track) => {
+                    ids.push(track.id.0);
+                    false
+                }
+                None => true,
+            },
+        );
     }
     if uris.is_empty() {
         return Ok(ids);
@@ -336,7 +338,10 @@ pub(super) async fn add_spotify_tracks(
         .await
         .map_err(|error| error.to_string())?;
     ids.extend(mutate_library(&state, |library| {
-        Ok(tracks.into_iter().map(|track| library.add(track).0).collect::<Vec<_>>())
+        Ok(tracks
+            .into_iter()
+            .map(|track| library.add(track).0)
+            .collect::<Vec<_>>())
     })?);
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())?;

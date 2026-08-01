@@ -1116,9 +1116,7 @@ mod tests {
         );
         let mut cache = cached();
 
-        remove(&client, &mut cache, "playlist", &[0])
-            .await
-            .unwrap();
+        remove(&client, &mut cache, "playlist", &[0]).await.unwrap();
 
         assert_eq!(cache.playlists[0].snapshot_id, "removed");
         assert_eq!(cache.playlists[0].track_count, 1);

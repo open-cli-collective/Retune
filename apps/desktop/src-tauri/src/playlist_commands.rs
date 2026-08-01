@@ -98,7 +98,9 @@ fn playlist_track_views(
                     art: track.art.clone(),
                     alb: track.alb.clone(),
                     cat: track.cat.clone(),
-                    disc_no: track.disc_no.or_else(|| cached.and_then(|track| track.disc_no)),
+                    disc_no: track
+                        .disc_no
+                        .or_else(|| cached.and_then(|track| track.disc_no)),
                     track_no: track
                         .track_no
                         .or_else(|| cached.and_then(|track| track.track_no)),
@@ -107,9 +109,10 @@ fn playlist_track_views(
                     play_count: track.play_count,
                     last_played_at: track.last_played_at,
                     added_at: track.added_at,
-                    release_date: track.release_date.clone().or_else(|| {
-                        cached.and_then(|track| track.release_date.clone())
-                    }),
+                    release_date: track
+                        .release_date
+                        .clone()
+                        .or_else(|| cached.and_then(|track| track.release_date.clone())),
                     kind: track.kind.clone(),
                     bitrate_kbps: track.bitrate_kbps,
                     overridden: track

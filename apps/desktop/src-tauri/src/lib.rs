@@ -3214,9 +3214,10 @@ mod tests {
                 "added".into(),
                 "releaseDate".into(),
             ],
-            playlist_hidden_columns: BTreeMap::from([
-                ("first".into(), vec!["genre".into(), "plays".into()]),
-            ]),
+            playlist_hidden_columns: BTreeMap::from([(
+                "first".into(),
+                vec!["genre".into(), "plays".into()],
+            )]),
             sort_column: Some("plays".into()),
             sort_desc: true,
             auto_add_spotify_library: false,
