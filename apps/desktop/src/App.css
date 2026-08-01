@@ -275,7 +275,7 @@ button { color: inherit; }
 .playlist-track-row > :first-child, .playlist-track-row time { color: var(--dim); font-weight: 400; }
 .playlist-track-row.playing { font-weight: 700; }
 .playlist-track-row.insert-before, .playlist-end-drop.insert-before { border-top-color: var(--accent); }
-.playlist-track-row.reorderable, .spotify-row[draggable="true"], .spotify-track-row[draggable="true"] { cursor: grab; }
+.spotify-row[draggable="true"], .spotify-track-row[draggable="true"] { cursor: grab; }
 .playlist-end-drop { height: 12px; border-top: 2px solid transparent; }
 .get-info { width: min(440px, calc(100vw - 40px)); padding: 16px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--list); box-shadow: 0 12px 40px rgb(0 0 0 / .35); outline: 0; }
 .get-info h2 { margin: 0 0 14px; font-size: 16px; }
