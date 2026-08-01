@@ -3,14 +3,13 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { COLUMN_SPECS, compareTracks, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, parseDragRange, playbackOriginAction, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, playbackOriginAction, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 
-const PLAYLIST_TRACK_DRAG_TYPE = 'application/x-retune-playlist-track'
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
 const emptyTracks: Track[] = []
@@ -1190,6 +1189,9 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
   const [sortDesc, setSortDesc] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number; upstreamIndex?: number }>()
   const onErrorRef = useRef(onError)
+  const trackDrag = useRef<{ indices: number[]; pointerId: number; startY: number; moved: boolean } | undefined>(undefined)
+  const dragInsertBefore = useRef<number | undefined>(undefined)
+  const suppressTrackClick = useRef(false)
   onErrorRef.current = onError
   const canChangePlaylist = playlist.owned && tracks.length === playlist.trackCount
   const canReorder = canChangePlaylist && sortColumn === null
@@ -1248,9 +1250,7 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
     const indices = target !== undefined && !selected.has(target) ? [target] : [...selected]
     return indices.sort((left, right) => left - right)
   }
-  const drop = async (event: React.DragEvent, index: number) => {
-    const range = parseDragRange(event.dataTransfer.getData(PLAYLIST_TRACK_DRAG_TYPE))
-    if (!range) return
+  const reorder = async (range: { start: number; length: number }, index: number) => {
     if (index >= range.start && index <= range.start + range.length) {
       setInsertBefore(undefined)
       return
@@ -1266,6 +1266,11 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
       setSelectionAnchor(undefined)
       setMutating(false)
     }
+  }
+  const cancelTrackDrag = () => {
+    trackDrag.current = undefined
+    dragInsertBefore.current = undefined
+    setInsertBefore(undefined)
   }
   const remove = async (target?: number) => {
     const indices = selectedIndices(target)
@@ -1323,31 +1328,55 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
       </div>
       {rows.map(({ track, upstreamIndex }, rowIndex) => <div
         key={`${track.uri}-${upstreamIndex}`}
-        className={`playlist-track-row track-row ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
+        className={`playlist-track-row track-row ${canReorder && !mutating ? 'reorderable' : ''} ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
         style={{ gridTemplateColumns: columns }}
-        draggable={canReorder && !mutating}
-        onClick={(event) => select(upstreamIndex, event)}
+        onClick={(event) => {
+          if (suppressTrackClick.current) { suppressTrackClick.current = false; event.preventDefault(); return }
+          select(upstreamIndex, event)
+        }}
         onDoubleClick={() => onPlay(queue[rowIndex].id, queue)}
-        onDragStart={canReorder ? (event) => {
-          const dragged = selected.has(upstreamIndex) ? [...selected].sort((left, right) => left - right) : [upstreamIndex]
-          if (dragged.some((row, offset) => row !== dragged[0] + offset)) {
-            event.preventDefault()
+        onPointerDown={canReorder && !mutating ? (event) => {
+          if (event.button !== 0) return
+          suppressTrackClick.current = false
+          trackDrag.current = { indices: selected.has(upstreamIndex) ? [...selected] : [upstreamIndex], pointerId: event.pointerId, startY: event.clientY, moved: false }
+          event.currentTarget.setPointerCapture(event.pointerId)
+        } : undefined}
+        onPointerMove={canReorder && !mutating ? (event) => {
+          const drag = trackDrag.current
+          if (!drag || drag.pointerId !== event.pointerId || (!drag.moved && Math.abs(event.clientY - drag.startY) < 4)) return
+          if (!contiguousRange(drag.indices)) {
+            cancelTrackDrag()
             onError('Select a contiguous block of tracks to reorder.')
             return
           }
-          event.dataTransfer.effectAllowed = 'move'
-          event.dataTransfer.setData(PLAYLIST_TRACK_DRAG_TYPE, JSON.stringify({ start: dragged[0], length: dragged.length }))
+          drag.moved = true
+          event.preventDefault()
+          const trackRows = [...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>('.playlist-track-row')]
+          const target = insertionIndexAtY(trackRows.map((row) => { const bounds = row.getBoundingClientRect(); return bounds.top + bounds.height / 2 }), event.clientY)
+          dragInsertBefore.current = target
+          setInsertBefore(target)
         } : undefined}
-        onDragOver={canReorder ? (event) => { event.preventDefault(); setInsertBefore(upstreamIndex) } : undefined}
-        onDrop={canReorder ? (event) => { event.preventDefault(); void drop(event, upstreamIndex) } : undefined}
-        onDragEnd={() => setInsertBefore(undefined)}
+        onPointerUp={canReorder && !mutating ? (event) => {
+          const drag = trackDrag.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          const range = contiguousRange(drag.indices)
+          const target = dragInsertBefore.current
+          const moved = drag.moved
+          cancelTrackDrag()
+          if (!moved || !range || target === undefined) return
+          event.preventDefault()
+          suppressTrackClick.current = true
+          window.setTimeout(() => { suppressTrackClick.current = false }, 0)
+          void reorder(range, target)
+        } : undefined}
+        onPointerCancel={cancelTrackDrag}
         onContextMenu={(event) => {
           event.preventDefault()
           if (!selected.has(upstreamIndex)) select(upstreamIndex, event)
           setMenu({ x: event.clientX, y: event.clientY, upstreamIndex })
         }}
       ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} playing={isCurrentTrack(playing, queue[rowIndex]) ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>)}
-      {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} onDragOver={(event) => { event.preventDefault(); setInsertBefore(tracks.length) }} onDrop={(event) => { event.preventDefault(); void drop(event, tracks.length) }} />}
+      {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} />}
     </div>
     {menu && (menu.upstreamIndex === undefined
       ? <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={columnOrder.map((column) => ({ key: column, label: headings[column], checked: !hiddenColumns.includes(column), disabled: column === 'name', onChange: (checked) => onHiddenColumns(checked ? hiddenColumns.filter((hidden) => hidden !== column) : [...hiddenColumns, column]) }))} />

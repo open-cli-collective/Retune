@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, parseDragRange, playbackOriginAction, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
+import { clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
 
 test('the music catch-all has a user-facing genre label', () => {
   assert.equal(facetLabel('Genre', 'Uncategorized'), 'No Genre')
@@ -25,10 +25,10 @@ test('menu coordinates stay under the pointer and inside a zoomed viewport', () 
   assert.deepEqual(menuPosition(1085, 700, 150, 200, 1120, 720, 1.2), { left: 964 / 1.2, top: 500 / 1.2 })
 })
 
-test('playlist drag ranges reject malformed payloads', () => {
-  assert.deepEqual(parseDragRange('{"start":2,"length":3}'), { start: 2, length: 3 })
-  assert.equal(parseDragRange('{"start":-1,"length":3}'), undefined)
-  assert.equal(parseDragRange('nope'), undefined)
+test('playlist drags accept only contiguous selections', () => {
+  assert.deepEqual(contiguousRange([4, 2, 3]), { start: 2, length: 3 })
+  assert.equal(contiguousRange([2, 4]), undefined)
+  assert.equal(contiguousRange([]), undefined)
 })
 
 test('columns move before the header under the pointer', () => {

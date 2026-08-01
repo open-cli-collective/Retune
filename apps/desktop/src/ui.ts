@@ -139,13 +139,11 @@ export const menuPosition = (x: number, y: number, width: number, height: number
   return { left: left / zoom, top: top / zoom }
 }
 
-export type DragRange = { start: number; length: number }
-
-export const parseDragRange = (value: string): DragRange | undefined => {
-  try {
-    const range = JSON.parse(value) as Partial<DragRange>
-    if (Number.isInteger(range.start) && Number.isInteger(range.length) && range.start! >= 0 && range.length! > 0) return range as DragRange
-  } catch {}
+export const contiguousRange = (indices: number[]) => {
+  const sorted = [...indices].sort((left, right) => left - right)
+  return sorted.length && sorted.every((row, offset) => row === sorted[0] + offset)
+    ? { start: sorted[0], length: sorted.length }
+    : undefined
 }
 
 export const DRAG_TYPE = 'application/x-retune'
