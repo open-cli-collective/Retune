@@ -66,16 +66,21 @@ pub(super) fn click_track_star(
 }
 
 #[tauri::command]
-pub(super) fn set_track_enabled(
-    state: tauri::State<'_, AppState>,
+pub(super) async fn set_track_enabled(
+    app: tauri::AppHandle,
     id: u64,
     enabled: bool,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     mutate_library(&state, |library| {
         library
             .set_track_enabled(TrackId(id), enabled)
             .map_err(|error| error.to_string())
-    })
+    })?;
+    if !enabled {
+        state.playback.exclude_track(id).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]

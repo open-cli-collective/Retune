@@ -118,6 +118,19 @@ impl Snapshot {
     fn has_next(&self) -> bool {
         self.index + 1 < self.len()
     }
+
+    fn exclude(&mut self, id: u64) -> bool {
+        let current = self.order[self.index];
+        let previous_len = self.order.len();
+        self.order
+            .retain(|&index| index == current || self.tracks[index].id != id);
+        self.index = self
+            .order
+            .iter()
+            .position(|&index| index == current)
+            .expect("current track is retained");
+        self.order.len() != previous_len
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -419,6 +432,20 @@ impl Playback {
             .await
             .reducer
             .set_play_threshold_percent(percent);
+    }
+
+    pub async fn exclude_track(&self, id: u64) {
+        let mut state = self.state.lock().await;
+        if !state
+            .reducer
+            .snapshot_mut()
+            .is_some_and(|snapshot| snapshot.exclude(id))
+        {
+            return;
+        }
+        let snapshot = state.reducer.snapshot().cloned();
+        let repeat = state.reducer.repeat().to_owned();
+        state.backend.set_shuffle_snapshot(snapshot, &repeat).await;
     }
 
     pub fn listen(
@@ -1108,6 +1135,27 @@ mod tests {
             .collect::<Vec<_>>();
         ids.sort_unstable();
         assert_eq!(ids, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn excluding_a_track_keeps_the_current_instance_and_removes_the_rest() {
+        let mut tracks = file_tracks(3);
+        tracks.push(tracks[1].clone());
+        let mut snapshot = Snapshot::new(tracks, 1);
+
+        assert!(snapshot.exclude(2));
+        assert_eq!(snapshot.current().id, 2);
+        assert_eq!(
+            snapshot
+                .active_tracks()
+                .into_iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(snapshot.exclude(1));
+        assert_eq!(snapshot.current().id, 2);
+        assert_eq!(snapshot.index, 0);
     }
 
     #[tokio::test]
