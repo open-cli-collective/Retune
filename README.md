@@ -1,42 +1,37 @@
 # Retune
 
-Retune is a macOS desktop music library for people who prefer the dense,
-album-first workflow of early iTunes. It combines a local metadata overlay,
-local audio files, and a user's Spotify library behind one three-column browser.
+Retune is a dense, album-first music library for macOS, inspired by the
+three-column browser in early iTunes.
 
-Retune is a Tauri application with a React/TypeScript UI and a Rust backend.
-The local overlay is authoritative for Retune-specific metadata such as ratings,
-normalized genres, and play counts. Those edits are never written to Spotify.
-Explicit content actions—saving albums, following artists, and editing owned
-playlists—do use Spotify as the canonical store.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/playing-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/playing-light.png">
+  <img alt="Retune browsing and playing a music library" src="screenshots/playing-light.png">
+</picture>
 
-## What works
+[See all screenshots](screenshots/)
 
-- Genre → Artist → Album browsing with a configurable, resizable track table.
-- Local metadata edits, album/track rating inheritance, play counts, and search.
-- Local audio import and playback.
-- Spotify library sync, search, artist/album drill-down, and library writes.
-- Owned-playlist creation, membership, deletion, and reordering.
-- Built-in Spotify playback through librespot, with Spotify Connect as an
-  optional alternative.
-- JSON and gzip backup, restore, and additive merge.
+Retune brings local audio files and a Spotify library into one browser while
+keeping ratings, normalized genres, play counts, and other personal metadata
+local.
 
-Spotify does not expose the contents of playlists owned by other users to this
-app. Retune can show their cached metadata and track counts, but cannot load or
-edit their tracks.
+## Why Retune?
 
-## Requirements
+Retune is for people who want to maintain a music library, not just stream one.
 
-- macOS
-- Rust stable
-- Node.js 22 and npm
-- A Spotify Premium account and Spotify application client ID for Spotify
-  features
+* Browse by genre, artist, and album in a compact, resizable interface.
+* Mix local files and Spotify content without treating either as secondary.
+* Edit personal metadata without rewriting Spotify's catalog.
+* Rate albums and tracks, track plays, search, and manage owned playlists.
+* Back up, restore, or merge the library as JSON or gzip.
 
-The Spotify desktop app is required only when using the Spotify Connect playback
-backend. Local files and built-in Spotify playback do not depend on it.
+## Run from source
 
-## Run locally
+Retune currently targets macOS. Building it requires:
+
+* Rust stable
+* Node.js 22 and npm
+* Xcode command-line tools
 
 ```sh
 cd apps/desktop
@@ -44,18 +39,36 @@ npm ci
 npm exec tauri dev
 ```
 
-See [Development](docs/DEVELOPMENT.md) for validation, packaging, credentials,
+On first launch, import local audio files, connect Spotify, or use both. Local
+files remain available without a Spotify account. Spotify features require a
+Spotify Premium account and a Spotify application client ID.
+
+See [Development](docs/DEVELOPMENT.md) for Spotify setup, validation, packaging,
 and troubleshooting.
+
+## How Retune treats your library
+
+Retune stores ratings, genres, play counts, and other overlay edits locally.
+Those edits are never written to Spotify. Explicit content actions such as
+saving albums, following artists, and editing owned playlists do update
+Spotify.
+
+Built-in Spotify playback does not require the Spotify desktop app. The desktop
+app is needed only when using the optional Spotify Connect backend.
+
+Spotify does not expose playlist contents to Retune unless the current user owns
+the playlist. Retune can retain cached metadata and track counts for other
+playlists, but cannot load or edit their tracks.
 
 ## Documentation
 
-- [Architecture map](ARCHITECTURE.md)
-- [Library domain](docs/architecture/library.md)
-- [Spotify integration](docs/architecture/spotify.md)
-- [Playback](docs/architecture/playback.md)
-- [Persistence](docs/architecture/persistence.md)
-- [Development and validation](docs/DEVELOPMENT.md)
+* [Architecture map](ARCHITECTURE.md)
+* [Library domain](docs/architecture/library.md)
+* [Spotify integration](docs/architecture/spotify.md)
+* [Playback](docs/architecture/playback.md)
+* [Persistence](docs/architecture/persistence.md)
+* [Development and validation](docs/DEVELOPMENT.md)
 
-The UI design files are visual references, not production architecture. Current
-behavior in the application and the architecture documents above are the source
-of truth.
+## License
+
+[MIT](LICENSE)
