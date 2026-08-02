@@ -3,11 +3,9 @@
 Retune is a dense, album-first music library for macOS, inspired by the
 three-column browser in early iTunes.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="screenshots/playing-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="screenshots/playing-light.png">
-  <img alt="Retune browsing and playing a music library" src="screenshots/playing-light.png">
-</picture>
+| Light | Dark |
+| :---: | :---: |
+| ![Retune browsing and playing a music library in light mode](screenshots/library-light.png) | ![Retune browsing and playing a music library in dark mode](screenshots/library-dark.png) |
 
 [See all screenshots](screenshots/)
 
