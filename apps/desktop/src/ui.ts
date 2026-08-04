@@ -1,4 +1,4 @@
-import type { ColumnKey, PlaybackOrigin, PlaybackTrack, PlaylistSubject, Source, Track } from './types.ts'
+import type { ColumnKey, PlaybackOrigin, PlaybackTrack, PlaylistSubject, Selection, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -9,6 +9,12 @@ export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) =>
 
 export const normalizeZoom = (zoom: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Math.round(zoom * 100) / 100))
+
+export const browseRequestKey = (source: Source, selection: Selection, query: string, scope: 'library' | 'spotify', revision: number) =>
+  JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], query, scope, revision])
+
+export const browseViewForRequest = <T>(view: T | null, resolvedKey: string | undefined, requestKey: string) =>
+  resolvedKey === requestKey ? view : null
 
 export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) =>
   Math.max(28, Math.round(startWidth + clientX - startX))

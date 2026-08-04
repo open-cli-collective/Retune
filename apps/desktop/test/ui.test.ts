@@ -1,6 +1,30 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
+import type { PlaybackTrack } from '../src/types.ts'
+import { browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
+
+test('pending narrower browse criteria cannot use the prior resolved tracks', () => {
+  const broadQueue: PlaybackTrack[] = [
+    { id: 1, uri: 'fixture:track:1', name: 'Welcome', art: 'Artist', alb: 'Broad Album', durationSecs: 180, enabled: true },
+    { id: 2, uri: 'fixture:track:2', name: 'Americana', art: 'Artist', alb: 'Broad Album', durationSecs: 200, enabled: true },
+  ]
+  const baseSelection = {}
+  const resolvedKey = browseRequestKey('music', baseSelection, '', 'library', 0)
+  const pendingKey = browseRequestKey('music', { alb: ['America, The Dream Goes On'] }, '', 'library', 0)
+
+  assert.deepEqual(playbackQueue(browseViewForRequest(broadQueue, resolvedKey, resolvedKey) ?? [], 1).map((track) => track.id), [1, 2])
+  assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, pendingKey) ?? [], [])
+
+  // A browser-pane facet selection is the selection change below.
+  const changedKeys = [
+    browseRequestKey('podcasts', baseSelection, '', 'library', 0),
+    pendingKey,
+    browseRequestKey('music', baseSelection, 'America', 'library', 0),
+    browseRequestKey('music', baseSelection, '', 'spotify', 0),
+    browseRequestKey('music', baseSelection, '', 'library', 1),
+  ]
+  assert.equal(new Set([resolvedKey, ...changedKeys]).size, changedKeys.length + 1)
+})
 
 test('the music catch-all has a user-facing genre label', () => {
   assert.equal(facetLabel('Genre', 'Uncategorized'), 'No Genre')
