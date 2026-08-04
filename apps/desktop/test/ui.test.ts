@@ -15,9 +15,11 @@ test('pending narrower browse criteria cannot use the prior resolved tracks', ()
   assert.deepEqual(playbackQueue(browseViewForRequest(broadQueue, resolvedKey, resolvedKey) ?? [], 1).map((track) => track.id), [1, 2])
   assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, pendingKey) ?? [], [])
 
-  // A browser-pane facet selection is the selection change below.
+  // Category, artist, and album selections are browser-pane selection changes.
   const changedKeys = [
     browseRequestKey('podcasts', baseSelection, '', 'library', 0),
+    browseRequestKey('music', { cat: ['Rock'] }, '', 'library', 0),
+    browseRequestKey('music', { art: ['Artist'] }, '', 'library', 0),
     pendingKey,
     browseRequestKey('music', baseSelection, 'America', 'library', 0),
     browseRequestKey('music', baseSelection, '', 'spotify', 0),
