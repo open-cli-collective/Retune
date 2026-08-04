@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, playbackOriginAction, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, playbackOriginAction, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
@@ -31,6 +31,7 @@ type State = {
   settingsHydrated: boolean
   systemDark: boolean
   view: BrowseView | null
+  viewKey?: string
   revision: number
   error?: string
   notice?: string
@@ -49,7 +50,7 @@ type State = {
 }
 
 type Action =
-  | { type: 'view'; view: BrowseView }
+  | { type: 'view'; view: BrowseView; key: string }
   | { type: 'error'; error: string }
   | { type: 'clear-error' }
   | { type: 'source'; source: Source }
@@ -125,6 +126,7 @@ const initialState: State = {
   settingsHydrated: false,
   systemDark: false,
   view: null,
+  viewKey: undefined,
   revision: 0,
   preferences: false,
   setup: false,
@@ -137,7 +139,7 @@ const initialState: State = {
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'view':
-      return { ...state, view: action.view, error: undefined }
+      return { ...state, view: action.view, viewKey: action.key, error: undefined }
     case 'error':
       return { ...state, error: action.error, syncProgress: undefined }
     case 'clear-error':
@@ -355,7 +357,8 @@ function App() {
   const skipSettingsSave = useRef(false)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
-  const view = state.view
+  const browseKey = browseRequestKey(state.source, state.sel, state.query, state.scope, state.revision)
+  const view = browseViewForRequest(state.view, state.viewKey, browseKey)
   const tracks = view?.tracks ?? emptyTracks
   const displayedTracks = useMemo(() => state.settings.sortColumn
     ? [...tracks].sort((left, right) => compareTracks(left, right, state.settings.sortColumn!, state.settings.sortDesc))
@@ -407,11 +410,12 @@ function App() {
 
   useEffect(() => {
     let active = true
+    const requestKey = browseRequestKey(state.source, state.sel, state.query, state.scope, state.revision)
     invoke<BrowseView>('browse', {
       source: state.source,
       sel: { cat: state.sel.cat ?? [], art: state.sel.art ?? [], alb: state.sel.alb ?? [] },
       query: state.scope === 'library' && state.query.trim() ? state.query : undefined,
-    }).then((next) => active && dispatch({ type: 'view', view: next }))
+    }).then((next) => active && dispatch({ type: 'view', view: next, key: requestKey }))
       .catch((error) => active && fail(error))
     return () => { active = false }
   }, [state.source, state.sel, state.query, state.scope, state.revision, fail])
@@ -633,7 +637,7 @@ function App() {
         dispatch({ type: 'selectTrack', id: track.id })
         window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${track.id}"]`)?.scrollIntoView({ block: 'nearest' }))
       } else {
-        const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+        const facetValues = view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
         const facetTitle = labels[state.source].facets[activePane === 'cat' ? 0 : activePane === 'art' ? 1 : 2]
         const index = facetValues.findIndex((value) => facetLabel(facetTitle, value).toLocaleLowerCase().startsWith(prefix))
         if (index < 0) return
@@ -657,7 +661,7 @@ function App() {
         dispatch({ type: 'selectTrack', id: displayedTracks[index].id })
         window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${displayedTracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
       } else {
-        const facetValues = state.view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+        const facetValues = view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
         const values: (string | undefined)[] = [undefined, ...facetValues]
         const current = values.indexOf(facetAnchors.current[activePane] ?? state.sel[activePane]?.[0])
         const index = Math.max(0, Math.min(values.length - 1, current + direction))
@@ -715,7 +719,7 @@ function App() {
       />
       <div className="body-grid">
         <Sidebar
-          state={state}
+          state={{ ...state, view }}
           playlists={playlists}
           onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }}
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
@@ -776,7 +780,7 @@ function App() {
           />
           : (
             <>
-              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onToggle={toggleBrowserPane} />
+              <BrowserPane state={{ ...state, view }} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onToggle={toggleBrowserPane} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
                 <AlbumRatingStrip
                   album={selectedAlbum}
