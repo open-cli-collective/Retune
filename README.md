@@ -23,6 +23,25 @@ Retune is for people who want to maintain a music library, not just stream one.
 * Rate albums and tracks, track plays, search, and manage owned playlists.
 * Back up, restore, or merge the library as JSON or gzip.
 
+## Install with Homebrew
+
+Retune ships as a prebuilt Apple Silicon app via the
+[open-cli-collective tap](https://github.com/open-cli-collective/homebrew-tap):
+
+```sh
+brew install --cask --no-quarantine open-cli-collective/tap/retune
+```
+
+Release builds are ad-hoc signed but **not notarized** (there is no Apple
+Developer ID behind them). Without `--no-quarantine`, Gatekeeper will refuse
+to open the app with a "Retune is damaged" dialog. The cask also clears the
+quarantine attribute after install; if you downloaded the app some other way,
+clear it yourself:
+
+```sh
+xattr -cr /Applications/Retune.app
+```
+
 ## Run from source
 
 Retune currently targets macOS. Building it requires:
