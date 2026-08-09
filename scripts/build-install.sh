@@ -13,6 +13,12 @@ cd "$repo/apps/desktop"
 # and we install straight into /Applications anyway).
 npx tauri build --bundles app --features dev-token-store
 
+# Tauri ad-hoc signs the bundle (bundle.macOS.signingIdentity is "-" in
+# tauri.conf.json — same as release builds). Fail loudly if it didn't.
+codesign --verify --deep --strict "$bundle"
+codesign -dv "$bundle" 2>&1 | grep -q "Signature=adhoc" \
+  || { echo "Expected an ad-hoc signature on $bundle" >&2; exit 1; }
+
 # Quit a running copy before overwriting it, then install fresh.
 osascript -e 'quit app "Retune"' >/dev/null 2>&1 || true
 rm -rf "$app"

@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Check tag matches app version
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag v$tag does not match tauri.conf.json version $version" >&2
+            exit 1
+          fi
+
+      - run: npm ci
+
+      # No --features dev-token-store here: release builds use the encrypted
+      # token store. Ad-hoc signing comes from bundle.macOS.signingIdentity
+      # ("-") in tauri.conf.json, so local and CI builds are signed identically.
+      - name: Build app bundle
+        run: npx tauri build --bundles app
+
+      - name: Verify code signature
+        run: |
+          codesign --verify --deep --strict --verbose=2 ../../target/release/bundle/macos/Retune.app
+          codesign -dv --verbose=2 ../../target/release/bundle/macos/Retune.app
+
+      - name: Package
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          artifact="Retune-${version}-aarch64.tar.gz"
+          tar -czf "$artifact" -C ../../target/release/bundle/macos Retune.app
+          shasum -a 256 "$artifact" > "$artifact.sha256"
+          cat "$artifact.sha256"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact="${{ steps.package.outputs.artifact }}"
+          sha="$(cut -d' ' -f1 "$artifact.sha256")"
+          cat > release-notes.md <<EOF
+          macOS (Apple Silicon) app bundle, ad-hoc signed (not notarized).
+
+          SHA-256 of \`$artifact\`:
+
+          \`\`\`
+          $sha
+          \`\`\`
+
+          Because the app is not notarized, install via Homebrew
+          (\`brew install --cask --no-quarantine open-cli-collective/tap/retune\`)
+          or clear the quarantine attribute manually:
+
+          \`\`\`
+          xattr -cr /Applications/Retune.app
+          \`\`\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            "$artifact" "$artifact.sha256" \
+            --title "Retune $GITHUB_REF_NAME" \
+            --notes-file release-notes.md
