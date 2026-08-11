@@ -4,22 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: apps/desktop
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-node@v5
         with:
@@ -27,62 +23,422 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Check tag matches app version
+      - name: Check release contract
+        run: node scripts/check-release.mjs
+
+      - name: Resolve version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
         run: |
-          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$tag" != "$version" ]; then
-            echo "Tag v$tag does not match tauri.conf.json version $version" >&2
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          if [ "$EVENT_NAME" = push ] && [ "${TAG#v}" != "$version" ]; then
+            echo "::error::tag $TAG does not match tauri.conf.json version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+            arch: arm64
+            bundle: app
+          - name: Windows x64
+            os: windows-2025
+            arch: x64
+            bundle: nsis
+          - name: Windows ARM64
+            os: windows-11-arm
+            arch: arm64
+            bundle: nsis
+          - name: Ubuntu 22.04 amd64
+            os: ubuntu-22.04
+            arch: amd64
+            bundle: deb
+          - name: Ubuntu 22.04 arm64
+            os: ubuntu-22.04-arm
+            arch: arm64
+            bundle: deb
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Verify native runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          node -e "const expected = process.env.EXPECTED_ARCH === 'amd64' ? 'x64' : process.env.EXPECTED_ARCH; if (process.arch !== expected) throw new Error('expected ' + expected + ', got ' + process.arch)"
+
+      - name: Install Ubuntu build dependencies
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            patchelf \
+            wget
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Release native credential-store tests
+        run: cargo test --workspace --release --locked
+
+      - name: Verify local-only import and playback on non-macOS
+        if: startsWith(matrix.os, 'windows-') || startsWith(matrix.os, 'ubuntu-')
+        run: |
+          cargo test -p retune-audio --release
+          cargo test -p retune-desktop --release local_files_remain_playable_without_playback_authorization
+
+      - name: Build native bundle
+        working-directory: apps/desktop
+        run: npx tauri build --bundles ${{ matrix.bundle }}
+
+      - name: Configure stable macOS signing
+        if: matrix.os == 'macos-15'
+        id: macos-codesign
+        uses: open-cli-collective/.github/actions/macos-codesign-setup@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706
+        with:
+          cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          cert-cn: ${{ secrets.MACOS_CERT_CN }}
+          cert-leaf-sha: ${{ secrets.MACOS_CERT_LEAF_SHA }}
+          binary: retune
+
+      - name: Require stable macOS signing
+        if: matrix.os == 'macos-15'
+        env:
+          SIGNING_ENABLED: ${{ steps.macos-codesign.outputs.enabled }}
+          CONFIGURED_LEAF: ${{ secrets.MACOS_CERT_LEAF_SHA }}
+        run: |
+          set -euo pipefail
+          expected_leaf=42e1afd02aae8666c09c15f171e1639550f301c2
+          if [ "$SIGNING_ENABLED" != true ]; then
+            echo "::error::stable macOS signing credentials are required for every release run"
+            exit 1
+          fi
+          if [ "$CONFIGURED_LEAF" != "$expected_leaf" ]; then
+            echo "::error::MACOS_CERT_LEAF_SHA is not the expected stable certificate leaf"
+            exit 1
+          fi
+          if ! security find-identity -v -p codesigning | grep -i -F "$expected_leaf" >/dev/null; then
+            echo "::error::imported macOS signing identity does not match the expected certificate leaf"
             exit 1
           fi
 
-      - run: npm ci
-
-      # No --features dev-token-store here: release builds use the encrypted
-      # token store. Ad-hoc signing comes from bundle.macOS.signingIdentity
-      # ("-") in tauri.conf.json, so local and CI builds are signed identically.
-      - name: Build app bundle
-        run: npx tauri build --bundles app
-
-      - name: Verify code signature
+      - name: Stable-sign macOS app
+        if: matrix.os == 'macos-15'
+        working-directory: apps/desktop
+        env:
+          MACOS_CERT_CN: ${{ secrets.MACOS_CERT_CN }}
         run: |
-          codesign --verify --deep --strict --verbose=2 ../../target/release/bundle/macos/Retune.app
-          codesign -dv --verbose=2 ../../target/release/bundle/macos/Retune.app
+          set -euo pipefail
+          app="../../target/release/bundle/macos/Retune.app"
+          executables=()
+          for candidate in "$app/Contents/MacOS"/*; do
+            if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+              executables+=("$candidate")
+            fi
+          done
+          [ "${#executables[@]}" -eq 1 ] || { echo "::error::expected one macOS process executable"; exit 1; }
+          executable="${executables[0]}"
+          requirements='=designated => identifier "com.rianjs.retune" and certificate leaf = H"42e1afd02aae8666c09c15f171e1639550f301c2"'
+          test -d "$app"
+          test -x "$executable"
+          codesign --force --sign "$MACOS_CERT_CN" --identifier com.rianjs.retune --requirements "$requirements" "$executable"
+          codesign --force --sign "$MACOS_CERT_CN" --identifier com.rianjs.retune --requirements "$requirements" "$app"
 
-      - name: Package
-        id: package
+      - name: Verify macOS app signature
+        if: matrix.os == 'macos-15'
+        working-directory: apps/desktop
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          artifact="Retune-${version}-aarch64.tar.gz"
-          tar -czf "$artifact" -C ../../target/release/bundle/macos Retune.app
-          shasum -a 256 "$artifact" > "$artifact.sha256"
-          cat "$artifact.sha256"
-          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          app="../../target/release/bundle/macos/Retune.app"
+          executable="$(find "$app/Contents/MacOS" -type f -perm +111 -print)"
+          [ "$(printf '%s\n' "$executable" | grep -c .)" -eq 1 ] || { echo "::error::expected one macOS process executable"; exit 1; }
+          codesign --verify --deep --strict "$app"
+          for target in "$executable" "$app"; do
+            codesign --verify --strict "$target"
+            requirement="$(codesign -d -r- "$target" 2>&1 | sed -n 's/^designated => //p')"
+            case "$requirement" in
+              *'identifier "com.rianjs.retune"'*'certificate leaf = H"42e1afd02aae8666c09c15f171e1639550f301c2"'*) ;;
+              *) echo "::error::unexpected macOS designated requirement for $target: $requirement"; exit 1 ;;
+            esac
+            case "$requirement" in
+              *cdhash*) echo "::error::macOS designated requirement contains cdhash for $target"; exit 1 ;;
+            esac
+          done
+          details="$(codesign -d --verbose=4 "$app" 2>&1)"
+          if printf '%s\n' "$details" | grep -E 'flags=.*runtime'; then
+            echo "::error::macOS app has hardened-runtime flags"
+            exit 1
+          fi
+          if printf '%s\n' "$details" | grep -E '^Timestamp=' | grep -v '^Timestamp=none$'; then
+            echo "::error::macOS app has a timestamp"
+            exit 1
+          fi
+
+      - name: Package macOS app
+        if: matrix.os == 'macos-15'
+        working-directory: apps/desktop
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: tar -czf "Retune-${VERSION}-aarch64.tar.gz" -C ../../target/release/bundle/macos Retune.app
+
+      - name: Rename Windows NSIS installer
+        if: startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        working-directory: apps/desktop
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $bundle = Resolve-Path '../../target/release/bundle/nsis'
+          $files = @(Get-ChildItem -LiteralPath $bundle -Filter '*-setup.exe' -File)
+          if ($files.Count -ne 1) { throw "expected one NSIS setup.exe, found $($files.Count)" }
+          $destination = Join-Path $bundle "Retune-$env:VERSION-windows-$env:ARCH-setup.exe"
+          Move-Item -LiteralPath $files[0].FullName -Destination $destination
+
+      - name: Rename Debian package
+        if: startsWith(matrix.os, 'ubuntu-')
+        working-directory: apps/desktop
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          bundle=../../target/release/bundle/deb
+          files=("$bundle"/*.deb)
+          [ "${#files[@]}" -eq 1 ] || { echo "::error::expected one Debian package, found ${#files[@]}"; exit 1; }
+          mv "${files[0]}" "$bundle/retune_${VERSION}_${ARCH}.deb"
+
+      - name: Upload macOS artifact
+        if: matrix.os == 'macos-15'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retune-macos-arm64
+          path: apps/desktop/Retune-${{ needs.prepare.outputs.version }}-aarch64.tar.gz
+          if-no-files-found: error
+
+      - name: Upload Windows artifact
+        if: startsWith(matrix.os, 'windows-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: retune-windows-${{ matrix.arch }}
+          path: target/release/bundle/nsis/Retune-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-setup.exe
+          if-no-files-found: error
+
+      - name: Upload Debian artifact
+        if: startsWith(matrix.os, 'ubuntu-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: retune-debian-${{ matrix.arch }}
+          path: target/release/bundle/deb/retune_${{ needs.prepare.outputs.version }}_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  aggregate:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/incoming
+
+      - name: Aggregate and verify release assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/assets
+          while IFS= read -r file; do
+            cp "$file" "dist/assets/$(basename "$file")"
+          done < <(find dist/incoming -type f)
+
+          expected=(
+            "Retune-${VERSION}-aarch64.tar.gz"
+            "Retune-${VERSION}-windows-x64-setup.exe"
+            "Retune-${VERSION}-windows-arm64-setup.exe"
+            "retune_${VERSION}_amd64.deb"
+            "retune_${VERSION}_arm64.deb"
+          )
+          for asset in "${expected[@]}"; do
+            test -f "dist/assets/$asset" || { echo "::error::missing release asset $asset"; exit 1; }
+          done
+          actual="$(find dist/assets -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_names="$(printf '%s\n' "${expected[@]}" | sort)"
+          test "$actual" = "$expected_names" || { echo "::error::unexpected release asset set"; printf '%s\n' "$actual"; exit 1; }
+
+          (
+            cd dist/assets
+            sha256sum "${expected[@]}" > checksums.txt
+            sha256sum -c checksums.txt
+          )
+
+      - name: Upload aggregated dry-run assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: retune-${{ needs.prepare.outputs.version }}-release-assets
+          path: dist/assets
+          if-no-files-found: error
 
       - name: Create GitHub release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          artifact="${{ steps.package.outputs.artifact }}"
-          sha="$(cut -d' ' -f1 "$artifact.sha256")"
-          cat > release-notes.md <<EOF
-          macOS (Apple Silicon) app bundle, ad-hoc signed (not notarized).
+          set -euo pipefail
+          cat > dist/release-notes.md <<EOF
+          Retune $VERSION for macOS Apple Silicon, Windows x64/ARM64, and Ubuntu amd64/arm64.
 
-          SHA-256 of \`$artifact\`:
-
-          \`\`\`
-          $sha
-          \`\`\`
-
-          Because the app is not notarized, install via Homebrew
-          (\`brew install --cask --no-quarantine open-cli-collective/tap/retune\`)
-          or clear the quarantine attribute manually:
-
-          \`\`\`
-          xattr -cr /Applications/Retune.app
-          \`\`\`
+          macOS is stable-signed with the Open CLI Collective certificate but is not notarized.
+          The first access to stored Spotify credentials after upgrading from an older ad-hoc build
+          may show one macOS Keychain prompt. Choose Always Allow once; later stable-signed updates
+          keep the same identity. Homebrew clears quarantine after installation.
           EOF
-          gh release create "$GITHUB_REF_NAME" \
-            "$artifact" "$artifact.sha256" \
-            --title "Retune $GITHUB_REF_NAME" \
-            --notes-file release-notes.md
+          assets=(
+            "dist/assets/Retune-${VERSION}-aarch64.tar.gz"
+            "dist/assets/Retune-${VERSION}-windows-x64-setup.exe"
+            "dist/assets/Retune-${VERSION}-windows-arm64-setup.exe"
+            "dist/assets/retune_${VERSION}_amd64.deb"
+            "dist/assets/retune_${VERSION}_arm64.deb"
+            dist/assets/checksums.txt
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Retune $GITHUB_REF_NAME" \
+              --notes-file dist/release-notes.md
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --title "Retune $GITHUB_REF_NAME" \
+              --notes-file dist/release-notes.md
+          fi
+
+  publish-homebrew:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, aggregate]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: retune-${{ needs.prepare.outputs.version }}-release-assets
+          path: dist/assets
+
+      - name: Render Homebrew cask
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          checksum="$(awk -v name="Retune-${VERSION}-aarch64.tar.gz" '$2 == name { print $1 }' dist/assets/checksums.txt)"
+          test "${#checksum}" -eq 64
+          mkdir -p dist/homebrew
+          sed \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__SHA256__/${checksum}/g" \
+            packaging/homebrew/retune.rb.template > dist/homebrew/retune.rb
+
+      - name: Publish Homebrew cask
+        uses: open-cli-collective/.github/actions/homebrew-alias@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706
+        with:
+          canonical-cask-file: dist/homebrew/retune.rb
+          canonical-token: retune
+          alias-tokens: ""
+          tap-repo: open-cli-collective/homebrew-tap
+          tap-token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+  dispatch-linux:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: aggregate
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - name: Dispatch Linux package update
+        env:
+          DISPATCH_TOKEN: ${{ secrets.LINUX_PACKAGES_DISPATCH_TOKEN }}
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::warning::LINUX_PACKAGES_DISPATCH_TOKEN is not configured; Linux package dispatch skipped"
+            echo "⚠️ Linux package dispatch skipped for $VERSION_TAG: token is not configured" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          payload="$(jq -cn \
+            --arg package retune \
+            --arg version "$VERSION_TAG" \
+            --arg repo open-cli-collective/Retune \
+            '{event_type:"package-release",client_payload:{package:$package,version:$version,repo:$repo}}')"
+          if ! curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url https://api.github.com/repos/open-cli-collective/linux-packages/dispatches \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $DISPATCH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "$payload"; then
+            echo "::warning::Linux package dispatch failed for $VERSION_TAG; release assets remain available"
+            echo "⚠️ Linux package dispatch failed for $VERSION_TAG; release assets remain available" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  publish-winget:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, aggregate]
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Submit Winget package
+        uses: open-cli-collective/.github/actions/winget-submit@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706
+        with:
+          package-id: OpenCLICollective.Retune
+          version: ${{ needs.prepare.outputs.version }}
+          final-tag: ${{ github.ref_name }}
+          repo: open-cli-collective/Retune
+          working-directory: .
+          bootstrap: true
+          x64-marker: Retune-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+          arm64-marker: Retune-${{ needs.prepare.outputs.version }}-windows-arm64-setup.exe
+          github-token: ${{ github.token }}
+          winget-token: ${{ secrets.WINGET_GITHUB_TOKEN }}
+
+      - name: Note Winget failure
+        if: failure()
+        shell: bash
+        run: echo "⚠️ Winget submission failed for OpenCLICollective.Retune ${{ needs.prepare.outputs.version }}; see this job's logs" >> "$GITHUB_STEP_SUMMARY"
