@@ -391,6 +391,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn native_credential_builder_matches_platform() {
+        let builder = keyring::default::default_credential_builder();
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            builder
+                .as_any()
+                .is::<keyring::macos::MacCredentialBuilder>()
+        );
+        #[cfg(target_os = "windows")]
+        assert!(
+            builder
+                .as_any()
+                .is::<keyring::windows::WinCredentialBuilder>()
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            builder
+                .as_any()
+                .is::<keyring::secret_service::SsCredentialBuilder>()
+        );
+    }
+
+    #[test]
     fn cached_store_reads_inner_once_and_updates_after_writes() {
         let inner = Arc::new(CountingStore {
             tokens: Mutex::new(Some(tokens("initial"))),

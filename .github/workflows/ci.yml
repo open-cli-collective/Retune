@@ -43,7 +43,7 @@ jobs:
       matrix:
         include:
           - name: macOS arm64
-            os: macos-14
+            os: macos-15
             arch: arm64
             bundle: app
             output: macos
@@ -85,13 +85,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            curl \
+            file \
+            libasound2-dev \
             libayatana-appindicator3-dev \
             libdbus-1-dev \
             libssl-dev \
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            wget
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -121,7 +125,7 @@ jobs:
         if: startsWith(matrix.os, 'windows-') || startsWith(matrix.os, 'ubuntu-')
         run: |
           cargo test -p retune-audio --release
-          cargo test -p retune-desktop --release playback::file
+          cargo test -p retune-desktop --release local_files_remain_playable_without_playback_authorization
 
       - name: Build native bundle
         working-directory: apps/desktop

@@ -63,7 +63,8 @@ targets.
 
 Debug builds and local bundles built with the `dev-token-store` feature use the
 permission-restricted development token file. Ordinary release bundles never
-enable that feature and retain the encrypted-file/Keychain boundary.
+enable that feature and retain the encrypted-file/native credential-store
+boundary.
 
 ## Recovery and portability
 

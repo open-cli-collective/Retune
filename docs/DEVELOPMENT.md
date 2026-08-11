@@ -5,13 +5,14 @@
 - macOS arm64, Windows x64/ARM64, or Ubuntu 22.04 amd64/arm64
 - Rust stable, Node.js 22, and npm
 - Xcode command-line build tools on macOS
-- Tauri's Linux build dependencies plus `libdbus-1-dev` on Ubuntu
+- Tauri's Linux build dependencies plus `libasound2-dev` and `libdbus-1-dev` on
+  Ubuntu
 - A Spotify Premium account and Spotify application client ID for Spotify paths
 
 Configure the Spotify application's redirect URI to the loopback address shown
 by Retune. Debug builds and `scripts/build-install.sh` use the app's development
-token file; release builds encrypt tokens and use macOS Keychain for the
-encryption key.
+token file; release builds encrypt tokens and use the platform-native credential
+store for the encryption key.
 
 ## Run
 
