@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, playbackOriginAction, playbackQueue, playlistRows, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, playbackOriginAction, playbackQueue, playlistRows, replacementQueue, selectionAfterFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
@@ -61,6 +61,7 @@ type Action =
   | { type: 'selectTrack'; id: number }
   | { type: 'selection'; ids: Set<number>; anchor?: number }
   | { type: 'play'; id: number; queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
+  | { type: 'queue'; queue: readonly PlaybackTrack[]; origin: PlaybackOrigin }
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
@@ -149,11 +150,7 @@ function reducer(state: State, action: Action): State {
     case 'playlist':
       return { ...state, selectedPlaylist: action.id, spotifyNavigation: undefined, sel: {}, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
-      const sel = action.facet === 'cat'
-        ? { cat: action.values }
-        : action.facet === 'art'
-          ? { cat: state.sel.cat, art: action.values }
-          : { ...state.sel, alb: action.values }
+      const sel = selectionAfterFacet(state.sel, action.facet, action.values)
       return { ...state, sel, selectedTrackIds: new Set(), selectionAnchor: undefined }
     }
     case 'query':
@@ -176,6 +173,10 @@ function reducer(state: State, action: Action): State {
           shuffle: state.settings.shuffle, origin: action.origin, simulated: true,
         },
       }
+    case 'queue':
+      return state.playing
+        ? { ...state, playing: { ...state.playing, queue: action.queue, origin: action.origin } }
+        : state
     case 'togglePlay':
       return state.playing
         ? { ...state, playing: { ...state.playing, isPlaying: !state.playing.isPlaying } }
@@ -260,11 +261,13 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const origin = useRef<PlaybackOrigin | undefined>(undefined)
   const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin } | null>(null)
+  const starting = useRef<{ id: number; uri: string } | null>(null)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
   playingRef.current = playing
 
   useTauriEvent<PlayerState>('player-state', (player) => {
+    if (starting.current?.id === player.trackId && starting.current.uri === player.uri && !player.external) starting.current = null
     if (player.external) origin.current = undefined
     dispatch({ type: 'playerState', player, queue: queue.current, origin: origin.current })
   })
@@ -291,20 +294,40 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
     if (target?.uri.startsWith('file:') || target?.uri.startsWith('spotify:')) {
       queue.current = playable
       origin.current = launchOrigin
-      run('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+      starting.current = { id, uri: target.uri }
+      invoke('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+        .catch((error) => {
+          if (starting.current?.id === id && starting.current.uri === target.uri) starting.current = null
+          dispatch({ type: 'error', error: String(error) })
+        })
       return
     }
     dispatch({ type: 'play', id, queue: playable, origin: launchOrigin })
   }, [connected, dispatch, run])
 
+  const replace = useCallback((tracks: readonly PlaybackTrack[], nextOrigin: PlaybackOrigin) => {
+    if (starting.current) return
+    const replacement = replacementQueue(tracks, playingRef.current)
+    if (!replacement) return
+    if (playingRef.current?.simulated) {
+      dispatch({ type: 'queue', queue: replacement.queue, origin: nextOrigin })
+      return
+    }
+    invoke('replace_queue', { snapshot: replacement.queue, currentIndex: replacement.index })
+      .then(() => {
+        queue.current = replacement.queue
+        origin.current = nextOrigin
+        dispatch({ type: 'queue', queue: replacement.queue, origin: nextOrigin })
+      })
+      .catch((error) => dispatch({ type: 'error', error: String(error) }))
+  }, [dispatch])
+
   useEffect(() => {
     if (!connected || !pendingPlay.current) return
     const { id, tracks, origin: launchOrigin } = pendingPlay.current
     pendingPlay.current = null
-    queue.current = tracks
-    origin.current = launchOrigin
-    run('play_tracks', { snapshot: tracks, startIndex: tracks.findIndex((track) => track.id === id) })
-  }, [connected, run])
+    start(id, tracks, launchOrigin)
+  }, [connected, start])
 
   const toggle = useCallback(() => {
     if (liveBackend()) {
@@ -341,7 +364,7 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
-  return useMemo(() => ({ start, toggle, step, setVolume, seek }), [seek, setVolume, start, step, toggle])
+  return useMemo(() => ({ start, replace, toggle, step, setVolume, seek }), [replace, seek, setVolume, start, step, toggle])
 }
 
 function App() {
@@ -352,12 +375,13 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const [artworkOpen, setArtworkOpen] = useState(false)
+  const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
   const skipSettingsSave = useRef(false)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
-  const browseKey = browseRequestKey(state.source, state.sel, state.query, state.scope, state.revision)
+  const browseKey = browseRequestKey(state.source, state.sel, state.query, state.scope)
   const view = browseViewForRequest(state.view, state.viewKey, browseKey)
   const tracks = view?.tracks ?? emptyTracks
   const displayedTracks = useMemo(() => state.settings.sortColumn
@@ -382,6 +406,24 @@ function App() {
     }
     dispatch({ type: 'select', facet, values })
   }, [])
+  const playFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
+    selectFacet(facet, values, anchor)
+    setBrowserPlayKey(browseRequestKey(state.source, selectionAfterFacet(state.sel, facet, values), state.query, state.scope))
+  }, [selectFacet, state.query, state.scope, state.sel, state.source])
+  useEffect(() => {
+    if (!browserPlayKey) return
+    if (browserPlayKey !== browseKey) {
+      setBrowserPlayKey(undefined)
+      return
+    }
+    if (state.viewKey !== browserPlayKey) return
+    setBrowserPlayKey(undefined)
+    const first = displayedTracks[0]
+    if (first && tracklistVisible) player.start(first.id, displayedTracks, { kind: 'library', source: state.source })
+  }, [browserPlayKey, browseKey, displayedTracks, player, state.source, state.viewKey, tracklistVisible])
+  useEffect(() => {
+    if (!browserPlayKey && tracklistVisible) player.replace(displayedTracks, { kind: 'library', source: state.source })
+  }, [browserPlayKey, displayedTracks, player, state.playing?.queue, state.source, tracklistVisible])
   const setBrowserPanes = useCallback((browserPanes: BrowserPanes) => {
     for (const facet of ['cat', 'art', 'alb'] as const) {
       if (!browserPanes[facet]) delete facetAnchors.current[facet]
@@ -410,7 +452,7 @@ function App() {
 
   useEffect(() => {
     let active = true
-    const requestKey = browseRequestKey(state.source, state.sel, state.query, state.scope, state.revision)
+    const requestKey = browseRequestKey(state.source, state.sel, state.query, state.scope)
     invoke<BrowseView>('browse', {
       source: state.source,
       sel: { cat: state.sel.cat ?? [], art: state.sel.art ?? [], alb: state.sel.alb ?? [] },
@@ -780,7 +822,7 @@ function App() {
           />
           : (
             <>
-              <BrowserPane state={{ ...state, view }} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onToggle={toggleBrowserPane} />
+              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onPlay={playFacet} onToggle={toggleBrowserPane} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
                 <AlbumRatingStrip
                   album={selectedAlbum}

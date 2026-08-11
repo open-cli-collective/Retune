@@ -129,6 +129,10 @@ button { color: inherit; }
 .rating-stars button:disabled { opacity: 1; }
 .track-list { position: relative; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .track-scroll { min-height: 0; flex: 1; overflow: auto; }
+.track-scroll::-webkit-scrollbar { width: 11px; height: 11px; }
+.track-scroll::-webkit-scrollbar-track { background: var(--control); }
+.track-scroll::-webkit-scrollbar-thumb { border: 2px solid var(--control); border-radius: 6px; background: var(--dim); }
+.track-scroll::-webkit-scrollbar-corner { background: var(--control); }
 .track-scroll.empty-library { display: flex; flex-direction: column; }
 .track-scroll.empty-library .empty-prompt { flex: 1; justify-content: center; }
 .empty-prompt { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; color: var(--dim); text-align: center; }

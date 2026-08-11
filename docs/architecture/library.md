@@ -36,6 +36,12 @@ derived from it. Choosing a broader facet clears invalid narrower selections.
 Alternate views should consume the same library rather than introduce another
 canonical model.
 
+The UI keeps the last resolved projection visible while the same selection is
+refreshed. A source, facet, search, or scope change invalidates it until that
+new projection resolves, so playback cannot consume rows from the prior view.
+Double-clicking a facet row waits for that exact projection, then starts its
+first visible track with the full projection as the new queue.
+
 ## Track sorting
 
 An explicit column sort uses that column as its primary key, followed by disc,

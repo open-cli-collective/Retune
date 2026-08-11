@@ -1,4 +1,4 @@
-import type { ColumnKey, PlaybackOrigin, PlaybackTrack, PlaylistSubject, Selection, Source, Track } from './types.ts'
+import type { ColumnKey, PlaybackOrigin, PlaybackTrack, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -10,11 +10,16 @@ export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) =>
 export const normalizeZoom = (zoom: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Math.round(zoom * 100) / 100))
 
-export const browseRequestKey = (source: Source, selection: Selection, query: string, scope: 'library' | 'spotify', revision: number) =>
-  JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], query, scope, revision])
+export const browseRequestKey = (source: Source, selection: Selection, query: string, scope: 'library' | 'spotify') =>
+  JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], query, scope])
 
 export const browseViewForRequest = <T>(view: T | null, resolvedKey: string | undefined, requestKey: string) =>
   resolvedKey === requestKey ? view : null
+
+export const selectionAfterFacet = (selection: Selection, facet: keyof Selection, values: string[]): Selection =>
+  facet === 'cat' ? { cat: values }
+    : facet === 'art' ? { cat: selection.cat, art: values }
+      : { ...selection, alb: values }
 
 export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) =>
   Math.max(28, Math.round(startWidth + clientX - startX))
@@ -27,6 +32,15 @@ export const clearedTrackRating = (inherited: number | null) =>
 
 export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: number) =>
   tracks.filter((track) => track.enabled || track.id === requestedId)
+
+export const replacementQueue = (tracks: readonly PlaybackTrack[], playing: Playing | null) => {
+  if (!playing || playing.external || playing.trackId === null) return null
+  const queue = playbackQueue(tracks, playing.trackId)
+  const index = queue.findIndex((track) => isCurrentTrack(playing, track))
+  const unchanged = queue.length === playing.queue.length
+    && queue.every((track, row) => playing.queue[row]?.id === track.id && playing.queue[row]?.uri === track.uri)
+  return index < 0 || unchanged ? null : { queue, index }
+}
 
 export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
   ? { type: 'playlist' as const, id: origin.id }

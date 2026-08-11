@@ -481,6 +481,42 @@ impl Playback {
         .await
     }
 
+    pub async fn replace_queue(
+        &self,
+        tracks: Vec<SnapshotTrack>,
+        index: usize,
+    ) -> Result<(), String> {
+        if tracks.is_empty() || index >= tracks.len() {
+            return Err("Choose a track to play".into());
+        }
+        let mut state = self.state.lock().await;
+        let current_uri = state
+            .reducer
+            .snapshot()
+            .map(|snapshot| snapshot.current().uri.as_str())
+            .ok_or("Nothing is playing")?;
+        if tracks[index].uri != current_uri {
+            return Err("The replacement queue must keep the current track".into());
+        }
+        let snapshot = Snapshot::new_with(tracks, index, state.reducer.shuffle(), |suffix| {
+            suffix.shuffle(&mut rand::rng())
+        });
+        state.reducer.set_snapshot(Some(snapshot.clone()));
+        let repeat = state.reducer.repeat().to_owned();
+        state
+            .backend
+            .set_shuffle_snapshot(Some(snapshot.clone()), &repeat)
+            .await;
+        if snapshot.current().uri.starts_with("spotify:") {
+            if let Some(next) = preload_track(&snapshot, &repeat) {
+                if next.uri.starts_with("spotify:") {
+                    state.backend.preload(&next.uri)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn play_with(
         &self,
         client: Option<Arc<LiveClient>>,
@@ -1173,6 +1209,66 @@ mod tests {
         let state = playback.state.lock().await;
         assert_eq!(state.file.request_id(), before);
         assert!(state.reducer.state().shuffle);
+    }
+
+    #[tokio::test]
+    async fn replacing_queue_preserves_the_current_load_and_repeat_policy() {
+        let playback = Playback::default();
+        playback.play(None, file_tracks(1), 0).await.unwrap();
+        playback.set_repeat(None, "all").await.unwrap();
+        let before = playback.state.lock().await.file.request_id();
+
+        assert_eq!(
+            playback.replace_queue(file_tracks(2), 1).await.unwrap_err(),
+            "The replacement queue must keep the current track"
+        );
+        playback.replace_queue(file_tracks(3), 0).await.unwrap();
+
+        {
+            let mut state = playback.state.lock().await;
+            let snapshot = state.reducer.snapshot().unwrap();
+            assert_eq!(state.file.request_id(), before);
+            assert_eq!(snapshot.current().id, 1);
+            assert_eq!(snapshot.len(), 3);
+            assert_eq!(state.reducer.repeat(), "all");
+            let generation = state.generation;
+            assert!(state
+                .reducer
+                .handle(NeutralEvent::RequestIdChanged {
+                    generation,
+                    request_id: before,
+                })
+                .is_empty());
+            assert!(matches!(
+                state
+                    .reducer
+                    .handle(NeutralEvent::EndOfTrack {
+                        generation,
+                        request_id: before,
+                        uri: "file:///definitely/missing/1.mp3".into(),
+                    })
+                    .as_slice(),
+                [ReducerAction::TrackCompleted(_), ReducerAction::Advance]
+            ));
+            playback.step_locked(&mut state, None, 1).await.unwrap();
+            assert_eq!(state.reducer.snapshot().unwrap().current().id, 2);
+        }
+
+        for expected in [3, 1] {
+            playback.next(None).await.unwrap();
+            assert_eq!(
+                playback
+                    .state
+                    .lock()
+                    .await
+                    .reducer
+                    .snapshot()
+                    .unwrap()
+                    .current()
+                    .id,
+                expected
+            );
+        }
     }
 
     #[tokio::test]

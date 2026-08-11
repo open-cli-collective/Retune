@@ -1,31 +1,53 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { PlaybackTrack } from '../src/types.ts'
-import { browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, resizedColumnWidth, resizedPaneHeight, SYNTHETIC_BASE } from '../src/ui.ts'
+import type { PlaybackTrack, Playing } from '../src/types.ts'
+import { browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, SYNTHETIC_BASE } from '../src/ui.ts'
 
-test('pending narrower browse criteria cannot use the prior resolved tracks', () => {
+test('pending navigation cannot use prior tracks, while a data refresh keeps them visible', () => {
   const broadQueue: PlaybackTrack[] = [
     { id: 1, uri: 'fixture:track:1', name: 'Welcome', art: 'Artist', alb: 'Broad Album', durationSecs: 180, enabled: true },
     { id: 2, uri: 'fixture:track:2', name: 'Americana', art: 'Artist', alb: 'Broad Album', durationSecs: 200, enabled: true },
   ]
   const baseSelection = {}
-  const resolvedKey = browseRequestKey('music', baseSelection, '', 'library', 0)
-  const pendingKey = browseRequestKey('music', { alb: ['America, The Dream Goes On'] }, '', 'library', 0)
+  const resolvedKey = browseRequestKey('music', baseSelection, '', 'library')
+  const refreshKey = browseRequestKey('music', baseSelection, '', 'library')
+  const pendingKey = browseRequestKey('music', { alb: ['America, The Dream Goes On'] }, '', 'library')
 
   assert.deepEqual(playbackQueue(browseViewForRequest(broadQueue, resolvedKey, resolvedKey) ?? [], 1).map((track) => track.id), [1, 2])
   assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, pendingKey) ?? [], [])
+  assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, refreshKey), broadQueue)
 
   // Category, artist, and album selections are browser-pane selection changes.
   const changedKeys = [
-    browseRequestKey('podcasts', baseSelection, '', 'library', 0),
-    browseRequestKey('music', { cat: ['Rock'] }, '', 'library', 0),
-    browseRequestKey('music', { art: ['Artist'] }, '', 'library', 0),
+    browseRequestKey('podcasts', baseSelection, '', 'library'),
+    browseRequestKey('music', { cat: ['Rock'] }, '', 'library'),
+    browseRequestKey('music', { art: ['Artist'] }, '', 'library'),
     pendingKey,
-    browseRequestKey('music', baseSelection, 'America', 'library', 0),
-    browseRequestKey('music', baseSelection, '', 'spotify', 0),
-    browseRequestKey('music', baseSelection, '', 'library', 1),
+    browseRequestKey('music', baseSelection, 'America', 'library'),
+    browseRequestKey('music', baseSelection, '', 'spotify'),
   ]
   assert.equal(new Set([resolvedKey, ...changedKeys]).size, changedKeys.length + 1)
+})
+
+test('facet selection preserves broader columns and clears narrower columns', () => {
+  const selection = { cat: ['Soundtrack'], art: ['Howard Shore'], alb: ['The Lord of the Rings'] }
+
+  assert.deepEqual(selectionAfterFacet(selection, 'cat', ['Punk']), { cat: ['Punk'] })
+  assert.deepEqual(selectionAfterFacet(selection, 'art', ['Hans Zimmer']), { cat: ['Soundtrack'], art: ['Hans Zimmer'] })
+  assert.deepEqual(selectionAfterFacet(selection, 'alb', ['The Hobbit']), { ...selection, alb: ['The Hobbit'] })
+})
+
+test('a resolved view containing the current track replaces its queue at that row', () => {
+  const tracks = [
+    { id: 1, uri: 'spotify:track:1', enabled: true },
+    { id: 2, uri: 'spotify:track:2', enabled: true },
+    { id: 3, uri: 'spotify:track:3', enabled: true },
+  ] as PlaybackTrack[]
+  const playing = { trackId: 2, uri: tracks[1].uri, external: false, queue: [tracks[1]] } as Playing
+
+  assert.deepEqual(replacementQueue(tracks, playing), { queue: tracks, index: 1 })
+  assert.equal(replacementQueue(tracks, { ...playing, uri: 'spotify:track:else' }), null)
+  assert.equal(replacementQueue(tracks, { ...playing, queue: tracks }), null)
 })
 
 test('the music catch-all has a user-facing genre label', () => {

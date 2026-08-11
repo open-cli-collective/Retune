@@ -11,6 +11,18 @@ pub(super) async fn play_tracks(
     state.playback.play(client, snapshot, start_index).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub(super) async fn replace_queue(
+    app: tauri::AppHandle,
+    snapshot: Vec<SnapshotTrack>,
+    current_index: usize,
+) -> Result<(), String> {
+    app.state::<AppState>()
+        .playback
+        .replace_queue(snapshot, current_index)
+        .await
+}
+
 #[tauri::command]
 pub(super) async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();

@@ -3,11 +3,12 @@ import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settin
 import { COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 
-export function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: {
+export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle }: {
   state: { source: Source; view: BrowseView | null; settings: Pick<Settings, 'browserPanes' | 'browserVisible'>; sel: Selection }
   anchors: { current: Partial<Record<keyof Selection, string>> }
   onActivate: (facet: keyof Selection) => void
   onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
+  onPlay: (facet: keyof Selection, values: string[], anchor?: string) => void
   onToggle: (facet: keyof Selection) => void
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number }>()
@@ -23,7 +24,7 @@ export function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: 
   const adjustHeight = (delta: number) => setHeight((current) => resizedPaneHeight(current, 0, delta, maxHeight(), 1))
   return <div ref={pane} className="browser-pane" style={{ height, flexBasis: height }}>
     <div className="browser-scroll"><div className="browser-columns" style={{ minWidth: `${visible.length * 200}px`, gridTemplateColumns: `repeat(${visible.length}, minmax(200px, 1fr))` }}>
-      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onContextMenu={(event) => {
+      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onPlay={(selected, anchor) => onPlay(facet, selected, anchor)} onContextMenu={(event) => {
         event.preventDefault()
         setMenu({ x: event.clientX, y: event.clientY })
       }} />)}
@@ -53,7 +54,7 @@ export function BrowserPane({ state, anchors, onActivate, onSelect, onToggle }: 
   </div>
 }
 
-function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect, onContextMenu }: {
+function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect, onPlay, onContextMenu }: {
   facet: keyof Selection
   title: string
   values: string[]
@@ -61,6 +62,7 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   anchor?: string
   onActivate: () => void
   onSelect: (values: string[], anchor?: string) => void
+  onPlay: (values: string[], anchor?: string) => void
   onContextMenu: (event: React.MouseEvent) => void
 }) {
   const select = (value: string, event: React.MouseEvent) => {
@@ -77,11 +79,11 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   return <div className="facet-column" data-facet={facet} onMouseDown={onActivate} onContextMenu={onContextMenu}>
     <div className="column-header">{title}</div>
     <div className="facet-list">
-      <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)}>All ({values.length} {title}s)</button>
+      <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)} onDoubleClick={() => onPlay([], undefined)}>All ({values.length} {title}s)</button>
       {values.map((value, index) => {
         const label = facetLabel(title, value)
         const meta = label !== value
-        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
+        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} onDoubleClick={() => onPlay([value], value)} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
       })}
     </div>
   </div>

@@ -19,6 +19,12 @@ Ordinary queues omit overlay tracks disabled by the user. Explicitly starting a
 disabled track includes that track for the run while later advancement still skips
 the other disabled tracks.
 
+When a resolved Library view contains the current track, it replaces the
+controller's queue without reloading that track. Repeat off continues through
+the rows below it, repeat all may wrap to rows above it, and repeat one remains
+on the current track. Views that do not contain the current track leave the
+active queue unchanged.
+
 ## Backends
 
 - Built-in Spotify uses librespot with the current OAuth token, a soft mixer,
