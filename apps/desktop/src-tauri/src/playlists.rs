@@ -7,7 +7,6 @@ use retune_spotify::{
     Error,
 };
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 const PLAYLIST_PAGE_SIZE: u32 = 50;
 const TRACK_PAGE_SIZE: u32 = 50;
@@ -230,9 +229,8 @@ pub(crate) fn reject_local_uris(
         .filter(|uri| uri.starts_with("file:"))
         .map(|uri| {
             name(uri).unwrap_or_else(|| {
-                Url::parse(uri)
+                crate::localfiles::path_from_file_uri(uri)
                     .ok()
-                    .and_then(|url| url.to_file_path().ok())
                     .and_then(|path| {
                         path.file_name()
                             .map(|name| name.to_string_lossy().into_owned())
@@ -682,8 +680,9 @@ mod tests {
 
     #[test]
     fn local_uri_guard_bounds_reported_names() {
+        let root = std::env::temp_dir();
         let uris = (1..=5)
-            .map(|index| format!("file:///tmp/Track%20{index}.mp3"))
+            .map(|index| crate::localfiles::file_uri(&root.join(format!("Track {index}.mp3"))))
             .collect::<Vec<_>>();
 
         assert_eq!(

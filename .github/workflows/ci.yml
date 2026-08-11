@@ -33,3 +33,105 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit -p tsconfig.app.json
       - run: npm run build
+
+  native-bundles:
+    name: Native ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+            arch: arm64
+            bundle: app
+            output: macos
+          - name: Windows x64
+            os: windows-2025
+            arch: x64
+            bundle: nsis
+            output: nsis
+          - name: Windows ARM64
+            os: windows-11-arm
+            arch: arm64
+            bundle: nsis
+            output: nsis
+          - name: Ubuntu 22.04 amd64
+            os: ubuntu-22.04
+            arch: x64
+            bundle: deb
+            output: deb
+          - name: Ubuntu 22.04 arm64
+            os: ubuntu-22.04-arm
+            arch: arm64
+            bundle: deb
+            output: deb
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Verify native runner architecture
+        run: node -e "if (process.arch !== '${{ matrix.arch }}') { throw new Error('expected ${{ matrix.arch }}, got ' + process.arch) }"
+
+      - name: Install Ubuntu build dependencies
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            patchelf \
+            wget
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Validate stable runtime contracts
+        working-directory: apps/desktop
+        run: |
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            if (config.identifier !== 'com.rianjs.retune') throw new Error('bundle identifier changed');
+            const auth = fs.readFileSync('../../apps/desktop/src-tauri/src/spotify_commands.rs', 'utf8');
+            for (const value of ['bind_on(8898)', 'http://127.0.0.1:8898/callback']) {
+              if (!auth.includes(value)) throw new Error('missing callback contract: ' + value);
+            }
+          "
+
+      - name: Release native credential-store tests
+        run: cargo test --workspace --release --locked
+
+      - name: Verify local-only import and playback on non-macOS
+        if: startsWith(matrix.os, 'windows-') || startsWith(matrix.os, 'ubuntu-')
+        run: |
+          cargo test -p retune-audio --release
+          cargo test -p retune-desktop --release local_files_remain_playable_without_playback_authorization
+
+      - name: Build native bundle
+        working-directory: apps/desktop
+        run: npx tauri build --bundles ${{ matrix.bundle }}
+
+      - name: Verify native bundle output
+        working-directory: apps/desktop
+        run: |
+          node -e "const fs = require('node:fs'); const path = '../../target/release/bundle/${{ matrix.output }}'; const suffix = { app: '.app', nsis: '.exe', deb: '.deb' }['${{ matrix.bundle }}']; const entries = fs.existsSync(path) ? fs.readdirSync(path) : []; if (!entries.some(entry => entry.endsWith(suffix))) throw new Error('missing ' + suffix + ' bundle in ' + path)"

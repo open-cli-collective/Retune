@@ -2,10 +2,12 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use retune_core::io::{export_json, import};
 use retune_core::model::Library;
@@ -494,9 +496,9 @@ impl OverlayStore for FsOverlayStore {
     }
 }
 
-/// Debug-build token store: a 0600 JSON file beside the overlay, so dev
-/// iteration never touches the Keychain (whose ACL grants reset with every
-/// rebuild's ad-hoc signature). Release builds use the Keychain.
+/// Debug-build token store: a permission-restricted JSON file beside the
+/// overlay, so dev iteration never touches the native credential store.
+/// Release builds use encrypted tokens with a native credential-store key.
 pub struct FsTokenStore {
     path: PathBuf,
 }
@@ -527,7 +529,12 @@ impl TokenStore for FsTokenStore {
     fn save(&self, tokens: &Tokens) -> retune_spotify::Result<()> {
         let bytes = serde_json::to_vec(tokens).map_err(token_error)?;
         atomic_write(&self.path, &bytes).map_err(token_error)?;
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)).map_err(token_error)
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+                .map_err(token_error)?;
+        }
+        Ok(())
     }
 
     fn clear(&self) -> retune_spotify::Result<()> {
@@ -562,6 +569,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> StoreResult<()> {
 mod tests {
     use std::fs;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use crate::fixture;
 
@@ -591,11 +601,14 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         store.save(&tokens).unwrap();
         assert_eq!(store.load().unwrap(), Some(tokens));
-        let mode = fs::metadata(dir.path().join("dev-tokens.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(dir.path().join("dev-tokens.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         store.clear().unwrap();
         assert!(store.load().unwrap().is_none());
         store.clear().unwrap();

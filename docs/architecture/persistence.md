@@ -13,12 +13,13 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `cooldowns.json` | Typed Spotify endpoint cooldowns |
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
 | `tokens.enc` | Encrypted release OAuth token state |
-| `dev-tokens.json` | Development token state, mode 0600 |
+| `dev-tokens.json` | Development token state; mode 0600 on Unix |
 
 The token record has an optional reusable built-in playback credential containing
 the librespot username and AP authentication bytes. Its absence is the default,
 so older token files remain readable. Release builds keep it inside encrypted
-`tokens.enc`; development token files retain the existing mode-0600 boundary.
+`tokens.enc`; on Unix, development token files retain the existing mode-0600
+boundary.
 Refreshing the Web API token preserves the playback credential. Playback
 rejection removes only this field, while explicit Spotify disconnect removes the
 whole token record. It is machine-specific and never belongs in backup/export.
@@ -54,13 +55,17 @@ and excluded from backup and restore.
 ## OAuth token security
 
 Release builds encrypt `tokens.enc` with authenticated encryption. A random file
-key is stored in macOS Keychain under service `com.rianjs.retune` and account
-`token-file-key`. A legacy Keychain token entry is migrated into the encrypted
-file and then removed. An in-process cache avoids repeated credential prompts.
+key is stored in the platform-native credential store under service
+`com.rianjs.retune` and account `token-file-key`: macOS Keychain, Windows
+Credential Manager, or Linux Secret Service. A legacy native token entry is
+migrated into the encrypted file and then removed. An in-process cache avoids
+repeated credential prompts. The keyring mock backend is not enabled for release
+targets.
 
 Debug builds and local bundles built with the `dev-token-store` feature use the
-permission-restricted development token file. Ordinary release bundles never
-enable that feature and retain the encrypted-file/Keychain boundary.
+development token file. On Unix, Retune creates and checks that file with mode
+0600. Ordinary release bundles never enable that feature and retain the
+encrypted-file/native credential-store boundary.
 
 ## Recovery and portability
 

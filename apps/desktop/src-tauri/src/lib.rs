@@ -2126,7 +2126,7 @@ pub fn run() {
             settings_store.save(&settings)?;
             let menu_checks = install_file_menu(app, &settings)?;
             // Dev builds keep tokens in a 0600 plaintext file. Release keeps
-            // only the encryption key in Keychain.
+            // only the encryption key in the native credential store.
             let use_dev_token_store = cfg!(any(debug_assertions, feature = "dev-token-store"));
             let backing: Box<dyn TokenStore> = if use_dev_token_store {
                 Box::new(store::FsTokenStore::new(&app_data_dir))
@@ -2134,8 +2134,8 @@ pub fn run() {
                 Box::new(EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?)
             };
             let token_store = Arc::new(CachedTokenStore::new(backing));
-            // Keychain access can fail transiently; start disconnected rather
-            // than aborting startup.
+            // Native credential-store access can fail transiently; start
+            // disconnected rather than aborting startup.
             let connection = match token_store.load() {
                 Ok(tokens) => ConnectionState::from_tokens(tokens),
                 Err(error) => {
@@ -2401,8 +2401,9 @@ mod tests {
     #[test]
     fn track_info_view_decodes_only_local_file_paths() {
         let mut library = Library::new();
+        let local_path = std::env::temp_dir().join("Rétune song.mp3");
         let local = library.add(metadata_track(
-            "file:///tmp/R%C3%A9tune%20song.mp3",
+            &localfiles::file_uri(&local_path),
             "Genre",
             "Artist",
             "Album",
@@ -2416,7 +2417,7 @@ mod tests {
 
         assert_eq!(
             TrackInfoView::from_track(&library, library.get(local).unwrap()).local_path,
-            Some("/tmp/Rétune song.mp3".into())
+            Some(local_path.to_string_lossy().into_owned())
         );
         assert_eq!(
             TrackInfoView::from_track(&library, library.get(spotify).unwrap()).local_path,
