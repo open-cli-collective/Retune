@@ -1,5 +1,8 @@
 use std::{sync::Mutex, time::Duration};
 
+#[cfg(target_os = "windows")]
+use std::ffi::c_void;
+
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
 };
@@ -29,10 +32,25 @@ type MetadataKey = (
 
 impl MediaKeys {
     pub fn spawn(app: tauri::AppHandle) -> Self {
+        #[cfg(target_os = "windows")]
+        let hwnd = app
+            .get_webview_window("main")
+            .and_then(|window| window.hwnd().ok())
+            .map(|hwnd| hwnd.0 as *mut c_void)
+            .filter(|hwnd| !hwnd.is_null());
+        #[cfg(not(target_os = "windows"))]
+        let hwnd = None;
+
+        #[cfg(target_os = "windows")]
+        if hwnd.is_none() {
+            log::warn!("Media key setup failed: main window has no HWND");
+            return Self { controls: None };
+        }
+
         let result = MediaControls::new(PlatformConfig {
             dbus_name: "retune",
             display_name: "Retune",
-            hwnd: None,
+            hwnd,
         })
         .and_then(|mut controls| {
             controls.attach(move |event| handle_control(&app, event))?;

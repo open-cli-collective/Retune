@@ -74,7 +74,8 @@ updates state, advances the queue, and records threshold-based play counts.
 
 ## Current constraints
 
-- The desktop shell currently targets macOS.
+- The desktop shell targets macOS arm64, Windows x64/ARM64, and Ubuntu 22.04
+  amd64/arm64.
 - Spotify Premium is required for built-in Spotify playback.
 - Spotify restricts third-party access to playlists the current user does not
   own; Retune does not request those items.

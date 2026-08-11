@@ -8,7 +8,11 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 chrono = "0.4"
 httpdate = "1"
-keyring = { version = "3", features = ["apple-native"] }
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "linux-native-sync-persistent",
+] }
 log = "0.4"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

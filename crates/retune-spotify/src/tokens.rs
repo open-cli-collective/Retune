@@ -1,10 +1,12 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chacha20poly1305::{
@@ -146,11 +148,11 @@ trait KeySource: Send + Sync {
     fn load_or_create(&self) -> Result<[u8; 32]>;
 }
 
-struct KeychainKeySource {
+struct NativeKeySource {
     entry: keyring::Entry,
 }
 
-impl KeychainKeySource {
+impl NativeKeySource {
     fn new() -> Result<Self> {
         keyring::Entry::new(SERVICE, KEY_ACCOUNT)
             .map(|entry| Self { entry })
@@ -158,9 +160,9 @@ impl KeychainKeySource {
     }
 }
 
-impl KeySource for KeychainKeySource {
+impl KeySource for NativeKeySource {
     fn load_or_create(&self) -> Result<[u8; 32]> {
-        log::debug!("Loading Spotify token file key from Keychain");
+        log::debug!("Loading Spotify token file key from native credential store");
         match self.entry.get_password() {
             Ok(value) => BASE64
                 .decode(value)
@@ -188,10 +190,7 @@ pub struct EncryptedFsTokenStore {
 
 impl EncryptedFsTokenStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::with_key_source(
-            app_data_dir,
-            KeychainKeySource::new()?,
-        ))
+        Ok(Self::with_key_source(app_data_dir, NativeKeySource::new()?))
     }
 
     fn with_key_source(
@@ -278,11 +277,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(parent).map_err(token_error)?;
     let temporary = path.with_extension(format!("tmp-{}", rand::random::<u64>()));
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)
@@ -326,9 +325,11 @@ impl TokenStore for InMemoryTokenStore {
 mod tests {
     use std::{
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt},
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use super::*;
 
@@ -528,6 +529,7 @@ mod tests {
         store.save(&tokens("second")).unwrap();
         assert_eq!(store.load().unwrap(), Some(tokens("second")));
         assert_eq!(loads.load(Ordering::Relaxed), 1);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(dir.path().join("tokens.enc"))
                 .unwrap()
@@ -551,11 +553,13 @@ mod tests {
 
         store.save(&tokens("same")).unwrap();
         let first = fs::read(&path).unwrap();
+        #[cfg(unix)]
         let first_inode = fs::metadata(&path).unwrap().ino();
         store.save(&tokens("same")).unwrap();
         let second = fs::read(&path).unwrap();
 
         assert_ne!(first, second);
+        #[cfg(unix)]
         assert_ne!(first_inode, fs::metadata(path).unwrap().ino());
     }
 

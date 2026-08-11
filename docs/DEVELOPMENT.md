@@ -2,8 +2,10 @@
 
 ## Prerequisites
 
-- macOS, Rust stable, Node.js 22, and npm
-- Xcode command-line build tools
+- macOS arm64, Windows x64/ARM64, or Ubuntu 22.04 amd64/arm64
+- Rust stable, Node.js 22, and npm
+- Xcode command-line build tools on macOS
+- Tauri's Linux build dependencies plus `libdbus-1-dev` on Ubuntu
 - A Spotify Premium account and Spotify application client ID for Spotify paths
 
 Configure the Spotify application's redirect URI to the loopback address shown
@@ -20,8 +22,14 @@ npm exec tauri dev
 ```
 
 Package a production-like release with `npm exec tauri build` from
-`apps/desktop`. For local release-mode testing without repeated Keychain prompts,
-run `scripts/build-install.sh` from the repository root.
+`apps/desktop`. On macOS, for local release-mode testing without repeated native
+credential prompts, run `scripts/build-install.sh` from the repository root.
+
+Native CI builds the Tauri app bundle on macOS arm64, Windows x64/ARM64, and
+Ubuntu 22.04 amd64/arm64. The Windows and Linux jobs run release Rust tests,
+including local-file import/playback tests, before building their native bundle;
+those jobs are the cross-platform proof that release builds select persistent
+native credential stores.
 
 ## Checks
 

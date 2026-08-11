@@ -54,9 +54,12 @@ and excluded from backup and restore.
 ## OAuth token security
 
 Release builds encrypt `tokens.enc` with authenticated encryption. A random file
-key is stored in macOS Keychain under service `com.rianjs.retune` and account
-`token-file-key`. A legacy Keychain token entry is migrated into the encrypted
-file and then removed. An in-process cache avoids repeated credential prompts.
+key is stored in the platform-native credential store under service
+`com.rianjs.retune` and account `token-file-key`: macOS Keychain, Windows
+Credential Manager, or Linux Secret Service. A legacy native token entry is
+migrated into the encrypted file and then removed. An in-process cache avoids
+repeated credential prompts. The keyring mock backend is not enabled for release
+targets.
 
 Debug builds and local bundles built with the `dev-token-store` feature use the
 permission-restricted development token file. Ordinary release bundles never
