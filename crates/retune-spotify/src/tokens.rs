@@ -516,8 +516,15 @@ mod tests {
         store.clear().unwrap();
         assert_eq!(loads.load(Ordering::Relaxed), 0);
         assert_eq!(store.load().unwrap(), None);
-        store.save(&tokens("first")).unwrap();
-        assert_eq!(store.load().unwrap(), Some(tokens("first")));
+        let first = Tokens {
+            playback_credentials: Some(PlaybackCredentials {
+                username: "user".into(),
+                auth_data: vec![1, 2, 3],
+            }),
+            ..tokens("first")
+        };
+        store.save(&first).unwrap();
+        assert_eq!(store.load().unwrap(), Some(first));
         store.save(&tokens("second")).unwrap();
         assert_eq!(store.load().unwrap(), Some(tokens("second")));
         assert_eq!(loads.load(Ordering::Relaxed), 1);
