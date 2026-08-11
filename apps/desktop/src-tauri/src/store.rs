@@ -585,6 +585,7 @@ mod tests {
             refresh: "refresh".into(),
             expires_at: 42,
             scopes: "streaming".into(),
+            playback_credentials: None,
         };
 
         assert!(store.load().unwrap().is_none());

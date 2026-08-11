@@ -31,6 +31,7 @@ chrono = "0.4"
 log = "0.4"
 librespot-audio = { version = "0.8", default-features = false }
 librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-protocol = { version = "0.8", default-features = false }
 librespot-playback = { version = "0.8", default-features = false, features = ["rodio-backend", "rustls-tls-native-roots"] }
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-dialog = "2"

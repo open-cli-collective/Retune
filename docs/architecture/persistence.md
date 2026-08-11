@@ -15,6 +15,14 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state, mode 0600 |
 
+The token record has an optional reusable built-in playback credential containing
+the librespot username and AP authentication bytes. Its absence is the default,
+so older token files remain readable. Release builds keep it inside encrypted
+`tokens.enc`; development token files retain the existing mode-0600 boundary.
+Refreshing the Web API token preserves the playback credential. Playback
+rejection removes only this field, while explicit Spotify disconnect removes the
+whole token record. It is machine-specific and never belongs in backup/export.
+
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.
 

@@ -3,11 +3,11 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, playbackOriginAction, playbackQueue, playlistRows, replacementQueue, selectionAfterFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
-import { GetInfo, MultipleItemInformation, Preferences, SetupLibrary } from './dialogViews.tsx'
+import { browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, selectionAfterFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
-import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
+import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
@@ -38,6 +38,7 @@ type State = {
   info?: InfoDialog
   preferences: boolean
   setup: boolean
+  playbackAuthorization: PlaybackAuthorizationPrompt | null
   connection: ConnectionState
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
@@ -76,6 +77,7 @@ type Action =
   | { type: 'info'; info?: InfoDialog }
   | { type: 'preferences'; open: boolean }
   | { type: 'setup'; open: boolean }
+  | { type: 'playbackAuthorization'; prompt: PlaybackAuthorizationPrompt | null }
   | { type: 'connection'; connection: ConnectionState }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
@@ -131,7 +133,8 @@ const initialState: State = {
   revision: 0,
   preferences: false,
   setup: false,
-  connection: { connected: false, needs_reauth: false },
+  playbackAuthorization: null,
+  connection: { connected: false, needs_reauth: false, playback_authorized: false },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,
@@ -222,8 +225,12 @@ function reducer(state: State, action: Action): State {
       return { ...state, preferences: action.open, setup: false, info: undefined }
     case 'setup':
       return { ...state, setup: action.open, preferences: false, info: undefined }
+    case 'playbackAuthorization':
+      return action.prompt
+        ? { ...state, playbackAuthorization: action.prompt, info: undefined, preferences: false, setup: false }
+        : { ...state, playbackAuthorization: null }
     case 'connection':
-      return { ...state, connection: action.connection }
+      return { ...state, connection: action.connection, playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization }
     case 'spotifyResults':
       return { ...state, spotifyResults: action.results, spotifySearching: false }
     case 'spotifySearching':
@@ -257,10 +264,10 @@ function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void
   }, [event])
 }
 
-function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
+function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const origin = useRef<PlaybackOrigin | undefined>(undefined)
-  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin } | null>(null)
+  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin; awaitingPlaybackAuthorization: boolean } | null>(null)
   const starting = useRef<{ id: number; uri: string } | null>(null)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
@@ -270,6 +277,12 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
     if (starting.current?.id === player.trackId && starting.current.uri === player.uri && !player.external) starting.current = null
     if (player.external) origin.current = undefined
     dispatch({ type: 'playerState', player, queue: queue.current, origin: origin.current })
+  })
+
+  useTauriEvent<PlaybackAuthorizationPrompt>('playback-authorization-required', (prompt) => {
+    const id = pendingPlaybackTarget(prompt, queue.current)
+    if (id !== null) pendingPlay.current = { id, tracks: queue.current, origin: origin.current, awaitingPlaybackAuthorization: true }
+    dispatch({ type: 'playbackAuthorization', prompt })
   })
 
   const run = useCallback((command: string, args?: Record<string, unknown>) => {
@@ -284,10 +297,10 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin) => {
     const playable = playbackQueue(tracks, id)
     const target = playable.find((track) => track.id === id)
-    if (target?.uri.startsWith('spotify:') && !connected) {
+    if (playbackStartAction(target?.uri, connected) === 'connect') {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
-      pendingPlay.current = { id, tracks: playable, origin: launchOrigin }
+      pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: false }
       run('connect_spotify')
       return
     }
@@ -295,7 +308,14 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
       queue.current = playable
       origin.current = launchOrigin
       starting.current = { id, uri: target.uri }
-      invoke('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+      invoke<PlayOutcome>('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+        .then((outcome) => {
+          const prompt = playbackAuthorizationPrompt(outcome)
+          if (!prompt) return
+          if (starting.current?.id === id && starting.current.uri === target.uri) starting.current = null
+          pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
+          dispatch({ type: 'playbackAuthorization', prompt })
+        })
         .catch((error) => {
           if (starting.current?.id === id && starting.current.uri === target.uri) starting.current = null
           dispatch({ type: 'error', error: String(error) })
@@ -313,8 +333,9 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
       dispatch({ type: 'queue', queue: replacement.queue, origin: nextOrigin })
       return
     }
-    invoke('replace_queue', { snapshot: replacement.queue, currentIndex: replacement.index })
-      .then(() => {
+    invoke<PlayOutcome>('replace_queue', { snapshot: replacement.queue, currentIndex: replacement.index })
+      .then((outcome) => {
+        if (playbackAuthorizationPrompt(outcome)) return
         queue.current = replacement.queue
         origin.current = nextOrigin
         dispatch({ type: 'queue', queue: replacement.queue, origin: nextOrigin })
@@ -324,10 +345,16 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
   useEffect(() => {
     if (!connected || !pendingPlay.current) return
+    if (!playbackRetryReady(connected, playbackAuthorized, pendingPlay.current.awaitingPlaybackAuthorization)) return
     const { id, tracks, origin: launchOrigin } = pendingPlay.current
     pendingPlay.current = null
     start(id, tracks, launchOrigin)
-  }, [connected, start])
+  }, [connected, playbackAuthorized, start])
+
+  const cancelPending = useCallback(() => {
+    pendingPlay.current = null
+    dispatch({ type: 'playbackAuthorization', prompt: null })
+  }, [dispatch])
 
   const toggle = useCallback(() => {
     if (liveBackend()) {
@@ -364,7 +391,7 @@ function usePlayer(connected: boolean, playing: Playing | null, dispatch: React.
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
-  return useMemo(() => ({ start, replace, toggle, step, setVolume, seek }), [replace, seek, setVolume, start, step, toggle])
+  return useMemo(() => ({ start, replace, toggle, step, setVolume, seek, cancelPending }), [cancelPending, replace, seek, setVolume, start, step, toggle])
 }
 
 function App() {
@@ -392,7 +419,7 @@ function App() {
   const tracklistVisible = !spotifySearchActive && !state.selectedPlaylist
   const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
   const playbackTracks = state.playing?.queue ?? emptyTracks
-  const player = usePlayer(state.connection.connected, state.playing, dispatch)
+  const player = usePlayer(state.connection.connected, state.connection.playback_authorized, state.playing, dispatch)
   const addToPlaylist = useCallback((id: string, subject: PlaylistSubject) => subject.kind === 'album'
     ? invoke('playlist_add_album', { id, albumUri: subject.albumUri, albumLabel: subject.label })
     : invoke('playlist_add', { id, uris: subject.uris }), [])
@@ -633,12 +660,13 @@ function App() {
 
   const onKeyDown = useRef<(event: KeyboardEvent) => void>(() => {})
   onKeyDown.current = (event: KeyboardEvent) => {
-    const modalOpen = Boolean(state.info || state.preferences || state.setup || playlistSubject)
+    const modalOpen = Boolean(state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject)
     if (event.key === 'Escape' && modalOpen) {
       event.preventDefault()
       if (state.info) dispatch({ type: 'info' })
       else if (state.preferences) cancelPreferences()
       else if (state.setup) dispatch({ type: 'setup', open: false })
+      else if (state.playbackAuthorization) player.cancelPending()
       else setPlaylistSubject(undefined)
       return
     }
@@ -720,13 +748,13 @@ function App() {
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences || state.setup || playlistSubject) return
+      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject) return
       event.preventDefault()
       setZoom(state.settings.zoom + (event.deltaY < 0 ? 0.1 : -0.1))
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [playlistSubject, state.info, state.preferences, state.setup, state.settings.zoom])
+  }, [playlistSubject, state.info, state.playbackAuthorization, state.preferences, state.setup, state.settings.zoom])
 
   const selectedPlaylist = playlists?.find((playlist) => playlist.id === state.selectedPlaylist)
   const playlistHiddenColumns = selectedPlaylist
@@ -912,6 +940,7 @@ function App() {
           .catch(fail)
         dispatch({ type: 'preferences', open: false })
       }} />}
+      {state.playbackAuthorization && <PlaybackAuthorization prompt={state.playbackAuthorization} onCancel={player.cancelPending} onAuthorize={() => invoke('authorize_spotify_playback')} />}
       {playlistSubject && <AddToPlaylist subject={playlistSubject} revision={state.playlistRevision} onAdd={addToPlaylist} onClose={() => setPlaylistSubject(undefined)} onError={(error) => dispatch({ type: 'error', error })} />}
       {nativeDragActive && <div className="native-drop-overlay"><strong>Drop to add to Library</strong><span>Audio files and folders</span></div>}
     </main>

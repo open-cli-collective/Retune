@@ -4129,6 +4129,7 @@ dependencies = [
  "librespot-audio",
  "librespot-core",
  "librespot-playback",
+ "librespot-protocol",
  "log",
  "rand 0.9.5",
  "reqwest 0.12.28",

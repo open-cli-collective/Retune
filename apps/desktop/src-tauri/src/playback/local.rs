@@ -2,7 +2,11 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use librespot_audio::AudioFetchParams;
 use librespot_core::{
-    authentication::Credentials, cache::Cache, config::SessionConfig, session::Session,
+    authentication::Credentials,
+    cache::Cache,
+    config::SessionConfig,
+    error::{Error as LibrespotError, ErrorKind},
+    session::Session,
     spotify_uri::SpotifyUri,
 };
 use librespot_playback::{
@@ -11,9 +15,13 @@ use librespot_playback::{
     mixer::{self, Mixer, MixerConfig},
     player::{Player, PlayerEvent},
 };
+use librespot_protocol::authentication::AuthenticationType;
+use retune_spotify::tokens::TokenStore;
 use tokio::sync::mpsc;
 
-use super::{AudioSettings, LiveClient, NeutralEvent, Snapshot};
+use super::{
+    AudioSettings, LiveClient, NeutralEvent, PlaybackAuthorizationReason, PlaybackError, Snapshot,
+};
 
 struct Runtime {
     session: Session,
@@ -53,11 +61,8 @@ impl LocalBackend {
         volume: u8,
         cache_dir: Option<&Path>,
         audio: AudioSettings,
-    ) -> Result<Self, String> {
-        let access = client
-            .access_token()
-            .await
-            .map_err(|error| error.to_string())?;
+    ) -> Result<Self, PlaybackError> {
+        let credentials = stored_credentials(client)?;
         // Read farther ahead to survive short network stalls.
         let _ = AudioFetchParams::set(AudioFetchParams {
             read_ahead_during_playback: Duration::from_secs(30),
@@ -66,22 +71,26 @@ impl LocalBackend {
         let cache = cache_dir.and_then(audio_cache);
         let session = Session::new(SessionConfig::default(), cache);
         session
-            .connect(Credentials::with_access_token(access), false)
+            .connect(credentials, false)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| session_error(client, error))?;
+        if let Err(error) = session.login5().auth_token().await {
+            session.shutdown();
+            return Err(session_error(client, error));
+        }
 
         let mixer = mixer::find(None)
-            .ok_or_else(|| "librespot soft mixer is unavailable.".to_string())?(
+            .ok_or_else(|| PlaybackError::message("librespot soft mixer is unavailable."))?(
             MixerConfig {
                 volume_ctrl: VolumeCtrl::Linear,
                 ..MixerConfig::default()
             },
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| PlaybackError::message(error.to_string()))?;
         mixer.set_volume(soft_volume(volume));
         let volume_getter = mixer.get_soft_volume();
         let sink = audio_backend::find(Some("rodio".into()))
-            .ok_or_else(|| "librespot rodio output is unavailable.".to_string())?;
+            .ok_or_else(|| PlaybackError::message("librespot rodio output is unavailable."))?;
         let player = Player::new(
             PlayerConfig {
                 bitrate: bitrate(audio.bitrate),
@@ -129,16 +138,16 @@ impl LocalBackend {
             .is_none_or(|runtime| runtime.session.is_invalid())
     }
 
-    pub(super) async fn refresh_session(&mut self, client: &LiveClient) -> Result<(), String> {
-        let access = client
-            .access_token()
-            .await
-            .map_err(|error| error.to_string())?;
+    pub(super) async fn refresh_session(
+        &mut self,
+        client: &LiveClient,
+    ) -> Result<(), PlaybackError> {
+        let credentials = stored_credentials(client)?;
         let (config, cache) = {
             let runtime = self
                 .runtime
                 .as_ref()
-                .ok_or("Local playback is unavailable")?;
+                .ok_or_else(|| PlaybackError::message("Local playback is unavailable"))?;
             (
                 runtime.session.config().clone(),
                 runtime.session.cache().map(|cache| cache.as_ref().clone()),
@@ -146,20 +155,40 @@ impl LocalBackend {
         };
         let session = Session::new(config, cache);
         session
-            .connect(Credentials::with_access_token(access), false)
+            .connect(credentials, false)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| session_error(client, error))?;
+        if let Err(error) = session.login5().auth_token().await {
+            session.shutdown();
+            return Err(session_error(client, error));
+        }
         let runtime = self
             .runtime
             .as_mut()
-            .ok_or("Local playback is unavailable")?;
+            .ok_or_else(|| PlaybackError::message("Local playback is unavailable"))?;
         if runtime.player.is_invalid() {
             session.shutdown();
-            return Err("Local playback stopped while reconnecting to Spotify".into());
+            return Err(PlaybackError::message(
+                "Local playback stopped while reconnecting to Spotify",
+            ));
         }
         runtime.player.set_session(session.clone());
         runtime.session = session;
         Ok(())
+    }
+
+    pub(super) async fn preflight(&self, client: &LiveClient) -> Result<(), PlaybackError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| PlaybackError::message("Local playback is unavailable"))?;
+        runtime
+            .session
+            .login5()
+            .auth_token()
+            .await
+            .map(|_| ())
+            .map_err(|error| session_error(client, error))
     }
 
     pub(super) fn play(
@@ -272,6 +301,50 @@ fn bitrate(value: u16) -> Bitrate {
     }
 }
 
+fn stored_credentials(client: &LiveClient) -> Result<Credentials, PlaybackError> {
+    let tokens = client
+        .token_store()
+        .load()
+        .map_err(|error| PlaybackError::message(error.to_string()))?;
+    let credentials = tokens
+        .and_then(|tokens| tokens.playback_credentials)
+        .filter(|credentials| !credentials.username.is_empty() && !credentials.auth_data.is_empty())
+        .ok_or_else(|| PlaybackError::authorization(PlaybackAuthorizationReason::Missing))?;
+    Ok(Credentials {
+        username: Some(credentials.username),
+        auth_type: AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS,
+        auth_data: credentials.auth_data,
+    })
+}
+
+fn session_error(client: &LiveClient, error: LibrespotError) -> PlaybackError {
+    if !matches!(
+        error.kind,
+        ErrorKind::PermissionDenied | ErrorKind::Unauthenticated | ErrorKind::FailedPrecondition
+    ) {
+        return PlaybackError::message(error.to_string());
+    }
+    log::warn!(
+        "Spotify playback authorization rejected during session verification; clearing stored credential (kind={:?}, error={error:?})",
+        error.kind
+    );
+    match client.token_store().load() {
+        Ok(Some(mut tokens)) => {
+            tokens.playback_credentials = None;
+            match client.token_store().save(&tokens) {
+                Ok(()) => PlaybackError::authorization(PlaybackAuthorizationReason::Rejected),
+                Err(clear_error) => PlaybackError::message(format!(
+                    "Spotify playback authorization was rejected and could not be cleared: {clear_error}"
+                )),
+            }
+        }
+        Ok(None) => PlaybackError::authorization(PlaybackAuthorizationReason::Rejected),
+        Err(load_error) => PlaybackError::message(format!(
+            "Spotify playback authorization was rejected and could not be cleared: {load_error}"
+        )),
+    }
+}
+
 fn audio_cache(app_data_dir: &Path) -> Option<Cache> {
     let audio_path = app_data_dir.join("audio-cache");
     match Cache::new(
@@ -307,7 +380,21 @@ fn monitor(
         while let Some(event) = receiver.recv().await {
             if let PlayerEvent::Preloading { track_id } = &event {
                 if let Ok(uri) = track_id.to_uri() {
-                    log::info!("Preload ready: generation={generation} uri={uri}");
+                    log::info!("Spotify playback operation=preload ready: generation={generation} uri={uri}");
+                }
+            }
+            if let PlayerEvent::Unavailable {
+                play_request_id,
+                track_id,
+            } = &event
+            {
+                match track_id.to_uri() {
+                    Ok(uri) => log::warn!(
+                        "Spotify playback operation=load unavailable: generation={generation} request_id={play_request_id} uri={uri}"
+                    ),
+                    Err(_) => log::warn!(
+                        "Spotify playback operation=load unavailable: generation={generation} request_id={play_request_id}"
+                    ),
                 }
             }
             if let Some(event) = neutral_event(event, generation) {
@@ -426,6 +513,10 @@ fn neutral_event(event: PlayerEvent, generation: u64) -> Option<NeutralEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use retune_spotify::{
+        client::{HttpTransport, SpotifyClient},
+        tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials, Tokens},
+    };
 
     #[tokio::test]
     async fn monitor_reports_only_player_event_channel_closure() {
@@ -468,5 +559,68 @@ mod tests {
         assert_eq!(bitrate(160), Bitrate::Bitrate160);
         assert_eq!(bitrate(320), Bitrate::Bitrate320);
         assert_eq!(bitrate(0), Bitrate::Bitrate320);
+    }
+
+    #[test]
+    fn semantic_playback_rejection_clears_only_playback_credentials() {
+        let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(Some(Tokens {
+            access: "web-access".into(),
+            refresh: "web-refresh".into(),
+            expires_at: 0,
+            scopes: "user-library-read".into(),
+            playback_credentials: Some(PlaybackCredentials {
+                username: "user".into(),
+                auth_data: vec![1, 2, 3],
+            }),
+        })));
+        let store = Arc::new(CachedTokenStore::new(tokens));
+        let client = SpotifyClient::new("test", HttpTransport::new(), Arc::clone(&store));
+        let error = LibrespotError::new(
+            ErrorKind::PermissionDenied,
+            std::io::Error::other("rejected"),
+        );
+
+        assert!(matches!(
+            session_error(&client, error),
+            PlaybackError::AuthorizationRequired {
+                reason: PlaybackAuthorizationReason::Rejected,
+                ..
+            }
+        ));
+        let saved = store.load().unwrap().unwrap();
+        assert_eq!(saved.access, "web-access");
+        assert_eq!(saved.refresh, "web-refresh");
+        assert!(saved.playback_credentials.is_none());
+    }
+
+    #[test]
+    fn transient_session_error_keeps_playback_credentials() {
+        let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(Some(Tokens {
+            access: "web-access".into(),
+            refresh: "web-refresh".into(),
+            expires_at: 0,
+            scopes: "user-library-read".into(),
+            playback_credentials: Some(PlaybackCredentials {
+                username: "user".into(),
+                auth_data: vec![1, 2, 3],
+            }),
+        })));
+        let store = Arc::new(CachedTokenStore::new(tokens));
+        let client = SpotifyClient::new("test", HttpTransport::new(), Arc::clone(&store));
+        let error = LibrespotError::new(
+            ErrorKind::Unavailable,
+            std::io::Error::other("network unavailable"),
+        );
+
+        assert!(matches!(
+            session_error(&client, error),
+            PlaybackError::Message(_)
+        ));
+        assert!(store
+            .load()
+            .unwrap()
+            .unwrap()
+            .playback_credentials
+            .is_some());
     }
 }

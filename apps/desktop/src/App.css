@@ -231,6 +231,7 @@ button { color: inherit; }
 .sync-status { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .sync-meter { width: 120px; height: 5px; accent-color: var(--accent); }
 .error-banner { position: absolute; right: 10px; bottom: 30px; max-width: 430px; padding: 5px 8px; border: 1px solid #b33; color: #fff; background: #8d2d2d; }
+.dialog-error { color: var(--danger); }
 .startup-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--notice-border); color: var(--notice-text); background: var(--notice-bg); }
 .startup-notice button { border: 0; color: inherit; background: transparent; font-size: 16px; }
 .reauth-notice button { padding: 3px 8px; border: 1px solid currentColor; border-radius: 3px; font-size: inherit; }

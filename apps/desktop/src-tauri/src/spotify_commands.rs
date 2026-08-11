@@ -1,4 +1,6 @@
 use super::*;
+use librespot_core::{authentication::Credentials, config::SessionConfig, session::Session};
+use retune_spotify::tokens::PlaybackCredentials;
 
 #[tauri::command]
 pub(super) fn connection_state(
@@ -53,6 +55,11 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
     let now = unix_now();
     let state = app.state::<AppState>();
     let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.clone());
+    let playback_credentials = state
+        .token_store
+        .load()
+        .map_err(|error| error.to_string())?
+        .and_then(|tokens| tokens.playback_credentials);
     state
         .token_store
         .save(&Tokens {
@@ -60,6 +67,7 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
             refresh,
             expires_at: now.saturating_add(token.expires_in),
             scopes: granted_scopes,
+            playback_credentials,
         })
         .map_err(|error| error.to_string())?;
     *state.spotify.lock().expect("spotify mutex poisoned") =
@@ -67,6 +75,81 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
     set_auto_connect(&app, true)?;
     emit_connection_state(&app)?;
     sync_spotify(&app).await
+}
+
+#[tauri::command]
+pub(super) async fn authorize_spotify_playback(app: tauri::AppHandle) -> Result<(), String> {
+    let client_id = SessionConfig::default().client_id;
+    let listener = LoopbackListener::bind_on(8898).map_err(|error| error.to_string())?;
+    let redirect_uri = listener
+        .redirect_uri_for("/login")
+        .map_err(|error| error.to_string())?;
+    let state = auth::random_state();
+    let pkce = Pkce::generate();
+    let url = auth::authorize_url_with_scopes(
+        &client_id,
+        &redirect_uri,
+        &state,
+        &pkce.challenge,
+        auth::PLAYBACK_SCOPE,
+    )
+    .map_err(|error| error.to_string())?;
+    app.opener()
+        .open_url(url.to_string(), None::<String>)
+        .map_err(|error| error.to_string())?;
+    let callback = tauri::async_runtime::spawn_blocking(move || {
+        listener.accept_path(&state, "/login", Duration::from_secs(180))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    let token = auth::exchange_code(
+        &reqwest::Client::new(),
+        &client_id,
+        &callback.code,
+        &redirect_uri,
+        &pkce.verifier,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let session = Session::new(SessionConfig::default(), None);
+    session
+        .connect(Credentials::with_access_token(token.access_token), false)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = session.login5().auth_token().await {
+        session.shutdown();
+        return Err(error.to_string());
+    }
+    let playback_credentials = playback_credentials(session.username(), session.auth_data())?;
+    session.shutdown();
+
+    let state = app.state::<AppState>();
+    let mut tokens = state
+        .token_store
+        .load()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Connect to Spotify before authorizing playback.".to_string())?;
+    tokens.playback_credentials = Some(playback_credentials);
+    state
+        .token_store
+        .save(&tokens)
+        .map_err(|error| error.to_string())?;
+    emit_connection_state(&app)
+}
+
+fn playback_credentials(
+    username: String,
+    auth_data: Vec<u8>,
+) -> Result<PlaybackCredentials, String> {
+    if username.is_empty() || auth_data.is_empty() {
+        return Err("Spotify did not return reusable playback credentials.".into());
+    }
+    Ok(PlaybackCredentials {
+        username,
+        auth_data,
+    })
 }
 
 #[tauri::command]
@@ -363,4 +446,21 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
     })?;
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::playback_credentials;
+
+    #[test]
+    fn playback_credentials_require_both_session_parts() {
+        assert!(playback_credentials(String::new(), vec![1]).is_err());
+        assert!(playback_credentials("user".into(), vec![]).is_err());
+        assert_eq!(
+            playback_credentials("user".into(), vec![1, 2, 3])
+                .unwrap()
+                .auth_data,
+            [1, 2, 3]
+        );
+    }
 }
