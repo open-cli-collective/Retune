@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn file_uri_round_trips_spaces_and_unicode() {
-        let path = PathBuf::from("/tmp/Rétune song.mp3");
+        let path = std::env::temp_dir().join("Rétune song.mp3");
         let uri = file_uri(&path);
         assert_eq!(path_from_file_uri(&uri).unwrap(), path);
         assert!(uri.contains("%20"));
@@ -361,7 +361,7 @@ mod tests {
         local.kind = None;
         local.bitrate_kbps = None;
         let local_id = library.add(local.clone());
-        local.uri = "file:///definitely/missing/song.flac".into();
+        local.uri = file_uri(&std::env::temp_dir().join("definitely/missing/song.flac"));
         let missing_id = library.add(local);
         let mut spotify = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
         spotify.uri = "spotify:track:one".into();

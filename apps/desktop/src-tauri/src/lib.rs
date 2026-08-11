@@ -2401,8 +2401,9 @@ mod tests {
     #[test]
     fn track_info_view_decodes_only_local_file_paths() {
         let mut library = Library::new();
+        let local_path = std::env::temp_dir().join("Rétune song.mp3");
         let local = library.add(metadata_track(
-            "file:///tmp/R%C3%A9tune%20song.mp3",
+            &localfiles::file_uri(&local_path),
             "Genre",
             "Artist",
             "Album",
@@ -2416,7 +2417,7 @@ mod tests {
 
         assert_eq!(
             TrackInfoView::from_track(&library, library.get(local).unwrap()).local_path,
-            Some("/tmp/Rétune song.mp3".into())
+            Some(local_path.to_string_lossy().into_owned())
         );
         assert_eq!(
             TrackInfoView::from_track(&library, library.get(spotify).unwrap()).local_path,
