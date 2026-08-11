@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { PlaybackTrack, Playing } from '../src/types.ts'
-import { browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, playbackOriginAction, playbackQueue, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, SYNTHETIC_BASE } from '../src/ui.ts'
+import { browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, SYNTHETIC_BASE } from '../src/ui.ts'
 
 test('pending navigation cannot use prior tracks, while a data refresh keeps them visible', () => {
   const broadQueue: PlaybackTrack[] = [
@@ -130,6 +130,21 @@ test('playlist highlights require both the synthetic id and Spotify URI', () => 
 test('playback origins return to the launching library or playlist', () => {
   assert.deepEqual(playbackOriginAction({ kind: 'library', source: 'podcasts' }), { type: 'source', source: 'podcasts' })
   assert.deepEqual(playbackOriginAction({ kind: 'playlist', id: 'road-trip' }), { type: 'playlist', id: 'road-trip' })
+})
+
+test('playback start and result decisions keep OAuth outside the controller', () => {
+  assert.equal(playbackStartAction('spotify:track:one', false), 'connect')
+  assert.equal(playbackStartAction('spotify:track:one', true), 'play')
+  assert.equal(playbackStartAction('file:///tmp/one.mp3', false), 'play')
+  const prompt = { reason: 'missing' as const, message: 'Authorize playback.', targetTrackId: 2 }
+  assert.deepEqual(playbackAuthorizationPrompt({ playbackAuthorizationRequired: prompt }), prompt)
+  assert.equal(playbackAuthorizationPrompt('started'), null)
+  assert.equal(pendingPlaybackTarget(prompt, [{ id: 2, uri: 'spotify:track:two', enabled: true }]), 2)
+  assert.equal(pendingPlaybackTarget(prompt, []), null)
+  assert.equal(playbackRetryReady(false, false, true), false)
+  assert.equal(playbackRetryReady(true, false, true), false)
+  assert.equal(playbackRetryReady(true, true, true), true)
+  assert.equal(playbackRetryReady(true, false, false), true)
 })
 
 test('track and disc sorts keep multi-disc albums in playback order', () => {

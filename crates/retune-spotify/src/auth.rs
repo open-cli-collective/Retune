@@ -12,12 +12,11 @@ use url::Url;
 
 use crate::{Error, Result};
 
-pub const REQUIRED_SCOPES: [&str; 12] = [
+pub const REQUIRED_SCOPES: [&str; 11] = [
     "user-library-read",
     "user-library-modify",
     "user-read-playback-state",
     "user-modify-playback-state",
-    "streaming",
     "user-read-private",
     "playlist-read-private",
     "playlist-read-collaborative",
@@ -27,6 +26,7 @@ pub const REQUIRED_SCOPES: [&str; 12] = [
     "user-follow-modify",
 ];
 pub static SCOPES: LazyLock<String> = LazyLock::new(|| REQUIRED_SCOPES.join(" "));
+pub const PLAYBACK_SCOPE: &str = "streaming";
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 
@@ -65,12 +65,22 @@ pub fn authorize_url(
     state: &str,
     challenge: &str,
 ) -> Result<Url> {
+    authorize_url_with_scopes(client_id, redirect_uri, state, challenge, &SCOPES)
+}
+
+pub fn authorize_url_with_scopes(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    challenge: &str,
+    scopes: &str,
+) -> Result<Url> {
     let mut url = Url::parse(AUTHORIZE_URL).expect("Spotify authorize URL is constant");
     url.query_pairs_mut()
         .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", &SCOPES)
+        .append_pair("scope", scopes)
         .append_pair("state", state)
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", challenge);
@@ -156,13 +166,29 @@ impl LoopbackListener {
     }
 
     pub fn redirect_uri(&self) -> Result<String> {
+        self.redirect_uri_for("/callback")
+    }
+
+    pub fn redirect_uri_for(&self, path: &str) -> Result<String> {
+        if !path.starts_with('/') {
+            return Err(Error::Callback("redirect path must start with '/'".into()));
+        }
         self.listener
             .local_addr()
-            .map(|address| format!("http://127.0.0.1:{}/callback", address.port()))
+            .map(|address| format!("http://127.0.0.1:{}{path}", address.port()))
             .map_err(|error| Error::Callback(error.to_string()))
     }
 
     pub fn accept(self, expected_state: &str, timeout: Duration) -> Result<Callback> {
+        self.accept_path(expected_state, "/callback", timeout)
+    }
+
+    pub fn accept_path(
+        self,
+        expected_state: &str,
+        expected_path: &str,
+        timeout: Duration,
+    ) -> Result<Callback> {
         self.listener
             .set_nonblocking(true)
             .map_err(|error| Error::Callback(error.to_string()))?;
@@ -217,7 +243,7 @@ impl LoopbackListener {
                 );
                 continue;
             };
-            if url.path() != "/callback" {
+            if url.path() != expected_path {
                 let _ = respond(&mut stream, "404 Not Found", "Not found.");
                 continue;
             }
@@ -309,6 +335,31 @@ mod tests {
     }
 
     #[test]
+    fn playback_authorize_url_requests_only_streaming() {
+        let url = authorize_url_with_scopes(
+            "client",
+            "http://127.0.0.1:8898/login",
+            "state",
+            "challenge",
+            PLAYBACK_SCOPE,
+        )
+        .unwrap();
+
+        assert_eq!(url.path(), "/authorize");
+        assert_eq!(
+            url.query_pairs().find(|(key, _)| key == "scope").unwrap().1,
+            PLAYBACK_SCOPE
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "redirect_uri")
+                .unwrap()
+                .1,
+            "http://127.0.0.1:8898/login"
+        );
+    }
+
+    #[test]
     fn callback_uses_a_real_loopback_request_and_checks_state() {
         let listener = LoopbackListener::bind().unwrap();
         let redirect = listener.redirect_uri().unwrap();
@@ -393,6 +444,23 @@ mod tests {
             handle.join().unwrap(),
             Err(Error::AccessDenied(_))
         ));
+    }
+
+    #[test]
+    fn callback_accepts_the_playback_login_path() {
+        let listener = LoopbackListener::bind().unwrap();
+        let redirect = listener.redirect_uri_for("/login").unwrap();
+        let handle =
+            thread::spawn(move || listener.accept_path("right", "/login", Duration::from_secs(1)));
+        let url = Url::parse(&redirect).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", url.port().unwrap())).unwrap();
+        write!(
+            stream,
+            "GET /login?code=ok&state=right HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        stream.read_to_string(&mut String::new()).unwrap();
+        assert_eq!(handle.join().unwrap().unwrap().code, "ok");
     }
 
     #[test]

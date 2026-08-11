@@ -1210,6 +1210,7 @@ mod tests {
             refresh: String::new(),
             expires_at: 0,
             scopes: "user-library-read".into(),
+            playback_credentials: None,
         };
         let error = Error::Http {
             endpoint: "/playlists/id/tracks".into(),

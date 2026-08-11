@@ -6,10 +6,18 @@ library membership, playlists, and playback activation.
 
 ## Authentication and tokens
 
-Authentication uses Authorization Code with PKCE (S256), a loopback redirect,
-state validation, and a bounded callback wait. Retune requests the library,
-playback, streaming, playlist, and follow scopes needed by its current features.
-If an existing grant lacks required scopes, the UI asks the user to reconnect.
+Web API authentication uses Authorization Code with PKCE (S256), a loopback
+redirect, state validation, and a bounded callback wait. Its grant covers the
+library, playlist, and follow scopes needed by sync and browsing; `streaming` is
+not a Web API requirement.
+
+Built-in playback has a separate OAuth flow. It uses the current librespot
+`SessionConfig` client ID, requests only `streaming`, and returns through the
+same loopback listener at `/login`. The one-time access token is used to create
+and verify a reusable librespot AP credential through login5, then only the
+reusable credential is stored alongside the Web API token state. Web-token
+refresh preserves it. A playback rejection clears only that credential; an
+explicit Spotify disconnect clears the whole token record.
 
 There is one shared `SpotifyClient`. Access-token refresh is coalesced behind a
 refresh lock; a request that receives 401 refreshes once and retries once. Token
@@ -66,3 +74,36 @@ Spotify endpoints, scopes, quotas, and eligibility rules are external contracts.
 Before changing them, verify current official Spotify documentation and cover
 the transport policy with fake-response tests. Do not bypass the shared client
 for a one-off endpoint.
+
+## Compatibility/research record — 2026-08-11
+
+This is an upstream compatibility change, not a correction to Retune's Web API
+OAuth flow. Retune previously passed its developer-app access token directly to
+a librespot session presenting Spotify's built-in client identity. That shortcut
+was less idiomatic than persisting the reusable AP credential, but it worked on
+2026-08-08. On 2026-08-10 login5
+started returning `FaultyRequest(INVALID_CREDENTIALS)` while the same account
+could still sync, browse, and search through the Web API. Music Assistant
+reported the same ecosystem-wide [incident][ma-incident] and shipped [its fix][ma-fix]
+that day:
+Spotify now rejects a playback credential minted under an application's own
+client ID when librespot presents Spotify's built-in client identity.
+
+No corresponding Spotify announcement was found. The conclusion therefore
+rests on Retune's logs, the independent Music Assistant incident and fix, and
+the current librespot 0.8 authentication path. The remedy is to authorize
+playback separately with librespot's current `SessionConfig` client ID, verify
+the resulting reusable credential through login5, and retain Web API tokens
+unchanged. This flow was also checked against Spotify's current [PKCE][spotify-pkce],
+[scope][spotify-scopes], and [loopback redirect][spotify-redirect] guidance.
+Login5 is an undocumented private protocol; its [librespot authentication
+history][librespot-auth] is evidence, not an official contract. This boundary must be verified
+again if Spotify or librespot changes it; do not collapse playback authorization
+back into the Web API grant. No librespot version or fork change is required.
+
+[spotify-pkce]: https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow
+[spotify-scopes]: https://developer.spotify.com/documentation/web-api/concepts/scopes
+[spotify-redirect]: https://developer.spotify.com/documentation/web-api/concepts/redirect_uri
+[ma-incident]: https://github.com/music-assistant/support/issues/6043
+[ma-fix]: https://github.com/music-assistant/server/pull/5568
+[librespot-auth]: https://github.com/librespot-org/librespot/pull/1309

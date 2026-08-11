@@ -1,14 +1,25 @@
 use super::*;
+use crate::playback::PlayOutcome;
 
 #[tauri::command(rename_all = "camelCase")]
 pub(super) async fn play_tracks(
     app: tauri::AppHandle,
     snapshot: Vec<SnapshotTrack>,
     start_index: usize,
-) -> Result<(), String> {
+) -> Result<PlayOutcome, String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state).ok();
-    state.playback.play(client, snapshot, start_index).await
+    let outcome = state
+        .playback
+        .play(client.clone(), snapshot, start_index)
+        .await?;
+    if let PlayOutcome::PlaybackAuthorizationRequired(prompt) = &outcome {
+        state
+            .playback
+            .stop_for_authorization(&app, prompt.clone())
+            .await;
+    }
+    Ok(outcome)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -16,10 +27,12 @@ pub(super) async fn replace_queue(
     app: tauri::AppHandle,
     snapshot: Vec<SnapshotTrack>,
     current_index: usize,
-) -> Result<(), String> {
-    app.state::<AppState>()
+) -> Result<PlayOutcome, String> {
+    let state = app.state::<AppState>();
+    let client = provider_from(&state).ok();
+    state
         .playback
-        .replace_queue(snapshot, current_index)
+        .replace_queue(client, snapshot, current_index)
         .await
 }
 
@@ -34,14 +47,20 @@ pub(super) async fn player_toggle(app: tauri::AppHandle) -> Result<(), String> {
 pub(super) async fn player_next(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state).ok();
-    state.playback.next(client).await
+    if let PlayOutcome::PlaybackAuthorizationRequired(prompt) = state.playback.next(client).await? {
+        state.playback.stop_for_authorization(&app, prompt).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub(super) async fn player_prev(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = provider_from(&state).ok();
-    state.playback.prev(client).await
+    if let PlayOutcome::PlaybackAuthorizationRequired(prompt) = state.playback.prev(client).await? {
+        state.playback.stop_for_authorization(&app, prompt).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]

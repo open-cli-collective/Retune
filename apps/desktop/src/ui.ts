@@ -1,4 +1,4 @@
-import type { ColumnKey, PlaybackOrigin, PlaybackTrack, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
+import type { ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -32,6 +32,18 @@ export const clearedTrackRating = (inherited: number | null) =>
 
 export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: number) =>
   tracks.filter((track) => track.enabled || track.id === requestedId)
+
+export const playbackStartAction = (uri: string | undefined, connected: boolean) =>
+  uri?.startsWith('spotify:') && !connected ? 'connect' as const : 'play' as const
+
+export const playbackAuthorizationPrompt = (outcome: PlayOutcome | undefined) =>
+  typeof outcome === 'object' ? outcome.playbackAuthorizationRequired : null
+
+export const pendingPlaybackTarget = (prompt: PlaybackAuthorizationPrompt, tracks: readonly PlaybackTrack[]) =>
+  tracks.some((track) => track.id === prompt.targetTrackId) ? prompt.targetTrackId : null
+
+export const playbackRetryReady = (connected: boolean, playbackAuthorized: boolean, awaitingAuthorization: boolean) =>
+  connected && (!awaitingAuthorization || playbackAuthorized)
 
 export const replacementQueue = (tracks: readonly PlaybackTrack[], playing: Playing | null) => {
   if (!playing || playing.external || playing.trackId === null) return null

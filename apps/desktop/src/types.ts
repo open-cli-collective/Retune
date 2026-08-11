@@ -35,7 +35,13 @@ export type Settings = {
   playThresholdPercent: PlayThresholdPercent
 }
 
-export type ConnectionState = { connected: boolean; needs_reauth: boolean }
+export type ConnectionState = { connected: boolean; needs_reauth: boolean; playback_authorized: boolean }
+export type PlaybackAuthorizationPrompt = {
+  reason: 'missing' | 'rejected'
+  message: string
+  targetTrackId: number
+}
+export type PlayOutcome = 'started' | { playbackAuthorizationRequired: PlaybackAuthorizationPrompt }
 export type ImportSummary = { imported: number; duplicates: number; failed: { path: string; reason: string }[] }
 export type PlaylistListView = {
   id: string

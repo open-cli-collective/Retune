@@ -5,7 +5,10 @@ mod reducer;
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -23,6 +26,117 @@ type LiveClient = SpotifyClient<HttpTransport, crate::SharedTokenStore>;
 
 const AUDIOBOOK_ERROR: &str = "Audiobook playback isn't supported yet.";
 const RECONNECT_DELAYS: &[u64] = &[0, 1, 2, 4, 8, 15, 30];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackAuthorizationReason {
+    Missing,
+    Rejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackAuthorizationPrompt {
+    reason: PlaybackAuthorizationReason,
+    message: String,
+    target_track_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlayOutcome {
+    Started,
+    PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt),
+}
+
+#[derive(Debug)]
+pub(super) enum PlaybackError {
+    AuthorizationRequired {
+        reason: PlaybackAuthorizationReason,
+        target_track_id: Option<u64>,
+    },
+    Message(String),
+}
+
+impl PlaybackError {
+    fn message(message: impl Into<String>) -> Self {
+        Self::Message(message.into())
+    }
+
+    fn authorization(reason: PlaybackAuthorizationReason) -> Self {
+        Self::AuthorizationRequired {
+            reason,
+            target_track_id: None,
+        }
+    }
+
+    fn with_target(self, target_track_id: u64) -> Self {
+        match self {
+            Self::AuthorizationRequired { reason, .. } => Self::AuthorizationRequired {
+                reason,
+                target_track_id: Some(target_track_id),
+            },
+            error => error,
+        }
+    }
+
+    fn into_prompt(self, fallback_target_track_id: u64) -> Option<PlaybackAuthorizationPrompt> {
+        match self {
+            Self::AuthorizationRequired {
+                reason,
+                target_track_id,
+            } => Some(PlaybackAuthorizationPrompt {
+                reason,
+                message: reason.message().into(),
+                target_track_id: target_track_id.unwrap_or(fallback_target_track_id),
+            }),
+            Self::Message(_) => None,
+        }
+    }
+
+    fn into_string(self) -> String {
+        match self {
+            Self::AuthorizationRequired { reason, .. } => reason.message().into(),
+            Self::Message(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for PlaybackError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthorizationRequired { reason, .. } => formatter.write_str(reason.message()),
+            Self::Message(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl PlaybackAuthorizationReason {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Missing => "Spotify playback needs one-time authorization before this track can play.",
+            Self::Rejected => "Spotify rejected the saved playback authorization. Authorize playback again before retrying this track.",
+        }
+    }
+}
+
+impl From<String> for PlaybackError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for PlaybackError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.into())
+    }
+}
+
+impl From<PlaybackError> for String {
+    fn from(error: PlaybackError) -> Self {
+        error.into_string()
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct AudioSettings {
@@ -374,6 +488,7 @@ pub struct Playback {
     receiver: Mutex<Option<mpsc::UnboundedReceiver<NeutralEvent>>>,
     cache_dir: Option<PathBuf>,
     audio: Mutex<AudioSettings>,
+    local_requested: AtomicBool,
 }
 
 impl Default for Playback {
@@ -419,7 +534,16 @@ impl Playback {
             receiver: Mutex::new(Some(receiver)),
             cache_dir,
             audio: Mutex::new(audio),
+            local_requested: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_local_requested(&self, requested: bool) {
+        self.local_requested.store(requested, Ordering::Relaxed);
+    }
+
+    fn local_requested(&self) -> bool {
+        self.local_requested.load(Ordering::Relaxed)
     }
 
     pub fn set_audio(&self, audio: AudioSettings) {
@@ -474,18 +598,32 @@ impl Playback {
         client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
-    ) -> Result<(), String> {
-        self.play_with(client, tracks, index, |suffix| {
-            suffix.shuffle(&mut rand::rng())
-        })
-        .await
+    ) -> Result<PlayOutcome, String> {
+        let target_track_id = tracks.get(index).map(|track| track.id).unwrap_or(0);
+        match self
+            .play_with(client, tracks, index, |suffix| {
+                suffix.shuffle(&mut rand::rng())
+            })
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(error @ PlaybackError::AuthorizationRequired { .. }) => {
+                Ok(PlayOutcome::PlaybackAuthorizationRequired(
+                    error
+                        .into_prompt(target_track_id)
+                        .expect("authorization errors produce prompts"),
+                ))
+            }
+            Err(error) => Err(error.into_string()),
+        }
     }
 
     pub async fn replace_queue(
         &self,
+        client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
-    ) -> Result<(), String> {
+    ) -> Result<PlayOutcome, String> {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
         }
@@ -501,20 +639,42 @@ impl Playback {
         let snapshot = Snapshot::new_with(tracks, index, state.reducer.shuffle(), |suffix| {
             suffix.shuffle(&mut rand::rng())
         });
-        state.reducer.set_snapshot(Some(snapshot.clone()));
         let repeat = state.reducer.repeat().to_owned();
+        let preload = snapshot
+            .current()
+            .uri
+            .starts_with("spotify:")
+            .then(|| preload_track(&snapshot, &repeat))
+            .flatten()
+            .filter(|track| track.uri.starts_with("spotify:"))
+            .cloned();
+        if self.local_requested() {
+            if let Some(next) = &preload {
+                let client = require_spotify(client.as_deref())?;
+                if let Err(error) = self.ensure_local_backend(&mut state, client).await {
+                    log_authorization_required("preload", &next.uri, &error);
+                    return match error.with_target(next.id) {
+                        error @ PlaybackError::AuthorizationRequired { .. } => {
+                            Ok(PlayOutcome::PlaybackAuthorizationRequired(
+                                error
+                                    .into_prompt(next.id)
+                                    .expect("authorization errors produce prompts"),
+                            ))
+                        }
+                        error => Err(error.into_string()),
+                    };
+                }
+            }
+        }
+        state.reducer.set_snapshot(Some(snapshot.clone()));
         state
             .backend
             .set_shuffle_snapshot(Some(snapshot.clone()), &repeat)
             .await;
-        if snapshot.current().uri.starts_with("spotify:") {
-            if let Some(next) = preload_track(&snapshot, &repeat) {
-                if next.uri.starts_with("spotify:") {
-                    state.backend.preload(&next.uri)?;
-                }
-            }
+        if let Some(next) = preload {
+            state.backend.preload(&next.uri)?;
         }
-        Ok(())
+        Ok(PlayOutcome::Started)
     }
 
     async fn play_with(
@@ -523,7 +683,7 @@ impl Playback {
         tracks: Vec<SnapshotTrack>,
         index: usize,
         permute: impl FnOnce(&mut [usize]),
-    ) -> Result<(), String> {
+    ) -> Result<PlayOutcome, PlaybackError> {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
         }
@@ -533,12 +693,21 @@ impl Playback {
                 generation,
                 message: AUDIOBOOK_ERROR.into(),
             });
-            return Ok(());
+            return Ok(PlayOutcome::Started);
         }
         let mut state = self.state.lock().await;
         let snapshot = Snapshot::new_with(tracks, index, state.reducer.shuffle(), permute);
+        if self.local_requested() && !is_file_uri(&snapshot.current().uri) {
+            let client = require_spotify(client.as_deref())?;
+            if let Err(error) = self.ensure_local_backend(&mut state, client).await {
+                log_authorization_required("load", &snapshot.current().uri, &error);
+                return Err(error.with_target(snapshot.current().id));
+            }
+        }
         state.reducer.set_snapshot(Some(snapshot));
-        self.load_current_locked(&mut state, client, true, 0).await
+        self.load_current_locked(&mut state, client, true, 0)
+            .await
+            .map(|_| PlayOutcome::Started)
     }
 
     pub async fn toggle(&self, client: Option<&LiveClient>) -> Result<(), String> {
@@ -571,15 +740,25 @@ impl Playback {
         state.backend.set_playing(client, playing).await
     }
 
-    pub async fn next(&self, client: Option<Arc<LiveClient>>) -> Result<(), String> {
-        self.step(client, 1).await
+    pub async fn next(&self, client: Option<Arc<LiveClient>>) -> Result<PlayOutcome, String> {
+        self.step(client, 1)
+            .await
+            .map(|_| PlayOutcome::Started)
+            .or_else(play_outcome_from_error)
     }
 
-    pub async fn prev(&self, client: Option<Arc<LiveClient>>) -> Result<(), String> {
-        self.step(client, -1).await
+    pub async fn prev(&self, client: Option<Arc<LiveClient>>) -> Result<PlayOutcome, String> {
+        self.step(client, -1)
+            .await
+            .map(|_| PlayOutcome::Started)
+            .or_else(play_outcome_from_error)
     }
 
-    async fn step(&self, client: Option<Arc<LiveClient>>, direction: i8) -> Result<(), String> {
+    async fn step(
+        &self,
+        client: Option<Arc<LiveClient>>,
+        direction: i8,
+    ) -> Result<(), PlaybackError> {
         let mut state = self.state.lock().await;
         self.step_locked(&mut state, client, direction).await
     }
@@ -656,7 +835,18 @@ impl Playback {
         Ok(())
     }
 
+    pub(crate) async fn stop_for_authorization(
+        &self,
+        app: &tauri::AppHandle,
+        prompt: PlaybackAuthorizationPrompt,
+    ) {
+        let mut state = self.state.lock().await;
+        self.report_authorization_required(app, &mut state, prompt)
+            .await;
+    }
+
     pub async fn switch_to_local(&self, client: &LiveClient, volume: u8) -> Result<(), String> {
+        self.set_local_requested(true);
         let audio = *self.audio.lock().expect("audio settings mutex poisoned");
         self.switch_to_local_with(Some(client), || async {
             let state = self.state.lock().await;
@@ -671,6 +861,7 @@ impl Playback {
                 audio,
             )
             .await
+            .map_err(PlaybackError::into_string)
         })
         .await
     }
@@ -700,6 +891,7 @@ impl Playback {
     }
 
     pub async fn switch_to_connect(&self) {
+        self.set_local_requested(false);
         let mut state = self.state.lock().await;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
@@ -739,14 +931,48 @@ impl Playback {
         if !state.backend.is_local() || state.reducer.snapshot().is_none() {
             return Ok(());
         }
-        self.ensure_player(&mut state, client).await
+        self.ensure_player(&mut state, client)
+            .await
+            .map_err(PlaybackError::into_string)
+    }
+
+    async fn ensure_local_backend(
+        &self,
+        state: &mut ControllerState,
+        client: &LiveClient,
+    ) -> Result<(), PlaybackError> {
+        if state.backend.is_local() {
+            self.ensure_session(state, client).await?;
+            return Ok(());
+        }
+
+        let generation = state.generation.wrapping_add(1);
+        let audio = *self.audio.lock().expect("audio settings mutex poisoned");
+        let local = LocalBackend::activate(
+            client,
+            self.events.clone(),
+            generation,
+            state.volume,
+            self.cache_dir.as_deref(),
+            audio,
+        )
+        .await?;
+        if let PlayerBackend::Connect(connect) = &mut state.backend {
+            connect.stop(Some(client)).await?;
+        }
+        state.generation = generation;
+        state.file.set_generation(generation);
+        state.reducer.activate(generation);
+        state.volume = local.volume();
+        state.backend = PlayerBackend::Local(local);
+        Ok(())
     }
 
     async fn ensure_player(
         &self,
         state: &mut ControllerState,
         client: &LiveClient,
-    ) -> Result<(), String> {
+    ) -> Result<(), PlaybackError> {
         let invalid =
             matches!(&state.backend, PlayerBackend::Local(local) if local.player_is_invalid());
         if !invalid {
@@ -784,11 +1010,14 @@ impl Playback {
         &self,
         state: &mut ControllerState,
         client: &LiveClient,
-    ) -> Result<(), String> {
+    ) -> Result<(), PlaybackError> {
         self.ensure_player(state, client).await?;
         let invalid =
             matches!(&state.backend, PlayerBackend::Local(local) if local.session_is_invalid());
         if !invalid {
+            if let PlayerBackend::Local(local) = &state.backend {
+                local.preflight(client).await?;
+            }
             return Ok(());
         }
         log::info!(
@@ -802,12 +1031,19 @@ impl Playback {
             "Spotify control session replaced; active player preserved generation={}",
             state.generation
         );
+        if let PlayerBackend::Local(local) = &state.backend {
+            local.preflight(client).await?;
+        }
         Ok(())
     }
 
     /// Outcome of one reconnect attempt. Superseded means a newer
     /// generation exists or there is nothing to resume — stop retrying.
-    async fn try_reconnect(&self, client: &LiveClient, generation: u64) -> Result<bool, String> {
+    async fn try_reconnect(
+        &self,
+        client: &LiveClient,
+        generation: u64,
+    ) -> Result<bool, PlaybackError> {
         let mut state = self.state.lock().await;
         if state.generation != generation
             || !state.backend.is_local()
@@ -815,7 +1051,10 @@ impl Playback {
         {
             return Ok(false);
         }
-        self.ensure_player(&mut state, client).await?;
+        let target_track_id = state.reducer.snapshot().unwrap().current().id;
+        self.ensure_player(&mut state, client)
+            .await
+            .map_err(|error| error.with_target(target_track_id))?;
         Ok(true)
     }
 
@@ -824,7 +1063,7 @@ impl Playback {
         state: &mut ControllerState,
         client: Option<Arc<LiveClient>>,
         direction: i8,
-    ) -> Result<(), String> {
+    ) -> Result<(), PlaybackError> {
         let wrap = direction > 0 && state.reducer.repeat() == "all";
         let Some(snapshot) = state.reducer.snapshot() else {
             return Ok(());
@@ -834,12 +1073,28 @@ impl Playback {
                 state.file.stop();
                 return Ok(());
             }
+            if self.local_requested() {
+                return Ok(state.backend.stop(client.as_deref()).await?);
+            }
             let client = require_spotify(client.as_deref())?;
             self.ensure_player(state, client).await?;
-            return state.backend.step(client, direction).await;
+            return state
+                .backend
+                .step(client, direction)
+                .await
+                .map_err(PlaybackError::from);
         };
         if reject_chapter(&snapshot.track_at(next).uri) {
             return Err(AUDIOBOOK_ERROR.into());
+        }
+        let next_track_id = snapshot.track_at(next).id;
+        let next_uri = snapshot.track_at(next).uri.clone();
+        if self.local_requested() && !is_file_uri(&next_uri) {
+            let client = require_spotify(client.as_deref())?;
+            if let Err(error) = self.ensure_local_backend(state, client).await {
+                log_authorization_required("advance", &next_uri, &error);
+                return Err(error.with_target(next_track_id));
+            }
         }
         state.reducer.snapshot_mut().unwrap().index = next;
         self.load_current_locked(state, client, true, 0).await
@@ -851,7 +1106,7 @@ impl Playback {
         client: Option<Arc<LiveClient>>,
         playing: bool,
         position_ms: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), PlaybackError> {
         let snapshot = state
             .reducer
             .snapshot()
@@ -861,15 +1116,42 @@ impl Playback {
         if is_file_uri(&uri) {
             state.backend.stop(client.as_deref()).await?;
             state.reducer.queue_load(&uri, playing);
-            return state.file.load(&uri, playing, position_ms);
+            return Ok(state.file.load(&uri, playing, position_ms)?);
         }
 
         state.file.stop_silently();
         let client = client.ok_or_else(missing_spotify)?;
-        self.ensure_session(state, client.as_ref()).await?;
+        if self.local_requested() {
+            if let Err(error) = self.ensure_local_backend(state, client.as_ref()).await {
+                log_authorization_required("load", &uri, &error);
+                return Err(error.with_target(snapshot.current().id));
+            }
+        } else {
+            self.ensure_session(state, client.as_ref()).await?;
+        }
         state.reducer.queue_load(&uri, playing);
         let repeat = state.reducer.repeat().to_owned();
-        state.backend.play(client, snapshot, &repeat).await
+        Ok(state.backend.play(client, snapshot, &repeat).await?)
+    }
+
+    async fn report_authorization_required(
+        &self,
+        app: &tauri::AppHandle,
+        state: &mut ControllerState,
+        prompt: PlaybackAuthorizationPrompt,
+    ) {
+        if state.file.is_active() {
+            state.file.stop();
+        }
+        let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
+        if let Err(error) = state.backend.stop(client.as_deref()).await {
+            log::warn!("Could not stop playback after authorization rejection: {error}");
+        }
+        let shuffle = state.reducer.state().shuffle;
+        state.reducer.set_snapshot(None);
+        let _ = app.emit("player-state", empty_event(false, shuffle));
+        let _ = crate::emit_connection_state(app);
+        let _ = app.emit("playback-authorization-required", prompt);
     }
 
     async fn handle_event(
@@ -913,27 +1195,59 @@ impl Playback {
                     let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
                     let result = async {
                         let client = require_spotify(client.as_deref())?;
-                        self.ensure_session(&mut state, client).await?;
-                        state.backend.preload(&uri)
+                        if self.local_requested() {
+                            self.ensure_local_backend(&mut state, client).await?;
+                        } else {
+                            self.ensure_session(&mut state, client).await?;
+                        }
+                        Ok(state.backend.preload(&uri)?)
                     }
                     .await;
                     match result {
                         Ok(true) => log::info!("Preload requested: {uri}"),
                         Ok(false) => log::debug!("Preload ignored: {uri}"),
+                        Err(error @ PlaybackError::AuthorizationRequired { .. }) => {
+                            log::warn!(
+                                "Spotify playback authorization failed during speculative preload; current track continues: {error}"
+                            );
+                            let _ = crate::emit_connection_state(app);
+                        }
                         Err(error) => log::warn!("Unable to preload {uri}: {error}"),
                     }
                 }
                 ReducerAction::Advance => {
                     let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
                     if let Err(error) = self.step_locked(&mut state, client, 1).await {
-                        let _ = app.emit("operation-error", error);
+                        match error {
+                            error @ PlaybackError::AuthorizationRequired { .. } => {
+                                let prompt = error
+                                    .into_prompt(0)
+                                    .expect("authorization errors produce prompts");
+                                self.report_authorization_required(app, &mut state, prompt)
+                                    .await;
+                            }
+                            error => {
+                                let _ = app.emit("operation-error", error.into_string());
+                            }
+                        }
                     }
                 }
                 ReducerAction::Reload => {
                     let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
                     let result = self.load_current_locked(&mut state, client, true, 0).await;
                     if let Err(error) = result {
-                        let _ = app.emit("operation-error", error);
+                        match error {
+                            error @ PlaybackError::AuthorizationRequired { .. } => {
+                                let prompt = error
+                                    .into_prompt(0)
+                                    .expect("authorization errors produce prompts");
+                                self.report_authorization_required(app, &mut state, prompt)
+                                    .await;
+                            }
+                            error => {
+                                let _ = app.emit("operation-error", error.into_string());
+                            }
+                        }
                     }
                 }
                 ReducerAction::Invalidate => {
@@ -977,6 +1291,16 @@ impl Playback {
                                     log::debug!("Playback reconnect superseded");
                                     return;
                                 }
+                                Err(error @ PlaybackError::AuthorizationRequired { .. }) => {
+                                    let mut state = playback.state.lock().await;
+                                    let prompt = error
+                                        .into_prompt(0)
+                                        .expect("authorization errors produce prompts");
+                                    playback
+                                        .report_authorization_required(&app, &mut state, prompt)
+                                        .await;
+                                    return;
+                                }
                                 Err(error) => {
                                     log::info!(
                                         "Playback reconnect attempt {} failed: {error}",
@@ -997,6 +1321,27 @@ impl Playback {
                 }
             }
         }
+    }
+}
+
+fn play_outcome_from_error(error: PlaybackError) -> Result<PlayOutcome, String> {
+    match error {
+        error @ PlaybackError::AuthorizationRequired { .. } => {
+            Ok(PlayOutcome::PlaybackAuthorizationRequired(
+                error
+                    .into_prompt(0)
+                    .expect("authorization errors produce prompts"),
+            ))
+        }
+        error => Err(error.into_string()),
+    }
+}
+
+fn log_authorization_required(operation: &str, uri: &str, error: &PlaybackError) {
+    if let PlaybackError::AuthorizationRequired { reason, .. } = error {
+        log::warn!(
+            "Spotify playback authorization required operation={operation} uri={uri} reason={reason:?}"
+        );
     }
 }
 
@@ -1111,6 +1456,15 @@ mod tests {
             .collect()
     }
 
+    fn client_without_playback_credentials() -> Arc<LiveClient> {
+        let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(None));
+        Arc::new(SpotifyClient::new(
+            "test",
+            HttpTransport::new(),
+            Arc::new(CachedTokenStore::new(tokens)),
+        ))
+    }
+
     #[test]
     fn shuffle_only_permutes_future_and_restores_duplicate_occurrence() {
         let duplicate = SnapshotTrack {
@@ -1219,10 +1573,16 @@ mod tests {
         let before = playback.state.lock().await.file.request_id();
 
         assert_eq!(
-            playback.replace_queue(file_tracks(2), 1).await.unwrap_err(),
+            playback
+                .replace_queue(None, file_tracks(2), 1)
+                .await
+                .unwrap_err(),
             "The replacement queue must keep the current track"
         );
-        playback.replace_queue(file_tracks(3), 0).await.unwrap();
+        playback
+            .replace_queue(None, file_tracks(3), 0)
+            .await
+            .unwrap();
 
         {
             let mut state = playback.state.lock().await;
@@ -1269,6 +1629,46 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn replacing_queue_waits_for_playback_authorization_before_mutating() {
+        let playback = Playback::default();
+        playback.set_local_requested(true);
+        let mut current = mixed_tracks().pop().unwrap();
+        current.id = 10;
+        current.uri = "spotify:track:current".into();
+        let mut next = current.clone();
+        next.id = 11;
+        next.uri = "spotify:track:next".into();
+        playback
+            .state
+            .lock()
+            .await
+            .reducer
+            .set_snapshot(Some(Snapshot::new(vec![current.clone()], 0)));
+
+        let outcome = playback
+            .replace_queue(
+                Some(client_without_playback_credentials()),
+                vec![current, next],
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PlayOutcome::PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt {
+                reason: PlaybackAuthorizationReason::Missing,
+                target_track_id: 11,
+                ..
+            })
+        ));
+        let state = playback.state.lock().await;
+        let snapshot = state.reducer.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.current().id, 10);
     }
 
     #[tokio::test]
@@ -1435,6 +1835,61 @@ mod tests {
         let state = playback.state.lock().await;
         assert!(!state.file.is_active());
         assert!(state.reducer.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_playback_authorization_does_not_commit_a_spotify_queue() {
+        let playback = Playback::default();
+        playback.set_local_requested(true);
+        let track = mixed_tracks().pop().unwrap();
+        let outcome = playback
+            .play(Some(client_without_playback_credentials()), vec![track], 0)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PlayOutcome::PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt {
+                reason: PlaybackAuthorizationReason::Missing,
+                target_track_id: 2,
+                ..
+            })
+        ));
+        assert!(playback.state.lock().await.reducer.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn local_files_remain_playable_without_playback_authorization() {
+        let playback = Playback::default();
+        playback.set_local_requested(true);
+
+        assert_eq!(
+            playback.play(None, file_tracks(1), 0).await.unwrap(),
+            PlayOutcome::Started
+        );
+        assert!(playback.state.lock().await.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn playback_auth_failure_does_not_advance_from_a_local_file() {
+        let playback = Playback::default();
+        playback.set_local_requested(true);
+        playback.play(None, mixed_tracks(), 0).await.unwrap();
+
+        assert!(matches!(
+            playback
+                .next(Some(client_without_playback_credentials()))
+                .await
+                .unwrap(),
+            PlayOutcome::PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt {
+                reason: PlaybackAuthorizationReason::Missing,
+                target_track_id: 2,
+                ..
+            })
+        ));
+        let state = playback.state.lock().await;
+        assert_eq!(state.reducer.snapshot().unwrap().index, 0);
+        assert!(state.file.is_active());
     }
 
     #[tokio::test]
@@ -1650,7 +2105,11 @@ mod tests {
         ));
 
         assert_eq!(
-            playback.step_locked(&mut state, None, 1).await.unwrap_err(),
+            playback
+                .step_locked(&mut state, None, 1)
+                .await
+                .unwrap_err()
+                .into_string(),
             missing_spotify()
         );
         assert_eq!(state.reducer.snapshot().unwrap().index, 1);

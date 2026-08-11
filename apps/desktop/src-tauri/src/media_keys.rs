@@ -5,7 +5,10 @@ use souvlaki::{
 };
 use tauri::{Emitter, Manager};
 
-use crate::{playback::PlayerStateEvent, AppState};
+use crate::{
+    playback::{PlayOutcome, PlayerStateEvent},
+    AppState,
+};
 
 pub struct MediaKeys {
     controls: Option<Mutex<MediaControlsState>>,
@@ -124,8 +127,22 @@ fn handle_control(app: &tauri::AppHandle, event: MediaControlEvent) {
                 state.playback.set_playing(client.as_deref(), playing).await
             }
             PlaybackCommand::Toggle => state.playback.toggle(client.as_deref()).await,
-            PlaybackCommand::Next => state.playback.next(client).await,
-            PlaybackCommand::Previous => state.playback.prev(client).await,
+            PlaybackCommand::Next => match state.playback.next(client).await {
+                Ok(PlayOutcome::PlaybackAuthorizationRequired(prompt)) => {
+                    state.playback.stop_for_authorization(&app, prompt).await;
+                    Ok(())
+                }
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            },
+            PlaybackCommand::Previous => match state.playback.prev(client).await {
+                Ok(PlayOutcome::PlaybackAuthorizationRequired(prompt)) => {
+                    state.playback.stop_for_authorization(&app, prompt).await;
+                    Ok(())
+                }
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            },
             PlaybackCommand::Seek(seconds) => state.playback.seek(client.as_deref(), seconds).await,
         };
         if let Err(error) = result {

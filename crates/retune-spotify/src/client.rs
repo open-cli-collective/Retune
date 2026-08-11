@@ -203,6 +203,7 @@ pub fn fake_client(
             refresh: "refresh".into(),
             expires_at: u64::MAX,
             scopes: scopes.into(),
+            playback_credentials: None,
         })),
     )
 }
@@ -232,6 +233,10 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
 
     pub fn transport(&self) -> &T {
         &self.transport
+    }
+
+    pub fn token_store(&self) -> &S {
+        &self.tokens
     }
 
     pub fn reset_request_counts(&self) {
@@ -841,6 +846,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             refresh: token.refresh_token.unwrap_or(stored.refresh),
             expires_at: unix_now().saturating_add(token.expires_in),
             scopes: stored.scopes,
+            playback_credentials: stored.playback_credentials,
         })?;
         log::info!("Refreshed Spotify access token");
         Ok(())
@@ -1324,6 +1330,7 @@ mod tests {
             refresh: "refresh".into(),
             expires_at: 0,
             scopes: "streaming user-read-private".into(),
+            playback_credentials: None,
         }))
     }
 
@@ -1362,7 +1369,17 @@ mod tests {
             ),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
         ]);
-        let client = SpotifyClient::new("client", transport, tokens());
+        let store = tokens();
+        store
+            .save(&Tokens {
+                playback_credentials: Some(crate::tokens::PlaybackCredentials {
+                    username: "user".into(),
+                    auth_data: vec![1, 2, 3],
+                }),
+                ..store.load().unwrap().unwrap()
+            })
+            .unwrap();
+        let client = SpotifyClient::new("client", transport, store);
         client.saved_tracks(0, 50).await.unwrap();
         let requests = client.transport().requests();
         assert_eq!(requests.len(), 3);
@@ -1371,6 +1388,17 @@ mod tests {
         assert_eq!(
             client.tokens.load().unwrap().unwrap().scopes,
             "streaming user-read-private"
+        );
+        assert_eq!(
+            client
+                .tokens
+                .load()
+                .unwrap()
+                .unwrap()
+                .playback_credentials
+                .unwrap()
+                .auth_data,
+            vec![1, 2, 3]
         );
     }
 

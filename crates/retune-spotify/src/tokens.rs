@@ -21,6 +21,34 @@ const KEY_ACCOUNT: &str = "token-file-key";
 const NONCE_LEN: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackCredentials {
+    pub username: String,
+    #[serde(with = "base64_bytes")]
+    pub auth_data: Vec<u8>,
+}
+
+mod base64_bytes {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        STANDARD
+            .decode(String::deserialize(deserializer)?)
+            .map_err(D::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
     pub access: String,
     pub refresh: String,
@@ -28,6 +56,8 @@ pub struct Tokens {
     pub expires_at: u64,
     #[serde(default)]
     pub scopes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_credentials: Option<PlaybackCredentials>,
 }
 
 impl Tokens {
@@ -339,6 +369,7 @@ mod tests {
             refresh: "refresh".into(),
             expires_at: 42,
             scopes: "streaming".into(),
+            playback_credentials: None,
         }
     }
 
@@ -350,6 +381,7 @@ mod tests {
             refresh: "refresh".into(),
             expires_at: 42,
             scopes: "streaming".into(),
+            playback_credentials: None,
         };
         store.save(&tokens).unwrap();
         assert_eq!(store.load().unwrap(), Some(tokens));
@@ -403,6 +435,22 @@ mod tests {
                 .unwrap();
 
         assert!(tokens.scopes.is_empty());
+        assert!(tokens.playback_credentials.is_none());
+    }
+
+    #[test]
+    fn playback_credentials_round_trip_as_base64() {
+        let tokens = Tokens {
+            playback_credentials: Some(PlaybackCredentials {
+                username: "user".into(),
+                auth_data: vec![0, 1, 2, 254, 255],
+            }),
+            ..tokens("access")
+        };
+
+        let serialized = serde_json::to_string(&tokens).unwrap();
+        assert!(serialized.contains("AAEC/v8="));
+        assert_eq!(serde_json::from_str::<Tokens>(&serialized).unwrap(), tokens);
     }
 
     #[test]

@@ -27,10 +27,10 @@ active queue unchanged.
 
 ## Backends
 
-- Built-in Spotify uses librespot with the current OAuth token, a soft mixer,
-  normalization, gapless playback, compressed-audio read-ahead, and an app-data
-  audio cache. Its quality tiers are Normal (96 kbps), High (160 kbps), and Very
-  High (320 kbps).
+- Built-in Spotify uses librespot with the stored reusable playback credential,
+  a login5 preflight, a soft mixer, normalization, gapless playback,
+  compressed-audio read-ahead, and an app-data audio cache. Its quality tiers
+  are Normal (96 kbps), High (160 kbps), and Very High (320 kbps).
 - Spotify Connect controls the active Spotify device through the Web API and
   polls its state. It distinguishes natural completion, external takeover, and
   device disappearance. Spotify owns audio download, buffering, quality, and
@@ -44,6 +44,13 @@ Mixed queues switch at URI boundaries. Only one execution path is allowed to be
 audible; transitions pause or stop the counterpart before starting the next.
 System Play and Pause commands set an explicit state; only Toggle inverts the
 current state.
+
+When built-in playback is selected, missing or rejected playback authorization
+returns a typed outcome before a new queue is committed or the reducer advances
+to the next track. It never falls through to Connect. The shell keeps the
+requested selection outside the controller while it offers separate Spotify
+authorization; Cancel leaves playback stopped. File URIs continue through the
+local-file engine without Spotify playback authorization.
 
 ## Built-in Spotify data path
 

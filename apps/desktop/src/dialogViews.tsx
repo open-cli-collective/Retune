@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useState } from 'react'
-import type { MetadataValues, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
+import type { MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
 import { clearedTrackRating, overlayEditTargets } from './ui.ts'
 import { ModalDialog, RatingStars } from './viewShared.tsx'
 
@@ -141,6 +141,33 @@ export function SetupLibrary({ settings, connected, onCancel, onConnect, onSync 
         <div className="setup-step"><span className="step-number">3</span><div><strong>Spotify connection</strong><div className={`setup-status ${connected ? 'connected' : ''}`}><span className="connection-dot" /><span>{connected ? 'Connected' : 'Not connected'}</span>{connected ? <span className="detected">✓ auto-detected</span> : <button type="button" onClick={() => onConnect(trimmedClientId)}>Connect…</button>}</div></div></div>
       </div>
       <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!canSync}>Sync</button></div>
+  </ModalDialog>
+}
+
+export function PlaybackAuthorization({ prompt, onCancel, onAuthorize }: {
+  prompt: PlaybackAuthorizationPrompt
+  onCancel: () => void
+  onAuthorize: () => void | Promise<void>
+}) {
+  const [authorizing, setAuthorizing] = useState(false)
+  const [error, setError] = useState<string>()
+  const authorize = async () => {
+    setError(undefined)
+    setAuthorizing(true)
+    try {
+      await onAuthorize()
+    } catch (error) {
+      setError(String(error))
+    } finally {
+      setAuthorizing(false)
+    }
+  }
+  return <ModalDialog className="get-info playback-authorization" labelledBy="playback-authorization-title" onCancel={authorizing ? undefined : onCancel} onSubmit={authorizing ? undefined : authorize}>
+    <h2 id="playback-authorization-title">Authorize Spotify playback</h2>
+    <p>{prompt.message}</p>
+    <p>Your Spotify library access remains connected.</p>
+    {error && <p className="dialog-error" role="alert">{error}</p>}
+    <div className="modal-actions"><button type="button" disabled={authorizing} onClick={onCancel}>Cancel</button><button type="submit" className="primary" autoFocus disabled={authorizing}>{authorizing ? 'Opening Spotify…' : 'Open Spotify'}</button></div>
   </ModalDialog>
 }
 

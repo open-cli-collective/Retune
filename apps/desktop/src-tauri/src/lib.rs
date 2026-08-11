@@ -121,6 +121,7 @@ impl MenuChecks {
 struct ConnectionState {
     connected: bool,
     needs_reauth: bool,
+    playback_authorized: bool,
     missing_scopes: Vec<String>,
 }
 
@@ -136,6 +137,12 @@ impl ConnectionState {
         Self {
             connected: tokens.is_some(),
             needs_reauth: !missing_scopes.is_empty(),
+            playback_authorized: tokens
+                .as_ref()
+                .and_then(|tokens| tokens.playback_credentials.as_ref())
+                .is_some_and(|credentials| {
+                    !credentials.username.is_empty() && !credentials.auth_data.is_empty()
+                }),
             missing_scopes,
         }
     }
@@ -669,25 +676,12 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
     settings.spotify_sync_completed = current.spotify_sync_completed;
     settings.last_full_sync = current.last_full_sync;
     settings.validate().map_err(|error| error.to_string())?;
-    // Compare against the ACTIVE backend, not the persisted setting: a failed
-    // activation (e.g. under-scoped token at startup) leaves the setting on
-    // "local" while playback fell back to Connect, and re-selecting the radio
-    // must retry the switch.
     let wants_local = settings.playback_backend == "local";
-    if wants_local != state.playback.is_local_active().await {
-        let switch = if wants_local {
-            switch_to_local(&state, settings.volume).await
-        } else {
-            state.playback.switch_to_connect().await;
-            Ok(())
-        };
-        if let Err(error) = switch {
-            app.emit("operation-error", error)
-                .map_err(|error| error.to_string())?;
-            app.emit("settings-changed", current)
-                .map_err(|error| error.to_string())?;
-            return Ok(());
-        }
+    state.playback.set_local_requested(wants_local);
+    // Local activation is intentionally lazy: playback owns authorization
+    // prompts, and unrelated preference saves must remain offline-safe.
+    if !wants_local && state.playback.is_local_active().await {
+        state.playback.switch_to_connect().await;
     }
     state
         .settings_store
@@ -710,18 +704,11 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
 }
 
 async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
-    let stored = state
+    state
         .token_store
         .load()
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Connect to Spotify before enabling built-in playback.".to_string())?;
-    if !stored
-        .scopes
-        .split_whitespace()
-        .any(|scope| scope == "streaming")
-    {
-        return Err("Reconnect to Spotify to grant playback permission (Account → Disconnect, then Connect).".into());
-    }
     let client = provider_from(state)?;
     if !client
         .me()
@@ -758,7 +745,7 @@ fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionS
         .map_err(|error| error.to_string())
 }
 
-fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let connection = stored_connection_state(&state.token_store)?;
     state
@@ -2060,6 +2047,7 @@ pub fn run() {
             set_settings,
             spotify_commands::connection_state,
             spotify_commands::connect_spotify,
+            spotify_commands::authorize_spotify_playback,
             spotify_commands::disconnect_spotify,
             spotify_commands::sync_from_spotify,
             spotify_commands::spotify_search,
@@ -2174,7 +2162,9 @@ pub fn run() {
             if connection.connected && startup_action == StartupAction::Nothing {
                 log::info!("startup sync skipped; library fresh");
             }
-            let activate_local = connection.connected && settings.playback_backend == "local";
+            let activate_local = connection.connected
+                && connection.playback_authorized
+                && settings.playback_backend == "local";
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(
                 &settings.repeat,
@@ -2187,6 +2177,7 @@ pub fn run() {
                 },
                 Some(app_data_dir.clone()),
             ));
+            playback.set_local_requested(settings.playback_backend == "local");
             let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
             app.manage(AppState {
                 library: Mutex::new(library),
@@ -3033,12 +3024,14 @@ mod tests {
         let connected = ConnectionState {
             connected: true,
             needs_reauth: false,
+            playback_authorized: false,
             missing_scopes: vec![],
         };
         let disconnected = ConnectionState::from_tokens(None);
         let needs_reauth = ConnectionState {
             connected: true,
             needs_reauth: true,
+            playback_authorized: false,
             missing_scopes: vec!["playlist-read-private".into()],
         };
         assert_eq!(
@@ -3078,9 +3071,14 @@ mod tests {
             refresh: String::new(),
             expires_at: 0,
             scopes: "user-library-read".into(),
+            playback_credentials: None,
         };
         let current = Tokens {
             scopes: auth::SCOPES.clone(),
+            playback_credentials: Some(retune_spotify::tokens::PlaybackCredentials {
+                username: "user".into(),
+                auth_data: vec![1, 2, 3],
+            }),
             ..legacy.clone()
         };
 
@@ -3089,6 +3087,7 @@ mod tests {
             ConnectionState {
                 connected: true,
                 needs_reauth: true,
+                playback_authorized: false,
                 missing_scopes: auth::REQUIRED_SCOPES
                     .into_iter()
                     .filter(|scope| *scope != "user-library-read")
@@ -3097,12 +3096,25 @@ mod tests {
             }
         );
         assert_eq!(
-            stored_connection_state(&shared_token_store(Some(current))).unwrap(),
+            stored_connection_state(&shared_token_store(Some(current.clone()))).unwrap(),
             ConnectionState {
                 connected: true,
                 needs_reauth: false,
+                playback_authorized: true,
                 missing_scopes: vec![],
             }
+        );
+        let empty_playback = Tokens {
+            playback_credentials: Some(retune_spotify::tokens::PlaybackCredentials {
+                username: String::new(),
+                auth_data: vec![],
+            }),
+            ..current
+        };
+        assert!(
+            !stored_connection_state(&shared_token_store(Some(empty_playback)))
+                .unwrap()
+                .playback_authorized
         );
     }
 
@@ -3115,6 +3127,7 @@ mod tests {
             refresh: String::new(),
             expires_at: 0,
             scopes: "user-library-read".into(),
+            playback_credentials: None,
         };
         let forbidden = || retune_spotify::Error::Http {
             endpoint: "/playlists/id/tracks".into(),
