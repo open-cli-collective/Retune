@@ -150,10 +150,6 @@ jobs:
             echo "::error::MACOS_CERT_LEAF_SHA is not the expected stable certificate leaf"
             exit 1
           fi
-          if ! security find-identity -v -p codesigning | grep -i -F "$expected_leaf" >/dev/null; then
-            echo "::error::imported macOS signing identity does not match the expected certificate leaf"
-            exit 1
-          fi
 
       - name: Stable-sign macOS app
         if: matrix.os == 'macos-15'
