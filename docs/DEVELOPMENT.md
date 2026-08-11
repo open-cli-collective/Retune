@@ -36,13 +36,43 @@ including local-file import/playback tests, before building their native bundle;
 those jobs are the cross-platform proof that release builds select persistent
 native credential stores.
 
+## Release automation
+
+Pushing a tag such as `v0.2.0` runs the native release workflow. It builds and
+publishes exactly these assets: `Retune-<version>-aarch64.tar.gz`,
+`Retune-<version>-windows-x64-setup.exe`,
+`Retune-<version>-windows-arm64-setup.exe`,
+`retune_<version>_amd64.deb`, `retune_<version>_arm64.deb`, and
+`checksums.txt`. `workflow_dispatch` is a dry run: it builds, signs, verifies,
+and aggregates the same artifacts without creating a release or dispatching
+package channels.
+
+Run the local release contract check with:
+
+```sh
+node scripts/check-release.mjs
+```
+
+Tag releases require these repository secrets: `MACOS_CERT_P12`,
+`MACOS_CERT_PASSWORD`, `MACOS_CERT_CN`, `MACOS_CERT_LEAF_SHA` (exactly
+`42e1afd02aae8666c09c15f171e1639550f301c2`), `TAP_GITHUB_TOKEN`,
+and `WINGET_GITHUB_TOKEN`. `LINUX_PACKAGES_DISPATCH_TOKEN` is optional; when
+present it dispatches the APT repository update. The macOS build is stable-signed
+but not timestamped, hardened, or notarized; Homebrew clears
+quarantine. The first access to stored Spotify credentials after an older
+ad-hoc build may show one macOS Keychain prompt; choose Always Allow once.
+`TAP_GITHUB_TOKEN` needs write access to
+`open-cli-collective/homebrew-tap`; `WINGET_GITHUB_TOKEN` needs release-asset
+read access and Winget submission access; `LINUX_PACKAGES_DISPATCH_TOKEN` needs
+repository-dispatch access to `open-cli-collective/linux-packages`.
+
 ## Checks
 
 Run the same checks used by CI:
 
 ```sh
 node scripts/check-docs.mjs
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cd apps/desktop
