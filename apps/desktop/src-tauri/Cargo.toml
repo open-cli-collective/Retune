@@ -1,6 +1,6 @@
 [package]
 name = "retune-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Retune desktop shell — iTunes-style Spotify wrapper with local metadata overlay"
 license.workspace = true
 edition = "2021"
