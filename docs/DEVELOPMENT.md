@@ -5,6 +5,10 @@
 - macOS arm64, Windows x64/ARM64, or Ubuntu 22.04 amd64/arm64
 - Rust stable, Node.js 22, and npm
 - Xcode command-line build tools on macOS
+- Microsoft C++ Build Tools on Windows with the `Desktop development with C++`
+  workload, including the target-architecture tools for ARM64 builds
+- Microsoft Edge WebView2 Runtime on Windows; it is normally already present on
+  supported Windows 10/11 systems
 - Tauri's Linux build dependencies plus `libasound2-dev` and `libdbus-1-dev` on
   Ubuntu
 - A Spotify Premium account and Spotify application client ID for Spotify paths

@@ -36,23 +36,21 @@ impl MediaKeys {
         let hwnd = app
             .get_webview_window("main")
             .and_then(|window| window.hwnd().ok())
-            .map(|hwnd| hwnd.0 as *mut c_void)
-            .filter(|hwnd| !hwnd.is_null());
-        #[cfg(not(target_os = "windows"))]
-        let hwnd = None;
+            .map(|hwnd| hwnd.0 as *mut c_void);
 
         #[cfg(target_os = "windows")]
-        if hwnd.is_none() {
+        let Some(config) = platform_config(hwnd) else {
             log::warn!("Media key setup failed: main window has no HWND");
             return Self { controls: None };
-        }
-
-        let result = MediaControls::new(PlatformConfig {
+        };
+        #[cfg(not(target_os = "windows"))]
+        let config = PlatformConfig {
             dbus_name: "retune",
             display_name: "Retune",
-            hwnd,
-        })
-        .and_then(|mut controls| {
+            hwnd: None,
+        };
+
+        let result = MediaControls::new(config).and_then(|mut controls| {
             controls.attach(move |event| handle_control(&app, event))?;
             Ok(controls)
         });
@@ -121,6 +119,16 @@ impl MediaKeys {
             log::warn!("Media artwork update failed: {error}");
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_config(hwnd: Option<*mut c_void>) -> Option<PlatformConfig<'static>> {
+    let hwnd = hwnd.filter(|hwnd| !hwnd.is_null())?;
+    Some(PlatformConfig {
+        dbus_name: "retune",
+        display_name: "Retune",
+        hwnd: Some(hwnd),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -278,5 +286,16 @@ mod tests {
 
         assert_ne!(metadata_key(&first), metadata_key(&renamed));
         assert_eq!(metadata_key(&first), metadata_key(&progressed));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn builds_platform_config_only_for_non_null_hwnd() {
+        let hwnd = 0x1234usize as *mut c_void;
+        let config = platform_config(Some(hwnd)).expect("non-null HWND");
+
+        assert_eq!(config.hwnd, Some(hwnd));
+        assert!(platform_config(Some(std::ptr::null_mut())).is_none());
+        assert!(platform_config(None).is_none());
     }
 }
