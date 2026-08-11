@@ -19,6 +19,7 @@ assert.match(tauri.version, /^\d+\.\d+\.\d+$/)
 assert.equal(cargoVersion, tauri.version)
 assert.equal(lockVersion, tauri.version)
 assert.equal(tauri.identifier, 'com.rianjs.retune')
+assert.equal(tauri.bundle.linux.deb.section, 'sound')
 
 required(workflow, 'workflow_dispatch:')
 required(workflow, 'tags:\n      - "v*"')
