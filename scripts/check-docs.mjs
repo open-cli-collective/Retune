@@ -8,6 +8,7 @@ const required = [
   "ARCHITECTURE.md",
   "README.md",
   "docs/DEVELOPMENT.md",
+  "docs/INSTALL.md",
   "docs/architecture/library.md",
   "docs/architecture/spotify.md",
   "docs/architecture/playback.md",
@@ -44,6 +45,24 @@ for (const file of markdown) {
 const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
 for (const file of ["ARCHITECTURE.md", ...markdown.filter((file) => file.startsWith("docs/"))]) {
   if (!agents.includes(file)) errors.push(`AGENTS.md does not route to ${file}`);
+}
+
+const install = fs.readFileSync(path.join(root, "docs/INSTALL.md"), "utf8");
+for (const value of [
+  "brew install --cask open-cli-collective/tap/retune",
+  "winget install --exact --id OpenCLICollective.Retune",
+  "sudo apt install retune",
+  "http://127.0.0.1:8898/callback",
+  "Do **not** register",
+  "/login",
+  "stable-signed",
+  "not Apple-notarized",
+  "Unknown",
+  "SmartScreen",
+  "Linux Secret Service",
+  "checksums.txt",
+]) {
+  if (!install.includes(value)) errors.push(`docs/INSTALL.md: missing contract ${value}`);
 }
 
 if (errors.length) {

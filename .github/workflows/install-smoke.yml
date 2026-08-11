@@ -1,0 +1,66 @@
+name: Public install smoke
+
+on:
+  pull_request:
+
+jobs:
+  homebrew:
+    runs-on: macos-15
+    steps:
+      - name: Install and verify v0.2.1
+        run: |
+          set -euo pipefail
+          brew install --cask open-cli-collective/tap/retune
+          app=/Applications/Retune.app
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = 0.2.1
+          codesign --verify --deep --strict "$app"
+          requirement="$(codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')"
+          case "$requirement" in
+            *'identifier "com.rianjs.retune"'*'certificate leaf = H"42e1afd02aae8666c09c15f171e1639550f301c2"'*) ;;
+            *) echo "::error::unexpected designated requirement: $requirement"; exit 1 ;;
+          esac
+          case "$requirement" in
+            *cdhash*) echo "::error::designated requirement contains cdhash"; exit 1 ;;
+          esac
+          brew uninstall --cask retune
+
+  apt:
+    name: APT ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: amd64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+    steps:
+      - name: Configure signed repository
+        run: |
+          set -euo pipefail
+          curl -fsSL https://open-cli-collective.github.io/linux-packages/keys/gpg.asc \
+            | sudo gpg --dearmor --yes -o /usr/share/keyrings/open-cli-collective.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/open-cli-collective.gpg] https://open-cli-collective.github.io/linux-packages/apt stable main" \
+            | sudo tee /etc/apt/sources.list.d/open-cli-collective.list
+          sudo apt-get update
+
+      - name: Fresh install v0.2.1
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y retune
+          test "$(dpkg-query -W -f='${Version}' retune)" = 0.2.1
+          test "$(dpkg-query -W -f='${Architecture}' retune)" = '${{ matrix.arch }}'
+          sudo apt-get remove -y retune
+
+      - name: Upgrade v0.2.0 to v0.2.1
+        run: |
+          set -euo pipefail
+          curl -fL -o /tmp/retune.deb "https://github.com/open-cli-collective/Retune/releases/download/v0.2.0/retune_0.2.0_${{ matrix.arch }}.deb"
+          sudo apt-get install -y /tmp/retune.deb
+          test "$(dpkg-query -W -f='${Version}' retune)" = 0.2.0
+          test "$(dpkg-query -W -f='${Architecture}' retune)" = '${{ matrix.arch }}'
+          sudo apt-get install -y --only-upgrade retune
+          test "$(dpkg-query -W -f='${Version}' retune)" = 0.2.1
+          test "$(dpkg-query -W -f='${Architecture}' retune)" = '${{ matrix.arch }}'
+          sudo apt-get purge -y retune

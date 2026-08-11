@@ -1,6 +1,6 @@
 # Retune
 
-Retune is a dense, album-first music library for macOS, inspired by the
+Retune is a dense, album-first desktop music library inspired by the
 three-column browser in early iTunes.
 
 | Light | Dark |
@@ -23,45 +23,48 @@ Retune is for people who want to maintain a music library, not just stream one.
 * Rate albums and tracks, track plays, search, and manage owned playlists.
 * Back up, restore, or merge the library as JSON or gzip.
 
-## Install with Homebrew
+## Install
 
-Retune ships as a prebuilt Apple Silicon app via the
-[open-cli-collective tap](https://github.com/open-cli-collective/homebrew-tap):
+| Platform | Package | Supported architecture |
+| --- | --- | --- |
+| macOS | Homebrew | Apple Silicon |
+| Windows 10/11 | Winget | x64, ARM64 |
+| Ubuntu 22.04 and compatible Debian/Ubuntu | APT | amd64, arm64 |
 
-```sh
-brew install --cask --no-quarantine open-cli-collective/tap/retune
-```
-
-Release builds are ad-hoc signed but **not notarized** (there is no Apple
-Developer ID behind them). Without `--no-quarantine`, Gatekeeper will refuse
-to open the app with a "Retune is damaged" dialog. The cask also clears the
-quarantine attribute after install; if you downloaded the app some other way,
-clear it yourself:
+macOS:
 
 ```sh
-xattr -cr /Applications/Retune.app
+brew install --cask open-cli-collective/tap/retune
 ```
+
+Windows:
+
+```powershell
+winget install --exact --id OpenCLICollective.Retune
+```
+
+Debian/Ubuntu, after adding the signed Open CLI Collective APT repository:
+
+```sh
+sudo apt install retune
+```
+
+See the **[installation and Spotify setup guide](docs/INSTALL.md)** for APT
+repository setup, upgrades, uninstall commands, direct downloads, platform
+trust warnings, and the exact Spotify callback.
+
+On first launch, import local audio files, connect Spotify, or use both. Local
+files remain available without a Spotify account.
 
 ## Run from source
 
-Retune currently targets macOS. Building it requires:
-
-* Rust stable
-* Node.js 22 and npm
-* Xcode command-line tools
+See [Development](docs/DEVELOPMENT.md) for platform prerequisites, then run:
 
 ```sh
 cd apps/desktop
 npm ci
 npm exec tauri dev
 ```
-
-On first launch, import local audio files, connect Spotify, or use both. Local
-files remain available without a Spotify account. Spotify features require a
-Spotify Premium account and a Spotify application client ID.
-
-See [Development](docs/DEVELOPMENT.md) for Spotify setup, validation, packaging,
-and troubleshooting.
 
 ## How Retune treats your library
 
@@ -84,6 +87,7 @@ playlists, but cannot load or edit their tracks.
 * [Spotify integration](docs/architecture/spotify.md)
 * [Playback](docs/architecture/playback.md)
 * [Persistence](docs/architecture/persistence.md)
+* [Installation and Spotify setup](docs/INSTALL.md)
 * [Development and validation](docs/DEVELOPMENT.md)
 
 ## License
