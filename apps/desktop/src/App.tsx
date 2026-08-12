@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, selectionAfterFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
@@ -485,10 +485,18 @@ function App() {
       source: state.source,
       sel: { cat: state.sel.cat ?? [], art: state.sel.art ?? [], alb: state.sel.alb ?? [] },
       query: state.scope === 'library' && state.query.trim() ? state.query : undefined,
-    }).then((next) => active && dispatch({ type: 'view', view: next, key: requestKey }))
+    }).then((next) => {
+      if (!active) return
+      const fallback = staleSelectionFacet(state.sel, next.facets)
+      if (fallback) {
+        selectFacet(fallback, [])
+        return
+      }
+      dispatch({ type: 'view', view: next, key: requestKey })
+    })
       .catch((error) => active && fail(error))
     return () => { active = false }
-  }, [state.source, state.sel, state.query, state.scope, state.revision, fail])
+  }, [state.source, state.sel, state.query, state.scope, state.revision, fail, selectFacet])
 
   useEffect(() => {
     let active = true
