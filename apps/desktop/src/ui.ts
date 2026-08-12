@@ -1,4 +1,4 @@
-import type { ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
+import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -22,6 +22,13 @@ export const selectionAfterFacet = (selection: Selection, facet: keyof Selection
   facet === 'cat' ? { cat: values }
     : facet === 'art' ? { cat: selection.cat, art: values }
       : { ...selection, alb: values }
+
+export const staleSelectionFacet = (selection: Selection, facets: BrowseView['facets']): 'cat' | 'art' | null => {
+  const missing = (selected: string[] | undefined, available: string[]) => selected?.some((value) => !available.includes(value)) ?? false
+  if (missing(selection.cat, facets.cats)) return 'cat'
+  if (missing(selection.art, facets.arts) || missing(selection.alb, facets.albs)) return 'art'
+  return null
+}
 
 export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) =>
   Math.max(28, Math.round(startWidth + clientX - startX))

@@ -33,6 +33,9 @@ Overlay edits never mutate source-file tags or Spotify metadata.
 The three-column browser is a pure projection over `Library`. `Selection`
 contains source/category/artist/album filters; `Facets` and visible tracks are
 derived from it. Choosing a broader facet clears invalid narrower selections.
+When a resolved projection proves a preserved value stale, the UI falls back
+hierarchically by clearing category, artist, and album for a missing category,
+or artist and album for a missing artist or album.
 Alternate views should consume the same library rather than introduce another
 canonical model.
 

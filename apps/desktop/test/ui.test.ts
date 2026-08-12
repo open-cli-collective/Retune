@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { PlaybackTrack, Playing } from '../src/types.ts'
-import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, SYNTHETIC_BASE } from '../src/ui.ts'
+import type { PlaybackTrack, Playing, Selection } from '../src/types.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE } from '../src/ui.ts'
 
 test('pending navigation cannot use prior tracks, while a data refresh keeps them visible', () => {
   const broadQueue: PlaybackTrack[] = [
@@ -35,6 +35,20 @@ test('facet selection preserves broader columns and clears narrower columns', ()
   assert.deepEqual(selectionAfterFacet(selection, 'cat', ['Punk']), { cat: ['Punk'] })
   assert.deepEqual(selectionAfterFacet(selection, 'art', ['Hans Zimmer']), { cat: ['Soundtrack'], art: ['Hans Zimmer'] })
   assert.deepEqual(selectionAfterFacet(selection, 'alb', ['The Hobbit']), { ...selection, alb: ['The Hobbit'] })
+})
+
+test('stale browse selections fall back at the narrowest invalid level', () => {
+  const facets = { cats: ['Rock', 'Jazz'], arts: ['Artist', 'Other'], albs: ['Album', 'Other Album'] }
+  const cases: { selection: Selection; expected: 'cat' | 'art' | null }[] = [
+    { selection: { cat: ['Rock'], art: ['Artist'], alb: ['Album'] }, expected: null },
+    { selection: { cat: ['Missing'], art: ['Artist'], alb: ['Album'] }, expected: 'cat' },
+    { selection: { cat: ['Rock', 'Missing'], art: ['Artist'], alb: ['Album'] }, expected: 'cat' },
+    { selection: { cat: ['Rock'], art: ['Missing'], alb: ['Album'] }, expected: 'art' },
+    { selection: { cat: ['Rock'], art: ['Artist'], alb: ['Missing'] }, expected: 'art' },
+    { selection: { cat: ['Rock'], art: ['Artist'], alb: ['Album', 'Missing'] }, expected: 'art' },
+    { selection: { cat: ['Rock'], art: ['Artist', 'Missing'] }, expected: 'art' },
+  ]
+  for (const { selection, expected } of cases) assert.equal(staleSelectionFacet(selection, facets), expected)
 })
 
 test('a resolved view containing the current track replaces its queue at that row', () => {
