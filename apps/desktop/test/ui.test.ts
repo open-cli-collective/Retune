@@ -1,7 +1,97 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { PlaybackTrack, Playing, Selection } from '../src/types.ts'
+import type { PlaybackTrack, Playing, Selection, SpotifyResults } from '../src/types.ts'
+import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE } from '../src/ui.ts'
+
+const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
+  artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
+  albums: { items: Array.from({ length: 10 }, (_, index) => ({ uri: `spotify:album:${index}`, name: `Album ${index}`, artist: 'Artist', year: null, imageUrl: null, albumType: null, trackCount: 1, inLibrary: false })), total: 21, nextOffset: 10 },
+  tracks: { items: Array.from({ length: 10 }, (_, index) => ({ uri: `spotify:track:${index}`, name: `Track ${index}`, artist: 'Artist', alb: 'Album', durationSecs: 1, imageUrl: null, albumUri: null, inLibrary: false })), total: 21, nextOffset: 10 },
+  ...overrides,
+})
+
+test('Spotify search uses 5 rows in All and 10 in filtered tabs', () => {
+  const all = createSpotifySearchState('jazz')
+  assert.deepEqual(all.visible, { artists: 5, albums: 5, tracks: 5 })
+  const filtered = setSpotifySearchTab(all, 'albums')
+  assert.deepEqual(filtered.visible, { artists: 5, albums: 10, tracks: 5 })
+})
+
+test('Spotify search expands one group, merges cached sibling pages, and labels remaining rows', () => {
+  let state = replaceSpotifySearchResults(createSpotifySearchState('jazz'), searchPage())
+  const expansion = expandSpotifySearchGroup(state, 'artists')
+  assert.equal(expansion.request?.offset, 10)
+  state = receiveSpotifySearchPage(expansion.state, 'artists', 10, searchPage({
+    artists: { items: [{ id: 'artist-9', name: 'Duplicate', descriptor: '', imageUrl: null }, { id: 'artist-10', name: 'Artist 10', descriptor: '', imageUrl: null }], total: 21, nextOffset: 20 },
+    albums: { items: [{ uri: 'spotify:album:9', name: 'Duplicate', artist: 'Artist', year: null, imageUrl: null, albumType: null, trackCount: 1, inLibrary: false }, { uri: 'spotify:album:10', name: 'Album 10', artist: 'Artist', year: null, imageUrl: null, albumType: null, trackCount: 1, inLibrary: false }], total: 21, nextOffset: 20 },
+    tracks: { items: [{ uri: 'spotify:track:9', name: 'Duplicate', artist: 'Artist', alb: 'Album', durationSecs: 1, imageUrl: null, albumUri: null, inLibrary: false }, { uri: 'spotify:track:10', name: 'Track 10', artist: 'Artist', alb: 'Album', durationSecs: 1, imageUrl: null, albumUri: null, inLibrary: false }], total: 21, nextOffset: 20 },
+  }), expansion.request!.generation)
+  assert.equal(state.groups.artists.items.length, 11)
+  assert.equal(state.groups.albums.items.length, 11)
+  assert.equal(state.groups.tracks.items.length, 11)
+  assert.equal(moreSpotifySearchLabel(state, 'artists'), 'View 6 more artists')
+  assert.equal(spotifySearchGroupHeader(state, 'artists'), 'Artists · 15 of 21')
+  const albumExpansion = expandSpotifySearchGroup(state, 'albums')
+  assert.equal(albumExpansion.state.visible.artists, 15)
+  assert.equal(albumExpansion.state.visible.albums, 15)
+  assert.equal(albumExpansion.request?.offset, 20)
+})
+
+test('Spotify search uses the smaller remaining label and exhausts cleanly', () => {
+  let state = replaceSpotifySearchResults(createSpotifySearchState('jazz'), searchPage({
+    artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 13, nextOffset: 10 },
+  }))
+  const expansion = expandSpotifySearchGroup(state, 'artists')
+  state = receiveSpotifySearchPage(expansion.state, 'artists', 10, searchPage({
+    artists: { items: [{ id: 'artist-10', name: 'Artist 10', descriptor: '', imageUrl: null }, { id: 'artist-11', name: 'Artist 11', descriptor: '', imageUrl: null }, { id: 'artist-12', name: 'Artist 12', descriptor: '', imageUrl: null }], total: 13, nextOffset: null },
+  }), expansion.request!.generation)
+  assert.equal(state.groups.artists.items.length, 13)
+  assert.equal(moreSpotifySearchLabel(state, 'artists'), undefined)
+})
+
+test('Spotify search query and filter resets preserve only safe cached pages', () => {
+  let state = replaceSpotifySearchResults(createSpotifySearchState('jazz'), searchPage())
+  const expansion = expandSpotifySearchGroup(state, 'artists')
+  state = receiveSpotifySearchPage(expansion.state, 'artists', 10, searchPage({
+    artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index + 10}`, name: `Artist ${index + 10}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 20 },
+  }), expansion.request!.generation)
+  const filtered = setSpotifySearchTab(state, 'tracks')
+  assert.equal(filtered.groups.artists.items.length, 20)
+  assert.deepEqual(filtered.visible, { artists: 5, albums: 5, tracks: 10 })
+  const reset = replaceSpotifySearchResults(resetSpotifySearchQuery(filtered, 'rock'), searchPage({ artists: { items: [], total: 0, nextOffset: null } }))
+  assert.equal(reset.groups.artists.items.length, 0)
+  assert.equal(reset.generation > filtered.generation, true)
+})
+
+test('Spotify search failure preserves rows, retry targets the same offset, and stale responses are ignored', () => {
+  let state = replaceSpotifySearchResults(createSpotifySearchState('jazz'), searchPage())
+  const expansion = expandSpotifySearchGroup(state, 'artists')
+  state = failSpotifySearchGroup(expansion.state, 'artists', 'offline', expansion.request!.generation)
+  assert.equal(state.groups.artists.items.length, 10)
+  assert.equal(state.errors.artists, 'offline')
+  assert.equal(state.visible.artists, 5)
+  const retry = retrySpotifySearchGroup(state, 'artists')
+  assert.equal(retry.request?.offset, 10)
+  assert.equal(retry.state.visible.artists, 15)
+  const reset = setSpotifySearchTab(retry.state, 'albums')
+  assert.equal(reset.loading.size, 0)
+  assert.equal(receiveSpotifySearchPage(reset, 'artists', 10, searchPage(), retry.request!.generation).groups.artists.items.length, 10)
+  const queryReset = resetSpotifySearchQuery(state, 'rock')
+  assert.equal(receiveSpotifySearchPage(queryReset, 'artists', 10, searchPage(), expansion.request!.generation).groups.artists.items.length, 0)
+})
+
+test('Spotify search pending pages are not reused after returning to the same query', () => {
+  const jazz = replaceSpotifySearchResults(createSpotifySearchState('jazz'), searchPage())
+  const pending = expandSpotifySearchGroup(jazz, 'artists').request!
+  const rock = resetSpotifySearchQuery(jazz, 'rock')
+  const jazzAgain = resetSpotifySearchQuery(rock, 'jazz')
+
+  assert.notEqual(
+    spotifySearchPendingPageKey(jazzAgain.query, pending.offset, jazzAgain.generation),
+    spotifySearchPendingPageKey(jazz.query, pending.offset, pending.generation),
+  )
+})
 
 test('pending navigation cannot use prior tracks, while a data refresh keeps them visible', () => {
   const broadQueue: PlaybackTrack[] = [

@@ -1294,6 +1294,15 @@ fn mark_album_membership(library: &Library, albums: &mut [provider::SearchAlbum]
     }
 }
 
+fn mark_track_membership(library: &Library, tracks: &mut [provider::SearchTrack]) {
+    for track in tracks {
+        track.in_library = library
+            .tracks()
+            .iter()
+            .any(|candidate| candidate.source == SourceId::Music && candidate.uri == track.uri);
+    }
+}
+
 fn album_track_uris(album: &Album) -> Vec<String> {
     album
         .tracks
@@ -2940,6 +2949,44 @@ mod tests {
         mark_album_membership(&library, &mut albums);
 
         assert!(albums[0].in_library);
+    }
+
+    #[test]
+    fn track_rows_reflect_library_track_identity() {
+        let mut library = Library::new();
+        library.add(metadata_track(
+            "spotify:track:one",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        let mut tracks = vec![
+            provider::SearchTrack {
+                uri: "spotify:track:one".into(),
+                name: "One".into(),
+                artist: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 1,
+                image_url: None,
+                album_uri: Some("spotify:album:one".into()),
+                in_library: false,
+            },
+            provider::SearchTrack {
+                uri: "spotify:track:two".into(),
+                name: "Two".into(),
+                artist: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 1,
+                image_url: None,
+                album_uri: Some("spotify:album:one".into()),
+                in_library: true,
+            },
+        ];
+
+        mark_track_membership(&library, &mut tracks);
+
+        assert!(tracks[0].in_library);
+        assert!(!tracks[1].in_library);
     }
 
     #[test]

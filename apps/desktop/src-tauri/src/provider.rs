@@ -1,6 +1,6 @@
 use retune_core::model::NewTrack;
 use retune_spotify::{
-    client::{endpoint_family, Album, Artist, Image, SpotifyClient, Transport},
+    client::{endpoint_family, Album, Artist, Image, Page, SpotifyClient, Transport},
     normalize,
     tokens::TokenStore,
 };
@@ -105,13 +105,23 @@ pub struct SearchTrack {
     pub duration_secs: u64,
     pub image_url: Option<String>,
     pub album_uri: Option<String>,
+    pub in_library: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchGroup<T> {
+    pub items: Vec<T>,
+    pub total: u32,
+    pub next_offset: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchResults {
-    pub artists: Vec<SearchArtist>,
-    pub albums: Vec<SearchAlbum>,
-    pub tracks: Vec<SearchTrack>,
+    pub artists: SearchGroup<SearchArtist>,
+    pub albums: SearchGroup<SearchAlbum>,
+    pub tracks: SearchGroup<SearchTrack>,
 }
 
 pub struct Snapshot {
@@ -900,51 +910,52 @@ impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
     }
 }
 
+fn search_group<T, U>(page: Page<T>, offset: u32, map: impl FnMut(T) -> U) -> SearchGroup<U> {
+    let count = (page.items.len() + page.skipped) as u32;
+    SearchGroup {
+        items: page.items.into_iter().map(map).collect(),
+        total: page.total,
+        next_offset: (page.next.is_some() && count > 0).then_some(offset + count),
+    }
+}
+
 pub async fn search<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     query: &str,
+    offset: u32,
 ) -> Result<SearchResults, String> {
-    let results = SpotifyClient::search(client, query, 0, SEARCH_PAGE_SIZE)
+    let results = SpotifyClient::search(client, query, offset, SEARCH_PAGE_SIZE)
         .await
         .map_err(|error| error.to_string())?;
     Ok(SearchResults {
-        artists: results
-            .artists
-            .items
-            .into_iter()
-            .map(|artist| SearchArtist {
-                id: artist.id.clone(),
-                descriptor: artist_descriptor(&artist),
-                image_url: image_url(&artist.images),
-                name: artist.name,
-            })
-            .collect(),
-        albums: results.albums.items.into_iter().map(search_album).collect(),
-        tracks: results
-            .tracks
-            .items
-            .into_iter()
-            .map(|track| SearchTrack {
-                uri: track.uri,
-                name: track.name,
-                artist: track
-                    .artists
-                    .first()
-                    .map(|artist| artist.name.clone())
-                    .unwrap_or_default(),
-                alb: track
-                    .album
-                    .as_ref()
-                    .map(|album| album.name.clone())
-                    .unwrap_or_default(),
-                duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
-                image_url: track
-                    .album
-                    .as_ref()
-                    .and_then(|album| image_url(&album.images)),
-                album_uri: track.album.map(|album| album.uri),
-            })
-            .collect(),
+        artists: search_group(results.artists, offset, |artist| SearchArtist {
+            id: artist.id.clone(),
+            descriptor: artist_descriptor(&artist),
+            image_url: image_url(&artist.images),
+            name: artist.name,
+        }),
+        albums: search_group(results.albums, offset, search_album),
+        tracks: search_group(results.tracks, offset, |track| SearchTrack {
+            uri: track.uri,
+            name: track.name,
+            artist: track
+                .artists
+                .first()
+                .map(|artist| artist.name.clone())
+                .unwrap_or_default(),
+            alb: track
+                .album
+                .as_ref()
+                .map(|album| album.name.clone())
+                .unwrap_or_default(),
+            duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+            image_url: track
+                .album
+                .as_ref()
+                .and_then(|album| image_url(&album.images)),
+            album_uri: track.album.map(|album| album.uri),
+            in_library: false,
+        }),
     })
 }
 
@@ -1771,10 +1782,10 @@ mod tests {
             }),
         )]);
 
-        let results = search(&client, "artist").await.unwrap();
+        let results = search(&client, "artist", 0).await.unwrap();
 
         assert_eq!(
-            results.artists[0],
+            results.artists.items[0],
             SearchArtist {
                 id: "artist-1".into(),
                 name: "Artist".into(),
@@ -1782,9 +1793,9 @@ mod tests {
                 image_url: Some("small".into()),
             }
         );
-        assert_eq!(results.albums[0].year.as_deref(), Some("2024"));
+        assert_eq!(results.albums.items[0].year.as_deref(), Some("2024"));
         assert_eq!(
-            results.tracks[0],
+            results.tracks.items[0],
             SearchTrack {
                 uri: "spotify:track:1".into(),
                 name: "Track".into(),
@@ -1793,6 +1804,7 @@ mod tests {
                 duration_secs: 123,
                 image_url: Some("track".into()),
                 album_uri: Some("spotify:album:1".into()),
+                in_library: false,
             }
         );
         let url = url::Url::parse(&client.transport().requests()[0].url).unwrap();
@@ -1804,6 +1816,57 @@ mod tests {
             url.query_pairs().find(|(key, _)| key == "limit").unwrap().1,
             "10"
         );
+    }
+
+    #[tokio::test]
+    async fn search_pages_expose_totals_and_next_offsets_for_empty_final_pages() {
+        let first_page = || {
+            Response::json(
+                200,
+                serde_json::json!({
+                    "artists": {"items": (0..10).map(|index| serde_json::json!({"id": format!("artist-{index}"), "name": "Artist", "images": []})).collect::<Vec<_>>(), "next": "next", "total": 10},
+                    "albums": {"items": [], "next": "next", "total": 10},
+                    "tracks": {"items": [], "next": "next", "total": 10}
+                }),
+            )
+        };
+        let client = client([
+            first_page(),
+            Response::json(
+                200,
+                serde_json::json!({
+                    "artists": {"items": [], "next": null, "total": 10},
+                    "albums": {"items": [], "next": null, "total": 10},
+                    "tracks": {"items": [], "next": null, "total": 10}
+                }),
+            ),
+        ]);
+
+        let first = search(&client, "artist", 0).await.unwrap();
+        let final_page = search(&client, "artist", 10).await.unwrap();
+
+        assert_eq!(first.artists.items.len(), 10);
+        assert_eq!(first.artists.total, 10);
+        assert_eq!(first.artists.next_offset, Some(10));
+        assert!(final_page.artists.items.is_empty());
+        assert_eq!(final_page.artists.next_offset, None);
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        for (request, offset) in requests.iter().zip([0, 10]) {
+            let url = url::Url::parse(&request.url).unwrap();
+            assert_eq!(url.path(), "/v1/search");
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == "offset")
+                    .unwrap()
+                    .1,
+                offset.to_string()
+            );
+            assert_eq!(
+                url.query_pairs().find(|(key, _)| key == "limit").unwrap().1,
+                "10"
+            );
+        }
     }
 
     #[test]

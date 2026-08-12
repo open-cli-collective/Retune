@@ -63,10 +63,14 @@ export type SearchAlbum = {
   trackCount: number
   inLibrary: boolean
 }
+export type SearchArtist = { id: string; name: string; descriptor: string; imageUrl: string | null }
+export type SearchTrack = { uri: string; name: string; artist: string; alb: string; durationSecs: number; imageUrl: string | null; albumUri: string | null; inLibrary: boolean }
+export type SpotifyResultGroup<T> = { items: T[]; total: number; nextOffset: number | null }
+export type SpotifyResultGroupKey = 'artists' | 'albums' | 'tracks'
 export type SpotifyResults = {
-  artists: { id: string; name: string; descriptor: string; imageUrl: string | null }[]
-  albums: SearchAlbum[]
-  tracks: { uri: string; name: string; artist: string; alb: string; durationSecs: number; imageUrl: string | null; albumUri: string | null }[]
+  artists: SpotifyResultGroup<SearchArtist>
+  albums: SpotifyResultGroup<SearchAlbum>
+  tracks: SpotifyResultGroup<SearchTrack>
 }
 export type SpotifyNavEntry = { kind: 'artist'; id: string } | { kind: 'album'; uri: string; highlight?: string }
 

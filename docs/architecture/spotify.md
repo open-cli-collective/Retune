@@ -57,6 +57,25 @@ paced and capped per sync. Artist discography initially requests albums and
 singles ten at a time; the UI explicitly loads later pages, preserves earlier
 pages, and deduplicates requests.
 
+## Search contract
+
+Spotify search keeps one combined `artist,album,track` request and sends an
+explicit offset with a limit of 10. This is the Development Mode maximum; the
+UI paginates later offsets through the same `SpotifyClient` request gate, as
+required by Spotify's [current search contract][spotify-search] and [migration
+guidance][spotify-search-migration]. The desktop response exposes each result
+group as `items`, `total`, and `nextOffset`.
+
+The search view stores successful pages by offset, merges every group returned
+by a page, and deduplicates artists by Spotify ID and albums/tracks by URI.
+Album and track rows carry membership flags from the local library snapshot so
+the explicit Add action can render its current state without changing Spotify
+playback behavior.
+Visible counts are transient UI state: All starts at five per group and a
+filtered group starts at ten. Query changes discard pages; filter changes reset
+visible counts but retain pages for the same query. A failed later page leaves
+existing rows visible and can be retried for that group.
+
 ## Writes and playlists
 
 Overlay metadata never writes to Spotify. Explicit content actions may save or
@@ -107,3 +126,5 @@ back into the Web API grant. No librespot version or fork change is required.
 [ma-incident]: https://github.com/music-assistant/support/issues/6043
 [ma-fix]: https://github.com/music-assistant/server/pull/5568
 [librespot-auth]: https://github.com/librespot-org/librespot/pull/1309
+[spotify-search]: https://developer.spotify.com/documentation/web-api/reference/search
+[spotify-search-migration]: https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide
