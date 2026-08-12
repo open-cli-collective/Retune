@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { PlaybackTrack, Playing } from '../src/types.ts'
-import { browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, SYNTHETIC_BASE } from '../src/ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, SYNTHETIC_BASE } from '../src/ui.ts'
 
 test('pending navigation cannot use prior tracks, while a data refresh keeps them visible', () => {
   const broadQueue: PlaybackTrack[] = [
@@ -62,7 +62,8 @@ test('only native drags with paths activate the Finder overlay', () => {
   assert.equal(nextNativeDragActive(true, { type: 'drop' }), false)
 })
 
-test('zoom preserves the Large preset and clamps limits', () => {
+test('zoom maps logical 100% to the readable baseline and clamps limits', () => {
+  assert.equal(appliedZoom(1, 1.15), 1.15)
   assert.equal(normalizeZoom(1.15, .7, 1.8), 1.15)
   assert.equal(normalizeZoom(.1, .7, 1.8), .7)
   assert.equal(normalizeZoom(2, .7, 1.8), 1.8)

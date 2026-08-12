@@ -211,8 +211,9 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
           <section className="preference-group"><h3>Theme</h3><div className="preference-inset preference-options">
             {themeOptions.map(([value, label, help]) => <label className="preference-choice" key={value}><input type="radio" name="theme" value={value} checked={theme === value} onChange={() => setTheme(value)} /><span><strong>{label}</strong><small>{help}</small></span></label>)}
           </div></section>
-          <section className="preference-group"><h3>Text size <small>⌘+ · ⌘− · ⌘0</small></h3><div className="preference-inset preference-row">
-            {([['Small', .9], ['Medium', 1], ['Large', 1.15]] as const).map(([label, zoom]) => <label className="preference-choice" key={label}><input type="radio" name="text-size" checked={Math.abs(settings.zoom - zoom) <= .03} onChange={() => onZoom(zoom)} /><span>{label}</span></label>)}
+          <section className="preference-group"><h3>Text size <small>{Math.round(settings.zoom * 100)}% · ⌘+ · ⌘− · ⌘0</small></h3><div className="preference-inset preference-size">
+            <input className="preference-range" type="range" aria-label="Text size" min="0.7" max="1.8" step="0.1" value={settings.zoom} onChange={(event) => onZoom(Number(event.target.value))} />
+            <div className="range-labels"><span>70%</span><span>180%</span></div>
           </div></section>
           <section className="preference-group"><h3>Column browser <small>⌘B</small></h3><div className="preference-inset">
             <div className="preference-row">{([['Show', true], ['Hide', false]] as const).map(([label, visible]) => <label className="preference-choice" key={label}><input type="radio" name="browser-visible" checked={browserVisible === visible} onChange={() => setBrowserVisible(visible)} /><span>{label}</span></label>)}</div>

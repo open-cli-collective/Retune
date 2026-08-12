@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, selectionAfterFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, selectionAfterFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
@@ -15,6 +15,7 @@ const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlist
 const emptyTracks: Track[] = []
 const ZOOM_MIN = 0.7
 const ZOOM_MAX = 1.8
+const ZOOM_BASE = 1.15
 // Settings persisted by set_repeat / set_audio_settings — excluded from the
 // generic settings-save effect (set_settings also switches playback backends).
 const EXCLUDED = ['repeat', 'streamingBitrate', 'normalizeVolume', 'gapless'] as const
@@ -769,7 +770,7 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: state.settings.zoom }}>
+    <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: appliedZoom(state.settings.zoom, ZOOM_BASE) }}>
       <TransportBar
         playing={state.playing}
         track={playingTrack}

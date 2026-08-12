@@ -10,6 +10,8 @@ export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) =>
 export const normalizeZoom = (zoom: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Math.round(zoom * 100) / 100))
 
+export const appliedZoom = (zoom: number, base: number) => zoom * base
+
 export const browseRequestKey = (source: Source, selection: Selection, query: string, scope: 'library' | 'spotify') =>
   JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], query, scope])
 
