@@ -31,6 +31,21 @@ before clearing quarantine or moving `Retune.app` into `/Applications`. On
 Windows, verify the installer before accepting any unsigned-publisher warning.
 These files support only the targets listed above.
 
+After verifying the download, install the matching package:
+
+```sh
+# macOS
+tar -xzf Retune-0.2.1-aarch64.tar.gz
+xattr -dr com.apple.quarantine Retune.app
+sudo mv Retune.app /Applications/
+
+# Debian/Ubuntu amd64 (use the arm64 filename on ARM64)
+sudo apt install ./retune_0.2.1_amd64.deb
+```
+
+On Windows, run the downloaded `.exe` installer from File Explorer or
+PowerShell, for example `./Retune-0.2.1-windows-x64-setup.exe`.
+
 ## macOS with Homebrew
 
 Install:

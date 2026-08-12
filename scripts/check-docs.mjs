@@ -49,6 +49,10 @@ for (const file of ["ARCHITECTURE.md", ...markdown.filter((file) => file.startsW
 
 const install = fs.readFileSync(path.join(root, "docs/INSTALL.md"), "utf8");
 const normalizedInstall = install.replace(/\s+/g, " ");
+const version = JSON.parse(fs.readFileSync(path.join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8")).version;
+for (const match of install.matchAll(/(?:Retune v|Retune-|retune_|\/(?:tag|download)\/v)(\d+\.\d+\.\d+)/g)) {
+  if (match[1] !== version) errors.push(`docs/INSTALL.md: stale version ${match[1]} (expected ${version})`);
+}
 for (const value of [
   "brew install --cask open-cli-collective/tap/retune",
   "winget install --exact --id OpenCLICollective.Retune",
