@@ -48,6 +48,7 @@ for (const file of ["ARCHITECTURE.md", ...markdown.filter((file) => file.startsW
 }
 
 const install = fs.readFileSync(path.join(root, "docs/INSTALL.md"), "utf8");
+const normalizedInstall = install.replace(/\s+/g, " ");
 for (const value of [
   "brew install --cask open-cli-collective/tap/retune",
   "winget install --exact --id OpenCLICollective.Retune",
@@ -63,6 +64,16 @@ for (const value of [
   "checksums.txt",
 ]) {
   if (!install.includes(value)) errors.push(`docs/INSTALL.md: missing contract ${value}`);
+}
+for (const value of [
+  "Do **not** register `http://127.0.0.1:8898/login`; `/login` is Retune's separate internal built-in-playback callback.",
+  "Retune uses Authorization Code with PKCE, so it does not need or store the client secret.",
+  "approve the separate one-time **Authorize Spotify playback** prompt",
+  "Spotify Development Mode currently requires the application owner to have Premium and limits each app to five authenticated users.",
+  "Anyone other than the owner must be added to the app allowlist",
+  "You can import and play local files while signed out.",
+]) {
+  if (!normalizedInstall.includes(value)) errors.push(`docs/INSTALL.md: missing relationship ${value}`);
 }
 
 if (errors.length) {
