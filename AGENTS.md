@@ -12,6 +12,7 @@ the behavior you are changing:
 | Queueing, backends, playback events, play counts | [Playback](docs/architecture/playback.md) |
 | Files, tokens, backup/restore | [Persistence](docs/architecture/persistence.md) |
 | Build, test, run, package, manual validation | [Development](docs/DEVELOPMENT.md) |
+| Install, upgrade, uninstall, Spotify setup | [Installation](docs/INSTALL.md) |
 
 ## Invariants
 

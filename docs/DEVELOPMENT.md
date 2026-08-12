@@ -38,7 +38,7 @@ native credential stores.
 
 ## Release automation
 
-Pushing a tag such as `v0.2.0` runs the native release workflow. It builds and
+Pushing a tag such as `v0.2.1` runs the native release workflow. It builds and
 publishes exactly these assets: `Retune-<version>-aarch64.tar.gz`,
 `Retune-<version>-windows-x64-setup.exe`,
 `Retune-<version>-windows-arm64-setup.exe`,
