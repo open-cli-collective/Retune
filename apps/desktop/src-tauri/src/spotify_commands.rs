@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::SearchGroup;
 use librespot_core::{authentication::Credentials, config::SessionConfig, session::Session};
 use retune_spotify::tokens::PlaybackCredentials;
 
@@ -202,22 +203,39 @@ pub(super) async fn sync_from_spotify(app: tauri::AppHandle) -> Result<(), Strin
 pub(super) async fn spotify_search(
     state: tauri::State<'_, AppState>,
     query: String,
+    offset: u32,
 ) -> Result<SearchResults, String> {
     if query.trim().is_empty() {
         return Ok(SearchResults {
-            artists: vec![],
-            albums: vec![],
-            tracks: vec![],
+            artists: SearchGroup {
+                items: vec![],
+                total: 0,
+                next_offset: None,
+            },
+            albums: SearchGroup {
+                items: vec![],
+                total: 0,
+                next_offset: None,
+            },
+            tracks: SearchGroup {
+                items: vec![],
+                total: 0,
+                next_offset: None,
+            },
         });
     }
     if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify to search.".into());
     }
     let provider = provider_from(&state)?;
-    let mut results = provider::search(provider.as_ref(), query.trim()).await?;
+    let mut results = provider::search(provider.as_ref(), query.trim(), offset).await?;
     mark_album_membership(
         &state.library.lock().expect("library mutex poisoned"),
-        &mut results.albums,
+        &mut results.albums.items,
+    );
+    mark_track_membership(
+        &state.library.lock().expect("library mutex poisoned"),
+        &mut results.tracks.items,
     );
     Ok(results)
 }

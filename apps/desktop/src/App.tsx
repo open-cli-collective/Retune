@@ -158,7 +158,7 @@ function reducer(state: State, action: Action): State {
       return { ...state, sel, selectedTrackIds: new Set(), selectionAnchor: undefined }
     }
     case 'query':
-      return { ...state, query: action.query, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, query: action.query, spotifyResults: null, spotifySearching: false, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'scope':
       return { ...state, scope: action.scope, spotifyNavigation: undefined }
     case 'selectTrack':
@@ -576,7 +576,7 @@ function App() {
     dispatch({ type: 'spotifySearching', searching: true })
     let active = true
     const timer = window.setTimeout(() => {
-      invoke<SpotifyResults>('spotify_search', { query })
+      invoke<SpotifyResults>('spotify_search', { query, offset: 0 })
         .then((results) => active && dispatch({ type: 'spotifyResults', results }))
         .catch((error) => {
           if (!active) return
@@ -824,6 +824,10 @@ function App() {
               navigation={state.spotifyNavigation}
               playingUri={state.playing?.uri ?? null}
               onAdd={(album) => invoke('add_spotify_album', album)
+                .catch((error) => { fail(error); throw error })}
+              onAddTrack={(uri) => invoke('add_spotify_track', { uri })
+                .catch((error) => { fail(error); throw error })}
+              onRemoveTrack={(uri) => invoke('remove_spotify_track', { uri })
                 .catch((error) => { fail(error); throw error })}
               onPlay={player.start}
               onPlaylist={setPlaylistSubject}
