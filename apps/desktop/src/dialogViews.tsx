@@ -251,18 +251,27 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSa
             <label className="preference-choice"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} /><span><strong>Automatically add my entire Spotify library</strong><small>Everything you save on Spotify appears here automatically.</small></span></label>
             <label className="preference-choice"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} /><span><strong>Connect to Spotify automatically at launch</strong><small>Keep pulling in music you add on Spotify each time Retune starts.</small></span></label>
           </div></section>
-          <section className="preference-group"><h3>Last.fm</h3><div className="preference-inset preference-options">
-            {!lastfm.available ? <p>{lastfm.problem ?? 'Last.fm scrobbling is unavailable in this build.'}</p> : lastfm.connected ? <>
-              <p>Connected to Last.fm{lastfm.username ? <> as <strong>{lastfm.username}</strong></> : ''}.</p>
-              {lastfm.problem && <p>{lastfm.problem}</p>}
-              <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Send a track after Last.fm’s listening threshold is reached.</small></span></label>
-              <button type="button" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect Last.fm</button>
-            </> : <>
-              <p>{lastfm.problem ?? 'Connect Retune to Last.fm to scrobble your listening history.'}</p>
-              {lastfm.pending ? <button type="button" className="primary" onClick={() => void lastfmAction('finish_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish connecting'}</button> : <button type="button" className="primary" onClick={() => void lastfmAction('connect_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening Last.fm…' : 'Connect Last.fm'}</button>}
-            </>}
-            {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
-            <small>Powered by <a href="https://www.last.fm/" target="_blank" rel="noreferrer">Last.fm</a>.</small>
+          <section className="preference-group"><h3>Last.fm</h3><div className="lastfm-section">
+            <div className="preference-inset lastfm-card">
+              {!lastfm.available ? <p className="lastfm-unavailable">{lastfm.problem ?? 'Last.fm scrobbling is unavailable in this build.'}</p> : lastfm.connected ? <>
+                <div className="lastfm-status-row">
+                  <span className="lastfm-status-dot connected" aria-hidden="true" />
+                  <span className="lastfm-status-label">Connected as <strong>{lastfm.username ?? 'Last.fm'}</strong></span>
+                  <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect</button>
+                </div>
+                <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Sent once a track passes Last.fm's listening threshold.</small></span></label>
+              </> : <div className="lastfm-status-row">
+                <span className={`lastfm-status-dot${lastfm.pending ? ' pending' : ''}`} aria-hidden="true" />
+                <span className="lastfm-status-copy muted">
+                  <strong>{lastfm.pending ? 'Authorization pending' : 'No Last.fm account'}</strong>
+                  <small>{lastfm.pending ? 'Finish connecting to scrobble everything you play in Retune.' : 'Connect one to scrobble everything you play in Retune.'}</small>
+                </span>
+                {lastfm.pending ? <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('finish_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish…'}</button> : <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('connect_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening…' : 'Connect…'}</button>}
+              </div>}
+              {lastfm.problem && lastfm.available && <small className="error-text" role="alert">{lastfm.problem}</small>}
+              {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
+            </div>
+            <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" target="_blank" rel="noreferrer">Last.fm</a>.</small>
           </div></section>
         </>}
         {tab === 'audio' && <>
