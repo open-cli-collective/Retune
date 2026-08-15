@@ -18,6 +18,10 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `lastfm-pending-token.json` | Short-lived Last.fm authorization token; mode 0600 on Unix |
 | `lastfm-scrobbles.json` | Ordered durable Last.fm scrobble queue; excluded from backup |
 
+The official Tauri window-state plugin manages the main native window's size,
+position, and maximized state in machine-local application state. Its lifecycle
+handles restoring and saving this state; it is not part of backup/export.
+
 The token record has an optional reusable built-in playback credential containing
 the librespot username and AP authentication bytes. Its absence is the default,
 so older token files remain readable. Release builds keep it inside encrypted
