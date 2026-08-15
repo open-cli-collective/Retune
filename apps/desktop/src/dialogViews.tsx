@@ -261,7 +261,7 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSa
               <p>{lastfm.problem ?? 'Connect Retune to Last.fm to scrobble your listening history.'}</p>
               {lastfm.pending ? <button type="button" className="primary" onClick={() => void lastfmAction('finish_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish connecting'}</button> : <button type="button" className="primary" onClick={() => void lastfmAction('connect_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening Last.fm…' : 'Connect Last.fm'}</button>}
             </>}
-            {lastfmError && <small className="error-text" role="alert">{lastfmError}</small>}
+            {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
             <small>Powered by <a href="https://www.last.fm/" target="_blank" rel="noreferrer">Last.fm</a>.</small>
           </div></section>
         </>}
