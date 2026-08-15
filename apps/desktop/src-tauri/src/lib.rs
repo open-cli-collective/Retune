@@ -2058,10 +2058,12 @@ fn notify_error(app: &tauri::AppHandle, error: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    let app = builder.invoke_handler(tauri::generate_handler![
             library_commands::browse,
             library_commands::metadata_values,
             library_commands::click_track_star,
@@ -2117,9 +2119,6 @@ pub fn run() {
             lastfm::disconnect_lastfm
         ])
         .setup(|app| {
-            #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_window_state::Builder::default().build())?;
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
