@@ -460,7 +460,7 @@ impl Service {
             )
         } else if runtime.build_problem {
             (
-                true,
+                false,
                 Some(
                     "This Retune build cannot use Last.fm because its app identity was rejected."
                         .into(),
@@ -1601,7 +1601,11 @@ mod tests {
     fn build_failure_stops_flush_without_dropping_session_or_queue() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let mut service = Service::new(directory.path(), true, true);
+            Arc::get_mut(&mut service).unwrap().credentials = Some(Credentials {
+                api_key: "test-key".into(),
+                shared_secret: "test-secret".into(),
+            });
             let session = LastFmSession {
                 username: "user".into(),
                 key: "session".into(),
@@ -1625,6 +1629,13 @@ mod tests {
                 .is_some_and(|value| value == &session));
             assert_eq!(runtime.queue, queued);
             assert!(!flush_ready(&runtime));
+            drop(runtime);
+            let state = service.state().await;
+            assert!(!state.available);
+            assert_eq!(
+                state.problem.as_deref(),
+                Some("This Retune build cannot use Last.fm because its app identity was rejected.")
+            );
         });
     }
 
