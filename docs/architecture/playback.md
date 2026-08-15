@@ -108,6 +108,19 @@ tracks. Skipping before the threshold does not increment the count. Playback
 events are generation-scoped so late backend events cannot count or advance a
 newer track.
 
+The same generation-scoped reducer also tracks cumulative forward playback for
+Last.fm independently of the Retune play-count setting. It emits a natural
+track-start signal only when playback actually begins, once per load/repeat
+generation, and an eligibility signal for tracks longer than 30 seconds at
+`min(duration / 2, 240 seconds)`. The scrobble uses the original start timestamp;
+explicit seeks, discontinuous position jumps, and stale backend events do not
+advance that listening total, while completion is a fallback when no immediate
+eligibility event was observed. The Tauri shell handles Last.fm HTTPS,
+credential storage, queue persistence, and retries for built-in Spotify, Spotify
+Connect, and local/tagged overlay playback. Disabling scrobbling stops new
+requests and flushing without deleting queued items; reconnecting or re-enabling
+drains the queue.
+
 ## Local files
 
 `retune-audio` recursively scans supported audio extensions without following

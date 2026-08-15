@@ -14,6 +14,9 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state; mode 0600 on Unix |
+| `dev-lastfm-session.json` | Development Last.fm session; mode 0600 on Unix |
+| `lastfm-pending-token.json` | Short-lived Last.fm authorization token; mode 0600 on Unix |
+| `lastfm-scrobbles.json` | Ordered durable Last.fm scrobble queue; excluded from backup |
 
 The token record has an optional reusable built-in playback credential containing
 the librespot username and AP authentication bytes. Its absence is the default,
@@ -66,6 +69,24 @@ Debug builds and local bundles built with the `dev-token-store` feature use the
 development token file. On Unix, Retune creates and checks that file with mode
 0600. Ordinary release bundles never enable that feature and retain the
 encrypted-file/native credential-store boundary.
+
+Last.fm release session keys use the native credential store with service
+`com.rianjs.retune` and account `lastfm-session`; the username is stored beside
+that credential value and is never sent to the frontend except as connected
+account display state. Debug builds and local bundles use
+`dev-lastfm-session.json`. Authorization request tokens use the short-lived
+owner-only pending-token file. Scrobbles are written atomically oldest-first to
+the ordered queue file, sent in batches of at most 50, and removed after an
+accepted/ignored response (including ignored code 3). The queue is
+machine/account state and is intentionally omitted from backup and restore;
+each queued scrobble carries its non-secret owning Last.fm username. Session and
+app-identity failures preserve it for reconnect, while permanent request
+rejections remove and log the affected batch. Reconnecting as the same username
+preserves and drains the queue; a different username clears it durably before
+installing the new session. Ownerless or mixed legacy queues are never flushed
+and are cleared during account reconciliation. Disconnect clears the durable
+queue before clearing session or pending authorization state; a failed queue
+clear leaves the active account connected.
 
 ## Recovery and portability
 

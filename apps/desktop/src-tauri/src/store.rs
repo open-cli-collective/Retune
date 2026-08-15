@@ -122,6 +122,8 @@ pub struct Settings {
     pub gapless: bool,
     #[serde(default = "default_play_threshold_percent")]
     pub play_threshold_percent: u8,
+    #[serde(default = "default_true")]
+    pub lastfm_scrobbling: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -201,6 +203,7 @@ impl Default for Settings {
             normalize_volume: false,
             gapless: true,
             play_threshold_percent: default_play_threshold_percent(),
+            lastfm_scrobbling: true,
         }
     }
 }
@@ -673,6 +676,7 @@ mod tests {
             normalize_volume: true,
             gapless: false,
             play_threshold_percent: 75,
+            lastfm_scrobbling: false,
         };
 
         assert!(store.load().unwrap().is_none());
@@ -748,6 +752,16 @@ mod tests {
         let settings: Settings = serde_json::from_value(json).unwrap();
 
         assert_eq!(settings.play_threshold_percent, 100);
+    }
+
+    #[test]
+    fn legacy_settings_enable_lastfm_scrobbling_by_default() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("lastfmScrobbling");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert!(settings.lastfm_scrobbling);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use connect::ConnectBackend;
 use file::FileEngine;
 use local::LocalBackend;
 use rand::seq::SliceRandom;
-use reducer::{EventReducer, ReducerAction};
+use reducer::{EventReducer, LastFmAction, ReducerAction};
 use retune_spotify::client::{HttpTransport, SpotifyClient};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -576,6 +576,8 @@ impl Playback {
         self: &Arc<Self>,
         app: tauri::AppHandle,
         on_track_completed: impl Fn(String) + Send + Sync + 'static,
+        on_track_started: impl Fn(SnapshotTrack) + Send + Sync + 'static,
+        on_track_eligible: impl Fn(SnapshotTrack, u64) + Send + Sync + 'static,
     ) {
         let mut receiver = self
             .receiver
@@ -587,7 +589,13 @@ impl Playback {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 playback
-                    .handle_event(&app, event, &on_track_completed)
+                    .handle_event(
+                        &app,
+                        event,
+                        &on_track_completed,
+                        &on_track_started,
+                        &on_track_eligible,
+                    )
                     .await;
             }
         });
@@ -1159,9 +1167,19 @@ impl Playback {
         app: &tauri::AppHandle,
         event: NeutralEvent,
         on_track_completed: &impl Fn(String),
+        on_track_started: &impl Fn(SnapshotTrack),
+        on_track_eligible: &impl Fn(SnapshotTrack, u64),
     ) {
         let mut state = self.state.lock().await;
         let actions = state.reducer.handle(event);
+        for event in state.reducer.take_lastfm_events() {
+            match event {
+                LastFmAction::Started(track) => on_track_started(track),
+                LastFmAction::Eligible { track, started_at } => {
+                    on_track_eligible(track, started_at)
+                }
+            }
+        }
         for action in actions {
             match action {
                 ReducerAction::Emit(event) => {

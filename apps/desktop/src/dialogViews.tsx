@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useState } from 'react'
-import type { MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
+import type { LastFmState, MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
 import { clearedTrackRating, overlayEditTargets } from './ui.ts'
 import { ModalDialog, RatingStars } from './viewShared.tsx'
 
@@ -171,11 +171,13 @@ export function PlaybackAuthorization({ prompt, onCancel, onAuthorize }: {
   </ModalDialog>
 }
 
-export function Preferences({ settings, onZoom, onCancel, onSave }: {
+export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSave }: {
   settings: Settings
+  lastfm: LastFmState
   onZoom: (zoom: number) => void
   onCancel: () => void
-  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent'>) => void
+  onLastfm: (state: LastFmState) => void
+  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
@@ -190,6 +192,9 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
   const [normalizeVolume, setNormalizeVolume] = useState(settings.normalizeVolume)
   const [gapless, setGapless] = useState(settings.gapless)
   const [playThresholdPercent, setPlayThresholdPercent] = useState(settings.playThresholdPercent)
+  const [lastfmScrobbling, setLastfmScrobbling] = useState(settings.lastfmScrobbling)
+  const [lastfmBusy, setLastfmBusy] = useState(false)
+  const [lastfmError, setLastfmError] = useState<string>()
   const tabs: [PreferenceTab, string, string][] = [
     ['appearance', '◑', 'Appearance'],
     ['library', '♫', 'Library'],
@@ -200,7 +205,22 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
     ['light', 'Light', 'Always use the light theme.'],
     ['dark', 'Dark', 'Always use the dark theme.'],
   ]
-  const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent })
+  const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent, lastfmScrobbling })
+  const lastfmAction = async (command: 'connect_lastfm' | 'finish_lastfm' | 'disconnect_lastfm') => {
+    setLastfmBusy(true)
+    setLastfmError(undefined)
+    try {
+      const next = await invoke<LastFmState>(command)
+      onLastfm(next)
+      if (command === 'finish_lastfm') {
+        setLastfmScrobbling(true)
+      }
+    } catch (error) {
+      setLastfmError(String(error))
+    } finally {
+      setLastfmBusy(false)
+    }
+  }
   return <ModalDialog className="get-info preferences" labelledBy="preferences-title" onCancel={onCancel} onSubmit={save}>
       <h2 id="preferences-title">Preferences</h2>
       <div className="preference-toolbar" role="tablist">
@@ -230,6 +250,19 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
           <section className="preference-group"><h3>Syncing</h3><div className="preference-inset preference-options">
             <label className="preference-choice"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} /><span><strong>Automatically add my entire Spotify library</strong><small>Everything you save on Spotify appears here automatically.</small></span></label>
             <label className="preference-choice"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} /><span><strong>Connect to Spotify automatically at launch</strong><small>Keep pulling in music you add on Spotify each time Retune starts.</small></span></label>
+          </div></section>
+          <section className="preference-group"><h3>Last.fm</h3><div className="preference-inset preference-options">
+            {!lastfm.available ? <p>{lastfm.problem ?? 'Last.fm scrobbling is unavailable in this build.'}</p> : lastfm.connected ? <>
+              <p>Connected to Last.fm{lastfm.username ? <> as <strong>{lastfm.username}</strong></> : ''}.</p>
+              {lastfm.problem && <p>{lastfm.problem}</p>}
+              <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Send a track after Last.fm’s listening threshold is reached.</small></span></label>
+              <button type="button" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect Last.fm</button>
+            </> : <>
+              <p>{lastfm.problem ?? 'Connect Retune to Last.fm to scrobble your listening history.'}</p>
+              {lastfm.pending ? <button type="button" className="primary" onClick={() => void lastfmAction('finish_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish connecting'}</button> : <button type="button" className="primary" onClick={() => void lastfmAction('connect_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening Last.fm…' : 'Connect Last.fm'}</button>}
+            </>}
+            {lastfmError && <small className="error-text" role="alert">{lastfmError}</small>}
+            <small>Powered by <a href="https://www.last.fm/" target="_blank" rel="noreferrer">Last.fm</a>.</small>
           </div></section>
         </>}
         {tab === 'audio' && <>
