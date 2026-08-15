@@ -7,7 +7,7 @@ import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, comp
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifySearch } from './spotifyViews.tsx'
-import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
+import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
@@ -41,6 +41,7 @@ type State = {
   setup: boolean
   playbackAuthorization: PlaybackAuthorizationPrompt | null
   connection: ConnectionState
+  lastfm: LastFmState
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
   spotifyNavigation?: SpotifyNavEntry
@@ -80,6 +81,7 @@ type Action =
   | { type: 'setup'; open: boolean }
   | { type: 'playbackAuthorization'; prompt: PlaybackAuthorizationPrompt | null }
   | { type: 'connection'; connection: ConnectionState }
+  | { type: 'lastfm'; lastfm: LastFmState }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'spotifyNavigate'; entry: SpotifyNavEntry }
@@ -117,6 +119,7 @@ const defaultSettings: Settings = {
   normalizeVolume: false,
   gapless: true,
   playThresholdPercent: 100,
+  lastfmScrobbling: true,
 }
 
 const initialState: State = {
@@ -136,6 +139,7 @@ const initialState: State = {
   setup: false,
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
+  lastfm: { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,
@@ -232,6 +236,8 @@ function reducer(state: State, action: Action): State {
         : { ...state, playbackAuthorization: null }
     case 'connection':
       return { ...state, connection: action.connection, playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization }
+    case 'lastfm':
+      return { ...state, lastfm: action.lastfm }
     case 'spotifyResults':
       return { ...state, spotifyResults: action.results, spotifySearching: false }
     case 'spotifySearching':
@@ -522,6 +528,9 @@ function App() {
     invoke<ConnectionState>('connection_state')
       .then((connection) => dispatch({ type: 'connection', connection }))
       .catch(fail)
+    invoke<LastFmState>('lastfm_state')
+      .then((lastfm) => dispatch({ type: 'lastfm', lastfm }))
+      .catch(fail)
   }, [fail])
 
   const saveKey = useMemo(
@@ -544,6 +553,7 @@ function App() {
   useTauriEvent<string>('operation-error', (error) => dispatch({ type: 'error', error }))
   useTauriEvent('operation-recovered', () => dispatch({ type: 'clear-error' }))
   useTauriEvent<ConnectionState>('connection-changed', (connection) => dispatch({ type: 'connection', connection }))
+  useTauriEvent<LastFmState>('lastfm-changed', (lastfm) => dispatch({ type: 'lastfm', lastfm }))
   useTauriEvent<Settings>('settings-changed', (settings) => dispatch({ type: 'hydrateSettings', settings }))
   useTauriEvent<string>('sync-progress', (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
   useTauriEvent<{ tracks: number; fraction: number }>('sync-progress-count', (progress) => dispatch({ type: 'syncProgress', progress }))
@@ -943,7 +953,7 @@ function App() {
           return invoke('sync_from_spotify')
         })
         .catch(fail)} />}
-      {state.preferences && <Preferences settings={state.settings} onZoom={setZoom} onCancel={cancelPreferences} onSave={({ browserPanes, ...settings }) => {
+      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} onZoom={setZoom} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onSave={({ browserPanes, ...settings }) => {
         const audioChanged = settings.streamingBitrate !== state.settings.streamingBitrate
           || settings.normalizeVolume !== state.settings.normalizeVolume
           || settings.gapless !== state.settings.gapless

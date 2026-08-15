@@ -12,7 +12,17 @@ const desktopCargo = read('apps/desktop/src-tauri/Cargo.toml')
 const lock = read('Cargo.lock')
 const workflow = read('.github/workflows/release.yml')
 const ci = read('.github/workflows/ci.yml')
+const gitignore = read('.gitignore')
 const cask = read('packaging/homebrew/retune.rb.template')
+const buildInstall = read('scripts/build-install.sh')
+const lastfmBackend = read('apps/desktop/src-tauri/src/lastfm.rs')
+const frontendState = [
+  read('apps/desktop/src/App.tsx'),
+  read('apps/desktop/src/dialogViews.tsx'),
+  read('apps/desktop/src/types.ts'),
+].join('\n')
+
+const nativeBundleStep = workflow.match(/- name: Build native bundle\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 
 const cargoVersion = desktopCargo.match(/name = "retune-desktop"\s+version = "([^"]+)"/s)?.[1]
 const lockVersion = lock.match(/\[\[package\]\]\s+name = "retune-desktop"\s+version = "([^"]+)"/s)?.[1]
@@ -24,6 +34,18 @@ assert.equal(tauri.bundle.linux.deb.section, 'sound')
 
 required(workflow, 'workflow_dispatch:')
 required(workflow, 'tags:\n      - "v*"')
+required(nativeBundleStep, 'RETUNE_LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}', 'trusted Last.fm API key mapping')
+required(nativeBundleStep, 'RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}', 'trusted Last.fm shared-secret mapping')
+required(nativeBundleStep, "RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET", 'release Last.fm credential presence check')
+assert.doesNotMatch(ci, /LASTFM_API_KEY|LASTFM_API_SECRET|RETUNE_LASTFM/)
+assert.equal((workflow.match(/secrets\.LASTFM_API_(?:KEY|SECRET)/g) ?? []).length, 2)
+required(buildInstall, '.env.lastfm.local')
+required(buildInstall, 'chmod 600')
+required(buildInstall, 'unset RETUNE_LASTFM_API_KEY RETUNE_LASTFM_SHARED_SECRET')
+required(gitignore, '.env.lastfm.local')
+required(lastfmBackend, 'option_env!("RETUNE_LASTFM_API_KEY")', 'backend-only Last.fm API key compile option')
+required(lastfmBackend, 'option_env!("RETUNE_LASTFM_SHARED_SECRET")', 'backend-only Last.fm shared-secret compile option')
+assert.doesNotMatch(frontendState, /RETUNE_LASTFM_API_KEY|RETUNE_LASTFM_SHARED_SECRET|LASTFM_API_SECRET|LASTFM_API_KEY/)
 for (const [runner, arch, bundle] of [
   ['macos-15', 'arm64', 'app'],
   ['windows-2025', 'x64', 'nsis'],
