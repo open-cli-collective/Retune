@@ -94,6 +94,10 @@ pub struct Settings {
     #[serde(default)]
     pub playlist_hidden_columns: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    pub playlist_column_orders: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub playlist_column_widths: BTreeMap<String, BTreeMap<String, u32>>,
+    #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_desc: bool,
@@ -122,6 +126,8 @@ pub struct Settings {
     pub gapless: bool,
     #[serde(default = "default_play_threshold_percent")]
     pub play_threshold_percent: u8,
+    #[serde(default = "default_true")]
+    pub lastfm_scrobbling: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -186,6 +192,8 @@ impl Default for Settings {
             column_widths: BTreeMap::new(),
             hidden_columns: Self::OPTIONAL_COLUMNS.map(String::from).to_vec(),
             playlist_hidden_columns: BTreeMap::new(),
+            playlist_column_orders: BTreeMap::new(),
+            playlist_column_widths: BTreeMap::new(),
             sort_column: None,
             sort_desc: false,
             auto_add_spotify_library: true,
@@ -201,12 +209,29 @@ impl Default for Settings {
             normalize_volume: false,
             gapless: true,
             play_threshold_percent: default_play_threshold_percent(),
+            lastfm_scrobbling: true,
         }
     }
 }
 
 impl Settings {
     const COLUMNS: [&'static str; 14] = [
+        "track",
+        "name",
+        "artist",
+        "album",
+        "time",
+        "plays",
+        "rating",
+        "genre",
+        "disc",
+        "kind",
+        "bitrate",
+        "lastPlayed",
+        "added",
+        "releaseDate",
+    ];
+    const LEGACY_DEFAULT_COLUMN_ORDER: [&'static str; 14] = [
         "name",
         "artist",
         "album",
@@ -222,6 +247,22 @@ impl Settings {
         "added",
         "releaseDate",
     ];
+    const PLAYLIST_COLUMNS: [&'static str; 14] = [
+        "name",
+        "artist",
+        "album",
+        "time",
+        "rating",
+        "plays",
+        "genre",
+        "disc",
+        "kind",
+        "bitrate",
+        "lastPlayed",
+        "added",
+        "releaseDate",
+        "track",
+    ];
     const OPTIONAL_COLUMNS: [&'static str; 6] = [
         "disc",
         "kind",
@@ -230,7 +271,24 @@ impl Settings {
         "added",
         "releaseDate",
     ];
+    const PLAYLIST_OPTIONAL_COLUMNS: [&'static str; 7] = [
+        "disc",
+        "kind",
+        "bitrate",
+        "lastPlayed",
+        "added",
+        "releaseDate",
+        "track",
+    ];
     pub(crate) fn normalize(&mut self) {
+        if self
+            .column_order
+            .iter()
+            .map(String::as_str)
+            .eq(Self::LEGACY_DEFAULT_COLUMN_ORDER)
+        {
+            self.column_order = Self::COLUMNS.map(String::from).to_vec();
+        }
         self.column_order
             .retain(|column| Self::COLUMNS.contains(&column.as_str()));
         self.column_widths
@@ -250,16 +308,25 @@ impl Settings {
                 self.column_order.push(column.into());
                 if Self::OPTIONAL_COLUMNS.contains(&column) {
                     self.hidden_columns.push(column.into());
-                    for hidden_columns in self.playlist_hidden_columns.values_mut() {
-                        hidden_columns.push(column.into());
-                    }
                 }
             }
         }
         Self::normalize_hidden_columns(&mut self.hidden_columns);
         for hidden_columns in self.playlist_hidden_columns.values_mut() {
-            Self::normalize_hidden_columns(hidden_columns);
+            Self::normalize_playlist_hidden_columns(hidden_columns);
         }
+        self.playlist_hidden_columns
+            .retain(|_, hidden_columns| !Self::is_default_playlist_hidden(hidden_columns));
+        for order in self.playlist_column_orders.values_mut() {
+            Self::normalize_playlist_column_order(order);
+        }
+        self.playlist_column_orders
+            .retain(|_, order| !Self::is_default_playlist_order(order));
+        for widths in self.playlist_column_widths.values_mut() {
+            widths.retain(|column, _| Self::PLAYLIST_COLUMNS.contains(&column.as_str()));
+        }
+        self.playlist_column_widths
+            .retain(|_, widths| !widths.is_empty());
         if !matches!(self.play_threshold_percent, 50 | 75 | 90 | 100) {
             self.play_threshold_percent = default_play_threshold_percent();
         }
@@ -288,10 +355,29 @@ impl Settings {
             || self
                 .playlist_hidden_columns
                 .values()
-                .any(|columns| !Self::hidden_columns_valid(columns))
+                .any(|columns| !Self::playlist_hidden_columns_valid(columns))
         {
             return Err(StoreError::InvalidSettings(
-                "settings hiddenColumns must be unique track columns other than name",
+                "settings hiddenColumns must contain unique known columns other than name",
+            ));
+        }
+        if self.playlist_column_orders.values().any(|order| {
+            order.len() != Self::PLAYLIST_COLUMNS.len()
+                || Self::PLAYLIST_COLUMNS
+                    .iter()
+                    .any(|column| order.iter().filter(|item| item.as_str() == *column).count() != 1)
+        }) {
+            return Err(StoreError::InvalidSettings(
+                "settings playlistColumnOrders must contain each playlist column exactly once",
+            ));
+        }
+        if self.playlist_column_widths.values().any(|widths| {
+            widths.iter().any(|(column, width)| {
+                !Self::PLAYLIST_COLUMNS.contains(&column.as_str()) || *width < 28
+            })
+        }) {
+            return Err(StoreError::InvalidSettings(
+                "settings playlistColumnWidths must contain playlist columns at least 28px wide",
             ));
         }
         if self
@@ -350,6 +436,52 @@ impl Settings {
         columns.iter().all(|column| {
             column != "name"
                 && Self::COLUMNS.contains(&column.as_str())
+                && columns.iter().filter(|item| *item == column).count() == 1
+        })
+    }
+
+    fn normalize_playlist_column_order(order: &mut Vec<String>) {
+        let mut normalized = Vec::with_capacity(Self::PLAYLIST_COLUMNS.len());
+        for column in order.drain(..) {
+            if Self::PLAYLIST_COLUMNS.contains(&column.as_str()) && !normalized.contains(&column) {
+                normalized.push(column);
+            }
+        }
+        for column in Self::PLAYLIST_COLUMNS {
+            if !normalized.iter().any(|item| item == column) {
+                normalized.push(column.into());
+            }
+        }
+        *order = normalized;
+    }
+
+    fn is_default_playlist_order(order: &[String]) -> bool {
+        order.iter().map(String::as_str).eq(Self::PLAYLIST_COLUMNS)
+    }
+
+    fn is_default_playlist_hidden(columns: &[String]) -> bool {
+        columns
+            .iter()
+            .map(String::as_str)
+            .eq(Self::PLAYLIST_OPTIONAL_COLUMNS)
+    }
+
+    fn normalize_playlist_hidden_columns(columns: &mut Vec<String>) {
+        columns
+            .retain(|column| column != "name" && Self::PLAYLIST_COLUMNS.contains(&column.as_str()));
+        columns.sort_by_key(|column| {
+            Self::PLAYLIST_COLUMNS
+                .iter()
+                .position(|candidate| candidate == column)
+                .unwrap_or(usize::MAX)
+        });
+        columns.dedup();
+    }
+
+    fn playlist_hidden_columns_valid(columns: &[String]) -> bool {
+        columns.iter().all(|column| {
+            column != "name"
+                && Self::PLAYLIST_COLUMNS.contains(&column.as_str())
                 && columns.iter().filter(|item| *item == column).count() == 1
         })
     }
@@ -649,15 +781,69 @@ mod tests {
             .to_vec(),
             column_widths: BTreeMap::from([("name".into(), 240), ("lastPlayed".into(), 120)]),
             hidden_columns: vec![
-                "disc".into(),
                 "genre".into(),
+                "disc".into(),
                 "added".into(),
                 "releaseDate".into(),
             ],
-            playlist_hidden_columns: BTreeMap::from([(
-                "road-trip".into(),
-                vec!["genre".into(), "plays".into()],
-            )]),
+            playlist_hidden_columns: BTreeMap::from([
+                ("road-trip".into(), vec!["plays".into(), "genre".into()]),
+                ("focus".into(), vec!["disc".into(), "track".into()]),
+            ]),
+            playlist_column_orders: BTreeMap::from([
+                (
+                    "road-trip".into(),
+                    [
+                        "genre",
+                        "name",
+                        "artist",
+                        "album",
+                        "time",
+                        "rating",
+                        "plays",
+                        "disc",
+                        "kind",
+                        "bitrate",
+                        "lastPlayed",
+                        "added",
+                        "releaseDate",
+                        "track",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+                (
+                    "focus".into(),
+                    [
+                        "plays",
+                        "name",
+                        "artist",
+                        "album",
+                        "time",
+                        "rating",
+                        "genre",
+                        "disc",
+                        "kind",
+                        "bitrate",
+                        "lastPlayed",
+                        "added",
+                        "releaseDate",
+                        "track",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+            ]),
+            playlist_column_widths: BTreeMap::from([
+                (
+                    "road-trip".into(),
+                    BTreeMap::from([("name".into(), 220), ("genre".into(), 120)]),
+                ),
+                (
+                    "focus".into(),
+                    BTreeMap::from([("plays".into(), 180), ("genre".into(), 140)]),
+                ),
+            ]),
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,
@@ -673,6 +859,7 @@ mod tests {
             normalize_volume: true,
             gapless: false,
             play_threshold_percent: 75,
+            lastfm_scrobbling: false,
         };
 
         assert!(store.load().unwrap().is_none());
@@ -748,6 +935,16 @@ mod tests {
         let settings: Settings = serde_json::from_value(json).unwrap();
 
         assert_eq!(settings.play_threshold_percent, 100);
+    }
+
+    #[test]
+    fn legacy_settings_enable_lastfm_scrobbling_by_default() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("lastfmScrobbling");
+
+        let settings: Settings = serde_json::from_value(json).unwrap();
+
+        assert!(settings.lastfm_scrobbling);
     }
 
     #[test]
@@ -888,8 +1085,8 @@ mod tests {
                 "album",
                 "genre",
                 "rating",
-                "disc",
                 "plays",
+                "disc",
                 "kind",
                 "bitrate",
                 "lastPlayed",
@@ -943,8 +1140,8 @@ mod tests {
                 "time",
                 "genre",
                 "rating",
-                "disc",
                 "plays",
+                "disc",
                 "kind",
                 "bitrate",
                 "lastPlayed",
@@ -955,8 +1152,8 @@ mod tests {
         assert_eq!(
             settings.hidden_columns,
             [
-                "disc",
                 "genre",
+                "disc",
                 "kind",
                 "bitrate",
                 "lastPlayed",
@@ -1020,6 +1217,108 @@ mod tests {
     }
 
     #[test]
+    fn settings_load_migrates_the_legacy_default_library_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let legacy = serde_json::json!({
+            "theme": "system", "zoom": 1.0, "zebra": true,
+            "columnOrder": ["name", "artist", "album", "disc", "track", "time", "rating", "genre", "plays", "kind", "bitrate", "lastPlayed", "added", "releaseDate"],
+            "autoAddSpotifyLibrary": true
+        });
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load().unwrap().unwrap().column_order,
+            Settings::default().column_order
+        );
+    }
+
+    #[test]
+    fn playlist_layout_defaults_remove_empty_and_default_overrides() {
+        let mut settings = Settings::default();
+        settings.playlist_hidden_columns.insert(
+            "playlist".into(),
+            Settings::PLAYLIST_OPTIONAL_COLUMNS
+                .map(String::from)
+                .to_vec(),
+        );
+        settings
+            .playlist_hidden_columns
+            .insert("all-visible".into(), vec![]);
+        settings.playlist_column_orders.insert(
+            "playlist".into(),
+            Settings::PLAYLIST_COLUMNS.map(String::from).to_vec(),
+        );
+        settings
+            .playlist_column_widths
+            .insert("playlist".into(), BTreeMap::new());
+
+        settings.normalize();
+
+        assert!(!settings.playlist_hidden_columns.contains_key("playlist"));
+        assert_eq!(
+            settings.playlist_hidden_columns["all-visible"],
+            Vec::<String>::new()
+        );
+        assert!(settings.playlist_column_orders.is_empty());
+        assert!(settings.playlist_column_widths.is_empty());
+    }
+
+    #[test]
+    fn playlist_layout_overrides_normalize_and_validate_at_the_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let json = serde_json::json!({
+            "theme": "system", "zoom": 1.0, "zebra": true,
+            "columnOrder": Settings::default().column_order,
+            "autoAddSpotifyLibrary": true,
+            "playlistHiddenColumns": {"a": ["genre", "track", "genre"]},
+            "playlistColumnOrders": {"a": ["genre", "name", "artist"]},
+            "playlistColumnWidths": {"a": {"name": 220, "future": 80}}
+        });
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        let settings = store.load().unwrap().unwrap();
+        assert_eq!(
+            settings.playlist_hidden_columns["a"],
+            vec!["genre".to_string(), "track".to_string()]
+        );
+        assert_eq!(
+            settings.playlist_column_orders["a"],
+            [
+                "genre",
+                "name",
+                "artist",
+                "album",
+                "time",
+                "rating",
+                "plays",
+                "disc",
+                "kind",
+                "bitrate",
+                "lastPlayed",
+                "added",
+                "releaseDate",
+                "track"
+            ]
+            .map(String::from)
+            .to_vec()
+        );
+        assert_eq!(
+            settings.playlist_column_widths["a"],
+            BTreeMap::from([("name".into(), 220)])
+        );
+    }
+
+    #[test]
     fn legacy_settings_json_defaults_to_no_sort() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "theme": "system", "zoom": 1.0, "zebra": true,
@@ -1031,6 +1330,8 @@ mod tests {
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);
         assert!(settings.playlist_hidden_columns.is_empty());
+        assert!(settings.playlist_column_orders.is_empty());
+        assert!(settings.playlist_column_widths.is_empty());
     }
 
     #[test]
@@ -1129,6 +1430,31 @@ mod tests {
         settings
             .playlist_hidden_columns
             .insert("playlist".into(), vec!["name".into()]);
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn playlist_layout_validation_rejects_invalid_columns_and_widths() {
+        let mut settings = Settings::default();
+        settings
+            .playlist_column_orders
+            .insert("playlist".into(), vec!["name".into()]);
+        assert!(settings.validate().is_err());
+
+        settings.playlist_column_orders.clear();
+        settings
+            .playlist_hidden_columns
+            .insert("playlist".into(), vec!["track".into()]);
+        assert!(settings.validate().is_ok());
+
+        settings.playlist_hidden_columns.clear();
+        settings
+            .playlist_column_widths
+            .insert("playlist".into(), BTreeMap::from([("track".into(), 28)]));
+        assert!(settings.validate().is_ok());
+        settings
+            .playlist_column_widths
+            .insert("playlist".into(), BTreeMap::from([("track".into(), 27)]));
         assert!(settings.validate().is_err());
     }
 

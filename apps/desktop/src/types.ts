@@ -19,6 +19,8 @@ export type Settings = {
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
   playlistHiddenColumns: Record<string, ColumnKey[]>
+  playlistColumnOrders: Record<string, ColumnKey[]>
+  playlistColumnWidths: Record<string, Partial<Record<ColumnKey, number>>>
   sortColumn: ColumnKey | null
   sortDesc: boolean
   autoAddSpotifyLibrary: boolean
@@ -33,9 +35,18 @@ export type Settings = {
   normalizeVolume: boolean
   gapless: boolean
   playThresholdPercent: PlayThresholdPercent
+  lastfmScrobbling: boolean
 }
 
 export type ConnectionState = { connected: boolean; needs_reauth: boolean; playback_authorized: boolean }
+export type LastFmState = {
+  available: boolean
+  connected: boolean
+  username: string | null
+  pending: boolean
+  reconnectRequired: boolean
+  problem: string | null
+}
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'
   message: string

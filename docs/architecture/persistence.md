@@ -14,6 +14,20 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state; mode 0600 on Unix |
+| `dev-lastfm-session.json` | Development Last.fm session; mode 0600 on Unix |
+| `lastfm-pending-token.json` | Short-lived Last.fm authorization token; mode 0600 on Unix |
+| `lastfm-scrobbles.json` | Ordered durable Last.fm scrobble queue; excluded from backup |
+
+The official Tauri window-state plugin manages the main native window's size,
+position, and maximized state in machine-local application state. Its lifecycle
+handles restoring and saving this state; it is not part of backup/export.
+
+The Preferences Bug tab reads the current rotating application log directly.
+A startup marker limits the viewer to the current process session. View filters
+do not change the report window: Copy Logs and Email include session entries
+through the final warning or error and omit trailing informational entries.
+Email support is compiled from optional `RETUNE_SUPPORT_EMAIL`; missing local
+configuration disables only Email, and the frontend never receives the address.
 
 The token record has an optional reusable built-in playback credential containing
 the librespot username and AP authentication bytes. Its absence is the default,
@@ -31,8 +45,13 @@ The playlist cache retains Spotify display metadata for every fetched track,
 including disc/track numbers and album release date. Older caches deserialize
 with defaults and are refreshed once before snapshot-based fetch skipping resumes.
 
-Column visibility is UI state in `settings.json`: the Library has one hidden-column
-list, and playlists have independent lists keyed by Spotify playlist ID.
+Column layout is UI state in `settings.json`: the Library has one order, width map,
+and hidden-column list. Playlists have independent metadata-column order, width,
+and visibility overrides keyed by Spotify playlist ID; absent playlist keys mean
+the default layout (fixed Spotify order `#`, Song, Artist, Album, Time, Rating,
+Plays, Genre). The legacy `playlistHiddenColumns` map remains readable and
+portable. Restoring a playlist aspect to its default removes that playlist's
+override instead of storing redundant defaults.
 
 ## Spotify audio cache
 
@@ -66,6 +85,31 @@ Debug builds and local bundles built with the `dev-token-store` feature use the
 development token file. On Unix, Retune creates and checks that file with mode
 0600. Ordinary release bundles never enable that feature and retain the
 encrypted-file/native credential-store boundary.
+
+Last.fm release session keys use the native credential store with service
+`com.rianjs.retune` and account `lastfm-session`; the username is stored beside
+that credential value and is never sent to the frontend except as connected
+account display state. Debug builds and local bundles use
+`dev-lastfm-session.json`. Authorization request tokens use the short-lived
+owner-only pending-token file. Scrobbles are written atomically oldest-first to
+the ordered queue file, sent in batches of at most 50, and removed after an
+accepted/ignored response (including ignored code 3). The queue is
+machine/account state and is intentionally omitted from backup and restore;
+each queued scrobble carries its non-secret owning Last.fm username. Session and
+app-identity failures preserve it for reconnect, while permanent request
+rejections remove and log the affected batch. Reconnecting as the same username
+preserves and drains the queue; a different username clears it durably before
+installing the new session. Ownerless or mixed legacy queues are never flushed
+and are cleared during account reconciliation. Disconnect clears the durable
+queue before clearing session or pending authorization state; a failed queue
+clear leaves the active account connected.
+
+Last.fm runtime mutations snapshot queue/account state under the persistence
+serialization mutex, perform filesystem and credential-store work in blocking
+tasks, and commit only when the snapshot is still current. This keeps queue
+ordering and account isolation intact without holding the async runtime mutex
+across local I/O; failed queue writes or clears retain the corresponding
+in-memory state.
 
 ## Recovery and portability
 

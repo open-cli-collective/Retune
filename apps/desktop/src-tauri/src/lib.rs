@@ -1,4 +1,6 @@
+mod diagnostics;
 mod fixture;
+mod lastfm;
 mod library_commands;
 mod localfiles;
 mod media_keys;
@@ -78,6 +80,7 @@ struct AppState {
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
+    lastfm: Arc<lastfm::Service>,
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
     playlist_reauth_notified: AtomicBool,
@@ -167,6 +170,10 @@ struct ExportSettings {
     #[serde(default)]
     playlist_hidden_columns: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    playlist_column_orders: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    playlist_column_widths: BTreeMap<String, BTreeMap<String, u32>>,
+    #[serde(default)]
     sort_column: Option<String>,
     #[serde(default)]
     sort_desc: bool,
@@ -187,6 +194,8 @@ impl ExportSettings {
             column_widths: settings.column_widths.clone(),
             hidden_columns: settings.hidden_columns.clone(),
             playlist_hidden_columns: settings.playlist_hidden_columns.clone(),
+            playlist_column_orders: settings.playlist_column_orders.clone(),
+            playlist_column_widths: settings.playlist_column_widths.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
             shuffle: settings.shuffle,
@@ -204,6 +213,8 @@ impl ExportSettings {
         settings.column_widths = self.column_widths;
         settings.hidden_columns = self.hidden_columns;
         settings.playlist_hidden_columns = self.playlist_hidden_columns;
+        settings.playlist_column_orders = self.playlist_column_orders;
+        settings.playlist_column_widths = self.playlist_column_widths;
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
         settings.shuffle = self.shuffle;
@@ -688,6 +699,7 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
         .save(&settings)
         .map_err(|error| error.to_string())?;
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    state.lastfm.set_enabled(settings.lastfm_scrobbling).await;
     state
         .playback
         .set_play_threshold_percent(settings.play_threshold_percent)
@@ -701,6 +713,23 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
             spotify_provider(&settings.spotify_client_id, Arc::clone(&state.token_store))?;
     }
     Ok(())
+}
+
+pub(crate) fn set_lastfm_scrobbling(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut settings = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    settings.lastfm_scrobbling = enabled;
+    state
+        .settings_store
+        .save(&settings)
+        .map_err(|error| error.to_string())?;
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
+    app.emit("settings-changed", settings)
+        .map_err(|error| error.to_string())
 }
 
 async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
@@ -2038,10 +2067,12 @@ fn notify_error(app: &tauri::AppHandle, error: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(all(desktop, not(test)))]
+    let builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    let app = builder.invoke_handler(tauri::generate_handler![
             library_commands::browse,
             library_commands::metadata_values,
             library_commands::click_track_star,
@@ -2081,7 +2112,6 @@ pub fn run() {
             playlist_commands::playlist_reorder,
             playlist_commands::playlist_remove,
             playback_commands::play_tracks,
-            playback_commands::replace_queue,
             playback_commands::player_toggle,
             playback_commands::player_next,
             playback_commands::player_prev,
@@ -2090,7 +2120,13 @@ pub fn run() {
             playback_commands::set_repeat,
             playback_commands::set_shuffle,
             playback_commands::set_audio_settings,
-            spotify_commands::track_artwork
+            spotify_commands::track_artwork,
+            lastfm::lastfm_state,
+            lastfm::connect_lastfm,
+            lastfm::finish_lastfm,
+            lastfm::disconnect_lastfm,
+            diagnostics::load_diagnostics,
+            diagnostics::email_diagnostics
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -2100,6 +2136,11 @@ pub fn run() {
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                     .build(),
             )?;
+            log::info!(
+                target: diagnostics::LOG_TARGET,
+                "{}",
+                diagnostics::SESSION_START_MARKER
+            );
             let app_data_dir = app.path().app_data_dir()?;
             let store = FsOverlayStore::new(&app_data_dir);
             let (mut library, recovery_notice, needs_save) = match store.load() {
@@ -2143,6 +2184,11 @@ pub fn run() {
                 Box::new(EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?)
             };
             let token_store = Arc::new(CachedTokenStore::new(backing));
+            let lastfm = lastfm::Service::new(
+                &app_data_dir,
+                use_dev_token_store,
+                settings.lastfm_scrobbling,
+            );
             // Native credential-store access can fail transiently; start
             // disconnected rather than aborting startup.
             let connection = match token_store.load() {
@@ -2188,6 +2234,7 @@ pub fn run() {
             ));
             playback.set_local_requested(settings.playback_backend == "local");
             let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
+            let lastfm_enabled = settings.lastfm_scrobbling;
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
@@ -2202,26 +2249,37 @@ pub fn run() {
                 spotify: Mutex::new(spotify),
                 artwork_cache: Mutex::default(),
                 playback: Arc::clone(&playback),
+                lastfm: Arc::clone(&lastfm),
                 media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
                 playlist_reauth_notified: AtomicBool::new(false),
             });
-            let completion_app = app.handle().clone();
-            playback.listen(app.handle().clone(), move |uri| {
-                let handle = completion_app.clone();
-                drop(tauri::async_runtime::spawn_blocking(move || {
-                    let state = handle.state::<AppState>();
-                    match record_play(&state.store, &state.library, &uri, unix_now()) {
-                        Ok(true) => {
-                            if let Err(error) = handle.emit("library-changed", ()) {
-                                notify_error(&handle, error.to_string());
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(error) => notify_error(&handle, error),
-                    }
-                }));
+            lastfm.attach_app(app.handle().clone());
+            let lastfm_startup = Arc::clone(&lastfm);
+            tauri::async_runtime::spawn(async move {
+                lastfm_startup.set_enabled(lastfm_enabled).await;
             });
+            let completion_app = app.handle().clone();
+            let lastfm = Arc::clone(&lastfm);
+            playback.listen(
+                app.handle().clone(),
+                move |uri| {
+                    let handle = completion_app.clone();
+                    drop(tauri::async_runtime::spawn_blocking(move || {
+                        let state = handle.state::<AppState>();
+                        match record_play(&state.store, &state.library, &uri, unix_now()) {
+                            Ok(true) => {
+                                if let Err(error) = handle.emit("library-changed", ()) {
+                                    notify_error(&handle, error.to_string());
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => notify_error(&handle, error),
+                        }
+                    }));
+                },
+                move |fact| lastfm.handle_listening_fact(fact),
+            );
             if activate_local
                 || connection.connected
                 || startup_action != StartupAction::Nothing
@@ -3269,8 +3327,8 @@ mod tests {
             .to_vec(),
             column_widths: BTreeMap::from([("name".into(), 260), ("artist".into(), 140)]),
             hidden_columns: vec![
-                "disc".into(),
                 "genre".into(),
+                "disc".into(),
                 "kind".into(),
                 "bitrate".into(),
                 "added".into(),
@@ -3278,7 +3336,32 @@ mod tests {
             ],
             playlist_hidden_columns: BTreeMap::from([(
                 "first".into(),
-                vec!["genre".into(), "plays".into()],
+                vec!["plays".into(), "genre".into()],
+            )]),
+            playlist_column_orders: BTreeMap::from([(
+                "first".into(),
+                [
+                    "genre",
+                    "name",
+                    "artist",
+                    "album",
+                    "time",
+                    "rating",
+                    "plays",
+                    "disc",
+                    "kind",
+                    "bitrate",
+                    "lastPlayed",
+                    "added",
+                    "releaseDate",
+                    "track",
+                ]
+                .map(String::from)
+                .to_vec(),
+            )]),
+            playlist_column_widths: BTreeMap::from([(
+                "first".into(),
+                BTreeMap::from([("name".into(), 220), ("genre".into(), 120)]),
             )]),
             sort_column: Some("plays".into()),
             sort_desc: true,
@@ -3295,6 +3378,7 @@ mod tests {
             normalize_volume: true,
             gapless: false,
             play_threshold_percent: 100,
+            lastfm_scrobbling: true,
         };
         let plain = export_with_settings(&library, &exported, &playlists).unwrap();
         // Gzip the export ourselves so import's GzDecoder path stays covered
@@ -3325,6 +3409,14 @@ mod tests {
         assert_eq!(
             restored.playlist_hidden_columns,
             exported.playlist_hidden_columns
+        );
+        assert_eq!(
+            restored.playlist_column_orders,
+            exported.playlist_column_orders
+        );
+        assert_eq!(
+            restored.playlist_column_widths,
+            exported.playlist_column_widths
         );
         assert_eq!(restored.sort_column.as_deref(), Some("plays"));
         assert!(restored.sort_desc);
@@ -3367,6 +3459,8 @@ mod tests {
             serde_json::json!(["track", "name", "time", "artist", "album", "genre", "rating"]),
         );
         object.insert("hiddenColumns".into(), serde_json::json!(["name", "genre"]));
+        object.remove("playlistColumnOrders");
+        object.remove("playlistColumnWidths");
         object.remove("sortColumn");
         object.remove("sortDesc");
         let visual: ExportSettings = serde_json::from_value(json).unwrap();
@@ -3384,8 +3478,8 @@ mod tests {
                 "album",
                 "genre",
                 "rating",
-                "disc",
                 "plays",
+                "disc",
                 "kind",
                 "bitrate",
                 "lastPlayed",
@@ -3396,8 +3490,8 @@ mod tests {
         assert_eq!(
             settings.hidden_columns,
             [
-                "disc",
                 "genre",
+                "disc",
                 "kind",
                 "bitrate",
                 "lastPlayed",
@@ -3407,6 +3501,8 @@ mod tests {
         );
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);
+        assert!(settings.playlist_column_orders.is_empty());
+        assert!(settings.playlist_column_widths.is_empty());
     }
 
     #[test]

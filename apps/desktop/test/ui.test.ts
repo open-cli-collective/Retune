@@ -1,14 +1,25 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { PlaybackTrack, Playing, Selection, SpotifyResults } from '../src/types.ts'
+import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../src/diagnostics.ts'
+import { initialState, reducer, type Action } from '../src/appState.ts'
+import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE } from '../src/ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
   albums: { items: Array.from({ length: 10 }, (_, index) => ({ uri: `spotify:album:${index}`, name: `Album ${index}`, artist: 'Artist', year: null, imageUrl: null, albumType: null, trackCount: 1, inLibrary: false })), total: 21, nextOffset: 10 },
   tracks: { items: Array.from({ length: 10 }, (_, index) => ({ uri: `spotify:track:${index}`, name: `Track ${index}`, artist: 'Artist', alb: 'Album', durationSecs: 1, imageUrl: null, albumUri: null, inLibrary: false })), total: 21, nextOffset: 10 },
   ...overrides,
+})
+
+test('diagnostic reports include session context through the last problem only', () => {
+  const entry = (level: DiagnosticEntry['level'], message: string): DiagnosticEntry => ({ date: '2026-08-16', time: '12:00:00', level, target: 'retune', message })
+  const entries = [entry('INFO', 'start'), entry('WARN', 'retry'), entry('INFO', 'context'), entry('ERROR', 'failed'), entry('INFO', 'trailing')]
+  const report = reportWindow(entries)
+  assert.deepEqual(report.map(({ message }) => message), ['start', 'retry', 'context', 'failed'])
+  assert.match(formatDiagnosticReport(report), /^\[2026-08-16\]\[12:00:00\]\[INFO\]\[retune\] start/)
+  assert.deepEqual(reportWindow([entry('INFO', 'healthy')]), [])
 })
 
 test('Spotify search uses 5 rows in All and 10 in filtered tabs', () => {
@@ -127,6 +138,146 @@ test('facet selection preserves broader columns and clears narrower columns', ()
   assert.deepEqual(selectionAfterFacet(selection, 'alb', ['The Hobbit']), { ...selection, alb: ['The Hobbit'] })
 })
 
+test('facet selections are remembered independently for each library source', () => {
+  let saved = { music: {}, podcasts: {}, audiobooks: {} }
+  saved = rememberSelection(saved, 'music', { cat: ['Rock'], art: ['Artist'] })
+  saved = rememberSelection(saved, 'podcasts', { cat: ['News'] })
+
+  assert.deepEqual(restoreSelection(saved, 'music'), { cat: ['Rock'], art: ['Artist'] })
+  assert.deepEqual(restoreSelection(saved, 'podcasts'), { cat: ['News'] })
+  assert.deepEqual(restoreSelection(saved, 'audiobooks'), {})
+})
+
+test('navigation transitions preserve the active playback queue and origin', () => {
+  const queue: PlaybackTrack[] = [
+    { id: 1, uri: 'fixture:track:1', name: 'One', art: 'Artist', alb: 'Album', durationSecs: 180, enabled: true },
+    { id: 2, uri: 'fixture:track:2', name: 'Two', art: 'Artist', alb: 'Album', durationSecs: 180, enabled: true },
+  ]
+  const origin = { kind: 'playlist', id: 'playlist-a' } as const
+  const view: BrowseView = {
+    facets: { cats: [], arts: [], albs: [] },
+    tracks: [],
+    albumRating: null,
+    albumRatingArtist: null,
+    albumRatingAmbiguous: false,
+    counts: { tracks: 0, totalSecs: 0, perSource: { music: 0, podcasts: 0, audiobooks: 0 } },
+  }
+  const transitions: Action[] = [
+    { type: 'view', view, key: 'library-view' },
+    { type: 'source', source: 'podcasts' },
+    { type: 'select', facet: 'cat', values: ['The Hobbit'] },
+    { type: 'playlist', id: 'playlist-a' },
+    { type: 'spotifyNavigate', entry: { kind: 'artist', id: 'artist-a' } },
+    { type: 'playlist' },
+  ]
+  let state = reducer(initialState, { type: 'play', id: 2, queue, origin })
+
+  for (const transition of transitions) {
+    state = reducer(state, transition)
+    assert.deepEqual(state.playing?.queue, queue)
+    assert.deepEqual(state.playing?.origin, origin)
+  }
+})
+
+test('source, pane, and playlist transitions restore and retain the intended selection', () => {
+  let state = reducer(initialState, { type: 'select', facet: 'cat', values: ['Rock'] })
+  state = reducer(state, { type: 'select', facet: 'art', values: ['Artist'] })
+  state = reducer(state, { type: 'select', facet: 'alb', values: ['Album'] })
+  state = reducer(state, { type: 'source', source: 'podcasts' })
+  state = reducer(state, { type: 'select', facet: 'cat', values: ['The Hobbit'] })
+  state = reducer(state, { type: 'source', source: 'music' })
+
+  assert.deepEqual(state.sel, { cat: ['Rock'], art: ['Artist'], alb: ['Album'] })
+  state = reducer(state, { type: 'browserPanes', browserPanes: { cat: false, art: true, alb: true } })
+  assert.deepEqual(state.sel, { art: ['Artist'], alb: ['Album'] })
+  assert.deepEqual(state.savedSelections.music, state.sel)
+
+  state = reducer(state, { type: 'playlist', id: 'playlist-a' })
+  state = reducer(state, { type: 'playlist' })
+  assert.equal(state.selectedPlaylist, undefined)
+  assert.deepEqual(state.sel, { art: ['Artist'], alb: ['Album'] })
+})
+
+test('library and playlist defaults expose the approved visible column orders', () => {
+  assert.deepEqual(visibleColumnOrder(LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS), ['track', 'name', 'artist', 'album', 'time', 'plays', 'rating', 'genre'])
+  assert.deepEqual(visibleColumnOrder(PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS), ['name', 'artist', 'album', 'time', 'rating', 'plays', 'genre'])
+  assert.equal(PLAYLIST_DEFAULT_COLUMN_ORDER.at(-1), 'track')
+  assert.equal(PLAYLIST_DEFAULT_HIDDEN_COLUMNS.at(-1), 'track')
+})
+
+test('playlist layout resolution uses its keyed override instead of Library defaults', () => {
+  const customOrder = [...PLAYLIST_DEFAULT_COLUMN_ORDER].reverse()
+  const settings: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'> = {
+    playlistHiddenColumns: { 'playlist-a': ['genre'] },
+    playlistColumnOrders: { 'playlist-a': customOrder },
+    playlistColumnWidths: { 'playlist-a': { name: 220 } },
+  }
+
+  assert.deepEqual(playlistLayoutFor('playlist-a', settings), {
+    hiddenColumns: ['genre'],
+    columnOrder: customOrder,
+    columnWidths: { name: 220 },
+  })
+  assert.deepEqual(playlistLayoutFor('playlist-b', settings), {
+    hiddenColumns: PLAYLIST_DEFAULT_HIDDEN_COLUMNS,
+    columnOrder: PLAYLIST_DEFAULT_COLUMN_ORDER,
+    columnWidths: {},
+  })
+})
+
+test('playlist layout overrides stay keyed and disappear when restored to defaults', () => {
+  const customOrder = [...PLAYLIST_DEFAULT_COLUMN_ORDER].reverse()
+  const orders = playlistOverride({}, 'playlist-a', customOrder, PLAYLIST_DEFAULT_COLUMN_ORDER)
+  assert.deepEqual(orders['playlist-a'], customOrder)
+  const otherOrder = [...PLAYLIST_DEFAULT_COLUMN_ORDER].slice(1).concat(PLAYLIST_DEFAULT_COLUMN_ORDER[0])
+  const bothOrders = playlistOverride(orders, 'playlist-b', otherOrder, PLAYLIST_DEFAULT_COLUMN_ORDER)
+  assert.deepEqual(bothOrders, { 'playlist-a': customOrder, 'playlist-b': otherOrder })
+  const restoredOrders = playlistOverride(bothOrders, 'playlist-a', PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_COLUMN_ORDER)
+  assert.deepEqual(restoredOrders, { 'playlist-b': otherOrder })
+
+  const hidden = playlistOverride({}, 'playlist-a', ['genre'], PLAYLIST_DEFAULT_HIDDEN_COLUMNS)
+  const bothHidden = playlistOverride(hidden, 'playlist-b', ['plays'], PLAYLIST_DEFAULT_HIDDEN_COLUMNS)
+  assert.deepEqual(bothHidden, { 'playlist-a': ['genre'], 'playlist-b': ['plays'] })
+  assert.deepEqual(playlistOverride(bothHidden, 'playlist-a', PLAYLIST_DEFAULT_HIDDEN_COLUMNS, PLAYLIST_DEFAULT_HIDDEN_COLUMNS), { 'playlist-b': ['plays'] })
+
+  const widths = playlistOverride({}, 'playlist-a', { name: 220 }, {})
+  const bothWidths = playlistOverride(widths, 'playlist-b', { artist: 180 }, {})
+  assert.deepEqual(bothWidths, { 'playlist-a': { name: 220 }, 'playlist-b': { artist: 180 } })
+  assert.deepEqual(playlistOverride(bothWidths, 'playlist-a', {}, {}), { 'playlist-b': { artist: 180 } })
+
+  const customized: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'> = {
+    playlistHiddenColumns: bothHidden,
+    playlistColumnOrders: bothOrders,
+    playlistColumnWidths: bothWidths,
+  }
+  assert.deepEqual(playlistLayoutFor('playlist-a', customized), {
+    hiddenColumns: ['genre'],
+    columnOrder: customOrder,
+    columnWidths: { name: 220 },
+  })
+  assert.deepEqual(playlistLayoutFor('playlist-b', customized), {
+    hiddenColumns: ['plays'],
+    columnOrder: otherOrder,
+    columnWidths: { artist: 180 },
+  })
+
+  const restored: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'> = {
+    playlistHiddenColumns: playlistOverride(bothHidden, 'playlist-a', PLAYLIST_DEFAULT_HIDDEN_COLUMNS, PLAYLIST_DEFAULT_HIDDEN_COLUMNS),
+    playlistColumnOrders: restoredOrders,
+    playlistColumnWidths: playlistOverride(bothWidths, 'playlist-a', {}, {}),
+  }
+  assert.deepEqual(playlistLayoutFor('playlist-a', restored), {
+    hiddenColumns: PLAYLIST_DEFAULT_HIDDEN_COLUMNS,
+    columnOrder: PLAYLIST_DEFAULT_COLUMN_ORDER,
+    columnWidths: {},
+  })
+  assert.deepEqual(playlistLayoutFor('playlist-b', restored), {
+    hiddenColumns: ['plays'],
+    columnOrder: otherOrder,
+    columnWidths: { artist: 180 },
+  })
+})
+
 test('stale browse selections fall back at the narrowest invalid level', () => {
   const facets = { cats: ['Rock', 'Jazz'], arts: ['Artist', 'Other'], albs: ['Album', 'Other Album'] }
   const cases: { selection: Selection; expected: 'cat' | 'art' | null }[] = [
@@ -139,19 +290,6 @@ test('stale browse selections fall back at the narrowest invalid level', () => {
     { selection: { cat: ['Rock'], art: ['Artist', 'Missing'] }, expected: 'art' },
   ]
   for (const { selection, expected } of cases) assert.equal(staleSelectionFacet(selection, facets), expected)
-})
-
-test('a resolved view containing the current track replaces its queue at that row', () => {
-  const tracks = [
-    { id: 1, uri: 'spotify:track:1', enabled: true },
-    { id: 2, uri: 'spotify:track:2', enabled: true },
-    { id: 3, uri: 'spotify:track:3', enabled: true },
-  ] as PlaybackTrack[]
-  const playing = { trackId: 2, uri: tracks[1].uri, external: false, queue: [tracks[1]] } as Playing
-
-  assert.deepEqual(replacementQueue(tracks, playing), { queue: tracks, index: 1 })
-  assert.equal(replacementQueue(tracks, { ...playing, uri: 'spotify:track:else' }), null)
-  assert.equal(replacementQueue(tracks, { ...playing, queue: tracks }), null)
 })
 
 test('the music catch-all has a user-facing genre label', () => {

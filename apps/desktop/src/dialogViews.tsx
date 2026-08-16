@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useState } from 'react'
-import type { MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
+import { diagnosticLevels, formatDiagnosticReport, reportWindow, type DiagnosticLevel, type DiagnosticReport } from './diagnostics.ts'
+import type { LastFmState, MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
 import { clearedTrackRating, overlayEditTargets } from './ui.ts'
 import { ModalDialog, RatingStars } from './viewShared.tsx'
 
@@ -171,13 +172,76 @@ export function PlaybackAuthorization({ prompt, onCancel, onAuthorize }: {
   </ModalDialog>
 }
 
-export function Preferences({ settings, onZoom, onCancel, onSave }: {
+function BugPreferences() {
+  const [report, setReport] = useState<DiagnosticReport>({ entries: [], emailAvailable: false })
+  const [levels, setLevels] = useState<Set<DiagnosticLevel>>(() => new Set(diagnosticLevels))
+  const [error, setError] = useState<string>()
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    let active = true
+    invoke<DiagnosticReport>('load_diagnostics')
+      .then((next) => { if (active) setReport(next) })
+      .catch((reason) => { if (active) setError(String(reason)) })
+    return () => { active = false }
+  }, [])
+  const counts = Object.fromEntries(diagnosticLevels.map((level) => [level, report.entries.filter((entry) => entry.level === level).length])) as Record<DiagnosticLevel, number>
+  const visible = report.entries.filter((entry) => levels.has(entry.level))
+  const reportEntries = reportWindow(report.entries)
+  const body = formatDiagnosticReport(reportEntries)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(body)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch (reason) {
+      setError(String(reason))
+    }
+  }
+  const email = async () => {
+    try {
+      await invoke('email_diagnostics', { body })
+    } catch (reason) {
+      setError(String(reason))
+    }
+  }
+  const toggleLevel = (level: DiagnosticLevel) => setLevels((current) => {
+    const next = new Set(current)
+    if (next.has(level)) next.delete(level)
+    else next.add(level)
+    return next
+  })
+  const problemCount = counts.WARN + counts.ERROR
+  return <>
+    <section className="preference-group diagnostic-group">
+      <h3>Log <small>{report.entries.length} entries this session · {counts.WARN} warnings · {counts.ERROR} errors</small></h3>
+      <div className="preference-inset diagnostic-card">
+        <div className="diagnostic-filters">
+          {diagnosticLevels.map((level) => <label className="preference-choice" key={level}><input type="checkbox" checked={levels.has(level)} onChange={() => toggleLevel(level)} /><span>{level} <small>{counts[level]}</small></span></label>)}
+          <button type="button" onClick={() => setLevels(new Set(['WARN', 'ERROR']))}>Problems only</button>
+        </div>
+        <div className="diagnostic-log" role="log" aria-label="Retune diagnostics">
+          {visible.length ? visible.map((entry, index) => <div className={`diagnostic-entry ${entry.level.toLowerCase()}`} key={`${entry.date}-${entry.time}-${index}`}><span>{entry.date} {entry.time}</span><strong>{entry.level}</strong><span>{entry.target}</span><span>{entry.message}</span></div>) : <div className="diagnostic-empty">No entries at these levels.</div>}
+        </div>
+      </div>
+    </section>
+    <section className="preference-group"><h3>Report a problem</h3><div className="preference-inset diagnostic-report">
+      <div><strong>{problemCount ? `Copies ${reportEntries.length} entries — the session run-up through the last problem.` : 'No warnings or errors this session.'}</strong><small>Filters change the view only. Reports always include the full diagnostic window.</small></div>
+      <div className="diagnostic-actions"><button type="button" disabled={!body} onClick={() => void copy()}>{copied ? '✓ Copied' : 'Copy Logs'}</button><button type="button" className="primary" disabled={!body || !report.emailAvailable} title={report.emailAvailable ? undefined : 'Email support is unavailable in this build.'} onClick={() => void email()}>Email…</button></div>
+      {error && <small className="error-text" role="alert">{error}</small>}
+      {!report.emailAvailable && <small>Email support is unavailable in this build. Copy Logs and share the report instead.</small>}
+    </div></section>
+  </>
+}
+
+export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSave }: {
   settings: Settings
+  lastfm: LastFmState
   onZoom: (zoom: number) => void
   onCancel: () => void
-  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent'>) => void
+  onLastfm: (state: LastFmState) => void
+  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
 }) {
-  type PreferenceTab = 'appearance' | 'library' | 'audio'
+  type PreferenceTab = 'appearance' | 'library' | 'audio' | 'bug'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
   const [theme, setTheme] = useState(settings.theme)
   const [browserVisible, setBrowserVisible] = useState(settings.browserVisible)
@@ -190,17 +254,36 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
   const [normalizeVolume, setNormalizeVolume] = useState(settings.normalizeVolume)
   const [gapless, setGapless] = useState(settings.gapless)
   const [playThresholdPercent, setPlayThresholdPercent] = useState(settings.playThresholdPercent)
+  const [lastfmScrobbling, setLastfmScrobbling] = useState(settings.lastfmScrobbling)
+  const [lastfmBusy, setLastfmBusy] = useState(false)
+  const [lastfmError, setLastfmError] = useState<string>()
   const tabs: [PreferenceTab, string, string][] = [
     ['appearance', '◑', 'Appearance'],
     ['library', '♫', 'Library'],
     ['audio', '◉', 'Audio'],
+    ['bug', '⚠', 'Bug'],
   ]
   const themeOptions: [Theme, string, string][] = [
     ['system', 'System', 'Follow the OS appearance, switching automatically.'],
     ['light', 'Light', 'Always use the light theme.'],
     ['dark', 'Dark', 'Always use the dark theme.'],
   ]
-  const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent })
+  const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent, lastfmScrobbling })
+  const lastfmAction = async (command: 'connect_lastfm' | 'finish_lastfm' | 'disconnect_lastfm') => {
+    setLastfmBusy(true)
+    setLastfmError(undefined)
+    try {
+      const next = await invoke<LastFmState>(command)
+      onLastfm(next)
+      if (command === 'finish_lastfm') {
+        setLastfmScrobbling(true)
+      }
+    } catch (error) {
+      setLastfmError(String(error))
+    } finally {
+      setLastfmBusy(false)
+    }
+  }
   return <ModalDialog className="get-info preferences" labelledBy="preferences-title" onCancel={onCancel} onSubmit={save}>
       <h2 id="preferences-title">Preferences</h2>
       <div className="preference-toolbar" role="tablist">
@@ -231,6 +314,28 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
             <label className="preference-choice"><input type="checkbox" checked={autoAdd} onChange={(event) => setAutoAdd(event.target.checked)} /><span><strong>Automatically add my entire Spotify library</strong><small>Everything you save on Spotify appears here automatically.</small></span></label>
             <label className="preference-choice"><input type="checkbox" checked={autoConnect} onChange={(event) => setAutoConnect(event.target.checked)} /><span><strong>Connect to Spotify automatically at launch</strong><small>Keep pulling in music you add on Spotify each time Retune starts.</small></span></label>
           </div></section>
+          <section className="preference-group"><h3>Last.fm</h3><div className="lastfm-section">
+            <div className="preference-inset lastfm-card">
+              {!lastfm.available ? <p className="lastfm-unavailable">{lastfm.problem ?? 'Last.fm scrobbling is unavailable in this build.'}</p> : lastfm.connected ? <>
+                <div className="lastfm-status-row">
+                  <span className="lastfm-status-dot connected" aria-hidden="true" />
+                  <span className="lastfm-status-label">Connected as <strong>{lastfm.username ?? 'Last.fm'}</strong></span>
+                  <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect</button>
+                </div>
+                <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Sent once a track passes Last.fm's listening threshold.</small></span></label>
+              </> : <div className="lastfm-status-row">
+                <span className={`lastfm-status-dot${lastfm.pending ? ' pending' : ''}`} aria-hidden="true" />
+                <span className="lastfm-status-copy muted">
+                  <strong>{lastfm.pending ? 'Authorization pending' : 'No Last.fm account'}</strong>
+                  <small>{lastfm.pending ? 'Finish connecting to scrobble everything you play in Retune.' : 'Connect one to scrobble everything you play in Retune.'}</small>
+                </span>
+                {lastfm.pending ? <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('finish_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish…'}</button> : <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('connect_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening…' : 'Connect…'}</button>}
+              </div>}
+              {lastfm.problem && lastfm.available && <small className="error-text" role="alert">{lastfm.problem}</small>}
+              {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
+            </div>
+            <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" target="_blank" rel="noreferrer">Last.fm</a>.</small>
+          </div></section>
         </>}
         {tab === 'audio' && <>
           <section className="preference-group"><h3>Streaming quality</h3><div className="preference-inset preference-row quality-options">
@@ -247,6 +352,7 @@ export function Preferences({ settings, onZoom, onCancel, onSave }: {
             {playThresholds.map((percent) => <label className="preference-choice" key={percent}><input type="radio" name="play-threshold" checked={playThresholdPercent === percent} onChange={() => setPlayThresholdPercent(percent)} /><span>{percent === 100 ? 'When finished' : `${percent}%`}</span></label>)}
           </div></section>
         </>}
+        {tab === 'bug' && <BugPreferences />}
       </div>
       <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">OK</button></div>
   </ModalDialog>
