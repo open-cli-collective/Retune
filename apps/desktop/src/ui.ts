@@ -1,4 +1,4 @@
-import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
+import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlaylistSubject, Selection, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -70,15 +70,6 @@ export const pendingPlaybackTarget = (prompt: PlaybackAuthorizationPrompt, track
 
 export const playbackRetryReady = (connected: boolean, playbackAuthorized: boolean, awaitingAuthorization: boolean) =>
   connected && (!awaitingAuthorization || playbackAuthorized)
-
-export const replacementQueue = (tracks: readonly PlaybackTrack[], playing: Playing | null) => {
-  if (!playing || playing.external || playing.trackId === null) return null
-  const queue = playbackQueue(tracks, playing.trackId)
-  const index = queue.findIndex((track) => isCurrentTrack(playing, track))
-  const unchanged = queue.length === playing.queue.length
-    && queue.every((track, row) => playing.queue[row]?.id === track.id && playing.queue[row]?.uri === track.uri)
-  return index < 0 || unchanged ? null : { queue, index }
-}
 
 export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
   ? { type: 'playlist' as const, id: origin.id }

@@ -2112,7 +2112,6 @@ pub fn run() {
             playlist_commands::playlist_reorder,
             playlist_commands::playlist_remove,
             playback_commands::play_tracks,
-            playback_commands::replace_queue,
             playback_commands::player_toggle,
             playback_commands::player_next,
             playback_commands::player_prev,

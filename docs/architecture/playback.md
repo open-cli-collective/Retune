@@ -19,11 +19,11 @@ Ordinary queues omit overlay tracks disabled by the user. Explicitly starting a
 disabled track includes that track for the run while later advancement still skips
 the other disabled tracks.
 
-When a resolved Library view contains the current track, it replaces the
-controller's queue without reloading that track. Repeat off continues through
-the rows below it, repeat all may wrap to rows above it, and repeat one remains
-on the current track. Views that do not contain the current track leave the
-active queue unchanged.
+Navigation and resolved Library projections are view-only; they never mutate or
+replace the active queue. An explicit Library, playlist, or other play/start
+action establishes the canonical queue and current position. Repeat off stops
+at that queue's end, repeat all may wrap, and repeat one remains on the current
+track.
 
 ## Backends
 

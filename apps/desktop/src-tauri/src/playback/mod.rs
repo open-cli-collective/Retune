@@ -626,65 +626,6 @@ impl Playback {
         }
     }
 
-    pub async fn replace_queue(
-        &self,
-        client: Option<Arc<LiveClient>>,
-        tracks: Vec<SnapshotTrack>,
-        index: usize,
-    ) -> Result<PlayOutcome, String> {
-        if tracks.is_empty() || index >= tracks.len() {
-            return Err("Choose a track to play".into());
-        }
-        let mut state = self.state.lock().await;
-        let current_uri = state
-            .reducer
-            .snapshot()
-            .map(|snapshot| snapshot.current().uri.as_str())
-            .ok_or("Nothing is playing")?;
-        if tracks[index].uri != current_uri {
-            return Err("The replacement queue must keep the current track".into());
-        }
-        let snapshot = Snapshot::new_with(tracks, index, state.reducer.shuffle(), |suffix| {
-            suffix.shuffle(&mut rand::rng())
-        });
-        let repeat = state.reducer.repeat().to_owned();
-        let preload = snapshot
-            .current()
-            .uri
-            .starts_with("spotify:")
-            .then(|| preload_track(&snapshot, &repeat))
-            .flatten()
-            .filter(|track| track.uri.starts_with("spotify:"))
-            .cloned();
-        if self.local_requested() {
-            if let Some(next) = &preload {
-                let client = require_spotify(client.as_deref())?;
-                if let Err(error) = self.ensure_local_backend(&mut state, client).await {
-                    log_authorization_required("preload", &next.uri, &error);
-                    return match error.with_target(next.id) {
-                        error @ PlaybackError::AuthorizationRequired { .. } => {
-                            Ok(PlayOutcome::PlaybackAuthorizationRequired(
-                                error
-                                    .into_prompt(next.id)
-                                    .expect("authorization errors produce prompts"),
-                            ))
-                        }
-                        error => Err(error.into_string()),
-                    };
-                }
-            }
-        }
-        state.reducer.set_snapshot(Some(snapshot.clone()));
-        state
-            .backend
-            .set_shuffle_snapshot(Some(snapshot.clone()), &repeat)
-            .await;
-        if let Some(next) = preload {
-            state.backend.preload(&next.uri)?;
-        }
-        Ok(PlayOutcome::Started)
-    }
-
     async fn play_with(
         &self,
         client: Option<Arc<LiveClient>>,
@@ -1584,112 +1525,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_queue_preserves_the_current_load_and_repeat_policy() {
-        let playback = Playback::default();
-        playback.play(None, file_tracks(1), 0).await.unwrap();
-        playback.set_repeat(None, "all").await.unwrap();
-        let before = playback.state.lock().await.file.request_id();
-
-        assert_eq!(
-            playback
-                .replace_queue(None, file_tracks(2), 1)
-                .await
-                .unwrap_err(),
-            "The replacement queue must keep the current track"
-        );
-        playback
-            .replace_queue(None, file_tracks(3), 0)
-            .await
-            .unwrap();
-
-        {
-            let mut state = playback.state.lock().await;
-            let snapshot = state.reducer.snapshot().unwrap();
-            assert_eq!(state.file.request_id(), before);
-            assert_eq!(snapshot.current().id, 1);
-            assert_eq!(snapshot.len(), 3);
-            assert_eq!(state.reducer.repeat(), "all");
-            let generation = state.generation;
-            assert!(state
-                .reducer
-                .handle(NeutralEvent::RequestIdChanged {
-                    generation,
-                    request_id: before,
-                })
-                .is_empty());
-            assert!(matches!(
-                state
-                    .reducer
-                    .handle(NeutralEvent::EndOfTrack {
-                        generation,
-                        request_id: before,
-                        uri: "file:///definitely/missing/1.mp3".into(),
-                    })
-                    .as_slice(),
-                [ReducerAction::TrackCompleted(_), ReducerAction::Advance]
-            ));
-            playback.step_locked(&mut state, None, 1).await.unwrap();
-            assert_eq!(state.reducer.snapshot().unwrap().current().id, 2);
-        }
-
-        for expected in [3, 1] {
-            playback.next(None).await.unwrap();
-            assert_eq!(
-                playback
-                    .state
-                    .lock()
-                    .await
-                    .reducer
-                    .snapshot()
-                    .unwrap()
-                    .current()
-                    .id,
-                expected
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn replacing_queue_waits_for_playback_authorization_before_mutating() {
-        let playback = Playback::default();
-        playback.set_local_requested(true);
-        let mut current = mixed_tracks().pop().unwrap();
-        current.id = 10;
-        current.uri = "spotify:track:current".into();
-        let mut next = current.clone();
-        next.id = 11;
-        next.uri = "spotify:track:next".into();
-        playback
-            .state
-            .lock()
-            .await
-            .reducer
-            .set_snapshot(Some(Snapshot::new(vec![current.clone()], 0)));
-
-        let outcome = playback
-            .replace_queue(
-                Some(client_without_playback_credentials()),
-                vec![current, next],
-                0,
-            )
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            outcome,
-            PlayOutcome::PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt {
-                reason: PlaybackAuthorizationReason::Missing,
-                target_track_id: 11,
-                ..
-            })
-        ));
-        let state = playback.state.lock().await;
-        let snapshot = state.reducer.snapshot().unwrap();
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot.current().id, 10);
-    }
-
-    #[tokio::test]
     async fn enabled_shuffle_constructs_exact_queue_then_event_advance_and_prev_follow_it() {
         let playback = Playback::default();
         playback.set_shuffle_with(true, |_| unreachable!()).await;
@@ -2046,6 +1881,31 @@ mod tests {
         let state = playback.state.lock().await;
         assert_eq!(state.reducer.snapshot().unwrap().index, 0);
         assert!(state.file.is_active());
+    }
+
+    #[tokio::test]
+    async fn repeat_off_stops_after_the_remaining_tracks() {
+        let playback = Playback::default();
+        playback.play(None, file_tracks(5), 2).await.unwrap();
+
+        playback.next(None).await.unwrap();
+        playback.next(None).await.unwrap();
+
+        {
+            let state = playback.state.lock().await;
+            let snapshot = state.reducer.snapshot().unwrap();
+            assert_eq!(snapshot.order, [0, 1, 2, 3, 4]);
+            assert_eq!(snapshot.index, 4);
+            assert_eq!(snapshot.current().id, 5);
+        }
+
+        playback.next(None).await.unwrap();
+        let state = playback.state.lock().await;
+        let snapshot = state.reducer.snapshot().unwrap();
+        assert_eq!(snapshot.order, [0, 1, 2, 3, 4]);
+        assert_eq!(snapshot.index, 4);
+        assert_eq!(snapshot.current().id, 5);
+        assert!(!state.file.is_active());
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistOverride, playlistRows, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, replacementQueue, resizedColumnWidth, restoreSelection, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistOverride, playlistRows, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resizedColumnWidth, restoreSelection, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
@@ -65,7 +65,6 @@ type Action =
   | { type: 'selectTrack'; id: number }
   | { type: 'selection'; ids: Set<number>; anchor?: number }
   | { type: 'play'; id: number; queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
-  | { type: 'queue'; queue: readonly PlaybackTrack[]; origin: PlaybackOrigin }
   | { type: 'togglePlay' }
   | { type: 'step'; id: number }
   | { type: 'tick'; duration: number; nextId: number }
@@ -185,10 +184,6 @@ function reducer(state: State, action: Action): State {
           shuffle: state.settings.shuffle, origin: action.origin, simulated: true,
         },
       }
-    case 'queue':
-      return state.playing
-        ? { ...state, playing: { ...state.playing, queue: action.queue, origin: action.origin } }
-        : state
     case 'togglePlay':
       return state.playing
         ? { ...state, playing: { ...state.playing, isPlaying: !state.playing.isPlaying } }
@@ -336,24 +331,6 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     dispatch({ type: 'play', id, queue: playable, origin: launchOrigin })
   }, [connected, dispatch, run])
 
-  const replace = useCallback((tracks: readonly PlaybackTrack[], nextOrigin: PlaybackOrigin) => {
-    if (starting.current) return
-    const replacement = replacementQueue(tracks, playingRef.current)
-    if (!replacement) return
-    if (playingRef.current?.simulated) {
-      dispatch({ type: 'queue', queue: replacement.queue, origin: nextOrigin })
-      return
-    }
-    invoke<PlayOutcome>('replace_queue', { snapshot: replacement.queue, currentIndex: replacement.index })
-      .then((outcome) => {
-        if (playbackAuthorizationPrompt(outcome)) return
-        queue.current = replacement.queue
-        origin.current = nextOrigin
-        dispatch({ type: 'queue', queue: replacement.queue, origin: nextOrigin })
-      })
-      .catch((error) => dispatch({ type: 'error', error: String(error) }))
-  }, [dispatch])
-
   useEffect(() => {
     if (!connected || !pendingPlay.current) return
     if (!playbackRetryReady(connected, playbackAuthorized, pendingPlay.current.awaitingPlaybackAuthorization)) return
@@ -402,7 +379,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
-  return useMemo(() => ({ start, replace, toggle, step, setVolume, seek, cancelPending }), [cancelPending, replace, seek, setVolume, start, step, toggle])
+  return useMemo(() => ({ start, toggle, step, setVolume, seek, cancelPending }), [cancelPending, seek, setVolume, start, step, toggle])
 }
 
 function App() {
@@ -459,9 +436,6 @@ function App() {
     const first = displayedTracks[0]
     if (first && tracklistVisible) player.start(first.id, displayedTracks, { kind: 'library', source: state.source })
   }, [browserPlayKey, browseKey, displayedTracks, player, state.source, state.viewKey, tracklistVisible])
-  useEffect(() => {
-    if (!browserPlayKey && tracklistVisible) player.replace(displayedTracks, { kind: 'library', source: state.source })
-  }, [browserPlayKey, displayedTracks, player, state.playing?.queue, state.source, tracklistVisible])
   const setBrowserPanes = useCallback((browserPanes: BrowserPanes) => {
     for (const facet of ['cat', 'art', 'alb'] as const) {
       if (!browserPanes[facet]) delete facetAnchors.current[facet]

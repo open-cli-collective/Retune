@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../src/diagnostics.ts'
-import type { PlaybackTrack, Playing, Selection, SpotifyResults } from '../src/types.ts'
+import type { PlaybackTrack, Selection, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, replacementQueue, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
@@ -182,19 +182,6 @@ test('stale browse selections fall back at the narrowest invalid level', () => {
     { selection: { cat: ['Rock'], art: ['Artist', 'Missing'] }, expected: 'art' },
   ]
   for (const { selection, expected } of cases) assert.equal(staleSelectionFacet(selection, facets), expected)
-})
-
-test('a resolved view containing the current track replaces its queue at that row', () => {
-  const tracks = [
-    { id: 1, uri: 'spotify:track:1', enabled: true },
-    { id: 2, uri: 'spotify:track:2', enabled: true },
-    { id: 3, uri: 'spotify:track:3', enabled: true },
-  ] as PlaybackTrack[]
-  const playing = { trackId: 2, uri: tracks[1].uri, external: false, queue: [tracks[1]] } as Playing
-
-  assert.deepEqual(replacementQueue(tracks, playing), { queue: tracks, index: 1 })
-  assert.equal(replacementQueue(tracks, { ...playing, uri: 'spotify:track:else' }), null)
-  assert.equal(replacementQueue(tracks, { ...playing, queue: tracks }), null)
 })
 
 test('the music catch-all has a user-facing genre label', () => {
