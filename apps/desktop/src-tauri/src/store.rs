@@ -786,35 +786,67 @@ mod tests {
                 "added".into(),
                 "releaseDate".into(),
             ],
-            playlist_hidden_columns: BTreeMap::from([(
-                "road-trip".into(),
-                vec!["plays".into(), "genre".into()],
-            )]),
-            playlist_column_orders: BTreeMap::from([(
-                "road-trip".into(),
-                [
-                    "genre",
-                    "name",
-                    "artist",
-                    "album",
-                    "time",
-                    "rating",
-                    "plays",
-                    "disc",
-                    "kind",
-                    "bitrate",
-                    "lastPlayed",
-                    "added",
-                    "releaseDate",
-                    "track",
-                ]
-                .map(String::from)
-                .to_vec(),
-            )]),
-            playlist_column_widths: BTreeMap::from([(
-                "road-trip".into(),
-                BTreeMap::from([("name".into(), 220), ("genre".into(), 120)]),
-            )]),
+            playlist_hidden_columns: BTreeMap::from([
+                (
+                    "road-trip".into(),
+                    vec!["plays".into(), "genre".into()],
+                ),
+                ("focus".into(), vec!["disc".into(), "track".into()]),
+            ]),
+            playlist_column_orders: BTreeMap::from([
+                (
+                    "road-trip".into(),
+                    [
+                        "genre",
+                        "name",
+                        "artist",
+                        "album",
+                        "time",
+                        "rating",
+                        "plays",
+                        "disc",
+                        "kind",
+                        "bitrate",
+                        "lastPlayed",
+                        "added",
+                        "releaseDate",
+                        "track",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+                (
+                    "focus".into(),
+                    [
+                        "plays",
+                        "name",
+                        "artist",
+                        "album",
+                        "time",
+                        "rating",
+                        "genre",
+                        "disc",
+                        "kind",
+                        "bitrate",
+                        "lastPlayed",
+                        "added",
+                        "releaseDate",
+                        "track",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+            ]),
+            playlist_column_widths: BTreeMap::from([
+                (
+                    "road-trip".into(),
+                    BTreeMap::from([("name".into(), 220), ("genre".into(), 120)]),
+                ),
+                (
+                    "focus".into(),
+                    BTreeMap::from([("plays".into(), 180), ("genre".into(), 140)]),
+                ),
+            ]),
             sort_column: Some("artist".into()),
             sort_desc: true,
             auto_add_spotify_library: true,

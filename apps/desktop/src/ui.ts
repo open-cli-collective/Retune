@@ -1,4 +1,4 @@
-import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlaylistSubject, Selection, Source, Track } from './types.ts'
+import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
@@ -39,6 +39,12 @@ export const playlistOverride = <T>(overrides: Record<string, T>, id: string, va
   else next[id] = value
   return next
 }
+
+export const playlistLayoutFor = (id: string | undefined, settings: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'>) => ({
+  hiddenColumns: id !== undefined ? settings.playlistHiddenColumns[id] ?? PLAYLIST_DEFAULT_HIDDEN_COLUMNS : PLAYLIST_DEFAULT_HIDDEN_COLUMNS,
+  columnOrder: id !== undefined ? settings.playlistColumnOrders[id] ?? PLAYLIST_DEFAULT_COLUMN_ORDER : PLAYLIST_DEFAULT_COLUMN_ORDER,
+  columnWidths: id !== undefined ? settings.playlistColumnWidths[id] ?? {} : {},
+})
 
 export const staleSelectionFacet = (selection: Selection, facets: BrowseView['facets']): 'cat' | 'art' | null => {
   const missing = (selected: string[] | undefined, available: string[]) => selected?.some((value) => !available.includes(value)) ?? false
