@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
 
 use super::{
-    empty_event, local_event, ListeningFact, NeutralEvent, NeutralState, PlayerStateEvent,
-    Snapshot,
+    empty_event, local_event, ListeningFact, NeutralEvent, NeutralState, PlayerStateEvent, Snapshot,
 };
 
 fn duration_secs_ceil(duration_ms: Option<u32>) -> u64 {
@@ -250,10 +249,11 @@ impl EventReducer {
                 self.last_progress_ms = position_ms;
                 self.state.elapsed = u64::from(position_ms) / 1000;
                 if let Some(track) = self.listening_track_for(&uri) {
-                    self.listening_facts.push_back(ListeningFact::Discontinuity {
-                        generation: self.listening_generation,
-                        track,
-                    });
+                    self.listening_facts
+                        .push_back(ListeningFact::Discontinuity {
+                            generation: self.listening_generation,
+                            track,
+                        });
                 }
                 vec![ReducerAction::Emit(self.state.clone())]
             }
@@ -400,10 +400,11 @@ impl EventReducer {
         let delta = position_ms.saturating_sub(self.last_progress_ms);
         if position_ms < self.last_progress_ms || delta > 30_000 {
             self.last_progress_ms = position_ms;
-            self.listening_facts.push_back(ListeningFact::Discontinuity {
-                generation: self.listening_generation,
-                track,
-            });
+            self.listening_facts
+                .push_back(ListeningFact::Discontinuity {
+                    generation: self.listening_generation,
+                    track,
+                });
         } else if delta > 0 {
             self.played_ms = self.played_ms.saturating_add(u64::from(delta));
             self.last_progress_ms = position_ms;
@@ -1099,7 +1100,10 @@ mod tests {
         reducer.handle(external(90_000));
         assert!(matches!(
             reducer.take_listening_facts().as_slice(),
-            [ListeningFact::Forward { played_ms: 90_000, .. }]
+            [ListeningFact::Forward {
+                played_ms: 90_000,
+                ..
+            }]
         ));
     }
 
@@ -1126,7 +1130,10 @@ mod tests {
         reducer.handle(external(15_000));
         assert!(matches!(
             reducer.take_listening_facts().as_slice(),
-            [ListeningFact::Forward { played_ms: 15_000, .. }]
+            [ListeningFact::Forward {
+                played_ms: 15_000,
+                ..
+            }]
         ));
         reducer.handle(external(16_000));
         assert!(matches!(
@@ -1220,7 +1227,10 @@ mod tests {
         });
         assert!(matches!(
             reducer.take_listening_facts().as_slice(),
-            [ListeningFact::Forward { played_ms: 60_000, .. }]
+            [ListeningFact::Forward {
+                played_ms: 60_000,
+                ..
+            }]
         ));
     }
 

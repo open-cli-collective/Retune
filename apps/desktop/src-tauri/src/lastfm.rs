@@ -781,7 +781,9 @@ impl Service {
                     runtime.queue_owner = queue_owner(&runtime.queue).map(ToOwned::to_owned);
                     runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
                 }
-                log::error!("Last.fm local persistence failed while disconnecting; session retained");
+                log::error!(
+                    "Last.fm local persistence failed while disconnecting; session retained"
+                );
                 drop(runtime);
                 self.emit_state().await;
                 return Err(error);
@@ -928,16 +930,11 @@ impl Service {
                 runtime.queue_owner = queue_owner(&runtime.queue).map(ToOwned::to_owned);
                 runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
             }
-            log::error!(
-                "Last.fm local persistence failed; queued scrobble may be lost: {error}"
-            );
+            log::error!("Last.fm local persistence failed; queued scrobble may be lost: {error}");
             return;
         }
         drop(_queue_io);
-        log::debug!(
-            "Last.fm scrobble eligible; queue count={}",
-            queue.len()
-        );
+        log::debug!("Last.fm scrobble eligible; queue count={}", queue.len());
         let should_flush = {
             let runtime = self.runtime.lock().await;
             flush_ready(&runtime)
@@ -1057,7 +1054,12 @@ impl Service {
                     let original = runtime.queue.clone();
                     let removed = apply_scrobble_results(&mut runtime.queue, &batch, &codes);
                     runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
-                    (original, runtime.queue.clone(), removed, runtime.queue_revision)
+                    (
+                        original,
+                        runtime.queue.clone(),
+                        removed,
+                        runtime.queue_revision,
+                    )
                 };
                 if let Err(error) = self.persist_queue(queue.clone()).await {
                     let mut runtime = self.runtime.lock().await;
@@ -1127,7 +1129,12 @@ impl Service {
                         .filter_map(|item| runtime.queue.pop_front().map(|_| item.clone()))
                         .collect::<Vec<_>>();
                     runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
-                    (original, runtime.queue.clone(), removed, runtime.queue_revision)
+                    (
+                        original,
+                        runtime.queue.clone(),
+                        removed,
+                        runtime.queue_revision,
+                    )
                 };
                 if let Err(save_error) = self.persist_queue(queue.clone()).await {
                     let mut runtime = self.runtime.lock().await;
@@ -1859,12 +1866,10 @@ mod tests {
             let mut service = Service::new(directory.path(), true, true);
             let (entered, entered_rx) = std::sync::mpsc::channel();
             let (release, release_rx) = std::sync::mpsc::channel();
-            Arc::get_mut(&mut service).unwrap().queue_store.blocker = Some(Arc::new(
-                SaveBlocker {
-                    entered,
-                    release: std::sync::Mutex::new(release_rx),
-                },
-            ));
+            Arc::get_mut(&mut service).unwrap().queue_store.blocker = Some(Arc::new(SaveBlocker {
+                entered,
+                release: std::sync::Mutex::new(release_rx),
+            }));
             {
                 let mut runtime = service.runtime.lock().await;
                 runtime.queue_owner = Some("user".into());

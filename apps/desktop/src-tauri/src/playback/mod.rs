@@ -609,12 +609,7 @@ impl Playback {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 playback
-                    .handle_event(
-                        &app,
-                        event,
-                        &on_track_completed,
-                        &on_listening,
-                    )
+                    .handle_event(&app, event, &on_track_completed, &on_listening)
                     .await;
             }
         });
