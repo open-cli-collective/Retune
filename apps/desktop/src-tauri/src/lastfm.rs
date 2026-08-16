@@ -744,21 +744,24 @@ impl Service {
                 .ok_or_else(|| "Last.fm did not return a session key.".to_string())?,
         };
         let _credential_io = self.credential_io.lock().await;
-        self.reconcile_queue_owner(&session.username).await?;
-        self.save_session(session.clone()).await?;
-        self.clear_pending().await?;
-        {
-            let mut runtime = self.runtime.lock().await;
-            runtime.session = Some(session.clone());
-            runtime.pending = None;
-            runtime.reconnect_required = false;
-            runtime.build_problem = false;
-            runtime.queue_owner = Some(session.username.clone());
-        }
+        self.commit_session(session).await?;
         log::info!("Last.fm connected");
         self.emit_state().await;
         Arc::clone(self).schedule_flush().await;
         Ok(self.state().await)
+    }
+
+    async fn commit_session(&self, session: LastFmSession) -> Result<(), String> {
+        self.clear_pending().await?;
+        self.reconcile_queue_owner(&session.username).await?;
+        self.save_session(session.clone()).await?;
+        let mut runtime = self.runtime.lock().await;
+        runtime.session = Some(session.clone());
+        runtime.pending = None;
+        runtime.reconnect_required = false;
+        runtime.build_problem = false;
+        runtime.queue_owner = Some(session.username);
+        Ok(())
     }
 
     pub(crate) async fn disconnect(&self) -> Result<LastFmState, String> {
@@ -2140,6 +2143,46 @@ mod tests {
                 .as_ref()
                 .is_some_and(|value| value == &session));
             assert!(runtime.queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn cross_account_completion_keeps_old_session_when_pending_clear_fails() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let service = Service::new(directory.path(), true, true);
+            let old_session = LastFmSession {
+                username: "old-user".into(),
+                key: "old-session".into(),
+            };
+            let new_session = LastFmSession {
+                username: "new-user".into(),
+                key: "new-session".into(),
+            };
+            let mut queued = VecDeque::from([queued_scrobble(1)]);
+            queued.front_mut().unwrap().owner = "old-user".into();
+            service.session_store.save(&old_session).unwrap();
+            service.queue_store.save(&queued).unwrap();
+            fs::create_dir(&service.pending_store.path).unwrap();
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.session = Some(old_session.clone());
+                runtime.pending = Some("pending-token".into());
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("old-user".into());
+            }
+
+            assert!(service.commit_session(new_session).await.is_err());
+            assert_eq!(
+                service.session_store.load().unwrap(),
+                Some(old_session.clone())
+            );
+            let runtime = service.runtime.lock().await;
+            assert_eq!(runtime.session, Some(old_session));
+            assert_eq!(runtime.pending.as_deref(), Some("pending-token"));
+            assert_eq!(runtime.queue, queued);
+            drop(runtime);
+            assert_eq!(service.queue_store.load().unwrap(), queued);
         });
     }
 

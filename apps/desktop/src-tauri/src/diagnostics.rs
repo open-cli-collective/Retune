@@ -69,41 +69,54 @@ const SENSITIVE_KEYS: &[&str] = &[
     "access token",
     "access_token",
     "accesstoken",
+    "access-token",
     "refresh token",
     "refresh_token",
     "refreshtoken",
+    "refresh-token",
     "playback credentials",
     "playback_credentials",
     "playbackcredentials",
+    "playback-credentials",
     "playback credential",
+    "playback-credential",
     "authorization",
     "authorization token",
     "authorization_token",
     "authorizationtoken",
+    "authorization-token",
     "oauth_token",
     "oauthtoken",
+    "oauth-token",
     "auth token",
     "auth_token",
     "authtoken",
+    "auth-token",
     "bearer",
     "client secret",
     "client_secret",
     "clientsecret",
+    "client-secret",
     "shared secret",
     "shared_secret",
     "sharedsecret",
+    "shared-secret",
     "session key",
     "session_key",
     "sessionkey",
+    "session-key",
     "lastfm session key",
     "lastfm_session_key",
     "lastfmsessionkey",
+    "lastfm-session-key",
     "api key",
     "api_key",
     "apikey",
+    "api-key",
     "api sig",
     "api_sig",
     "apisig",
+    "api-sig",
     "sk",
     "password",
     "passwd",
@@ -112,8 +125,10 @@ const SENSITIVE_KEYS: &[&str] = &[
     "key",
 ];
 
-fn is_key_boundary(value: Option<char>) -> bool {
-    !value.is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-'))
+fn is_key_boundary(value: Option<char>, key: &str) -> bool {
+    !value.is_some_and(|value| {
+        value.is_ascii_alphanumeric() || value == '_' || (value == '-' && !key.contains('-'))
+    })
 }
 
 fn next_sensitive_key(message: &str, from: usize) -> Option<(usize, usize)> {
@@ -125,8 +140,8 @@ fn next_sensitive_key(message: &str, from: usize) -> Option<(usize, usize)> {
             while let Some(offset) = lower[search..].find(key) {
                 let start = search + offset;
                 let end = start + key.len();
-                if is_key_boundary(message[..start].chars().next_back())
-                    && is_key_boundary(message[end..].chars().next())
+                if is_key_boundary(message[..start].chars().next_back(), key)
+                    && is_key_boundary(message[end..].chars().next(), key)
                 {
                     return Some((start, end));
                 }
@@ -365,7 +380,8 @@ mod tests {
     #[test]
     fn redacts_all_credential_forms_while_preserving_context() {
         let message = concat!(
-            "GET /play?access_token=access-canary&refresh_token=refresh-canary&sk=lastfm-query-canary ",
+            "GET /play?access_token=access-canary&refresh_token=refresh-canary&access-token=access-hyphen-canary&refresh-token=refresh-hyphen-canary&sk=lastfm-query-canary ",
+            "headers={X-Api-Key: api-key-canary X-Client-Secret: client-secret-canary X-Session-Key: session-key-canary} ",
             "headers={Authorization: Bearer authorization-canary} ",
             "body={\"playbackCredentials\":\"playback-credential-canary\",",
             "\"accessToken\":\"playback-canary\",",
@@ -379,7 +395,12 @@ mod tests {
         for secret in [
             "access-canary",
             "refresh-canary",
+            "access-hyphen-canary",
+            "refresh-hyphen-canary",
             "lastfm-query-canary",
+            "api-key-canary",
+            "client-secret-canary",
+            "session-key-canary",
             "authorization-canary",
             "playback-credential-canary",
             "playback-canary",
@@ -394,6 +415,9 @@ mod tests {
             .message
             .contains("headers={Authorization: Bearer [REDACTED]}"));
         assert!(entry.message.contains("body={"));
+
+        let boundary = redact_message("access-tokenized=keep-access-tokenized");
+        assert!(boundary.contains("keep-access-tokenized"));
 
         let url = redacted_mailto_url("support@example.com", message);
         assert!(!url.contains("access-canary"));
