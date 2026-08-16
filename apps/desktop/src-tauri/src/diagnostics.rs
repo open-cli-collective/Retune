@@ -99,7 +99,14 @@ pub(crate) fn read_current_session(path: &Path) -> io::Result<Vec<DiagnosticEntr
 pub(crate) fn support_email_from(value: Option<&str>) -> Option<&str> {
     value.and_then(|value| {
         let value = value.trim();
-        (!value.is_empty()).then_some(value)
+        let (local, domain) = value.split_once('@')?;
+        (!local.is_empty()
+            && !domain.is_empty()
+            && !domain.contains('@')
+            && !value
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'?' | b'#' | b'&')))
+        .then_some(value)
     })
 }
 
@@ -151,12 +158,21 @@ mod tests {
 
     #[test]
     fn parses_actual_bracketed_log_shape() {
-        let entry = parse_line("[2026-08-16][14:03:02][WARN][retune::sync] retrying").unwrap();
-        assert_eq!(entry.date, "2026-08-16");
-        assert_eq!(entry.time, "14:03:02");
-        assert_eq!(entry.level, DiagnosticLevel::Warn);
-        assert_eq!(entry.target, "retune::sync");
-        assert_eq!(entry.message, "retrying");
+        for (name, expected) in [
+            ("INFO", DiagnosticLevel::Info),
+            ("WARN", DiagnosticLevel::Warn),
+            ("ERROR", DiagnosticLevel::Error),
+        ] {
+            let entry = parse_line(&format!(
+                "[2026-08-16][14:03:02][{name}][retune::sync] retrying"
+            ))
+            .unwrap();
+            assert_eq!(entry.date, "2026-08-16");
+            assert_eq!(entry.time, "14:03:02");
+            assert_eq!(entry.level, expected);
+            assert_eq!(entry.target, "retune::sync");
+            assert_eq!(entry.message, "retrying");
+        }
     }
 
     #[test]
@@ -196,6 +212,11 @@ mod tests {
     fn support_email_helper_handles_configured_and_unconfigured_values() {
         assert_eq!(support_email_from(None), None);
         assert_eq!(support_email_from(Some("  ")), None);
+        assert_eq!(support_email_from(Some("not-an-email")), None);
+        assert_eq!(
+            support_email_from(Some("support@example.com?subject=bad")),
+            None
+        );
         assert_eq!(
             support_email_from(Some(" support@example.com ")),
             Some("support@example.com")
