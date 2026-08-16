@@ -150,7 +150,7 @@ jobs:
             [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
             public static extern IntPtr GetProcAddress(IntPtr module, string name);
           }
-'@
+          '@
           $module = [IntPtr]::Zero
           $moduleName = $null
           foreach ($line in $imports) {
