@@ -2173,12 +2173,17 @@ mod tests {
             }
 
             assert!(service.commit_session(new_session).await.is_err());
-            assert_eq!(
-                service.session_store.load().unwrap(),
-                Some(old_session.clone())
-            );
+            assert!(service
+                .session_store
+                .load()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|session| session == &old_session));
             let runtime = service.runtime.lock().await;
-            assert_eq!(runtime.session, Some(old_session));
+            assert!(runtime
+                .session
+                .as_ref()
+                .is_some_and(|session| session == &old_session));
             assert_eq!(runtime.pending.as_deref(), Some("pending-token"));
             assert_eq!(runtime.queue, queued);
             drop(runtime);
