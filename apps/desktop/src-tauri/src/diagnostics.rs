@@ -75,10 +75,13 @@ const SENSITIVE_KEYS: &[&str] = &[
     "playback credentials",
     "playback_credentials",
     "playbackcredentials",
+    "playback credential",
     "authorization",
     "authorization token",
     "authorization_token",
     "authorizationtoken",
+    "oauth_token",
+    "oauthtoken",
     "auth token",
     "auth_token",
     "authtoken",
@@ -101,6 +104,7 @@ const SENSITIVE_KEYS: &[&str] = &[
     "api sig",
     "api_sig",
     "apisig",
+    "sk",
     "password",
     "passwd",
     "secret",
@@ -117,20 +121,27 @@ fn next_sensitive_key(message: &str, from: usize) -> Option<(usize, usize)> {
     SENSITIVE_KEYS
         .iter()
         .filter_map(|key| {
-            let start = lower[from..].find(key).map(|offset| from + offset)?;
-            let end = start + key.len();
-            if is_key_boundary(message[..start].chars().next_back())
-                && is_key_boundary(message[end..].chars().next())
-            {
-                Some((start, end))
-            } else {
-                None
+            let mut search = from;
+            while let Some(offset) = lower[search..].find(key) {
+                let start = search + offset;
+                let end = start + key.len();
+                if is_key_boundary(message[..start].chars().next_back())
+                    && is_key_boundary(message[end..].chars().next())
+                {
+                    return Some((start, end));
+                }
+                search = end;
             }
+            None
         })
         .min_by_key(|(start, _)| *start)
 }
 
-fn redact_field_value(message: &str, key_start: usize, key_end: usize) -> Option<(usize, usize, String)> {
+fn redact_field_value(
+    message: &str,
+    key_start: usize,
+    key_end: usize,
+) -> Option<(usize, usize, String)> {
     let key = message[key_start..key_end].to_ascii_lowercase();
     let bytes = message.as_bytes();
     let mut cursor = key_end;
@@ -150,13 +161,27 @@ fn redact_field_value(message: &str, key_start: usize, key_end: usize) -> Option
     {
         cursor += 1;
     }
-    let quoted = bytes.get(cursor).copied().filter(|byte| matches!(byte, b'"' | b'\''));
+    let quoted = bytes
+        .get(cursor)
+        .copied()
+        .filter(|byte| matches!(byte, b'"' | b'\''));
     if let Some(quote) = quoted {
         let start = cursor + 1;
-        let end = message[start..]
-            .find(char::from(quote))
-            .map(|offset| start + offset)
-            .unwrap_or(message.len());
+        let mut end = start;
+        while end < message.len() {
+            if bytes[end] == quote {
+                let mut backslashes = 0;
+                let mut previous = end;
+                while previous > start && bytes[previous - 1] == b'\\' {
+                    backslashes += 1;
+                    previous -= 1;
+                }
+                if backslashes % 2 == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
         return Some((start, end, REDACTED.into()));
     }
 
@@ -340,9 +365,10 @@ mod tests {
     #[test]
     fn redacts_all_credential_forms_while_preserving_context() {
         let message = concat!(
-            "GET /play?access_token=access-canary&refresh_token=refresh-canary ",
+            "GET /play?access_token=access-canary&refresh_token=refresh-canary&sk=lastfm-query-canary ",
             "headers={Authorization: Bearer authorization-canary} ",
-            "body={\"playbackCredentials\":{\"accessToken\":\"playback-canary\"},",
+            "body={\"playbackCredentials\":\"playback-credential-canary\",",
+            "\"accessToken\":\"playback-canary\",",
             "\"refreshToken\":\"refresh-body-canary\",\"session_key\":\"lastfm-canary\",",
             "\"key\":\"session-key-canary\"}"
         );
@@ -353,7 +379,9 @@ mod tests {
         for secret in [
             "access-canary",
             "refresh-canary",
+            "lastfm-query-canary",
             "authorization-canary",
+            "playback-credential-canary",
             "playback-canary",
             "refresh-body-canary",
             "lastfm-canary",
@@ -362,7 +390,9 @@ mod tests {
             assert!(!entry.message.contains(secret), "secret leaked: {secret}");
         }
         assert!(entry.message.contains("GET /play"));
-        assert!(entry.message.contains("headers={Authorization: Bearer [REDACTED]}"));
+        assert!(entry
+            .message
+            .contains("headers={Authorization: Bearer [REDACTED]}"));
         assert!(entry.message.contains("body={"));
 
         let url = redacted_mailto_url("support@example.com", message);
