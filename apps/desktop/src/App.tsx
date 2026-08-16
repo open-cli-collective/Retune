@@ -3,10 +3,10 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, rememberSelection, replacementQueue, restoreSelection, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
-import { SpotifySearch } from './spotifyViews.tsx'
+import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, InfoDialog, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 
@@ -23,6 +23,7 @@ const EXCLUDED = ['repeat', 'streamingBitrate', 'normalizeVolume', 'gapless'] as
 type State = {
   source: Source
   sel: Selection
+  savedSelections: Record<Source, Selection>
   query: string
   scope: 'library' | 'spotify'
   selectedTrackIds: Set<number>
@@ -125,6 +126,7 @@ const defaultSettings: Settings = {
 const initialState: State = {
   source: 'music',
   sel: {},
+  savedSelections: { music: {}, podcasts: {}, audiobooks: {} },
   query: '',
   scope: 'library',
   selectedTrackIds: new Set(),
@@ -154,12 +156,12 @@ function reducer(state: State, action: Action): State {
     case 'clear-error':
       return { ...state, error: undefined }
     case 'source':
-      return { ...state, source: action.source, sel: {}, query: '', spotifyNavigation: undefined, selectedPlaylist: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, source: action.source, sel: restoreSelection(state.savedSelections, action.source), query: '', spotifyNavigation: undefined, selectedPlaylist: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'playlist':
-      return { ...state, selectedPlaylist: action.id, spotifyNavigation: undefined, sel: {}, selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, selectedPlaylist: action.id, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
       const sel = selectionAfterFacet(state.sel, action.facet, action.values)
-      return { ...state, sel, selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, sel, savedSelections: rememberSelection(state.savedSelections, state.source, sel), selectedTrackIds: new Set(), selectionAnchor: undefined }
     }
     case 'query':
       return { ...state, query: action.query, spotifyResults: null, spotifySearching: false, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
@@ -216,7 +218,7 @@ function reducer(state: State, action: Action): State {
     case 'browserPanes': {
       const sel = { ...state.sel }
       for (const facet of ['cat', 'art', 'alb'] as const) if (!action.browserPanes[facet]) delete sel[facet]
-      return { ...state, sel, settings: { ...state.settings, browserPanes: action.browserPanes } }
+      return { ...state, sel, savedSelections: rememberSelection(state.savedSelections, state.source, sel), settings: { ...state.settings, browserPanes: action.browserPanes } }
     }
     case 'systemTheme':
       return { ...state, systemDark: action.dark }
@@ -846,12 +848,14 @@ function App() {
             /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch(fail)}>Connect to Spotify</button></div>
           ) : selectedPlaylist ? <PlaylistView
             playlist={selectedPlaylist}
+            backLabel={labels[state.source].name}
             revision={state.playlistRevision}
             libraryRevision={state.revision}
             playing={state.playing}
             columnOrder={state.settings.columnOrder}
             columnWidths={state.settings.columnWidths}
             hiddenColumns={playlistHiddenColumns}
+            onBack={() => dispatch({ type: 'playlist' })}
             onPlay={(id, tracks) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id })}
             onRate={(id, stars) => mutate('click_track_star', { id, stars })}
             onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch(fail)}
@@ -1262,14 +1266,16 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   </aside>{confirming && <ModalDialog className="get-info playlist-confirm" labelledBy="playlist-confirm-title" onCancel={busy ? undefined : () => setConfirming(undefined)} onSubmit={busy ? undefined : unfollow} closeOnBackdrop><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button type="submit" className="danger" disabled={busy}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></ModalDialog>}</>
 }
 
-function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onPlay, onRate, onOpen, onPlaylist, onInfo, onHiddenColumns, onError }: {
+function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onBack, onPlay, onRate, onOpen, onPlaylist, onInfo, onHiddenColumns, onError }: {
   playlist: PlaylistListView
+  backLabel: string
   revision: number
   libraryRevision: number
   playing: State['playing']
   columnOrder: ColumnKey[]
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
+  onBack: () => void
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
   onRate: (id: number, stars: number) => void
   onOpen: (target: 'app' | 'web') => void
@@ -1410,6 +1416,7 @@ function PlaylistView({ playlist, revision, libraryRevision, playing, columnOrde
     onInfo(chosen)
   }
   return <div className="playlist-view">
+    <SpotifyPageBack label={backLabel} onBack={onBack} />
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}{sortColumn ? ` · sorted by ${headings[sortColumn]}` : ''}</span>{playlist.owned && <button disabled={!canChangePlaylist || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
     {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify does not allow third-party apps to interact with playlists not owned by you. :-(</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
     <div className="playlist-track-scroll" onClick={(event) => {

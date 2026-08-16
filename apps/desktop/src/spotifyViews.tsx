@@ -97,7 +97,7 @@ function SpotifySearchSection({ group, state, onMore, onRetry, children }: { gro
   </section>
 }
 
-function SpotifyPageBack({ label, onBack }: { label: string; onBack: () => void }) {
+export function SpotifyPageBack({ label, onBack }: { label: string; onBack: () => void }) {
   return <button className="spotify-page-back" onClick={onBack}>‹ Back to {label}</button>
 }
 

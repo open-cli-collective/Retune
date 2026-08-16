@@ -23,6 +23,9 @@ export const selectionAfterFacet = (selection: Selection, facet: keyof Selection
     : facet === 'art' ? { cat: selection.cat, art: values }
       : { ...selection, alb: values }
 
+export const rememberSelection = (selections: Record<Source, Selection>, source: Source, selection: Selection) => ({ ...selections, [source]: selection })
+export const restoreSelection = (selections: Record<Source, Selection>, source: Source) => selections[source] ?? {}
+
 export const staleSelectionFacet = (selection: Selection, facets: BrowseView['facets']): 'cat' | 'art' | null => {
   const missing = (selected: string[] | undefined, available: string[]) => selected?.some((value) => !available.includes(value)) ?? false
   if (missing(selection.cat, facets.cats)) return 'cat'
