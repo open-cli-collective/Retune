@@ -123,6 +123,31 @@ jobs:
       - name: Release native credential-store tests
         run: cargo test --workspace --release --locked
 
+      - name: Diagnose Windows test loader failure
+        if: failure() && startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem target/release/deps/retune_desktop_lib-*.exe |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $exe) { throw 'retune_desktop_lib test executable was not produced' }
+          Write-Host "Inspecting $($exe.FullName)"
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$installation\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
+          & $dumpbin.FullName /imports $exe.FullName
+
+          Get-WinEvent -FilterHashtable @{
+            LogName = 'Application'
+            StartTime = (Get-Date).AddMinutes(-10)
+          } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'retune|entry point|0xc0000139' } |
+            Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message |
+            Format-List
+
       - name: Verify local-only import and playback on non-macOS
         if: startsWith(matrix.os, 'windows-') || startsWith(matrix.os, 'ubuntu-')
         run: |
