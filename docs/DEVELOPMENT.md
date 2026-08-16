@@ -16,7 +16,10 @@
 Configure the Spotify application's redirect URI to the loopback address shown
 by Retune. Debug builds and `scripts/build-install.sh` use the app's development
 token file; release builds encrypt tokens and use the platform-native credential
-store for the encryption key.
+store for the encryption key. Last.fm is optional: local builds can read
+`RETUNE_LASTFM_API_KEY` and `RETUNE_LASTFM_SHARED_SECRET` from the ignored,
+owner-only repo-root `.env.lastfm.local` file. Do not put real credentials in
+tracked files or frontend/Vite environment variables.
 
 ## Run
 
@@ -29,6 +32,22 @@ npm exec tauri dev
 Package a production-like release with `npm exec tauri build` from
 `apps/desktop`. On macOS, for local release-mode testing without repeated native
 credential prompts, run `scripts/build-install.sh` from the repository root.
+
+For direct local Tauri development, create `.env.lastfm.local` with those two
+`RETUNE_*` assignments, run `chmod 600 .env.lastfm.local`, then source it before
+starting Tauri:
+
+```sh
+set -a
+. ./.env.lastfm.local
+set +a
+cd apps/desktop
+npm exec tauri dev
+```
+
+If the file is absent or either value is empty, Retune remains usable and shows
+Last.fm as unavailable. Release builds receive the credentials only on the
+trusted native bundle step and fail there if either value is missing.
 
 Native CI builds the Tauri app bundle on macOS arm64, Windows x64/ARM64, and
 Ubuntu 22.04 amd64/arm64. The Windows and Linux jobs run release Rust tests,

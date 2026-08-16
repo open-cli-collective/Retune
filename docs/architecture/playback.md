@@ -19,11 +19,17 @@ Ordinary queues omit overlay tracks disabled by the user. Explicitly starting a
 disabled track includes that track for the run while later advancement still skips
 the other disabled tracks.
 
-When a resolved Library view contains the current track, it replaces the
-controller's queue without reloading that track. Repeat off continues through
-the rows below it, repeat all may wrap to rows above it, and repeat one remains
-on the current track. Views that do not contain the current track leave the
-active queue unchanged.
+Navigation and resolved Library projections are view-only; they never mutate or
+replace the active queue. An explicit Library, playlist, or other play/start
+action establishes the canonical queue and current position. Repeat off stops
+at that queue's end, repeat all may wrap, and repeat one remains on the current
+track.
+
+The reducer emits only neutral, listening-generation-scoped facts: natural
+start, cumulative forward listening, discontinuity/seek, and completion. The
+shell translates those facts into provider actions. Last.fm owns its
+`scrobble_threshold_ms` eligibility, provider state, timestamps, and queueing;
+the playback reducer has no Last.fm dependency or scrobble policy.
 
 ## Backends
 
@@ -107,6 +113,18 @@ threshold is crossed. Completion is a fallback for short or imprecisely reported
 tracks. Skipping before the threshold does not increment the count. Playback
 events are generation-scoped so late backend events cannot count or advance a
 newer track.
+
+The same generation-scoped reducer emits neutral listening facts when playback
+starts, advances, seeks, or completes; it does not know about Last.fm or its
+thresholds. The Tauri shell and Last.fm service track cumulative forward time,
+use the original start timestamp, and decide eligibility for tracks longer than
+30 seconds at `min(duration / 2, 240 seconds)`. Explicit seeks, discontinuous
+position jumps, and stale backend events do not advance that listening total,
+while completion is a fallback when no immediate eligibility decision was
+observed. The shell handles Last.fm HTTPS, credential storage, queue
+persistence, and retries for built-in Spotify, Spotify Connect, and local/tagged
+overlay playback. Disabling scrobbling stops new requests and flushing without
+deleting queued items; reconnecting or re-enabling drains the queue.
 
 ## Local files
 

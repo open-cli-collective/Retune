@@ -19,6 +19,8 @@ export type Settings = {
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
   playlistHiddenColumns: Record<string, ColumnKey[]>
+  playlistColumnOrders: Record<string, ColumnKey[]>
+  playlistColumnWidths: Record<string, Partial<Record<ColumnKey, number>>>
   sortColumn: ColumnKey | null
   sortDesc: boolean
   autoAddSpotifyLibrary: boolean
@@ -33,9 +35,18 @@ export type Settings = {
   normalizeVolume: boolean
   gapless: boolean
   playThresholdPercent: PlayThresholdPercent
+  lastfmScrobbling: boolean
 }
 
 export type ConnectionState = { connected: boolean; needs_reauth: boolean; playback_authorized: boolean }
+export type LastFmState = {
+  available: boolean
+  connected: boolean
+  username: string | null
+  pending: boolean
+  reconnectRequired: boolean
+  problem: string | null
+}
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'
   message: string
@@ -63,10 +74,14 @@ export type SearchAlbum = {
   trackCount: number
   inLibrary: boolean
 }
+export type SearchArtist = { id: string; name: string; descriptor: string; imageUrl: string | null }
+export type SearchTrack = { uri: string; name: string; artist: string; alb: string; durationSecs: number; imageUrl: string | null; albumUri: string | null; inLibrary: boolean }
+export type SpotifyResultGroup<T> = { items: T[]; total: number; nextOffset: number | null }
+export type SpotifyResultGroupKey = 'artists' | 'albums' | 'tracks'
 export type SpotifyResults = {
-  artists: { id: string; name: string; descriptor: string; imageUrl: string | null }[]
-  albums: SearchAlbum[]
-  tracks: { uri: string; name: string; artist: string; alb: string; durationSecs: number; imageUrl: string | null; albumUri: string | null }[]
+  artists: SpotifyResultGroup<SearchArtist>
+  albums: SpotifyResultGroup<SearchAlbum>
+  tracks: SpotifyResultGroup<SearchTrack>
 }
 export type SpotifyNavEntry = { kind: 'artist'; id: string } | { kind: 'album'; uri: string; highlight?: string }
 

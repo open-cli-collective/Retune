@@ -1,6 +1,12 @@
-import type { ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, Playing, PlaylistSubject, Selection, Source, Track } from './types.ts'
+import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
+
+export const LIBRARY_DEFAULT_COLUMN_ORDER: ColumnKey[] = ['track', 'name', 'artist', 'album', 'time', 'plays', 'rating', 'genre', 'disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate']
+export const LIBRARY_DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate']
+export const PLAYLIST_DEFAULT_COLUMN_ORDER: ColumnKey[] = ['name', 'artist', 'album', 'time', 'rating', 'plays', 'genre', 'disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate', 'track']
+export const PLAYLIST_DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate', 'track']
+export const PLAYLIST_COLUMNS: readonly ColumnKey[] = PLAYLIST_DEFAULT_COLUMN_ORDER
 
 export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) => {
   if (event.type === 'enter') return event.paths.length > 0
@@ -9,6 +15,8 @@ export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) =>
 
 export const normalizeZoom = (zoom: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Math.round(zoom * 100) / 100))
+
+export const appliedZoom = (zoom: number, base: number) => zoom * base
 
 export const browseRequestKey = (source: Source, selection: Selection, query: string, scope: 'library' | 'spotify') =>
   JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], query, scope])
@@ -20,6 +28,30 @@ export const selectionAfterFacet = (selection: Selection, facet: keyof Selection
   facet === 'cat' ? { cat: values }
     : facet === 'art' ? { cat: selection.cat, art: values }
       : { ...selection, alb: values }
+
+export const rememberSelection = (selections: Record<Source, Selection>, source: Source, selection: Selection) => ({ ...selections, [source]: selection })
+export const restoreSelection = (selections: Record<Source, Selection>, source: Source) => selections[source] ?? {}
+
+export const visibleColumnOrder = (order: ColumnKey[], hidden: ColumnKey[]) => order.filter((column) => !hidden.includes(column))
+export const playlistOverride = <T>(overrides: Record<string, T>, id: string, value: T, defaultValue: T) => {
+  const next = { ...overrides }
+  if (JSON.stringify(value) === JSON.stringify(defaultValue)) delete next[id]
+  else next[id] = value
+  return next
+}
+
+export const playlistLayoutFor = (id: string | undefined, settings: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'>) => ({
+  hiddenColumns: id !== undefined ? settings.playlistHiddenColumns[id] ?? PLAYLIST_DEFAULT_HIDDEN_COLUMNS : PLAYLIST_DEFAULT_HIDDEN_COLUMNS,
+  columnOrder: id !== undefined ? settings.playlistColumnOrders[id] ?? PLAYLIST_DEFAULT_COLUMN_ORDER : PLAYLIST_DEFAULT_COLUMN_ORDER,
+  columnWidths: id !== undefined ? settings.playlistColumnWidths[id] ?? {} : {},
+})
+
+export const staleSelectionFacet = (selection: Selection, facets: BrowseView['facets']): 'cat' | 'art' | null => {
+  const missing = (selected: string[] | undefined, available: string[]) => selected?.some((value) => !available.includes(value)) ?? false
+  if (missing(selection.cat, facets.cats)) return 'cat'
+  if (missing(selection.art, facets.arts) || missing(selection.alb, facets.albs)) return 'art'
+  return null
+}
 
 export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) =>
   Math.max(28, Math.round(startWidth + clientX - startX))
@@ -44,15 +76,6 @@ export const pendingPlaybackTarget = (prompt: PlaybackAuthorizationPrompt, track
 
 export const playbackRetryReady = (connected: boolean, playbackAuthorized: boolean, awaitingAuthorization: boolean) =>
   connected && (!awaitingAuthorization || playbackAuthorized)
-
-export const replacementQueue = (tracks: readonly PlaybackTrack[], playing: Playing | null) => {
-  if (!playing || playing.external || playing.trackId === null) return null
-  const queue = playbackQueue(tracks, playing.trackId)
-  const index = queue.findIndex((track) => isCurrentTrack(playing, track))
-  const unchanged = queue.length === playing.queue.length
-    && queue.every((track, row) => playing.queue[row]?.id === track.id && playing.queue[row]?.uri === track.uri)
-  return index < 0 || unchanged ? null : { queue, index }
-}
 
 export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
   ? { type: 'playlist' as const, id: origin.id }
