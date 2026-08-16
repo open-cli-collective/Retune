@@ -787,10 +787,7 @@ mod tests {
                 "releaseDate".into(),
             ],
             playlist_hidden_columns: BTreeMap::from([
-                (
-                    "road-trip".into(),
-                    vec!["plays".into(), "genre".into()],
-                ),
+                ("road-trip".into(), vec!["plays".into(), "genre".into()]),
                 ("focus".into(), vec!["disc".into(), "track".into()]),
             ]),
             playlist_column_orders: BTreeMap::from([
