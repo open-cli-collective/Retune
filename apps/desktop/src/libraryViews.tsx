@@ -109,7 +109,7 @@ export function TrackCell({ track, column, playing, selected, onInfo, onRate }: 
   if (column === 'time') return <span className="track-number">{formatTime(track.durationSecs)}</span>
   if (column === 'artist') return <span title={track.art}>{track.art}</span>
   if (column === 'album') return <span title={track.alb}>{track.alb}</span>
-  if (column === 'genre') return <span title={track.cat}>{track.overridden ? '● ' : ''}{track.cat}</span>
+  if (column === 'genre') return <span title={track.cat}>{track.cat}</span>
   if (column === 'plays') return <span className="track-number">{track.playCount || ''}</span>
   if (column === 'kind') return <span title={track.kind ?? undefined}>{track.kind ?? ''}</span>
   if (column === 'bitrate') return <span className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
