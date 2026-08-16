@@ -1,0 +1,4 @@
+name: rust
+description: Review agents for Retune Rust implementation correctness, concurrency, resources, and behavioral test coverage.
+owner: retune
+

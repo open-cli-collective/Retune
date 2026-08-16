@@ -1,0 +1,18 @@
+name: seams
+description: Reviews Retune changes for ownership, dependency direction, provider isolation, persistence and playback seams, and proportionate design.
+model_tier: large
+effort: high
+file_globs:
+  - "Cargo.toml"
+  - "crates/**/Cargo.toml"
+  - "crates/retune-core/**"
+  - "crates/retune-spotify/**"
+  - "crates/retune-audio/**"
+  - "apps/desktop/src-tauri/**"
+  - "apps/desktop/src/**"
+  - "docs/architecture/**"
+applies_when:
+  - A change moves responsibility across retune-core, the desktop shell, providers, persistence, playback, or the React projection; changes a durable or lifecycle boundary; or introduces an abstraction likely to compound across future work.
+  - Do not select for localized implementation, formatting, prompt-only, test-only, or narrow Tauri configuration changes when no ownership or dependency boundary changes.
+needs_full_file_content: true
+

@@ -1,0 +1,4 @@
+name: frontend
+description: Review agents for Retune React state, navigation, playback-independent views, accessibility, and UI regression coverage.
+owner: retune
+
