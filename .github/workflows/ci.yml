@@ -138,15 +138,35 @@ jobs:
           $dumpbin = Get-ChildItem "$installation\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
             Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
-          & $dumpbin.FullName /imports $exe.FullName
+          $imports = & $dumpbin.FullName /imports $exe.FullName
+          $imports
 
-          Get-WinEvent -FilterHashtable @{
-            LogName = 'Application'
-            StartTime = (Get-Date).AddMinutes(-10)
-          } -ErrorAction SilentlyContinue |
-            Where-Object { $_.Message -match 'retune|entry point|0xc0000139' } |
-            Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message |
-            Format-List
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class NativeLoader {
+            [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibrary(string name);
+            [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
+            public static extern IntPtr GetProcAddress(IntPtr module, string name);
+          }
+'@
+          $module = [IntPtr]::Zero
+          $moduleName = $null
+          foreach ($line in $imports) {
+            if ($line -match '^    (\S+\.dll)$') {
+              $moduleName = $Matches[1]
+              $module = [NativeLoader]::LoadLibrary($moduleName)
+              if ($module -eq [IntPtr]::Zero) {
+                Write-Host "MISSING DLL: $moduleName (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+              }
+            } elseif ($module -ne [IntPtr]::Zero -and $line -match '^\s+[0-9A-F]+\s+(\S+)$') {
+              $symbol = $Matches[1]
+              if ([NativeLoader]::GetProcAddress($module, $symbol) -eq [IntPtr]::Zero) {
+                Write-Host "MISSING ENTRY POINT: $moduleName!$symbol"
+              }
+            }
+          }
 
       - name: Verify local-only import and playback on non-macOS
         if: startsWith(matrix.os, 'windows-') || startsWith(matrix.os, 'ubuntu-')
