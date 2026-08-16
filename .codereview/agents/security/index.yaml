@@ -1,0 +1,4 @@
+name: security
+description: Review agents for Retune Spotify and Last.fm credential, trust-boundary, and sensitive-data handling.
+owner: retune
+

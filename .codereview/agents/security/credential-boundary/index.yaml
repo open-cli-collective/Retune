@@ -1,0 +1,26 @@
+name: credential-boundary
+description: Reviews Retune Spotify and Last.fm authentication, token authority, encrypted/native storage, dev/release separation, redaction, and cleanup.
+model_tier: medium
+effort: high
+file_globs:
+  - "crates/retune-spotify/src/auth.rs"
+  - "crates/retune-spotify/src/tokens.rs"
+  - "crates/retune-spotify/src/lib.rs"
+  - "crates/retune-spotify/Cargo.toml"
+  - "apps/desktop/src-tauri/src/lib.rs"
+  - "apps/desktop/src-tauri/src/provider.rs"
+  - "apps/desktop/src-tauri/src/store.rs"
+  - "apps/desktop/src-tauri/src/spotify_commands.rs"
+  - "apps/desktop/src-tauri/src/playback/**"
+  - "apps/desktop/src/**/*auth*"
+  - "apps/desktop/src/**/*token*"
+  - "apps/desktop/src/**/*lastfm*"
+  - "docs/architecture/spotify.md"
+  - "docs/architecture/persistence.md"
+  - "docs/DEVELOPMENT.md"
+applies_when:
+  - A change adds or alters Spotify or Last.fm authentication, scopes, token/session state, playback credentials, encrypted/native stores, development token files, secret ingress, logging/redaction, migration, disconnect, rotation, or cleanup.
+  - Do not select for authentication-independent provider behavior or generic Rust/Tauri issues already owned by another reviewer.
+required_on_match: true
+needs_full_file_content: true
+

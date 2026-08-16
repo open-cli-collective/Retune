@@ -1,0 +1,16 @@
+name: implementation-tests
+description: Reviews Retune Rust changes for correctness, async and lock safety, persistence, playback generations, and tests that prove changed behavior.
+model_tier: medium
+effort: medium
+file_globs:
+  - "**/*.rs"
+  - "Cargo.toml"
+  - "Cargo.lock"
+  - "**/Cargo.toml"
+  - "**/build.rs"
+  - "rust-toolchain"
+  - "rust-toolchain.toml"
+applies_when:
+  - A change touches Rust source, Cargo/workspace dependencies, build scripts, async or locking, persistence, playback, resource lifetimes, or behavior that should be proved by Rust tests.
+  - Do not duplicate architecture-boundary, Tauri configuration, credential-policy, or React findings owned by the dedicated reviewers.
+

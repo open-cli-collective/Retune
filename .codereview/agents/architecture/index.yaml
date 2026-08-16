@@ -1,0 +1,4 @@
+name: architecture
+description: Review agents for Retune responsibility ownership, dependency seams, lifecycle boundaries, and evolutionary design.
+owner: retune
+

@@ -1,0 +1,18 @@
+name: config-ipc
+description: Reviews Retune Tauri configuration, capabilities, commands, events, WebView inputs, DTOs, CSP, and release configuration.
+model_tier: medium
+effort: high
+file_globs:
+  - "apps/desktop/src-tauri/tauri.conf.json"
+  - "apps/desktop/src-tauri/capabilities/**"
+  - "apps/desktop/src-tauri/Cargo.toml"
+  - "apps/desktop/src-tauri/build.rs"
+  - "apps/desktop/src-tauri/src/**"
+  - "apps/desktop/src/**/*.ts"
+  - "apps/desktop/src/**/*.tsx"
+  - "apps/desktop/test/**"
+applies_when:
+  - A change edits Tauri configuration, capabilities, commands, events, plugins, CSP, windows, sidecars, updater/release settings, or the frontend/backend IPC and DTO boundary.
+  - Do not select for pure retune-core, provider transport, persistence, Rust-idiom, or React-only changes that do not alter the desktop boundary.
+required_on_match: true
+

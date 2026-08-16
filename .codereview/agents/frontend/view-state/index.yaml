@@ -1,0 +1,16 @@
+name: view-state
+description: Reviews Retune React state and effects for stale async results, navigation/playback independence, accessibility, and regression tests.
+model_tier: medium
+effort: high
+file_globs:
+  - "apps/desktop/src/**/*.tsx"
+  - "apps/desktop/src/**/*.ts"
+  - "apps/desktop/src/**/*.css"
+  - "apps/desktop/test/**"
+  - "apps/desktop/**/*.test.*"
+  - "apps/desktop/**/*.spec.*"
+applies_when:
+  - A change touches React view state, effects, navigation, library/search/playlist projections, playback controls, asynchronous requests, accessibility, or frontend regression tests.
+  - Do not select for pure styling, Tauri/Rust IPC configuration, provider transport, credential handling, or domain changes with no React behavior.
+required_on_match: true
+
