@@ -22,6 +22,13 @@ The official Tauri window-state plugin manages the main native window's size,
 position, and maximized state in machine-local application state. Its lifecycle
 handles restoring and saving this state; it is not part of backup/export.
 
+The Preferences Bug tab reads the current rotating application log directly.
+A startup marker limits the viewer to the current process session. View filters
+do not change the report window: Copy Logs and Email include session entries
+through the final warning or error and omit trailing informational entries.
+Email support is compiled from optional `RETUNE_SUPPORT_EMAIL`; missing local
+configuration disables only Email, and the frontend never receives the address.
+
 The token record has an optional reusable built-in playback credential containing
 the librespot username and AP authentication bytes. Its absence is the default,
 so older token files remain readable. Release builds keep it inside encrypted

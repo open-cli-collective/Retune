@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useState } from 'react'
+import { diagnosticLevels, formatDiagnosticReport, reportWindow, type DiagnosticLevel, type DiagnosticReport } from './diagnostics.ts'
 import type { LastFmState, MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
 import { clearedTrackRating, overlayEditTargets } from './ui.ts'
 import { ModalDialog, RatingStars } from './viewShared.tsx'
@@ -171,6 +172,67 @@ export function PlaybackAuthorization({ prompt, onCancel, onAuthorize }: {
   </ModalDialog>
 }
 
+function BugPreferences() {
+  const [report, setReport] = useState<DiagnosticReport>({ entries: [], emailAvailable: false })
+  const [levels, setLevels] = useState<Set<DiagnosticLevel>>(() => new Set(diagnosticLevels))
+  const [error, setError] = useState<string>()
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    let active = true
+    invoke<DiagnosticReport>('load_diagnostics')
+      .then((next) => { if (active) setReport(next) })
+      .catch((reason) => { if (active) setError(String(reason)) })
+    return () => { active = false }
+  }, [])
+  const counts = Object.fromEntries(diagnosticLevels.map((level) => [level, report.entries.filter((entry) => entry.level === level).length])) as Record<DiagnosticLevel, number>
+  const visible = report.entries.filter((entry) => levels.has(entry.level))
+  const reportEntries = reportWindow(report.entries)
+  const body = formatDiagnosticReport(reportEntries)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(body)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch (reason) {
+      setError(String(reason))
+    }
+  }
+  const email = async () => {
+    try {
+      await invoke('email_diagnostics', { body })
+    } catch (reason) {
+      setError(String(reason))
+    }
+  }
+  const toggleLevel = (level: DiagnosticLevel) => setLevels((current) => {
+    const next = new Set(current)
+    if (next.has(level)) next.delete(level)
+    else next.add(level)
+    return next
+  })
+  const problemCount = counts.WARN + counts.ERROR
+  return <>
+    <section className="preference-group diagnostic-group">
+      <h3>Log <small>{report.entries.length} entries this session · {counts.WARN} warnings · {counts.ERROR} errors</small></h3>
+      <div className="preference-inset diagnostic-card">
+        <div className="diagnostic-filters">
+          {diagnosticLevels.map((level) => <label className="preference-choice" key={level}><input type="checkbox" checked={levels.has(level)} onChange={() => toggleLevel(level)} /><span>{level} <small>{counts[level]}</small></span></label>)}
+          <button type="button" onClick={() => setLevels(new Set(['WARN', 'ERROR']))}>Problems only</button>
+        </div>
+        <div className="diagnostic-log" role="log" aria-label="Retune diagnostics">
+          {visible.length ? visible.map((entry, index) => <div className={`diagnostic-entry ${entry.level.toLowerCase()}`} key={`${entry.date}-${entry.time}-${index}`}><span>{entry.date} {entry.time}</span><strong>{entry.level}</strong><span>{entry.target}</span><span>{entry.message}</span></div>) : <div className="diagnostic-empty">No entries at these levels.</div>}
+        </div>
+      </div>
+    </section>
+    <section className="preference-group"><h3>Report a problem</h3><div className="preference-inset diagnostic-report">
+      <div><strong>{problemCount ? `Copies ${reportEntries.length} entries — the session run-up through the last problem.` : 'No warnings or errors this session.'}</strong><small>Filters change the view only. Reports always include the full diagnostic window.</small></div>
+      <div className="diagnostic-actions"><button type="button" disabled={!body} onClick={() => void copy()}>{copied ? '✓ Copied' : 'Copy Logs'}</button><button type="button" className="primary" disabled={!body || !report.emailAvailable} title={report.emailAvailable ? undefined : 'Email support is unavailable in this build.'} onClick={() => void email()}>Email…</button></div>
+      {error && <small className="error-text" role="alert">{error}</small>}
+      {!report.emailAvailable && <small>Email support is unavailable in this build. Copy Logs and share the report instead.</small>}
+    </div></section>
+  </>
+}
+
 export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSave }: {
   settings: Settings
   lastfm: LastFmState
@@ -179,7 +241,7 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSa
   onLastfm: (state: LastFmState) => void
   onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
 }) {
-  type PreferenceTab = 'appearance' | 'library' | 'audio'
+  type PreferenceTab = 'appearance' | 'library' | 'audio' | 'bug'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
   const [theme, setTheme] = useState(settings.theme)
   const [browserVisible, setBrowserVisible] = useState(settings.browserVisible)
@@ -199,6 +261,7 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSa
     ['appearance', '◑', 'Appearance'],
     ['library', '♫', 'Library'],
     ['audio', '◉', 'Audio'],
+    ['bug', '⚠', 'Bug'],
   ]
   const themeOptions: [Theme, string, string][] = [
     ['system', 'System', 'Follow the OS appearance, switching automatically.'],
@@ -289,6 +352,7 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSa
             {playThresholds.map((percent) => <label className="preference-choice" key={percent}><input type="radio" name="play-threshold" checked={playThresholdPercent === percent} onChange={() => setPlayThresholdPercent(percent)} /><span>{percent === 100 ? 'When finished' : `${percent}%`}</span></label>)}
           </div></section>
         </>}
+        {tab === 'bug' && <BugPreferences />}
       </div>
       <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">OK</button></div>
   </ModalDialog>
