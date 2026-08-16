@@ -137,6 +137,7 @@ impl SessionStore for KeyringSessionStore {
     }
 }
 
+#[derive(Clone)]
 struct PendingTokenStore {
     path: PathBuf,
 }
@@ -161,14 +162,25 @@ impl PendingTokenStore {
     }
 }
 
+#[cfg(test)]
+struct SaveBlocker {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[derive(Clone)]
 struct QueueStore {
     path: PathBuf,
+    #[cfg(test)]
+    blocker: Option<Arc<SaveBlocker>>,
 }
 
 impl QueueStore {
     fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
             path: app_data_dir.as_ref().join("lastfm-scrobbles.json"),
+            #[cfg(test)]
+            blocker: None,
         }
     }
 
@@ -177,6 +189,16 @@ impl QueueStore {
     }
 
     fn save(&self, queue: &VecDeque<Scrobble>) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(blocker) = &self.blocker {
+            let _ = blocker.entered.send(());
+            blocker
+                .release
+                .lock()
+                .expect("queue persistence blocker mutex is not poisoned")
+                .recv()
+                .expect("queue persistence blocker release is sent");
+        }
         let bytes = serde_json::to_vec(queue)
             .map_err(|_| "Could not serialize the Last.fm scrobble queue.".to_string())?;
         atomic_write(&self.path, &bytes, false)
@@ -347,34 +369,130 @@ struct Runtime {
     build_problem: bool,
     storage_problem: bool,
     flushing: bool,
+    queue_revision: u64,
+}
+
+#[derive(Default)]
+struct ListeningState {
+    generation: Option<u64>,
+    track: Option<super::playback::SnapshotTrack>,
+    started_at: u64,
+    played_ms: u64,
+    discontinuous: bool,
+    scrobbled: bool,
+}
+
+enum ListeningAction {
+    NowPlaying(Scrobble),
+    Enqueue(Scrobble),
+}
+
+impl ListeningState {
+    fn apply(
+        &mut self,
+        fact: super::playback::ListeningFact,
+        started_at: u64,
+    ) -> Vec<ListeningAction> {
+        match fact {
+            super::playback::ListeningFact::Started { generation, track } => {
+                self.generation = Some(generation);
+                self.track = Some(track.clone());
+                self.started_at = started_at;
+                self.played_ms = 0;
+                self.discontinuous = false;
+                self.scrobbled = false;
+                Scrobble::from_track(&track, 0)
+                    .map(ListeningAction::NowPlaying)
+                    .into_iter()
+                    .collect()
+            }
+            super::playback::ListeningFact::Forward {
+                generation,
+                track,
+                played_ms,
+            } => {
+                if !self.matches(generation, &track) {
+                    return Vec::new();
+                }
+                self.played_ms = self.played_ms.max(played_ms);
+                self.scrobble_if_eligible(&track, false)
+            }
+            super::playback::ListeningFact::Discontinuity { generation, track } => {
+                if self.matches(generation, &track) {
+                    self.discontinuous = true;
+                }
+                Vec::new()
+            }
+            super::playback::ListeningFact::Completed { generation, track } => {
+                if !self.matches(generation, &track) {
+                    return Vec::new();
+                }
+                self.scrobble_if_eligible(&track, true)
+            }
+        }
+    }
+
+    fn matches(&self, generation: u64, track: &super::playback::SnapshotTrack) -> bool {
+        self.generation == Some(generation)
+            && self
+                .track
+                .as_ref()
+                .is_some_and(|current| current.uri == track.uri)
+    }
+
+    fn scrobble_if_eligible(
+        &mut self,
+        track: &super::playback::SnapshotTrack,
+        completed: bool,
+    ) -> Vec<ListeningAction> {
+        let threshold = self
+            .track
+            .as_ref()
+            .and_then(|track| scrobble_threshold_ms(track.duration_secs));
+        let eligible = !self.scrobbled
+            && !self.discontinuous
+            && (threshold.is_some_and(|threshold| self.played_ms >= threshold)
+                || (completed && threshold.is_some()));
+        if !eligible {
+            return Vec::new();
+        }
+        self.scrobbled = true;
+        Scrobble::from_track(track, self.started_at)
+            .map(ListeningAction::Enqueue)
+            .into_iter()
+            .collect()
+    }
 }
 
 pub(crate) struct Service {
     credentials: Option<Credentials>,
     client: Client,
-    session_store: Box<dyn SessionStore>,
+    session_store: Arc<dyn SessionStore>,
     pending_store: PendingTokenStore,
     queue_store: QueueStore,
     runtime: Mutex<Runtime>,
+    queue_io: Mutex<()>,
+    credential_io: Mutex<()>,
+    listening: std::sync::Mutex<ListeningState>,
     app: std::sync::Mutex<Option<tauri::AppHandle>>,
 }
 
 impl Service {
     pub(crate) fn new(app_data_dir: impl AsRef<Path>, dev_store: bool, enabled: bool) -> Arc<Self> {
         let credentials = built_in_credentials();
-        let (session_store, mut storage_problem): (Box<dyn SessionStore>, bool) = if dev_store {
-            (Box::new(FileSessionStore::new(&app_data_dir)), false)
+        let (session_store, mut storage_problem): (Arc<dyn SessionStore>, bool) = if dev_store {
+            (Arc::new(FileSessionStore::new(&app_data_dir)), false)
         } else {
             #[cfg(not(test))]
             {
                 match KeyringSessionStore::new() {
-                    Ok(store) => (Box::new(store), false),
-                    Err(_) => (Box::new(FailedSessionStore), true),
+                    Ok(store) => (Arc::new(store), false),
+                    Err(_) => (Arc::new(FailedSessionStore), true),
                 }
             }
             #[cfg(test)]
             {
-                (Box::new(FileSessionStore::new(&app_data_dir)), false)
+                (Arc::new(FileSessionStore::new(&app_data_dir)), false)
             }
         };
         let pending_store = PendingTokenStore::new(&app_data_dir);
@@ -446,13 +564,59 @@ impl Service {
                 build_problem: false,
                 storage_problem,
                 flushing: false,
+                queue_revision: 0,
             }),
+            queue_io: Mutex::new(()),
+            credential_io: Mutex::new(()),
+            listening: std::sync::Mutex::new(ListeningState::default()),
             app: std::sync::Mutex::new(None),
         })
     }
 
     pub(crate) fn attach_app(&self, app: tauri::AppHandle) {
         *self.app.lock().expect("Last.fm app mutex poisoned") = Some(app);
+    }
+
+    async fn persist_queue(&self, queue: VecDeque<Scrobble>) -> Result<(), String> {
+        let store = self.queue_store.clone();
+        tauri::async_runtime::spawn_blocking(move || store.save(&queue))
+            .await
+            .map_err(|_| "Last.fm queue persistence task stopped.".to_string())?
+    }
+
+    async fn load_pending(&self) -> Result<Option<String>, String> {
+        let store = self.pending_store.clone();
+        tauri::async_runtime::spawn_blocking(move || store.load())
+            .await
+            .map_err(|_| "Last.fm pending-token task stopped.".to_string())?
+    }
+
+    async fn save_pending(&self, token: String) -> Result<(), String> {
+        let store = self.pending_store.clone();
+        tauri::async_runtime::spawn_blocking(move || store.save(&token))
+            .await
+            .map_err(|_| "Last.fm pending-token task stopped.".to_string())?
+    }
+
+    async fn clear_pending(&self) -> Result<(), String> {
+        let store = self.pending_store.clone();
+        tauri::async_runtime::spawn_blocking(move || store.clear())
+            .await
+            .map_err(|_| "Last.fm pending-token task stopped.".to_string())?
+    }
+
+    async fn save_session(&self, session: LastFmSession) -> Result<(), String> {
+        let store = Arc::clone(&self.session_store);
+        tauri::async_runtime::spawn_blocking(move || store.save(&session))
+            .await
+            .map_err(|_| "Last.fm session-store task stopped.".to_string())?
+    }
+
+    async fn clear_session(&self) -> Result<(), String> {
+        let store = Arc::clone(&self.session_store);
+        tauri::async_runtime::spawn_blocking(move || store.clear())
+            .await
+            .map_err(|_| "Last.fm session-store task stopped.".to_string())?
     }
 
     pub(crate) async fn state(&self) -> LastFmState {
@@ -528,7 +692,8 @@ impl Service {
         let token = response_text(&payload, &["token"])
             .filter(|token| !token.is_empty())
             .ok_or_else(|| "Last.fm did not return an authorization token.".to_string())?;
-        self.pending_store.save(&token)?;
+        let _credential_io = self.credential_io.lock().await;
+        self.save_pending(token.clone()).await?;
         {
             let mut runtime = self.runtime.lock().await;
             runtime.pending = Some(token.clone());
@@ -560,7 +725,7 @@ impl Service {
             let runtime = self.runtime.lock().await;
             runtime.pending.clone()
         }
-        .or(self.pending_store.load()?)
+        .or(self.load_pending().await?)
         .filter(|token| !token.is_empty())
         .ok_or_else(|| "Start Last.fm authorization first.".to_string())?;
         let payload = match self
@@ -578,11 +743,12 @@ impl Service {
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "Last.fm did not return a session key.".to_string())?,
         };
+        let _credential_io = self.credential_io.lock().await;
+        self.reconcile_queue_owner(&session.username).await?;
+        self.save_session(session.clone()).await?;
+        self.clear_pending().await?;
         {
             let mut runtime = self.runtime.lock().await;
-            self.reconcile_queue_owner_locked(&mut runtime, &session.username)?;
-            self.session_store.save(&session)?;
-            self.pending_store.clear()?;
             runtime.session = Some(session.clone());
             runtime.pending = None;
             runtime.reconnect_required = false;
@@ -597,18 +763,34 @@ impl Service {
 
     pub(crate) async fn disconnect(&self) -> Result<LastFmState, String> {
         let empty = VecDeque::new();
-        let mut runtime = self.runtime.lock().await;
-        if let Err(error) = self.queue_store.save(&empty) {
-            log::error!("Last.fm local persistence failed while disconnecting; session retained");
-            drop(runtime);
-            self.emit_state().await;
-            return Err(error);
+        let _credential_io = self.credential_io.lock().await;
+        {
+            let _queue_io = self.queue_io.lock().await;
+            let (previous, revision) = {
+                let mut runtime = self.runtime.lock().await;
+                let previous = runtime.queue.clone();
+                runtime.queue.clear();
+                runtime.queue_owner = None;
+                runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+                (previous, runtime.queue_revision)
+            };
+            if let Err(error) = self.persist_queue(empty.clone()).await {
+                let mut runtime = self.runtime.lock().await;
+                if runtime.queue_revision == revision {
+                    runtime.queue = previous;
+                    runtime.queue_owner = queue_owner(&runtime.queue).map(ToOwned::to_owned);
+                    runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+                }
+                log::error!("Last.fm local persistence failed while disconnecting; session retained");
+                drop(runtime);
+                self.emit_state().await;
+                return Err(error);
+            }
         }
-        runtime.queue = empty;
-        runtime.queue_owner = None;
 
-        let session_error = self.session_store.clear().err();
-        let pending_error = self.pending_store.clear().err();
+        let session_error = self.clear_session().await.err();
+        let pending_error = self.clear_pending().await.err();
+        let mut runtime = self.runtime.lock().await;
         if session_error.is_none() {
             runtime.session = None;
             runtime.reconnect_required = false;
@@ -632,29 +814,29 @@ impl Service {
         Ok(self.state().await)
     }
 
-    pub(crate) fn track_started(self: &Arc<Self>, track: super::playback::SnapshotTrack) {
-        let service = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
-            let Some(scrobble) = Scrobble::from_track(&track, 0) else {
-                return;
-            };
-            service.send_now_playing(scrobble).await;
-        });
-    }
-
-    pub(crate) fn track_eligible(
-        self: &Arc<Self>,
-        track: super::playback::SnapshotTrack,
-        timestamp: u64,
-    ) {
-        let service = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
-            let Some(scrobble) = Scrobble::from_track(&track, timestamp) else {
-                return;
-            };
-            log::debug!("Last.fm scrobble eligible");
-            service.enqueue(scrobble).await;
-        });
+    pub(crate) fn handle_listening_fact(self: &Arc<Self>, fact: super::playback::ListeningFact) {
+        let actions = self
+            .listening
+            .lock()
+            .expect("Last.fm listening mutex poisoned")
+            .apply(fact, crate::unix_now());
+        for action in actions {
+            match action {
+                ListeningAction::NowPlaying(scrobble) => {
+                    let service = Arc::clone(self);
+                    tauri::async_runtime::spawn(async move {
+                        service.send_now_playing(scrobble).await;
+                    });
+                }
+                ListeningAction::Enqueue(scrobble) => {
+                    let service = Arc::clone(self);
+                    tauri::async_runtime::spawn(async move {
+                        log::debug!("Last.fm scrobble eligible");
+                        service.enqueue(scrobble).await;
+                    });
+                }
+            }
+        }
     }
 
     async fn ensure_available(&self) -> Result<(), String> {
@@ -690,12 +872,9 @@ impl Service {
         match result {
             Ok(_) => log::debug!("Last.fm Now Playing accepted"),
             Err(Failure::Api(9)) => {
-                let mut runtime = self.runtime.lock().await;
-                if runtime.session.as_ref() == Some(&session) {
-                    self.invalidate_session_locked(&mut runtime);
+                if self.invalidate_session(&session).await {
                     log::info!("Last.fm reconnect required");
                     log::warn!("Last.fm session expired; reconnect required");
-                    drop(runtime);
                     self.emit_state().await;
                 }
             }
@@ -714,7 +893,8 @@ impl Service {
     }
 
     async fn enqueue(self: &Arc<Self>, mut scrobble: Scrobble) {
-        let should_flush = {
+        let _queue_io = self.queue_io.lock().await;
+        let (queue, previous, revision) = {
             let mut runtime = self.runtime.lock().await;
             if !runtime.enabled
                 || runtime.build_problem
@@ -735,20 +915,32 @@ impl Service {
                 return;
             }
             scrobble.owner = owner.clone();
+            let previous = runtime.queue.clone();
             runtime.queue.push_back(scrobble);
             runtime.queue_owner = Some(owner);
-            if let Err(error) = self.queue_store.save(&runtime.queue) {
-                runtime.queue.pop_back();
-                log::error!(
-                    "Last.fm local persistence failed; queued scrobble may be lost: {error}"
-                );
-                return;
+            runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+            (runtime.queue.clone(), previous, runtime.queue_revision)
+        };
+        if let Err(error) = self.persist_queue(queue.clone()).await {
+            let mut runtime = self.runtime.lock().await;
+            if runtime.queue_revision == revision {
+                runtime.queue = previous;
+                runtime.queue_owner = queue_owner(&runtime.queue).map(ToOwned::to_owned);
+                runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
             }
-            log::debug!(
-                "Last.fm scrobble eligible; queue count={}",
-                runtime.queue.len()
+            log::error!(
+                "Last.fm local persistence failed; queued scrobble may be lost: {error}"
             );
-            true
+            return;
+        }
+        drop(_queue_io);
+        log::debug!(
+            "Last.fm scrobble eligible; queue count={}",
+            queue.len()
+        );
+        let should_flush = {
+            let runtime = self.runtime.lock().await;
+            flush_ready(&runtime)
         };
         if should_flush {
             Arc::clone(self).schedule_flush().await;
@@ -854,16 +1046,25 @@ impl Service {
                     );
                     return FlushOutcome::Retry;
                 };
-                let mut runtime = self.runtime.lock().await;
-                if !queue_starts_with(&runtime.queue, &batch)
-                    || runtime.session.as_ref() != Some(&session)
-                {
-                    return FlushOutcome::Done;
-                }
-                let original = runtime.queue.clone();
-                let removed = apply_scrobble_results(&mut runtime.queue, &batch, &codes);
-                if let Err(error) = self.queue_store.save(&runtime.queue) {
-                    runtime.queue = original;
+                let _queue_io = self.queue_io.lock().await;
+                let (original, queue, removed, revision) = {
+                    let mut runtime = self.runtime.lock().await;
+                    if !queue_starts_with(&runtime.queue, &batch)
+                        || runtime.session.as_ref() != Some(&session)
+                    {
+                        return FlushOutcome::Done;
+                    }
+                    let original = runtime.queue.clone();
+                    let removed = apply_scrobble_results(&mut runtime.queue, &batch, &codes);
+                    runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+                    (original, runtime.queue.clone(), removed, runtime.queue_revision)
+                };
+                if let Err(error) = self.persist_queue(queue.clone()).await {
+                    let mut runtime = self.runtime.lock().await;
+                    if runtime.queue_revision == revision {
+                        runtime.queue = original;
+                        runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+                    }
                     log::error!("Last.fm local persistence failed after scrobble response; queue retained: {error}");
                     return FlushOutcome::Stop;
                 }
@@ -882,22 +1083,18 @@ impl Service {
                         );
                     }
                 }
-                if runtime.queue.is_empty() {
+                if queue.is_empty() {
                     FlushOutcome::Done
                 } else {
                     FlushOutcome::Continue
                 }
             }
             Err(Failure::Api(9)) => {
-                let mut runtime = self.runtime.lock().await;
-                if runtime.session.as_ref() != Some(&session) {
-                    return FlushOutcome::Done;
+                if self.invalidate_session(&session).await {
+                    log::info!("Last.fm reconnect required");
+                    log::warn!("Last.fm session expired; reconnect required");
+                    self.emit_state().await;
                 }
-                self.invalidate_session_locked(&mut runtime);
-                log::info!("Last.fm reconnect required");
-                log::warn!("Last.fm session expired; reconnect required");
-                drop(runtime);
-                self.emit_state().await;
                 FlushOutcome::Stop
             }
             Err(error) if is_build_failure(error) => {
@@ -916,19 +1113,28 @@ impl Service {
                 FlushOutcome::Retry
             }
             Err(error) => {
-                let mut runtime = self.runtime.lock().await;
-                if !queue_starts_with(&runtime.queue, &batch)
-                    || runtime.session.as_ref() != Some(&session)
-                {
-                    return FlushOutcome::Done;
-                }
-                let original = runtime.queue.clone();
-                let removed = batch
-                    .iter()
-                    .filter_map(|item| runtime.queue.pop_front().map(|_| item.clone()))
-                    .collect::<Vec<_>>();
-                if let Err(save_error) = self.queue_store.save(&runtime.queue) {
-                    runtime.queue = original;
+                let _queue_io = self.queue_io.lock().await;
+                let (original, queue, removed, revision) = {
+                    let mut runtime = self.runtime.lock().await;
+                    if !queue_starts_with(&runtime.queue, &batch)
+                        || runtime.session.as_ref() != Some(&session)
+                    {
+                        return FlushOutcome::Done;
+                    }
+                    let original = runtime.queue.clone();
+                    let removed = batch
+                        .iter()
+                        .filter_map(|item| runtime.queue.pop_front().map(|_| item.clone()))
+                        .collect::<Vec<_>>();
+                    runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+                    (original, runtime.queue.clone(), removed, runtime.queue_revision)
+                };
+                if let Err(save_error) = self.persist_queue(queue.clone()).await {
+                    let mut runtime = self.runtime.lock().await;
+                    if runtime.queue_revision == revision {
+                        runtime.queue = original;
+                        runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+                    }
                     log::error!("Last.fm local persistence failed after permanent rejection; queue retained: {save_error}");
                     return FlushOutcome::Stop;
                 }
@@ -940,7 +1146,7 @@ impl Service {
                         item.track
                     );
                 }
-                if runtime.queue.is_empty() {
+                if queue.is_empty() {
                     FlushOutcome::Done
                 } else {
                     FlushOutcome::Continue
@@ -949,21 +1155,29 @@ impl Service {
         }
     }
 
-    fn invalidate_session_locked(&self, runtime: &mut Runtime) {
+    async fn invalidate_session(&self, expected: &LastFmSession) -> bool {
+        let _credential_io = self.credential_io.lock().await;
+        let expected = expected.clone();
+        let current = self.runtime.lock().await.session.clone();
+        if current.as_ref() != Some(&expected) {
+            return false;
+        }
+        let clear_error = self.clear_session().await.err();
+        let mut runtime = self.runtime.lock().await;
+        if runtime.session.as_ref() != Some(&expected) {
+            return false;
+        }
         if runtime.queue_owner.is_none() {
-            runtime.queue_owner = runtime
-                .session
-                .as_ref()
-                .map(|session| session.username.clone())
-                .or_else(|| queue_owner(&runtime.queue).map(ToOwned::to_owned));
+            runtime.queue_owner = Some(expected.username.clone());
         }
         runtime.session = None;
         runtime.reconnect_required = true;
-        if let Err(error) = self.session_store.clear() {
+        if let Some(error) = clear_error {
             log::error!(
                 "Last.fm local persistence failed while clearing an invalid session: {error}"
             );
         }
+        true
     }
 
     async fn post(
@@ -1027,9 +1241,10 @@ impl Service {
                 "Last.fm is temporarily unavailable. Try again later.".into()
             }
             Failure::Api(9) => {
-                let mut runtime = self.runtime.lock().await;
-                self.invalidate_session_locked(&mut runtime);
-                drop(runtime);
+                let session = self.runtime.lock().await.session.clone();
+                if let Some(session) = session {
+                    self.invalidate_session(&session).await;
+                }
                 log::info!("Last.fm reconnect required");
                 log::warn!("Last.fm session expired; reconnect required");
                 self.emit_state().await;
@@ -1045,18 +1260,25 @@ impl Service {
         }
     }
 
-    fn reconcile_queue_owner_locked(
-        &self,
-        runtime: &mut Runtime,
-        username: &str,
-    ) -> Result<(), String> {
-        if !runtime.queue.is_empty() && queue_owner(&runtime.queue) != Some(username) {
-            let empty = VecDeque::new();
-            self.queue_store.save(&empty)?;
-            runtime.queue = empty;
-            runtime.queue_owner = None;
+    async fn reconcile_queue_owner(&self, username: &str) -> Result<(), String> {
+        let _queue_io = self.queue_io.lock().await;
+        let (revision, should_clear) = {
+            let runtime = self.runtime.lock().await;
+            (
+                runtime.queue_revision,
+                !runtime.queue.is_empty() && queue_owner(&runtime.queue) != Some(username),
+            )
+        };
+        if should_clear {
+            self.persist_queue(VecDeque::new()).await?;
+            let mut runtime = self.runtime.lock().await;
+            if runtime.queue_revision == revision {
+                runtime.queue.clear();
+                runtime.queue_owner = None;
+                runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+            }
         }
-        runtime.queue_owner = Some(username.to_owned());
+        self.runtime.lock().await.queue_owner = Some(username.to_owned());
         Ok(())
     }
 
@@ -1405,6 +1627,162 @@ mod tests {
     }
 
     #[test]
+    fn listening_provider_eligibility_keeps_the_30_001ms_boundary() {
+        let track = SnapshotTrack {
+            duration_secs: 31,
+            ..track("Artist", "Album")
+        };
+        let mut state = ListeningState::default();
+        assert!(matches!(
+            state
+                .apply(
+                    crate::playback::ListeningFact::Started {
+                        generation: 1,
+                        track: track.clone(),
+                    },
+                    1234,
+                )
+                .as_slice(),
+            [ListeningAction::NowPlaying(scrobble)] if scrobble.timestamp == 0
+        ));
+        assert!(state
+            .apply(
+                crate::playback::ListeningFact::Forward {
+                    generation: 1,
+                    track: track.clone(),
+                    played_ms: 15_000,
+                },
+                0,
+            )
+            .is_empty());
+        assert!(matches!(
+            state
+                .apply(
+                    crate::playback::ListeningFact::Forward {
+                        generation: 1,
+                        track,
+                        played_ms: 16_000,
+                    },
+                    0,
+                )
+                .as_slice(),
+            [ListeningAction::Enqueue(scrobble)] if scrobble.timestamp == 1234
+        ));
+    }
+
+    #[test]
+    fn listening_provider_rejects_stale_and_discontinuous_progress() {
+        let track = track("Artist", "Album");
+        let mut state = ListeningState::default();
+        state.apply(
+            crate::playback::ListeningFact::Started {
+                generation: 1,
+                track: track.clone(),
+            },
+            1234,
+        );
+        assert!(state
+            .apply(
+                crate::playback::ListeningFact::Forward {
+                    generation: 2,
+                    track: track.clone(),
+                    played_ms: 100_000,
+                },
+                0,
+            )
+            .is_empty());
+        state.apply(
+            crate::playback::ListeningFact::Discontinuity {
+                generation: 1,
+                track: track.clone(),
+            },
+            0,
+        );
+        assert!(state
+            .apply(
+                crate::playback::ListeningFact::Forward {
+                    generation: 1,
+                    track: track.clone(),
+                    played_ms: 100_000,
+                },
+                0,
+            )
+            .is_empty());
+        assert!(state
+            .apply(
+                crate::playback::ListeningFact::Completed {
+                    generation: 1,
+                    track,
+                },
+                0,
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn listening_provider_scrobbles_completion_fallback_once_per_repeat_generation() {
+        let track = track("Artist", "Album");
+        let mut state = ListeningState::default();
+        assert_eq!(
+            state
+                .apply(
+                    crate::playback::ListeningFact::Started {
+                        generation: 1,
+                        track: track.clone(),
+                    },
+                    1234,
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .apply(
+                    crate::playback::ListeningFact::Completed {
+                        generation: 1,
+                        track: track.clone(),
+                    },
+                    0,
+                )
+                .len(),
+            1
+        );
+        assert!(state
+            .apply(
+                crate::playback::ListeningFact::Completed {
+                    generation: 1,
+                    track: track.clone(),
+                },
+                0,
+            )
+            .is_empty());
+        assert_eq!(
+            state
+                .apply(
+                    crate::playback::ListeningFact::Started {
+                        generation: 2,
+                        track: track.clone(),
+                    },
+                    5678,
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .apply(
+                    crate::playback::ListeningFact::Completed {
+                        generation: 2,
+                        track,
+                    },
+                    0,
+                )
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn batch_is_capped_and_response_codes_are_ordered() {
         let mut items = (0..51)
             .map(|index| Scrobble {
@@ -1463,6 +1841,7 @@ mod tests {
             build_problem: false,
             storage_problem: false,
             flushing: false,
+            queue_revision: 0,
         };
         assert!(flush_ready(&runtime));
         let queued = runtime.queue.clone();
@@ -1474,30 +1853,69 @@ mod tests {
     }
 
     #[test]
+    fn queue_persistence_does_not_hold_runtime_lock() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let mut service = Service::new(directory.path(), true, true);
+            let (entered, entered_rx) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            Arc::get_mut(&mut service).unwrap().queue_store.blocker = Some(Arc::new(
+                SaveBlocker {
+                    entered,
+                    release: std::sync::Mutex::new(release_rx),
+                },
+            ));
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.queue_owner = Some("user".into());
+                runtime.reconnect_required = true;
+            }
+
+            let task_service = Arc::clone(&service);
+            let enqueue = tauri::async_runtime::spawn(async move {
+                task_service.enqueue(queued_scrobble(2)).await;
+            });
+            tauri::async_runtime::spawn_blocking(move || {
+                entered_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("queue persistence started");
+            })
+            .await
+            .unwrap();
+
+            let runtime = service.runtime.lock().await;
+            assert_eq!(runtime.queue.len(), 1);
+            drop(runtime);
+
+            release.send(()).unwrap();
+            enqueue.await.unwrap();
+        });
+    }
+
+    #[test]
     fn invalid_session_requires_reconnect_without_dropping_queue() {
-        let directory = tempfile::tempdir().unwrap();
-        let service = Service::new(directory.path(), true, true);
-        let mut runtime = Runtime {
-            enabled: true,
-            session: Some(LastFmSession {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let service = Service::new(directory.path(), true, true);
+            let session = LastFmSession {
                 username: "user".into(),
                 key: "session".into(),
-            }),
-            pending: None,
-            queue: VecDeque::from([queued_scrobble(1)]),
-            queue_owner: Some("user".into()),
-            reconnect_required: false,
-            build_problem: false,
-            storage_problem: false,
-            flushing: false,
-        };
-        let queued = runtime.queue.clone();
+            };
+            let queued = VecDeque::from([queued_scrobble(1)]);
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.session = Some(session.clone());
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("user".into());
+            }
 
-        service.invalidate_session_locked(&mut runtime);
+            assert!(service.invalidate_session(&session).await);
 
-        assert!(runtime.session.is_none());
-        assert!(runtime.reconnect_required);
-        assert_eq!(runtime.queue, queued);
+            let runtime = service.runtime.lock().await;
+            assert!(runtime.session.is_none());
+            assert!(runtime.reconnect_required);
+            assert_eq!(runtime.queue, queued);
+        });
     }
 
     #[test]
@@ -1507,14 +1925,15 @@ mod tests {
             let service = Service::new(directory.path(), true, true);
             let queued = VecDeque::from([queued_scrobble(1)]);
             service.queue_store.save(&queued).unwrap();
-            let mut runtime = service.runtime.lock().await;
-            runtime.queue = queued.clone();
-            runtime.queue_owner = Some("user".into());
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("user".into());
+            }
 
-            service
-                .reconcile_queue_owner_locked(&mut runtime, "user")
-                .unwrap();
+            service.reconcile_queue_owner("user").await.unwrap();
 
+            let runtime = service.runtime.lock().await;
             assert_eq!(runtime.queue, queued);
             drop(runtime);
             assert_eq!(service.queue_store.load().unwrap(), queued);
@@ -1533,15 +1952,16 @@ mod tests {
                 username: "old-user".into(),
                 key: "old-session".into(),
             };
-            let mut runtime = service.runtime.lock().await;
-            runtime.session = Some(old_session.clone());
-            runtime.queue = queued.clone();
-            runtime.queue_owner = Some("old-user".into());
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.session = Some(old_session.clone());
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("old-user".into());
+            }
 
-            service
-                .reconcile_queue_owner_locked(&mut runtime, "new-user")
-                .unwrap();
+            service.reconcile_queue_owner("new-user").await.unwrap();
 
+            let runtime = service.runtime.lock().await;
             assert!(runtime.queue.is_empty());
             assert!(runtime
                 .session
@@ -1564,14 +1984,15 @@ mod tests {
                 username: "old-user".into(),
                 key: "old-session".into(),
             };
-            let mut runtime = service.runtime.lock().await;
-            runtime.session = Some(old_session.clone());
-            runtime.queue = queued.clone();
-            runtime.queue_owner = Some("old-user".into());
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.session = Some(old_session.clone());
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("old-user".into());
+            }
 
-            assert!(service
-                .reconcile_queue_owner_locked(&mut runtime, "new-user")
-                .is_err());
+            assert!(service.reconcile_queue_owner("new-user").await.is_err());
+            let runtime = service.runtime.lock().await;
             assert_eq!(runtime.queue, queued);
             assert!(runtime
                 .session
@@ -1694,7 +2115,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let mut service = Service::new(directory.path(), true, true);
-            Arc::get_mut(&mut service).unwrap().session_store = Box::new(FailingClearSessionStore);
+            Arc::get_mut(&mut service).unwrap().session_store = Arc::new(FailingClearSessionStore);
             let session = LastFmSession {
                 username: "old-user".into(),
                 key: "old-session".into(),

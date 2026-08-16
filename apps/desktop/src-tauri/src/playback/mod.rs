@@ -16,7 +16,7 @@ use connect::ConnectBackend;
 use file::FileEngine;
 use local::LocalBackend;
 use rand::seq::SliceRandom;
-use reducer::{EventReducer, LastFmAction, ReducerAction};
+use reducer::{EventReducer, ReducerAction};
 use retune_spotify::client::{HttpTransport, SpotifyClient};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -154,6 +154,27 @@ pub struct SnapshotTrack {
     pub art: String,
     pub alb: String,
     pub duration_secs: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ListeningFact {
+    Started {
+        generation: u64,
+        track: SnapshotTrack,
+    },
+    Forward {
+        generation: u64,
+        track: SnapshotTrack,
+        played_ms: u64,
+    },
+    Discontinuity {
+        generation: u64,
+        track: SnapshotTrack,
+    },
+    Completed {
+        generation: u64,
+        track: SnapshotTrack,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -576,8 +597,7 @@ impl Playback {
         self: &Arc<Self>,
         app: tauri::AppHandle,
         on_track_completed: impl Fn(String) + Send + Sync + 'static,
-        on_track_started: impl Fn(SnapshotTrack) + Send + Sync + 'static,
-        on_track_eligible: impl Fn(SnapshotTrack, u64) + Send + Sync + 'static,
+        on_listening: impl Fn(ListeningFact) + Send + Sync + 'static,
     ) {
         let mut receiver = self
             .receiver
@@ -593,8 +613,7 @@ impl Playback {
                         &app,
                         event,
                         &on_track_completed,
-                        &on_track_started,
-                        &on_track_eligible,
+                        &on_listening,
                     )
                     .await;
             }
@@ -1108,18 +1127,12 @@ impl Playback {
         app: &tauri::AppHandle,
         event: NeutralEvent,
         on_track_completed: &impl Fn(String),
-        on_track_started: &impl Fn(SnapshotTrack),
-        on_track_eligible: &impl Fn(SnapshotTrack, u64),
+        on_listening: &impl Fn(ListeningFact),
     ) {
         let mut state = self.state.lock().await;
         let actions = state.reducer.handle(event);
-        for event in state.reducer.take_lastfm_events() {
-            match event {
-                LastFmAction::Started(track) => on_track_started(track),
-                LastFmAction::Eligible { track, started_at } => {
-                    on_track_eligible(track, started_at)
-                }
-            }
+        for fact in state.reducer.take_listening_facts() {
+            on_listening(fact);
         }
         for action in actions {
             match action {

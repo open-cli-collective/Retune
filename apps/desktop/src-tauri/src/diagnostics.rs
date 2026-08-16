@@ -60,8 +60,164 @@ pub(crate) fn parse_line(line: &str) -> Option<DiagnosticEntry> {
         time: time.to_owned(),
         level,
         target: target.to_owned(),
-        message: message.to_owned(),
+        message: redact_message(message),
     })
+}
+
+const REDACTED: &str = "[REDACTED]";
+const SENSITIVE_KEYS: &[&str] = &[
+    "access token",
+    "access_token",
+    "accesstoken",
+    "refresh token",
+    "refresh_token",
+    "refreshtoken",
+    "playback credentials",
+    "playback_credentials",
+    "playbackcredentials",
+    "authorization",
+    "authorization token",
+    "authorization_token",
+    "authorizationtoken",
+    "auth token",
+    "auth_token",
+    "authtoken",
+    "bearer",
+    "client secret",
+    "client_secret",
+    "clientsecret",
+    "shared secret",
+    "shared_secret",
+    "sharedsecret",
+    "session key",
+    "session_key",
+    "sessionkey",
+    "lastfm session key",
+    "lastfm_session_key",
+    "lastfmsessionkey",
+    "api key",
+    "api_key",
+    "apikey",
+    "api sig",
+    "api_sig",
+    "apisig",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "key",
+];
+
+fn is_key_boundary(value: Option<char>) -> bool {
+    !value.is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-'))
+}
+
+fn next_sensitive_key(message: &str, from: usize) -> Option<(usize, usize)> {
+    let lower = message.to_ascii_lowercase();
+    SENSITIVE_KEYS
+        .iter()
+        .filter_map(|key| {
+            let start = lower[from..].find(key).map(|offset| from + offset)?;
+            let end = start + key.len();
+            if is_key_boundary(message[..start].chars().next_back())
+                && is_key_boundary(message[end..].chars().next())
+            {
+                Some((start, end))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(start, _)| *start)
+}
+
+fn redact_field_value(message: &str, key_start: usize, key_end: usize) -> Option<(usize, usize, String)> {
+    let key = message[key_start..key_end].to_ascii_lowercase();
+    let bytes = message.as_bytes();
+    let mut cursor = key_end;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\''))
+    {
+        cursor += 1;
+    }
+    if !matches!(bytes.get(cursor), Some(b':' | b'=')) {
+        return None;
+    }
+    cursor += 1;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        cursor += 1;
+    }
+    let quoted = bytes.get(cursor).copied().filter(|byte| matches!(byte, b'"' | b'\''));
+    if let Some(quote) = quoted {
+        let start = cursor + 1;
+        let end = message[start..]
+            .find(char::from(quote))
+            .map(|offset| start + offset)
+            .unwrap_or(message.len());
+        return Some((start, end, REDACTED.into()));
+    }
+
+    let start = cursor;
+    let is_authorization = key.contains("authorization") || key == "bearer";
+    let end = message[start..]
+        .char_indices()
+        .find_map(|(offset, value)| {
+            let delimiter = if is_authorization {
+                matches!(value, '&' | ',' | '}' | ']' | ';' | '\r' | '\n')
+            } else {
+                value.is_ascii_whitespace()
+                    || matches!(value, '&' | ',' | '}' | ']' | ';' | '\r' | '\n')
+            };
+            delimiter.then_some(start + offset)
+        })
+        .unwrap_or(message.len());
+    if start == end {
+        return None;
+    }
+    let value = &message[start..end];
+    let replacement = value
+        .find(char::is_whitespace)
+        .map(|offset| &value[..offset])
+        .filter(|scheme| {
+            scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("basic")
+        })
+        .map(|scheme| format!("{scheme} {REDACTED}"))
+        .unwrap_or_else(|| REDACTED.into());
+    Some((start, end, replacement))
+}
+
+fn redact_message(message: &str) -> String {
+    let mut result = String::with_capacity(message.len());
+    let mut cursor = 0;
+    while let Some((key_start, key_end)) = next_sensitive_key(message, cursor) {
+        let Some((value_start, value_end, replacement)) =
+            redact_field_value(message, key_start, key_end)
+        else {
+            cursor = key_end;
+            continue;
+        };
+        result.push_str(&message[cursor..value_start]);
+        result.push_str(&replacement);
+        cursor = value_end;
+    }
+    result.push_str(&message[cursor..]);
+    let lower = result.to_ascii_lowercase();
+    lower
+        .contains(" returned http ")
+        .then(|| {
+            result
+                .split_once(": ")
+                .map(|(prefix, _)| format!("{prefix}: [redacted response body]"))
+        })
+        .flatten()
+        .unwrap_or(result)
+}
+
+fn redacted_mailto_url(email: &str, body: &str) -> String {
+    mailto_url(email, &redact_message(body))
 }
 
 pub(crate) fn current_session_entries(contents: &str) -> Vec<DiagnosticEntry> {
@@ -147,7 +303,7 @@ pub(super) fn email_diagnostics(app: tauri::AppHandle, body: String) -> Result<(
             .to_string()
     })?;
     app.opener()
-        .open_url(mailto_url(email, &body), None::<String>)
+        .open_url(redacted_mailto_url(email, &body), None::<String>)
         .map_err(|error| error.to_string())
 }
 
@@ -179,6 +335,48 @@ mod tests {
     fn preserves_brackets_inside_messages() {
         let entry = parse_line("[2026-08-16][14:03:02][ERROR][retune] failed [retry=2]").unwrap();
         assert_eq!(entry.message, "failed [retry=2]");
+    }
+
+    #[test]
+    fn redacts_all_credential_forms_while_preserving_context() {
+        let message = concat!(
+            "GET /play?access_token=access-canary&refresh_token=refresh-canary ",
+            "headers={Authorization: Bearer authorization-canary} ",
+            "body={\"playbackCredentials\":{\"accessToken\":\"playback-canary\"},",
+            "\"refreshToken\":\"refresh-body-canary\",\"session_key\":\"lastfm-canary\",",
+            "\"key\":\"session-key-canary\"}"
+        );
+        let entry = parse_line(&format!(
+            "[2026-08-16][14:03:02][ERROR][retune::http] {message}"
+        ))
+        .unwrap();
+        for secret in [
+            "access-canary",
+            "refresh-canary",
+            "authorization-canary",
+            "playback-canary",
+            "refresh-body-canary",
+            "lastfm-canary",
+            "session-key-canary",
+        ] {
+            assert!(!entry.message.contains(secret), "secret leaked: {secret}");
+        }
+        assert!(entry.message.contains("GET /play"));
+        assert!(entry.message.contains("headers={Authorization: Bearer [REDACTED]}"));
+        assert!(entry.message.contains("body={"));
+
+        let url = redacted_mailto_url("support@example.com", message);
+        assert!(!url.contains("access-canary"));
+        assert!(!url.contains("lastfm-canary"));
+
+        let entry = parse_line(
+            "[2026-08-16][14:03:02][ERROR][retune::spotify] Spotify /me returned HTTP 401: raw-canary",
+        )
+        .unwrap();
+        assert_eq!(
+            entry.message,
+            "Spotify /me returned HTTP 401: [redacted response body]"
+        );
     }
 
     #[test]

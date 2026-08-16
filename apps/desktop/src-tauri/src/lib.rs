@@ -2260,8 +2260,7 @@ pub fn run() {
                 lastfm_startup.set_enabled(lastfm_enabled).await;
             });
             let completion_app = app.handle().clone();
-            let lastfm_started = Arc::clone(&lastfm);
-            let lastfm_eligible = Arc::clone(&lastfm);
+            let lastfm = Arc::clone(&lastfm);
             playback.listen(
                 app.handle().clone(),
                 move |uri| {
@@ -2279,8 +2278,7 @@ pub fn run() {
                         }
                     }));
                 },
-                move |track| lastfm_started.track_started(track),
-                move |track, timestamp| lastfm_eligible.track_eligible(track, timestamp),
+                move |fact| lastfm.handle_listening_fact(fact),
             );
             if activate_local
                 || connection.connected

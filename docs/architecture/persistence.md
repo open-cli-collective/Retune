@@ -104,6 +104,13 @@ and are cleared during account reconciliation. Disconnect clears the durable
 queue before clearing session or pending authorization state; a failed queue
 clear leaves the active account connected.
 
+Last.fm runtime mutations snapshot queue/account state under the persistence
+serialization mutex, perform filesystem and credential-store work in blocking
+tasks, and commit only when the snapshot is still current. This keeps queue
+ordering and account isolation intact without holding the async runtime mutex
+across local I/O; failed queue writes or clears retain the corresponding
+in-memory state.
+
 ## Recovery and portability
 
 A corrupt library file is quarantined with a timestamped `.corrupt-*` suffix;

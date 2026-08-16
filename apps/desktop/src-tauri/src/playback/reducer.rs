@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 
-use super::{empty_event, local_event, NeutralEvent, NeutralState, PlayerStateEvent, Snapshot};
+use super::{
+    empty_event, local_event, ListeningFact, NeutralEvent, NeutralState, PlayerStateEvent,
+    Snapshot,
+};
 
 fn duration_secs_ceil(duration_ms: Option<u32>) -> u64 {
     duration_ms
@@ -18,15 +21,6 @@ pub(super) enum ReducerAction {
     Reload,
     Invalidate,
     Reconnect,
-}
-
-#[derive(Clone, Debug)]
-pub(super) enum LastFmAction {
-    Started(super::SnapshotTrack),
-    Eligible {
-        track: super::SnapshotTrack,
-        started_at: u64,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -48,14 +42,12 @@ pub(super) struct EventReducer {
     play_threshold_percent: u8,
     previous_position_ms: u32,
     counted: bool,
-    started_uri: Option<String>,
-    lastfm_track: Option<super::SnapshotTrack>,
-    started_at: u64,
+    listening_uri: Option<String>,
+    listening_track: Option<super::SnapshotTrack>,
+    listening_generation: u64,
     played_ms: u64,
     last_progress_ms: u32,
-    seeked: bool,
-    scrobbled: bool,
-    lastfm_events: VecDeque<LastFmAction>,
+    listening_facts: VecDeque<ListeningFact>,
     shuffle: bool,
 }
 
@@ -73,14 +65,12 @@ impl Default for EventReducer {
             play_threshold_percent: 100,
             previous_position_ms: 0,
             counted: false,
-            started_uri: None,
-            lastfm_track: None,
-            started_at: 0,
+            listening_uri: None,
+            listening_track: None,
+            listening_generation: 0,
             played_ms: 0,
             last_progress_ms: 0,
-            seeked: false,
-            scrobbled: false,
-            lastfm_events: VecDeque::new(),
+            listening_facts: VecDeque::new(),
             shuffle: false,
         }
     }
@@ -93,7 +83,7 @@ impl EventReducer {
         self.current = None;
         self.latest_intent = None;
         self.reset_playthrough();
-        self.lastfm_events.clear();
+        self.listening_facts.clear();
     }
 
     pub(super) fn recover(&mut self, generation: u64) {
@@ -101,8 +91,8 @@ impl EventReducer {
         self.pending.clear();
         self.current = None;
         self.latest_intent = None;
-        self.reset_lastfm_playthrough();
-        self.lastfm_events.clear();
+        self.reset_listening();
+        self.listening_facts.clear();
     }
 
     pub(super) fn set_snapshot(&mut self, snapshot: Option<Snapshot>) {
@@ -152,8 +142,8 @@ impl EventReducer {
         self.play_threshold_percent = percent;
     }
 
-    pub(super) fn take_lastfm_events(&mut self) -> Vec<LastFmAction> {
-        self.lastfm_events.drain(..).collect()
+    pub(super) fn take_listening_facts(&mut self) -> Vec<ListeningFact> {
+        self.listening_facts.drain(..).collect()
     }
 
     pub(super) fn queue_load(&mut self, uri: &str, playing: bool) {
@@ -258,8 +248,13 @@ impl EventReducer {
                 }
                 self.previous_position_ms = position_ms;
                 self.last_progress_ms = position_ms;
-                self.seeked = true;
                 self.state.elapsed = u64::from(position_ms) / 1000;
+                if let Some(track) = self.listening_track_for(&uri) {
+                    self.listening_facts.push_back(ListeningFact::Discontinuity {
+                        generation: self.listening_generation,
+                        track,
+                    });
+                }
                 vec![ReducerAction::Emit(self.state.clone())]
             }
             NeutralEvent::Unavailable {
@@ -343,6 +338,13 @@ impl EventReducer {
             })
     }
 
+    fn listening_track_for(&self, uri: &str) -> Option<super::SnapshotTrack> {
+        self.listening_track
+            .as_ref()
+            .filter(|track| track.uri == uri)
+            .cloned()
+    }
+
     fn emit_track(&mut self, uri: &str, position_ms: u32, playing: bool) -> Vec<ReducerAction> {
         let Some(track) = self.track(uri).cloned() else {
             return vec![ReducerAction::Error(format!(
@@ -383,42 +385,35 @@ impl EventReducer {
     ) -> Vec<ReducerAction> {
         let uri = track.uri.clone();
         let actions = Vec::with_capacity(2);
-        if self.started_uri.as_deref() != Some(uri.as_str()) {
-            self.reset_lastfm_playthrough();
-            self.started_uri = Some(uri.clone());
-            self.started_at = crate::unix_now();
+        if self.listening_uri.as_deref() != Some(uri.as_str()) {
+            self.reset_listening();
+            self.listening_uri = Some(uri.clone());
+            self.listening_generation = self.listening_generation.wrapping_add(1);
             self.played_ms = 0;
             self.last_progress_ms = position_ms;
-            self.seeked = false;
-            self.scrobbled = false;
-            self.lastfm_events
-                .push_back(LastFmAction::Started(track.clone()));
+            self.listening_facts.push_back(ListeningFact::Started {
+                generation: self.listening_generation,
+                track: track.clone(),
+            });
         }
-        self.lastfm_track = Some(track.clone());
-        if self.record_progress(&uri, position_ms, track.duration_secs) {
-            self.scrobbled = true;
-            self.lastfm_events.push_back(LastFmAction::Eligible {
+        self.listening_track = Some(track.clone());
+        let delta = position_ms.saturating_sub(self.last_progress_ms);
+        if position_ms < self.last_progress_ms || delta > 30_000 {
+            self.last_progress_ms = position_ms;
+            self.listening_facts.push_back(ListeningFact::Discontinuity {
+                generation: self.listening_generation,
                 track,
-                started_at: self.started_at,
+            });
+        } else if delta > 0 {
+            self.played_ms = self.played_ms.saturating_add(u64::from(delta));
+            self.last_progress_ms = position_ms;
+            self.listening_facts.push_back(ListeningFact::Forward {
+                generation: self.listening_generation,
+                track,
+                played_ms: self.played_ms,
             });
         }
         actions
-    }
-
-    fn record_progress(&mut self, uri: &str, position_ms: u32, duration_secs: u64) -> bool {
-        if self.started_uri.as_deref() != Some(uri) {
-            return false;
-        }
-        let delta = position_ms.saturating_sub(self.last_progress_ms);
-        if position_ms < self.last_progress_ms || delta > 30_000 {
-            self.seeked = true;
-        } else {
-            self.played_ms = self.played_ms.saturating_add(u64::from(delta));
-        }
-        self.last_progress_ms = position_ms;
-        !self.scrobbled
-            && crate::lastfm::scrobble_threshold_ms(duration_secs)
-                .is_some_and(|threshold| self.played_ms >= threshold)
     }
 
     fn position_changed(
@@ -446,7 +441,7 @@ impl EventReducer {
             self.counted = true;
             actions.push(ReducerAction::TrackCompleted(uri.to_owned()));
         }
-        if self.state.is_playing && self.started_uri.is_some() {
+        if self.state.is_playing && self.listening_uri.is_some() {
             actions.extend(self.start_and_progress(uri, position_ms));
         }
         actions
@@ -454,7 +449,7 @@ impl EventReducer {
 
     fn complete(&mut self, uri: String) -> Vec<ReducerAction> {
         let mut actions = Vec::with_capacity(3);
-        self.finish_scrobble();
+        self.finish_listening();
         if !self.counted {
             self.counted = true;
             actions.push(ReducerAction::TrackCompleted(uri));
@@ -470,48 +465,38 @@ impl EventReducer {
     fn reset_playthrough(&mut self) {
         self.previous_position_ms = 0;
         self.counted = false;
-        self.reset_lastfm_playthrough();
+        self.reset_listening();
     }
 
-    fn reset_lastfm_playthrough(&mut self) {
-        self.started_uri = None;
-        self.lastfm_track = None;
-        self.started_at = 0;
+    fn reset_listening(&mut self) {
+        self.listening_uri = None;
+        self.listening_track = None;
         self.played_ms = 0;
         self.last_progress_ms = 0;
-        self.seeked = false;
-        self.scrobbled = false;
     }
 
-    fn finish_scrobble(&mut self) {
-        let Some(uri) = self.started_uri.as_deref() else {
+    fn finish_listening(&mut self) {
+        let Some(uri) = self.listening_uri.as_deref() else {
             return;
         };
-        if self.scrobbled || self.seeked {
-            return;
-        }
         let Some(track) = self
-            .lastfm_track
+            .listening_track
             .as_ref()
             .filter(|track| track.uri == uri)
             .cloned()
         else {
             return;
         };
-        if crate::lastfm::scrobble_threshold_ms(track.duration_secs).is_none() {
-            return;
-        }
-        self.scrobbled = true;
-        self.lastfm_events.push_back(LastFmAction::Eligible {
+        self.listening_facts.push_back(ListeningFact::Completed {
+            generation: self.listening_generation,
             track,
-            started_at: self.started_at,
         });
     }
 
     fn connect_state(&mut self, state: NeutralState) -> Vec<ReducerAction> {
-        let changed_track = self.started_uri.as_deref() != state.uri.as_deref();
-        if changed_track && self.started_uri.is_some() {
-            self.reset_lastfm_playthrough();
+        let changed_track = self.listening_uri.as_deref() != state.uri.as_deref();
+        if changed_track && self.listening_uri.is_some() {
+            self.reset_listening();
         }
         if state.external {
             let external_track = state.uri.as_ref().map(|uri| super::SnapshotTrack {
@@ -1027,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_does_not_start_lastfm_before_playback_begins() {
+    fn loading_does_not_emit_listening_facts_before_playback_begins() {
         let mut reducer = reducer();
         bind(&mut reducer, "spotify:track:1", true, 1);
 
@@ -1038,7 +1023,7 @@ mod tests {
             position_ms: 0,
         });
 
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(reducer.take_listening_facts().is_empty());
         reducer.handle(NeutralEvent::Playing {
             generation: 7,
             request_id: 1,
@@ -1046,8 +1031,8 @@ mod tests {
             position_ms: 0,
         });
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Started(track)] if track.uri == "spotify:track:1"
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Started { generation: 1, track }] if track.uri == "spotify:track:1"
         ));
         reducer.handle(NeutralEvent::Playing {
             generation: 7,
@@ -1055,11 +1040,18 @@ mod tests {
             uri: "spotify:track:1".into(),
             position_ms: 1000,
         });
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(matches!(
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward {
+                generation: 1,
+                track,
+                played_ms: 1000,
+            }] if track.uri == "spotify:track:1"
+        ));
     }
 
     #[test]
-    fn external_playback_emits_lastfm_start_and_threshold_eligibility() {
+    fn external_playback_emits_generation_scoped_listening_facts() {
         let mut reducer = reducer();
         let external = |position_ms| NeutralEvent::ConnectState {
             generation: 7,
@@ -1079,27 +1071,40 @@ mod tests {
         let state = emitted(reducer.handle(external(0)));
         assert!(state.external);
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Started(track)]
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Started { generation: 1, track }]
                 if track.id == 0 && track.uri == "spotify:track:external"
         ));
 
         reducer.handle(external(30_000));
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(matches!(
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward {
+                generation: 1,
+                played_ms: 30_000,
+                ..
+            }]
+        ));
 
         reducer.handle(external(60_000));
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Eligible { track, .. }]
-                if track.uri == "spotify:track:external"
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward {
+                generation: 1,
+                track,
+                played_ms: 60_000,
+            }] if track.uri == "spotify:track:external"
         ));
 
         reducer.handle(external(90_000));
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(matches!(
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward { played_ms: 90_000, .. }]
+        ));
     }
 
     #[test]
-    fn external_duration_30_001ms_remains_eligible() {
+    fn external_duration_30_001ms_keeps_cumulative_forward_time() {
         let mut reducer = reducer();
         let external = |position_ms| NeutralEvent::ConnectState {
             generation: 7,
@@ -1117,19 +1122,25 @@ mod tests {
         };
 
         reducer.handle(external(0));
-        reducer.take_lastfm_events();
+        reducer.take_listening_facts();
         reducer.handle(external(15_000));
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(matches!(
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward { played_ms: 15_000, .. }]
+        ));
         reducer.handle(external(16_000));
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Eligible { track, .. }]
-                if track.duration_secs == 31
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward {
+                track,
+                played_ms: 16_000,
+                ..
+            }] if track.duration_secs == 31
         ));
     }
 
     #[test]
-    fn switching_tracks_before_threshold_does_not_emit_lastfm_completion_fallback() {
+    fn switching_tracks_starts_a_new_listening_fact() {
         let mut reducer = reducer();
         reducer.handle(NeutralEvent::ConnectState {
             generation: 7,
@@ -1145,7 +1156,7 @@ mod tests {
                 volume_supported: true,
             },
         });
-        reducer.take_lastfm_events();
+        reducer.take_listening_facts();
 
         reducer.handle(NeutralEvent::ConnectState {
             generation: 7,
@@ -1162,13 +1173,13 @@ mod tests {
             },
         });
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Started(track)] if track.uri == "spotify:track:2"
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Started { generation: 2, track }] if track.uri == "spotify:track:2"
         ));
     }
 
     #[test]
-    fn lastfm_eligibility_accumulates_played_time_once() {
+    fn listening_facts_accumulate_forward_time_once() {
         let mut reducer = reducer();
         bind(&mut reducer, "spotify:track:1", true, 1);
         reducer.handle(NeutralEvent::Playing {
@@ -1178,8 +1189,8 @@ mod tests {
             position_ms: 0,
         });
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Started(track)] if track.uri == "spotify:track:1"
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Started { track, .. }] if track.uri == "spotify:track:1"
         ));
 
         for position_ms in [10_000, 20_000, 30_000, 40_000, 50_000] {
@@ -1190,9 +1201,15 @@ mod tests {
                 position_ms,
             });
         }
+        let facts = reducer.take_listening_facts();
+        assert_eq!(facts.len(), 5);
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Eligible { track, started_at }] if track.uri == "spotify:track:1" && *started_at > 0
+            facts.last(),
+            Some(ListeningFact::Forward {
+                track,
+                played_ms: 50_000,
+                ..
+            }) if track.uri == "spotify:track:1"
         ));
 
         reducer.handle(NeutralEvent::PositionChanged {
@@ -1201,11 +1218,14 @@ mod tests {
             uri: "spotify:track:1".into(),
             position_ms: 60_000,
         });
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(matches!(
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Forward { played_ms: 60_000, .. }]
+        ));
     }
 
     #[test]
-    fn lastfm_seek_and_stale_events_cannot_qualify_a_generation() {
+    fn listening_seek_and_stale_events_are_generation_scoped() {
         let mut reducer = reducer();
         bind(&mut reducer, "spotify:track:1", true, 1);
         reducer.handle(NeutralEvent::Playing {
@@ -1214,7 +1234,7 @@ mod tests {
             uri: "spotify:track:1".into(),
             position_ms: 0,
         });
-        reducer.take_lastfm_events();
+        reducer.take_listening_facts();
         assert!(reducer
             .handle(NeutralEvent::PositionChanged {
                 generation: 6,
@@ -1223,7 +1243,7 @@ mod tests {
                 position_ms: 60_000,
             })
             .is_empty());
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(reducer.take_listening_facts().is_empty());
 
         reducer.handle(NeutralEvent::Seeked {
             generation: 7,
@@ -1236,11 +1256,17 @@ mod tests {
             request_id: 1,
             uri: "spotify:track:1".into(),
         });
-        assert!(reducer.take_lastfm_events().is_empty());
+        assert!(matches!(
+            reducer.take_listening_facts().as_slice(),
+            [
+                ListeningFact::Discontinuity { generation: 1, .. },
+                ListeningFact::Completed { generation: 1, .. },
+            ]
+        ));
     }
 
     #[test]
-    fn lastfm_completion_fallback_and_repeat_use_separate_generations() {
+    fn listening_completion_and_repeat_use_separate_facts() {
         let mut reducer = reducer();
         bind(&mut reducer, "spotify:track:1", true, 1);
         reducer.handle(NeutralEvent::Playing {
@@ -1249,15 +1275,15 @@ mod tests {
             uri: "spotify:track:1".into(),
             position_ms: 0,
         });
-        reducer.take_lastfm_events();
+        reducer.take_listening_facts();
         reducer.handle(NeutralEvent::EndOfTrack {
             generation: 7,
             request_id: 1,
             uri: "spotify:track:1".into(),
         });
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Eligible { track, .. }] if track.uri == "spotify:track:1"
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Completed { generation: 1, track }] if track.uri == "spotify:track:1"
         ));
 
         bind(&mut reducer, "spotify:track:1", true, 2);
@@ -1268,8 +1294,8 @@ mod tests {
             position_ms: 0,
         });
         assert!(matches!(
-            reducer.take_lastfm_events().as_slice(),
-            [LastFmAction::Started(track)] if track.uri == "spotify:track:1"
+            reducer.take_listening_facts().as_slice(),
+            [ListeningFact::Started { generation: 2, track }] if track.uri == "spotify:track:1"
         ));
     }
 

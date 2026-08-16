@@ -229,16 +229,53 @@ test('playlist layout overrides stay keyed and disappear when restored to defaul
   const customOrder = [...PLAYLIST_DEFAULT_COLUMN_ORDER].reverse()
   const orders = playlistOverride({}, 'playlist-a', customOrder, PLAYLIST_DEFAULT_COLUMN_ORDER)
   assert.deepEqual(orders['playlist-a'], customOrder)
-  assert.equal(orders['playlist-b'], undefined)
-  assert.deepEqual(playlistOverride(orders, 'playlist-a', PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_COLUMN_ORDER), {})
+  const otherOrder = [...PLAYLIST_DEFAULT_COLUMN_ORDER].slice(1).concat(PLAYLIST_DEFAULT_COLUMN_ORDER[0])
+  const bothOrders = playlistOverride(orders, 'playlist-b', otherOrder, PLAYLIST_DEFAULT_COLUMN_ORDER)
+  assert.deepEqual(bothOrders, { 'playlist-a': customOrder, 'playlist-b': otherOrder })
+  const restoredOrders = playlistOverride(bothOrders, 'playlist-a', PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_COLUMN_ORDER)
+  assert.deepEqual(restoredOrders, { 'playlist-b': otherOrder })
 
   const hidden = playlistOverride({}, 'playlist-a', ['genre'], PLAYLIST_DEFAULT_HIDDEN_COLUMNS)
-  assert.deepEqual(hidden, { 'playlist-a': ['genre'] })
-  assert.deepEqual(playlistOverride(hidden, 'playlist-a', PLAYLIST_DEFAULT_HIDDEN_COLUMNS, PLAYLIST_DEFAULT_HIDDEN_COLUMNS), {})
+  const bothHidden = playlistOverride(hidden, 'playlist-b', ['plays'], PLAYLIST_DEFAULT_HIDDEN_COLUMNS)
+  assert.deepEqual(bothHidden, { 'playlist-a': ['genre'], 'playlist-b': ['plays'] })
+  assert.deepEqual(playlistOverride(bothHidden, 'playlist-a', PLAYLIST_DEFAULT_HIDDEN_COLUMNS, PLAYLIST_DEFAULT_HIDDEN_COLUMNS), { 'playlist-b': ['plays'] })
 
   const widths = playlistOverride({}, 'playlist-a', { name: 220 }, {})
-  assert.deepEqual(widths, { 'playlist-a': { name: 220 } })
-  assert.deepEqual(playlistOverride(widths, 'playlist-a', {}, {}), {})
+  const bothWidths = playlistOverride(widths, 'playlist-b', { artist: 180 }, {})
+  assert.deepEqual(bothWidths, { 'playlist-a': { name: 220 }, 'playlist-b': { artist: 180 } })
+  assert.deepEqual(playlistOverride(bothWidths, 'playlist-a', {}, {}), { 'playlist-b': { artist: 180 } })
+
+  const customized: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'> = {
+    playlistHiddenColumns: bothHidden,
+    playlistColumnOrders: bothOrders,
+    playlistColumnWidths: bothWidths,
+  }
+  assert.deepEqual(playlistLayoutFor('playlist-a', customized), {
+    hiddenColumns: ['genre'],
+    columnOrder: customOrder,
+    columnWidths: { name: 220 },
+  })
+  assert.deepEqual(playlistLayoutFor('playlist-b', customized), {
+    hiddenColumns: ['plays'],
+    columnOrder: otherOrder,
+    columnWidths: { artist: 180 },
+  })
+
+  const restored: Pick<Settings, 'playlistHiddenColumns' | 'playlistColumnOrders' | 'playlistColumnWidths'> = {
+    playlistHiddenColumns: playlistOverride(bothHidden, 'playlist-a', PLAYLIST_DEFAULT_HIDDEN_COLUMNS, PLAYLIST_DEFAULT_HIDDEN_COLUMNS),
+    playlistColumnOrders: restoredOrders,
+    playlistColumnWidths: playlistOverride(bothWidths, 'playlist-a', {}, {}),
+  }
+  assert.deepEqual(playlistLayoutFor('playlist-a', restored), {
+    hiddenColumns: PLAYLIST_DEFAULT_HIDDEN_COLUMNS,
+    columnOrder: PLAYLIST_DEFAULT_COLUMN_ORDER,
+    columnWidths: {},
+  })
+  assert.deepEqual(playlistLayoutFor('playlist-b', restored), {
+    hiddenColumns: ['plays'],
+    columnOrder: otherOrder,
+    columnWidths: { artist: 180 },
+  })
 })
 
 test('stale browse selections fall back at the narrowest invalid level', () => {
