@@ -752,15 +752,31 @@ impl Service {
     }
 
     async fn commit_session(&self, session: LastFmSession) -> Result<(), String> {
-        self.clear_pending().await?;
-        self.reconcile_queue_owner(&session.username).await?;
+        let previous_session = self.runtime.lock().await.session.clone();
         self.save_session(session.clone()).await?;
+        if let Err(error) = self.reconcile_queue_owner(&session.username).await {
+            let rollback = match previous_session {
+                Some(previous) => self.save_session(previous).await,
+                None => self.clear_session().await,
+            };
+            if let Err(rollback_error) = rollback {
+                self.runtime.lock().await.storage_problem = true;
+                return Err(format!("{error} {rollback_error}"));
+            }
+            return Err(error);
+        }
         let mut runtime = self.runtime.lock().await;
         runtime.session = Some(session.clone());
         runtime.pending = None;
         runtime.reconnect_required = false;
         runtime.build_problem = false;
         runtime.queue_owner = Some(session.username);
+        drop(runtime);
+        if let Err(error) = self.clear_pending().await {
+            log::error!(
+                "Last.fm local persistence failed while clearing completed authorization: {error}"
+            );
+        }
         Ok(())
     }
 
@@ -1542,6 +1558,24 @@ mod tests {
         }
     }
 
+    struct FailingSaveSessionStore {
+        session: LastFmSession,
+    }
+
+    impl SessionStore for FailingSaveSessionStore {
+        fn load(&self) -> Result<Option<LastFmSession>, String> {
+            Ok(Some(self.session.clone()))
+        }
+
+        fn save(&self, _session: &LastFmSession) -> Result<(), String> {
+            Err("session save failed".into())
+        }
+
+        fn clear(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn empty_or_missing_built_in_credentials_disable_integration() {
         assert!(credentials_from(None, Some("secret")).is_none());
@@ -2147,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_account_completion_keeps_old_session_when_pending_clear_fails() {
+    fn cross_account_completion_commits_new_session_when_pending_clear_fails() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let service = Service::new(directory.path(), true, true);
@@ -2172,6 +2206,53 @@ mod tests {
                 runtime.queue_owner = Some("old-user".into());
             }
 
+            service.commit_session(new_session.clone()).await.unwrap();
+            assert!(service
+                .session_store
+                .load()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|session| session == &new_session));
+            let runtime = service.runtime.lock().await;
+            assert!(runtime
+                .session
+                .as_ref()
+                .is_some_and(|session| session == &new_session));
+            assert!(runtime.pending.is_none());
+            assert!(runtime.queue.is_empty());
+            drop(runtime);
+            assert!(service.queue_store.load().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn cross_account_completion_keeps_retry_state_when_session_save_fails() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let mut service = Service::new(directory.path(), true, true);
+            let old_session = LastFmSession {
+                username: "old-user".into(),
+                key: "old-session".into(),
+            };
+            let new_session = LastFmSession {
+                username: "new-user".into(),
+                key: "new-session".into(),
+            };
+            let mut queued = VecDeque::from([queued_scrobble(1)]);
+            queued.front_mut().unwrap().owner = "old-user".into();
+            Arc::get_mut(&mut service).unwrap().session_store = Arc::new(FailingSaveSessionStore {
+                session: old_session.clone(),
+            });
+            service.pending_store.save("pending-token").unwrap();
+            service.queue_store.save(&queued).unwrap();
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.session = Some(old_session.clone());
+                runtime.pending = Some("pending-token".into());
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("old-user".into());
+            }
+
             assert!(service.commit_session(new_session).await.is_err());
             assert!(service
                 .session_store
@@ -2179,6 +2260,11 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .is_some_and(|session| session == &old_session));
+            assert_eq!(
+                service.pending_store.load().unwrap().as_deref(),
+                Some("pending-token")
+            );
+            assert_eq!(service.queue_store.load().unwrap(), queued);
             let runtime = service.runtime.lock().await;
             assert!(runtime
                 .session
@@ -2186,8 +2272,6 @@ mod tests {
                 .is_some_and(|session| session == &old_session));
             assert_eq!(runtime.pending.as_deref(), Some("pending-token"));
             assert_eq!(runtime.queue, queued);
-            drop(runtime);
-            assert_eq!(service.queue_store.load().unwrap(), queued);
         });
     }
 
