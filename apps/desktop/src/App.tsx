@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, rememberSelection, replacementQueue, restoreSelection, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistOverride, playlistRows, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, replacementQueue, resizedColumnWidth, restoreSelection, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
@@ -102,10 +102,12 @@ const defaultSettings: Settings = {
   browserVisible: true,
   browserPanes: { cat: true, art: true, alb: true },
   // Mirrors Settings::default() in src-tauri/src/store.rs — keep in sync
-  columnOrder: ['name', 'artist', 'album', 'disc', 'track', 'time', 'rating', 'genre', 'plays', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
+  columnOrder: [...LIBRARY_DEFAULT_COLUMN_ORDER],
   columnWidths: {},
-  hiddenColumns: ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate'],
+  hiddenColumns: [...LIBRARY_DEFAULT_HIDDEN_COLUMNS],
   playlistHiddenColumns: {},
+  playlistColumnOrders: {},
+  playlistColumnWidths: {},
   sortColumn: null,
   sortDesc: false,
   autoAddSpotifyLibrary: true,
@@ -779,8 +781,14 @@ function App() {
 
   const selectedPlaylist = playlists?.find((playlist) => playlist.id === state.selectedPlaylist)
   const playlistHiddenColumns = selectedPlaylist
-    ? state.settings.playlistHiddenColumns[selectedPlaylist.id] ?? defaultSettings.hiddenColumns
-    : defaultSettings.hiddenColumns
+    ? state.settings.playlistHiddenColumns[selectedPlaylist.id] ?? PLAYLIST_DEFAULT_HIDDEN_COLUMNS
+    : PLAYLIST_DEFAULT_HIDDEN_COLUMNS
+  const playlistColumnOrder = selectedPlaylist
+    ? state.settings.playlistColumnOrders[selectedPlaylist.id] ?? PLAYLIST_DEFAULT_COLUMN_ORDER
+    : PLAYLIST_DEFAULT_COLUMN_ORDER
+  const playlistColumnWidths = selectedPlaylist
+    ? state.settings.playlistColumnWidths[selectedPlaylist.id] ?? {}
+    : {}
   const showPlayingOrigin = () => {
     const origin = state.playing?.origin
     if (!origin) return
@@ -852,8 +860,8 @@ function App() {
             revision={state.playlistRevision}
             libraryRevision={state.revision}
             playing={state.playing}
-            columnOrder={state.settings.columnOrder}
-            columnWidths={state.settings.columnWidths}
+            columnOrder={playlistColumnOrder}
+            columnWidths={playlistColumnWidths}
             hiddenColumns={playlistHiddenColumns}
             onBack={() => dispatch({ type: 'playlist' })}
             onPlay={(id, tracks) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id })}
@@ -864,13 +872,18 @@ function App() {
               if (tracks.length > 1 || tracks[0]?.id === null) dispatch({ type: 'info', info: { kind: 'multiple', tracks } })
               else openInfo(tracks[0]?.id)
             }}
+            onReorder={(columnOrder) => dispatch({
+              type: 'settings',
+              settings: { playlistColumnOrders: playlistOverride(state.settings.playlistColumnOrders, selectedPlaylist.id, columnOrder, PLAYLIST_DEFAULT_COLUMN_ORDER) },
+            })}
+            onColumnWidths={(columnWidths) => dispatch({
+              type: 'settings',
+              settings: { playlistColumnWidths: playlistOverride(state.settings.playlistColumnWidths, selectedPlaylist.id, columnWidths, {}) },
+            })}
             onHiddenColumns={(hiddenColumns) => dispatch({
               type: 'settings',
               settings: {
-                playlistHiddenColumns: {
-                  ...state.settings.playlistHiddenColumns,
-                  [selectedPlaylist.id]: hiddenColumns,
-                },
+                playlistHiddenColumns: playlistOverride(state.settings.playlistHiddenColumns, selectedPlaylist.id, hiddenColumns, PLAYLIST_DEFAULT_HIDDEN_COLUMNS),
               },
             })}
             onError={(error) => dispatch({ type: 'error', error })}
@@ -1266,7 +1279,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   </aside>{confirming && <ModalDialog className="get-info playlist-confirm" labelledBy="playlist-confirm-title" onCancel={busy ? undefined : () => setConfirming(undefined)} onSubmit={busy ? undefined : unfollow} closeOnBackdrop><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button type="submit" className="danger" disabled={busy}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></ModalDialog>}</>
 }
 
-function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onBack, onPlay, onRate, onOpen, onPlaylist, onInfo, onHiddenColumns, onError }: {
+function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onBack, onPlay, onRate, onOpen, onPlaylist, onInfo, onReorder, onColumnWidths, onHiddenColumns, onError }: {
   playlist: PlaylistListView
   backLabel: string
   revision: number
@@ -1281,6 +1294,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   onOpen: (target: 'app' | 'web') => void
   onPlaylist: (subject: PlaylistSubject) => void
   onInfo: (tracks: PlaylistTrack[]) => void
+  onReorder: (order: ColumnKey[]) => void
+  onColumnWidths: (widths: Partial<Record<ColumnKey, number>>) => void
   onHiddenColumns: (columns: ColumnKey[]) => void
   onError: (error: string) => void
 }) {
@@ -1291,14 +1306,19 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   const [mutating, setMutating] = useState(false)
   const [sortColumn, setSortColumn] = useState<ColumnKey | null>(null)
   const [sortDesc, setSortDesc] = useState(false)
+  const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; upstreamIndex?: number }>()
   const onErrorRef = useRef(onError)
   const trackDrag = useRef<{ indices: number[]; pointerId: number; startY: number; moved: boolean } | undefined>(undefined)
   const dragInsertBefore = useRef<number | undefined>(undefined)
   const suppressTrackClick = useRef(false)
+  const headerDragged = useRef(false)
+  const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLButtonElement } | undefined>(undefined)
+  const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
   onErrorRef.current = onError
   const canChangePlaylist = playlist.owned && tracks.length === playlist.trackCount
   const canReorder = canChangePlaylist && sortColumn === null
+  useEffect(() => setLiveWidths(columnWidths), [columnWidths])
   useEffect(() => {
     if (!playlist.itemsAvailable) {
       setTracks([])
@@ -1329,8 +1349,53 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   const rows = playlistRows(tracks, sortColumn, sortDesc)
   const queue: PlaybackTrack[] = rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex }))
   const headings = { ...trackColumnHeadings(labels.music), track: 'Track' }
-  const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
-  const columns = trackGridColumns(visibleColumns, columnWidths, '35px')
+  const customizableColumns = columnOrder.filter((column) => PLAYLIST_COLUMNS.includes(column))
+  const visibleColumns = visibleColumnOrder(customizableColumns, hiddenColumns)
+  const columns = trackGridColumns(visibleColumns, liveWidths, '35px')
+  const moveColumn = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const active = columnDrag.current
+    if (!active || active.pointerId !== event.pointerId) return
+    if (Math.abs(event.clientX - active.startX) > 4) {
+      headerDragged.current = true
+      active.element.classList.add('dragging')
+    }
+  }
+  const endColumn = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const active = columnDrag.current
+    if (!active || active.pointerId !== event.pointerId) return
+    active.element.classList.remove('dragging')
+    columnDrag.current = undefined
+    if (!headerDragged.current) return
+    const target = visibleColumns.find((column) => {
+      const element = event.currentTarget.parentElement?.querySelector<HTMLElement>(`[data-column="${column}"]`)
+      return element != null && event.clientX < element.getBoundingClientRect().left + element.getBoundingClientRect().width / 2
+    })
+    onReorder(moveBefore(columnOrder, active.column, target))
+  }
+  const beginResize = (event: React.PointerEvent<HTMLSpanElement>, column: ColumnKey) => {
+    event.preventDefault()
+    event.stopPropagation()
+    headerDragged.current = true
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resize.current = { column, pointerId: event.pointerId, startX: event.clientX, startWidth: event.currentTarget.parentElement?.getBoundingClientRect().width ?? 60 }
+  }
+  const moveResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const active = resize.current
+    if (!active || active.pointerId !== event.pointerId) return
+    setLiveWidths((widths) => ({ ...widths, [active.column]: resizedColumnWidth(active.startWidth, active.startX, event.clientX) }))
+  }
+  const endResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const active = resize.current
+    if (!active || active.pointerId !== event.pointerId) return
+    const width = resizedColumnWidth(active.startWidth, active.startX, event.clientX)
+    resize.current = undefined
+    onColumnWidths({ ...columnWidths, [active.column]: width })
+  }
+  const cancelResize = (event: React.PointerEvent<HTMLSpanElement>) => {
+    if (resize.current?.pointerId !== event.pointerId) return
+    resize.current = undefined
+    setLiveWidths(columnWidths)
+  }
   const select = (upstreamIndex: number, event: React.MouseEvent) => {
     if (event.shiftKey && selectionAnchor !== undefined) {
       const anchor = rows.findIndex((row) => row.upstreamIndex === selectionAnchor)
@@ -1425,11 +1490,26 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
       setSelectionAnchor(undefined)
     }}>
       <div className="playlist-track-header track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }) }}>
-        <button aria-label="Restore Spotify playlist order" title="Spotify order · click to restore" className={sortColumn === null ? 'active' : ''} onClick={() => { setSortColumn(null); setSortDesc(false) }}>#</button>
-        {visibleColumns.map((column) => <button key={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onClick={() => {
+        <button type="button" aria-label="Restore Spotify playlist order" title="Spotify order · click to restore" className={sortColumn === null ? 'active' : ''} onClick={() => { setSortColumn(null); setSortDesc(false) }}>#</button>
+        {visibleColumns.map((column) => <button type="button" key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
+          if (event.button !== 0) return
+          headerDragged.current = false
+          columnDrag.current = { column, pointerId: event.pointerId, startX: event.clientX, element: event.currentTarget }
+          event.currentTarget.setPointerCapture(event.pointerId)
+        }} onPointerMove={moveColumn} onPointerUp={endColumn} onPointerCancel={() => {
+          columnDrag.current?.element.classList.remove('dragging')
+          columnDrag.current = undefined
+        }} onClick={() => {
+          if (headerDragged.current) return
           setSortDesc(sortColumn === column ? !sortDesc : false)
           setSortColumn(column)
-        }}>{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</button>)}
+        }}><span className="track-header-label">{headings[column]}{sortColumn === column ? sortDesc ? ' ▼' : ' ▲' : ''}</span><span className="column-resize-handle" draggable={false} onPointerDown={(event) => beginResize(event, column)} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={cancelResize} onClick={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+        }} onDragStart={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+        }} /></button>)}
       </div>
       {rows.map(({ track, upstreamIndex }, rowIndex) => <div
         key={`${track.uri}-${upstreamIndex}`}
@@ -1484,7 +1564,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
       {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} />}
     </div>
     {menu && (menu.upstreamIndex === undefined
-      ? <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={columnOrder.map((column) => ({ key: column, label: headings[column], checked: !hiddenColumns.includes(column), disabled: column === 'name', onChange: (checked) => onHiddenColumns(checked ? hiddenColumns.filter((hidden) => hidden !== column) : [...hiddenColumns, column]) }))} />
+      ? <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={customizableColumns.map((column) => ({ key: column, label: headings[column], checked: !hiddenColumns.includes(column), disabled: column === 'name', onChange: (checked) => onHiddenColumns(checked ? hiddenColumns.filter((hidden) => hidden !== column) : [...hiddenColumns, column]) }))} />
       : <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
         <button onClick={() => { setSelected(new Set(tracks.map((_, index) => index))); setSelectionAnchor(tracks.length ? 0 : undefined); setMenu(undefined) }}>Select All</button>
         <button disabled={mutating || !selectedIndices(menu.upstreamIndex).some((index) => tracks[index].id === null)} onClick={() => void addToLibrary(menu.upstreamIndex)}>Add to Library</button>

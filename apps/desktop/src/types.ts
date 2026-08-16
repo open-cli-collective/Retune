@@ -19,6 +19,8 @@ export type Settings = {
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
   playlistHiddenColumns: Record<string, ColumnKey[]>
+  playlistColumnOrders: Record<string, ColumnKey[]>
+  playlistColumnWidths: Record<string, Partial<Record<ColumnKey, number>>>
   sortColumn: ColumnKey | null
   sortDesc: boolean
   autoAddSpotifyLibrary: boolean

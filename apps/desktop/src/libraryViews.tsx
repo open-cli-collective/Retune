@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
-import { COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns } from './ui.ts'
+import { COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 
 export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle }: {
@@ -135,7 +135,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
   useEffect(() => setLiveWidths(columnWidths), [columnWidths])
   const headings = trackColumnHeadings(label)
-  const visibleColumns = columnOrder.filter((column) => !hiddenColumns.includes(column))
+  const visibleColumns = visibleColumnOrder(columnOrder, hiddenColumns)
   const columns = trackGridColumns(visibleColumns, liveWidths)
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current

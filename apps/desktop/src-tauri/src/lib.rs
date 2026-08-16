@@ -170,6 +170,10 @@ struct ExportSettings {
     #[serde(default)]
     playlist_hidden_columns: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    playlist_column_orders: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    playlist_column_widths: BTreeMap<String, BTreeMap<String, u32>>,
+    #[serde(default)]
     sort_column: Option<String>,
     #[serde(default)]
     sort_desc: bool,
@@ -190,6 +194,8 @@ impl ExportSettings {
             column_widths: settings.column_widths.clone(),
             hidden_columns: settings.hidden_columns.clone(),
             playlist_hidden_columns: settings.playlist_hidden_columns.clone(),
+            playlist_column_orders: settings.playlist_column_orders.clone(),
+            playlist_column_widths: settings.playlist_column_widths.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
             shuffle: settings.shuffle,
@@ -207,6 +213,8 @@ impl ExportSettings {
         settings.column_widths = self.column_widths;
         settings.hidden_columns = self.hidden_columns;
         settings.playlist_hidden_columns = self.playlist_hidden_columns;
+        settings.playlist_column_orders = self.playlist_column_orders;
+        settings.playlist_column_widths = self.playlist_column_widths;
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
         settings.shuffle = self.shuffle;
@@ -3322,8 +3330,8 @@ mod tests {
             .to_vec(),
             column_widths: BTreeMap::from([("name".into(), 260), ("artist".into(), 140)]),
             hidden_columns: vec![
-                "disc".into(),
                 "genre".into(),
+                "disc".into(),
                 "kind".into(),
                 "bitrate".into(),
                 "added".into(),
@@ -3331,7 +3339,32 @@ mod tests {
             ],
             playlist_hidden_columns: BTreeMap::from([(
                 "first".into(),
-                vec!["genre".into(), "plays".into()],
+                vec!["plays".into(), "genre".into()],
+            )]),
+            playlist_column_orders: BTreeMap::from([(
+                "first".into(),
+                [
+                    "genre",
+                    "name",
+                    "artist",
+                    "album",
+                    "time",
+                    "rating",
+                    "plays",
+                    "disc",
+                    "kind",
+                    "bitrate",
+                    "lastPlayed",
+                    "added",
+                    "releaseDate",
+                    "track",
+                ]
+                .map(String::from)
+                .to_vec(),
+            )]),
+            playlist_column_widths: BTreeMap::from([(
+                "first".into(),
+                BTreeMap::from([("name".into(), 220), ("genre".into(), 120)]),
             )]),
             sort_column: Some("plays".into()),
             sort_desc: true,
@@ -3380,6 +3413,14 @@ mod tests {
             restored.playlist_hidden_columns,
             exported.playlist_hidden_columns
         );
+        assert_eq!(
+            restored.playlist_column_orders,
+            exported.playlist_column_orders
+        );
+        assert_eq!(
+            restored.playlist_column_widths,
+            exported.playlist_column_widths
+        );
         assert_eq!(restored.sort_column.as_deref(), Some("plays"));
         assert!(restored.sort_desc);
         assert!(restored.shuffle);
@@ -3421,6 +3462,8 @@ mod tests {
             serde_json::json!(["track", "name", "time", "artist", "album", "genre", "rating"]),
         );
         object.insert("hiddenColumns".into(), serde_json::json!(["name", "genre"]));
+        object.remove("playlistColumnOrders");
+        object.remove("playlistColumnWidths");
         object.remove("sortColumn");
         object.remove("sortDesc");
         let visual: ExportSettings = serde_json::from_value(json).unwrap();
@@ -3461,6 +3504,8 @@ mod tests {
         );
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);
+        assert!(settings.playlist_column_orders.is_empty());
+        assert!(settings.playlist_column_widths.is_empty());
     }
 
     #[test]

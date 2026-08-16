@@ -3,7 +3,7 @@ import test from 'node:test'
 import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../src/diagnostics.ts'
 import type { PlaybackTrack, Playing, Selection, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, rememberSelection, replacementQueue, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE } from '../src/ui.ts'
+import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, replacementQueue, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
@@ -145,6 +145,29 @@ test('facet selections are remembered independently for each library source', ()
   assert.deepEqual(restoreSelection(saved, 'music'), { cat: ['Rock'], art: ['Artist'] })
   assert.deepEqual(restoreSelection(saved, 'podcasts'), { cat: ['News'] })
   assert.deepEqual(restoreSelection(saved, 'audiobooks'), {})
+})
+
+test('library and playlist defaults expose the approved visible column orders', () => {
+  assert.deepEqual(visibleColumnOrder(LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS), ['track', 'name', 'artist', 'album', 'time', 'plays', 'rating', 'genre'])
+  assert.deepEqual(visibleColumnOrder(PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS), ['name', 'artist', 'album', 'time', 'rating', 'plays', 'genre'])
+  assert.equal(PLAYLIST_DEFAULT_COLUMN_ORDER.at(-1), 'track')
+  assert.equal(PLAYLIST_DEFAULT_HIDDEN_COLUMNS.at(-1), 'track')
+})
+
+test('playlist layout overrides stay keyed and disappear when restored to defaults', () => {
+  const customOrder = [...PLAYLIST_DEFAULT_COLUMN_ORDER].reverse()
+  const orders = playlistOverride({}, 'playlist-a', customOrder, PLAYLIST_DEFAULT_COLUMN_ORDER)
+  assert.deepEqual(orders['playlist-a'], customOrder)
+  assert.equal(orders['playlist-b'], undefined)
+  assert.deepEqual(playlistOverride(orders, 'playlist-a', PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_COLUMN_ORDER), {})
+
+  const hidden = playlistOverride({}, 'playlist-a', ['genre'], PLAYLIST_DEFAULT_HIDDEN_COLUMNS)
+  assert.deepEqual(hidden, { 'playlist-a': ['genre'] })
+  assert.deepEqual(playlistOverride(hidden, 'playlist-a', PLAYLIST_DEFAULT_HIDDEN_COLUMNS, PLAYLIST_DEFAULT_HIDDEN_COLUMNS), {})
+
+  const widths = playlistOverride({}, 'playlist-a', { name: 220 }, {})
+  assert.deepEqual(widths, { 'playlist-a': { name: 220 } })
+  assert.deepEqual(playlistOverride(widths, 'playlist-a', {}, {}), {})
 })
 
 test('stale browse selections fall back at the narrowest invalid level', () => {

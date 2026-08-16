@@ -45,8 +45,13 @@ The playlist cache retains Spotify display metadata for every fetched track,
 including disc/track numbers and album release date. Older caches deserialize
 with defaults and are refreshed once before snapshot-based fetch skipping resumes.
 
-Column visibility is UI state in `settings.json`: the Library has one hidden-column
-list, and playlists have independent lists keyed by Spotify playlist ID.
+Column layout is UI state in `settings.json`: the Library has one order, width map,
+and hidden-column list. Playlists have independent metadata-column order, width,
+and visibility overrides keyed by Spotify playlist ID; absent playlist keys mean
+the default layout (fixed Spotify order `#`, Song, Artist, Album, Time, Rating,
+Plays, Genre). The legacy `playlistHiddenColumns` map remains readable and
+portable. Restoring a playlist aspect to its default removes that playlist's
+override instead of storing redundant defaults.
 
 ## Spotify audio cache
 

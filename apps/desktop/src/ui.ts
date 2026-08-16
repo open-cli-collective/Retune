@@ -2,6 +2,12 @@ import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin
 
 export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
 
+export const LIBRARY_DEFAULT_COLUMN_ORDER: ColumnKey[] = ['track', 'name', 'artist', 'album', 'time', 'plays', 'rating', 'genre', 'disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate']
+export const LIBRARY_DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate']
+export const PLAYLIST_DEFAULT_COLUMN_ORDER: ColumnKey[] = ['name', 'artist', 'album', 'time', 'rating', 'plays', 'genre', 'disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate', 'track']
+export const PLAYLIST_DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate', 'track']
+export const PLAYLIST_COLUMNS: readonly ColumnKey[] = PLAYLIST_DEFAULT_COLUMN_ORDER
+
 export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) => {
   if (event.type === 'enter') return event.paths.length > 0
   return event.type === 'over' ? active : false
@@ -25,6 +31,14 @@ export const selectionAfterFacet = (selection: Selection, facet: keyof Selection
 
 export const rememberSelection = (selections: Record<Source, Selection>, source: Source, selection: Selection) => ({ ...selections, [source]: selection })
 export const restoreSelection = (selections: Record<Source, Selection>, source: Source) => selections[source] ?? {}
+
+export const visibleColumnOrder = (order: ColumnKey[], hidden: ColumnKey[]) => order.filter((column) => !hidden.includes(column))
+export const playlistOverride = <T>(overrides: Record<string, T>, id: string, value: T, defaultValue: T) => {
+  const next = { ...overrides }
+  if (JSON.stringify(value) === JSON.stringify(defaultValue)) delete next[id]
+  else next[id] = value
+  return next
+}
 
 export const staleSelectionFacet = (selection: Selection, facets: BrowseView['facets']): 'cat' | 'art' | null => {
   const missing = (selected: string[] | undefined, available: string[]) => selected?.some((value) => !available.includes(value)) ?? false
