@@ -3492,8 +3492,8 @@ mod tests {
         assert_eq!(
             settings.hidden_columns,
             [
-                "disc",
                 "genre",
+                "disc",
                 "kind",
                 "bitrate",
                 "lastPlayed",
