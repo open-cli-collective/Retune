@@ -2061,7 +2061,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
-    #[cfg(desktop)]
+    #[cfg(all(desktop, not(test)))]
     let builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
     let app = builder.invoke_handler(tauri::generate_handler![
             library_commands::browse,
