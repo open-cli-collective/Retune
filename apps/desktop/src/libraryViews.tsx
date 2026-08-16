@@ -95,9 +95,10 @@ export function AlbumRatingStrip({ album, rating, onRate }: { album: string; rat
 
 type TrackCellData = Omit<Track, 'id'> & { id: number | null }
 
-export function TrackCell({ track, column, playing, selected, onInfo, onRate }: {
+export function TrackCell({ track, column, facetTitle, playing, selected, onInfo, onRate }: {
   track: TrackCellData
   column: ColumnKey
+  facetTitle: string
   playing: false | 'playing' | 'paused'
   selected: boolean
   onInfo?: () => void
@@ -109,7 +110,11 @@ export function TrackCell({ track, column, playing, selected, onInfo, onRate }: 
   if (column === 'time') return <span className="track-number">{formatTime(track.durationSecs)}</span>
   if (column === 'artist') return <span title={track.art}>{track.art}</span>
   if (column === 'album') return <span title={track.alb}>{track.alb}</span>
-  if (column === 'genre') return <span title={track.cat}>{track.cat}</span>
+  if (column === 'genre') {
+    const label = facetLabel(facetTitle, track.cat)
+    const meta = label !== track.cat
+    return <span className={meta && !selected ? 'meta' : undefined} title={meta ? 'Tracks without genre metadata' : track.cat}>{label}</span>
+  }
   if (column === 'plays') return <span className="track-number">{track.playCount || ''}</span>
   if (column === 'kind') return <span title={track.kind ?? undefined}>{track.kind ?? ''}</span>
   if (column === 'bitrate') return <span className="track-number">{track.bitrateKbps === null ? '' : `${track.bitrateKbps} kbps`}</span>
@@ -218,7 +223,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           setMenu({ x: event.clientX, y: event.clientY, trackId: track.id })
         }}>
           <span className="track-enabled-cell"><input type="checkbox" checked={track.enabled} aria-label={`${track.enabled ? 'Exclude' : 'Include'} ${track.name} from sequential playback`} title={track.enabled ? 'Uncheck to skip during sequential playback' : 'Check to include in sequential playback'} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onChange={(event) => onEnabled(track.id, event.target.checked)} /></span>
-          {visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} playing={isPlaying ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selectedIds.has(track.id)} onInfo={() => onInfo(track.id)} onRate={(stars) => onRate(track.id, stars)} />)}
+          {visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isPlaying ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selectedIds.has(track.id)} onInfo={() => onInfo(track.id)} onRate={(stars) => onRate(track.id, stars)} />)}
         </div>
       })}
     </div>
