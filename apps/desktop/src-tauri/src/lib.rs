@@ -1,3 +1,4 @@
+mod diagnostics;
 mod fixture;
 mod lastfm;
 mod library_commands;
@@ -2116,7 +2117,9 @@ pub fn run() {
             lastfm::lastfm_state,
             lastfm::connect_lastfm,
             lastfm::finish_lastfm,
-            lastfm::disconnect_lastfm
+            lastfm::disconnect_lastfm,
+            diagnostics::load_diagnostics,
+            diagnostics::email_diagnostics
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -2126,6 +2129,11 @@ pub fn run() {
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                     .build(),
             )?;
+            log::info!(
+                target: diagnostics::LOG_TARGET,
+                "{}",
+                diagnostics::SESSION_START_MARKER
+            );
             let app_data_dir = app.path().app_data_dir()?;
             let store = FsOverlayStore::new(&app_data_dir);
             let (mut library, recovery_notice, needs_save) = match store.load() {

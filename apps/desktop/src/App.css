@@ -371,6 +371,28 @@ button { color: inherit; }
 .lastfm-attribution { display: block; color: var(--dim); font-size: 10.5px; line-height: 1.25; }
 .lastfm-attribution a { color: inherit; text-decoration: none; }
 .lastfm-attribution a:hover, .lastfm-attribution a:focus-visible { text-decoration: underline; }
+.diagnostic-card { padding: 0; overflow: hidden; }
+.diagnostic-filters { min-height: 32px; display: flex; align-items: center; gap: 15px; padding: 0 10px; border-bottom: 1px solid var(--border); }
+.diagnostic-filters .preference-choice { align-items: center; gap: 5px; }
+.diagnostic-filters .preference-choice > span { font-size: 10.5px; }
+.diagnostic-filters .preference-choice small { display: inline; margin: 0; font-size: 9px; }
+.diagnostic-filters > button { margin-left: auto; padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 10.5px; text-decoration: underline; }
+.diagnostic-log { height: 158px; overflow: auto; background: var(--list); font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.diagnostic-entry { display: grid; grid-template-columns: max-content 38px max-content minmax(180px, 1fr); gap: 9px; padding: 3px 7px; border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent); }
+.diagnostic-entry:nth-child(even) { background: color-mix(in srgb, var(--control) 45%, transparent); }
+.diagnostic-entry.warn { background: color-mix(in srgb, #e6a817 15%, var(--list)); }
+.diagnostic-entry.error { background: color-mix(in srgb, #d84848 16%, var(--list)); }
+.diagnostic-entry strong { font-weight: 600; }
+.diagnostic-empty { display: grid; place-items: center; height: 100%; color: var(--dim); }
+.diagnostic-report { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.diagnostic-report > div:first-child { min-width: 0; flex: 1; }
+.diagnostic-report strong, .diagnostic-report small { display: block; }
+.diagnostic-report small { margin-top: 3px; color: var(--dim); font-size: 10.5px; line-height: 1.25; }
+.diagnostic-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.diagnostic-actions button { height: 23px; padding: 0 12px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: linear-gradient(var(--list), var(--control)); font: inherit; font-size: 10.5px; }
+.diagnostic-actions button.primary { border-color: var(--gel-border); color: #fff; background: linear-gradient(#8fc0f5, var(--accent) 52%, var(--gel-bottom)); }
+.diagnostic-actions button:disabled { opacity: .5; }
+.diagnostic-report > .error-text, .diagnostic-report > small { flex-basis: 100%; }
 .preferences > .modal-actions { margin-top: 0; padding: 14px 18px 16px; border-top: 1px solid var(--border); background: linear-gradient(var(--control), var(--head2)); }
 .preferences > .modal-actions button { min-width: 0; height: 25px; padding: 0 15px; border-radius: 12px; background: linear-gradient(var(--list), var(--control)); }
 .preferences > .modal-actions .primary { padding: 0 18px; border-color: var(--gel-border); background: linear-gradient(#8fc0f5, var(--accent) 52%, var(--gel-bottom)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .55); }

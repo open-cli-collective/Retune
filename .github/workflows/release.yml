@@ -130,6 +130,7 @@ jobs:
         env:
           RETUNE_LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+          RETUNE_SUPPORT_EMAIL: ${{ vars.RETUNE_SUPPORT_EMAIL }}
         run: |
           node --input-type=module -e "for (const name of ['RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET']) if (!process.env[name]?.trim()) throw new Error(name + ' is required for release packaging')"
           npx tauri build --bundles ${{ matrix.bundle }}

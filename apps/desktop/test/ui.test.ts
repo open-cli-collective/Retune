@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../src/diagnostics.ts'
 import type { PlaybackTrack, Playing, Selection, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistRows, replacementQueue, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE } from '../src/ui.ts'
@@ -9,6 +10,15 @@ const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => 
   albums: { items: Array.from({ length: 10 }, (_, index) => ({ uri: `spotify:album:${index}`, name: `Album ${index}`, artist: 'Artist', year: null, imageUrl: null, albumType: null, trackCount: 1, inLibrary: false })), total: 21, nextOffset: 10 },
   tracks: { items: Array.from({ length: 10 }, (_, index) => ({ uri: `spotify:track:${index}`, name: `Track ${index}`, artist: 'Artist', alb: 'Album', durationSecs: 1, imageUrl: null, albumUri: null, inLibrary: false })), total: 21, nextOffset: 10 },
   ...overrides,
+})
+
+test('diagnostic reports include session context through the last problem only', () => {
+  const entry = (level: DiagnosticEntry['level'], message: string): DiagnosticEntry => ({ date: '2026-08-16', time: '12:00:00', level, target: 'retune', message })
+  const entries = [entry('INFO', 'start'), entry('WARN', 'retry'), entry('INFO', 'context'), entry('ERROR', 'failed'), entry('INFO', 'trailing')]
+  const report = reportWindow(entries)
+  assert.deepEqual(report.map(({ message }) => message), ['start', 'retry', 'context', 'failed'])
+  assert.match(formatDiagnosticReport(report), /^\[2026-08-16\]\[12:00:00\]\[INFO\]\[retune\] start/)
+  assert.deepEqual(reportWindow([entry('INFO', 'healthy')]), [])
 })
 
 test('Spotify search uses 5 rows in All and 10 in filtered tabs', () => {
