@@ -22,7 +22,9 @@ use url::Url;
 const API_URL: &str = "https://ws.audioscrobbler.com/2.0/";
 const AUTH_URL: &str = "https://www.last.fm/api/auth";
 const USER_AGENT: &str = concat!("Retune/", env!("CARGO_PKG_VERSION"));
+#[cfg(not(test))]
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.rianjs.retune";
+#[cfg(not(test))]
 pub(crate) const SESSION_ACCOUNT: &str = "lastfm-session";
 const RETRY_DELAYS: &[Duration] = &[
     Duration::from_secs(1),
@@ -93,10 +95,12 @@ impl SessionStore for FileSessionStore {
     }
 }
 
+#[cfg(not(test))]
 struct KeyringSessionStore {
     entry: keyring::Entry,
 }
 
+#[cfg(not(test))]
 impl KeyringSessionStore {
     fn new() -> Result<Self, String> {
         keyring::Entry::new(CREDENTIAL_SERVICE, SESSION_ACCOUNT)
@@ -105,6 +109,7 @@ impl KeyringSessionStore {
     }
 }
 
+#[cfg(not(test))]
 impl SessionStore for KeyringSessionStore {
     fn load(&self) -> Result<Option<LastFmSession>, String> {
         match self.entry.get_password() {
@@ -360,9 +365,16 @@ impl Service {
         let (session_store, mut storage_problem): (Box<dyn SessionStore>, bool) = if dev_store {
             (Box::new(FileSessionStore::new(&app_data_dir)), false)
         } else {
-            match KeyringSessionStore::new() {
-                Ok(store) => (Box::new(store), false),
-                Err(_) => (Box::new(FailedSessionStore), true),
+            #[cfg(not(test))]
+            {
+                match KeyringSessionStore::new() {
+                    Ok(store) => (Box::new(store), false),
+                    Err(_) => (Box::new(FailedSessionStore), true),
+                }
+            }
+            #[cfg(test)]
+            {
+                (Box::new(FileSessionStore::new(&app_data_dir)), false)
             }
         };
         let pending_store = PendingTokenStore::new(&app_data_dir);
@@ -1056,8 +1068,10 @@ impl Service {
     }
 }
 
+#[cfg(not(test))]
 struct FailedSessionStore;
 
+#[cfg(not(test))]
 impl SessionStore for FailedSessionStore {
     fn load(&self) -> Result<Option<LastFmSession>, String> {
         Err("Last.fm credential storage is unavailable.".into())
