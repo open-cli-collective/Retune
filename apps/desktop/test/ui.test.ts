@@ -4,7 +4,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, applyCurrentImportPageResponse, defaultReviewState, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, isCurrentImportPageResponse, nextRemainingImportQueue, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, skipImportAlbum, sortImportQueue, toggleImportRow, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, defaultReviewState, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, skipImportAlbum, sortImportQueue, toggleImportRow, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -94,20 +94,22 @@ test('Last.fm per-target fuzzy strategies and stale-free queue advancement are d
   assert.equal(isCurrentImportPageResponse(2, 2), true)
 })
 
-test('Last.fm deferred page selection keeps the newer response', async () => {
+test('Last.fm A-to-B queue selection keeps the newer page when A resolves last', async () => {
   let resolveA!: (page: string) => void
   let resolveB!: (page: string) => void
   const responseA = new Promise<string>((resolve) => { resolveA = resolve })
   const responseB = new Promise<string>((resolve) => { resolveB = resolve })
-  let generation = 1
+  const generation = { current: 0 }
+  const queue = importQueue()
+  const selected: string[] = []
   const applied: string[] = []
-  const requestA = applyCurrentImportPageResponse(1, () => generation, responseA, (page) => applied.push(page))
-  generation = 2
-  const requestB = applyCurrentImportPageResponse(2, () => generation, responseB, (page) => applied.push(page))
+  const requestA = loadSelectedImportPage(generation, queue[0], () => responseA, (item) => selected.push(item.artist), (page) => applied.push(page))
+  const requestB = loadSelectedImportPage(generation, queue[1], () => responseB, (item) => selected.push(item.artist), (page) => applied.push(page))
   resolveB('B')
   await requestB
   resolveA('A')
   await requestA
+  assert.deepEqual(selected, ['Beta', 'Alpha'])
   assert.deepEqual(applied, ['B'])
 })
 

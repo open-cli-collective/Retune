@@ -182,3 +182,9 @@ export async function applyCurrentImportPageResponse<T>(requestGeneration: numbe
   const value = await response
   if (isCurrentImportPageResponse(requestGeneration, currentGeneration())) apply(value)
 }
+
+export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void): Promise<void> {
+  const requestGeneration = ++generation.current
+  select(item)
+  await applyCurrentImportPageResponse(requestGeneration, () => generation.current, load(item), apply)
+}

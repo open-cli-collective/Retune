@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, Settings } from './types.ts'
-import { applyCurrentImportPageResponse, excludedImportCount, isCurrentImportPageResponse, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { applyCurrentImportPageResponse, excludedImportCount, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
@@ -342,10 +342,9 @@ export default function LastFmImporter() {
     try { await invoke('start_lastfm_import', { defaults: pendingDefaults }); await refresh() } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
   }
   const openQueueItem = async (item: ImportQueueItem, queueSnapshot = queue) => {
-    const requestGeneration = ++pageRequestGeneration.current
-    setSelected(item)
+    const requestGeneration = pageRequestGeneration.current + 1
     try {
-      await applyCurrentImportPageResponse(requestGeneration, () => pageRequestGeneration.current, invoke<PageView | null>('lastfm_import_page', { artist: item.artist, album: item.album }), (nextPage) => setPage(pageWithQueuePosition(nextPage, queueSnapshot, sort)))
+      await loadSelectedImportPage(pageRequestGeneration, item, (target) => invoke<PageView | null>('lastfm_import_page', { artist: target.artist, album: target.album }), setSelected, (nextPage) => setPage(pageWithQueuePosition(nextPage, queueSnapshot, sort)))
     } catch (reason) {
       if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setError(String(reason))
     }
