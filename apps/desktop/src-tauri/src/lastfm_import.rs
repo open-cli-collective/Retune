@@ -3593,6 +3593,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_blocking_persistence_does_not_commit_live_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", "spotify-user", 500, None)
+            .await
+            .unwrap();
+        Arc::get_mut(&mut service).unwrap().store.path = dir.path().to_path_buf();
+
+        let error = service.set_search_terms(false).await.unwrap_err();
+        assert!(error.contains("Could not replace the Last.fm store"));
+        assert!(service.snapshot().await.unwrap().search_terms);
+        assert!(
+            ImportSessionStore::new(dir.path())
+                .load()
+                .unwrap()
+                .unwrap()
+                .search_terms
+        );
+    }
+
+    #[tokio::test]
     async fn matching_checkpoint_and_finalization_cannot_write_through_suspension() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());

@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, Settings } from './types.ts'
-import { excludedImportCount, isCurrentImportPageResponse, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { applyCurrentImportPageResponse, excludedImportCount, isCurrentImportPageResponse, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
@@ -307,8 +307,7 @@ export default function LastFmImporter() {
       const target = current ?? ((nextState.phase === 'review' || nextState.phase === 'done') ? firstRemaining : undefined)
       if (target) {
         if (target.artist !== selectedArtist || target.album !== selectedAlbum) setSelected(target)
-        const nextPage = await invoke<PageView | null>('lastfm_import_page', { artist: target.artist, album: target.album })
-        if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setPage(pageWithQueuePosition(nextPage, nextQueue, sort))
+        await applyCurrentImportPageResponse(requestGeneration, () => pageRequestGeneration.current, invoke<PageView | null>('lastfm_import_page', { artist: target.artist, album: target.album }), (nextPage) => setPage(pageWithQueuePosition(nextPage, nextQueue, sort)))
       } else if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current) && nextState.phase !== 'review' && nextState.phase !== 'done') {
         setSelected(null)
         setPage(null)
@@ -346,8 +345,7 @@ export default function LastFmImporter() {
     const requestGeneration = ++pageRequestGeneration.current
     setSelected(item)
     try {
-      const nextPage = await invoke<PageView | null>('lastfm_import_page', { artist: item.artist, album: item.album })
-      if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setPage(pageWithQueuePosition(nextPage, queueSnapshot, sort))
+      await applyCurrentImportPageResponse(requestGeneration, () => pageRequestGeneration.current, invoke<PageView | null>('lastfm_import_page', { artist: item.artist, album: item.album }), (nextPage) => setPage(pageWithQueuePosition(nextPage, queueSnapshot, sort)))
     } catch (reason) {
       if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setError(String(reason))
     }

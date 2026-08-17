@@ -177,3 +177,8 @@ export function importStatusLabel(status: QueueStatus): string {
 export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {
   return requestGeneration === currentGeneration
 }
+
+export async function applyCurrentImportPageResponse<T>(requestGeneration: number, currentGeneration: () => number, response: Promise<T>, apply: (value: T) => void): Promise<void> {
+  const value = await response
+  if (isCurrentImportPageResponse(requestGeneration, currentGeneration())) apply(value)
+}
