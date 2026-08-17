@@ -29,10 +29,13 @@ test('Spotify search uses 5 rows in All and 10 in filtered tabs', () => {
   assert.deepEqual(filtered.visible, { artists: 5, albums: 10, tracks: 5 })
 })
 
-test('track membership mutations survive album navigation back to search results', () => {
-  const uri = 'spotify:track:one'
-  assert.equal(spotifyMembership(false, uri, { [uri]: true }), true)
-  assert.equal(spotifyMembership(true, uri, { [uri]: false }), false)
+test('pending membership mutations override stale track and album pages', () => {
+  const track = 'spotify:track:one'
+  const album = 'spotify:album:one'
+  assert.equal(spotifyMembership(false, track, { [track]: true }), true)
+  assert.equal(spotifyMembership(true, track, { [track]: false }), false)
+  assert.equal(spotifyMembership(false, album, { [album]: true }), true)
+  assert.equal(spotifyMembership(true, album, { [album]: false }), false)
 })
 
 test('Spotify search expands one group, merges cached sibling pages, and labels remaining rows', () => {

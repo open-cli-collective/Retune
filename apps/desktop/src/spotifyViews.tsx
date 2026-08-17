@@ -139,6 +139,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
   }, [entry.highlight, page])
   if (!page) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading album…</div></div>
   const tracks = albumPlaybackTracks(page)
+  const savedAlbum = spotifyMembership(page.savedAlbum, page.uri, membership)
   const refresh = () => setRevision((current) => current + 1)
   const trackIsSavedIndividually = (track: AlbumPageView['tracks'][number]) => spotifyMembership(track.savedIndividually, track.uri, membership)
   const rateAlbum = (stars: number) => invoke('set_album_rating', {
@@ -176,7 +177,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
         <div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={page.contentComplete && !adding && !busy ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span>{page.addedAt !== null && <time>Date Added: {new Date(page.addedAt * 1000).toLocaleDateString()}</time>}</div>
         <div className="spotify-page-actions">
           <button className="primary" onClick={() => onPlay(tracks[0].id, tracks)} disabled={!tracks.length}>▶ Play</button>
-          {page.savedAlbum
+          {savedAlbum
             ? <button disabled={adding || busy} onClick={() => void remove()}>{busy ? 'Removing…' : adding ? 'Adding…' : '✓ In Library — Remove'}</button>
             : <button disabled={adding || busy} onClick={() => void add()}>{busy ? 'Removing…' : adding ? 'Adding…' : '+ Add to Library'}</button>}
         </div>

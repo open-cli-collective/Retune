@@ -155,10 +155,19 @@ pub(super) async fn authorize_spotify_playback(app: tauri::AppHandle) -> Result<
         session.shutdown();
         return Err(error.to_string());
     }
-    let playback_credentials = playback_credentials(session.username(), session.auth_data())?;
+    let playback_username = session.username();
+    let playback_auth_data = session.auth_data();
     session.shutdown();
 
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let web_account_id = provider_from(&state)?
+        .me()
+        .await
+        .map_err(|error| format!("Could not identify the connected Spotify account: {error}"))?
+        .id;
+    let playback_credentials =
+        playback_credentials(&web_account_id, playback_username, playback_auth_data)?;
     let mut tokens = state
         .token_store
         .load()
@@ -173,11 +182,18 @@ pub(super) async fn authorize_spotify_playback(app: tauri::AppHandle) -> Result<
 }
 
 fn playback_credentials(
+    web_account_id: &str,
     username: String,
     auth_data: Vec<u8>,
 ) -> Result<PlaybackCredentials, String> {
     if username.is_empty() || auth_data.is_empty() {
         return Err("Spotify did not return reusable playback credentials.".into());
+    }
+    if username != web_account_id {
+        return Err(
+            "Playback authorization used a different Spotify account. Try again with the account connected to Retune."
+                .into(),
+        );
     }
     Ok(PlaybackCredentials {
         username,
@@ -692,13 +708,22 @@ mod tests {
 
     #[test]
     fn playback_credentials_require_both_session_parts() {
-        assert!(playback_credentials(String::new(), vec![1]).is_err());
-        assert!(playback_credentials("user".into(), vec![]).is_err());
+        assert!(playback_credentials("user", String::new(), vec![1]).is_err());
+        assert!(playback_credentials("user", "user".into(), vec![]).is_err());
         assert_eq!(
-            playback_credentials("user".into(), vec![1, 2, 3])
+            playback_credentials("user", "user".into(), vec![1, 2, 3])
                 .unwrap()
                 .auth_data,
             [1, 2, 3]
         );
+    }
+
+    #[test]
+    fn playback_credentials_reject_a_different_web_account() {
+        let error = playback_credentials("web-user", "playback-user".into(), vec![1])
+            .err()
+            .unwrap();
+
+        assert!(error.contains("different Spotify account"));
     }
 }

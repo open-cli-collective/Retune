@@ -76,7 +76,10 @@ token first resets persisted membership to unknown before replacement tokens
 enter the shared token store, then exposes the new connection and queries
 `/me`, so state from a previous account is never projected under new
 credentials. A new Web OAuth grant also clears reusable playback credentials;
-the user must explicitly authorize built-in playback for that account.
+the user must explicitly authorize built-in playback for that account. Playback
+authorization holds the same gate while comparing librespot's canonical
+username with the connected Web API `/me` user ID, and refuses to persist a
+credential minted for a different account.
 
 Search album and track rows expose their respective exact membership as
 `inLibrary` when known. Album-page DTOs keep `savedAlbum` separate from
