@@ -139,39 +139,31 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
   if (!page) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading album…</div></div>
   const tracks = albumPlaybackTracks(page)
   const refresh = () => setRevision((current) => current + 1)
-  const trackIsInLibrary = (track: AlbumPageView['tracks'][number]) => trackMembership[track.uri] ?? track.trackId !== null
-  const albumInLibrary = page.tracks.length > 0 && page.tracks.every(trackIsInLibrary)
-  const setAllTrackMembership = (inLibrary: boolean) => setTrackMembership(Object.fromEntries(page.tracks.map((track) => [track.uri, inLibrary])))
+  const trackIsSavedIndividually = (track: AlbumPageView['tracks'][number]) => trackMembership[track.uri] ?? track.savedIndividually
   const rateAlbum = (stars: number) => invoke('set_album_rating', {
     source: 'music', art: page.artist, alb: page.name, stars: stars === page.albumRating ? null : stars,
   }).then(refresh).catch((error) => onError(String(error)))
   const rateTrack = (id: number, stars: number) => invoke('click_track_star', { id, stars }).then(refresh).catch((error) => onError(String(error)))
   const remove = async () => {
-    const previous = trackMembership
-    setAllTrackMembership(false)
     setBusy(true)
     try {
       if (await onRemove(page.uri)) refresh()
-      else setTrackMembership(previous)
     } finally {
       setBusy(false)
     }
   }
   const add = async () => {
-    const previous = trackMembership
-    setAllTrackMembership(true)
     if (await onAdd({ uri: page.uri, name: page.name, artist: page.artist })) refresh()
-    else setTrackMembership(previous)
   }
   const toggleTrack = async (track: AlbumPageView['tracks'][number]) => {
-    const inLibrary = trackIsInLibrary(track)
+    const savedIndividually = trackIsSavedIndividually(track)
     setTrackBusy(track.uri)
-    setTrackMembership((current) => ({ ...current, [track.uri]: !inLibrary }))
+    setTrackMembership((current) => ({ ...current, [track.uri]: !savedIndividually }))
     try {
-      await invoke(inLibrary ? 'remove_spotify_track' : 'add_spotify_track', { uri: track.uri })
+      await invoke(savedIndividually ? 'remove_spotify_track' : 'add_spotify_track', { uri: track.uri })
       refresh()
     } catch (error) {
-      setTrackMembership((current) => ({ ...current, [track.uri]: inLibrary }))
+      setTrackMembership((current) => ({ ...current, [track.uri]: savedIndividually }))
       onError(String(error))
     } finally {
       setTrackBusy(undefined)
@@ -185,10 +177,10 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
         <div className="spotify-eyebrow">ALBUM{page.albumType.toLowerCase() !== 'album' && ` · ${page.albumType.toUpperCase()}`}</div>
         <h1>{page.name}</h1>
         <button className="spotify-link artist-link" onClick={() => onArtist(page.artistId)}>{page.artist}</button>
-        <div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={albumInLibrary && !adding && !busy ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span></div>
+        <div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={page.contentComplete && !adding && !busy ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span>{page.addedAt !== null && <time>Date Added: {new Date(page.addedAt * 1000).toLocaleDateString()}</time>}</div>
         <div className="spotify-page-actions">
           <button className="primary" onClick={() => onPlay(tracks[0].id, tracks)} disabled={!tracks.length}>▶ Play</button>
-          {albumInLibrary
+          {page.savedAlbum
             ? <button disabled={adding || busy} onClick={() => void remove()}>{busy ? 'Removing…' : adding ? 'Adding…' : '✓ In Library — Remove'}</button>
             : <button disabled={adding || busy} onClick={() => void add()}>{busy ? 'Removing…' : adding ? 'Adding…' : '+ Add to Library'}</button>}
         </div>
@@ -197,7 +189,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
     <section className="spotify-page-section album-tracks">
       {page.tracks.map((track, index) => {
         const subject: PlaylistSubject = { kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri] }
-        const inLibrary = trackIsInLibrary(track)
+        const savedIndividually = trackIsSavedIndividually(track)
         const mutating = trackBusy === track.uri
         return <div key={track.uri} ref={track.uri === entry.highlight ? highlighted : undefined} draggable aria-current={playingUri === track.uri ? 'true' : undefined} className={`spotify-track-row ${track.uri === entry.highlight ? 'highlighted' : ''}`} onDoubleClick={() => onPlay(tracks[index].id, tracks)} onDragStart={(event) => {
           event.dataTransfer.effectAllowed = 'copy'
@@ -208,7 +200,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
         <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={track.trackId === null ? undefined : (stars) => rateTrack(track.trackId!, stars)} />
         <time>{formatTime(track.durationSecs)}</time>
         <button className="spotify-track-action" draggable={false} title={`Play ${track.name}`} aria-label={`Play ${track.name}`} onClick={(event) => { event.stopPropagation(); onPlay(tracks[index].id, tracks) }} onDoubleClick={(event) => event.stopPropagation()}>▶ Play</button>
-        <button className="spotify-track-action library" draggable={false} disabled={mutating} title={inLibrary ? 'Remove from Library' : 'Add to Library'} aria-label={inLibrary ? `Remove ${track.name} from Library` : `Add ${track.name} to Library`} onClick={(event) => { event.stopPropagation(); void toggleTrack(track) }} onDoubleClick={(event) => event.stopPropagation()}>{mutating ? inLibrary ? 'Adding…' : 'Removing…' : inLibrary ? '✓ Added' : '+ Add'}</button>
+        <button className="spotify-track-action library" draggable={false} disabled={mutating} title={savedIndividually ? 'Remove from Library' : 'Add to Library'} aria-label={savedIndividually ? `Remove ${track.name} from Library` : `Add ${track.name} to Library`} onClick={(event) => { event.stopPropagation(); void toggleTrack(track) }} onDoubleClick={(event) => event.stopPropagation()}>{mutating ? savedIndividually ? 'Removing…' : 'Adding…' : savedIndividually ? '✓ Added' : '+ Add'}</button>
         {menu?.index === index && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setMenu(undefined); onPlaylist(subject) }}>Add to Playlist…</button></ContextMenu>}
       </div>})}
       <p className="spotify-page-hint">Double-click a track to preview. Adding the album pulls every track into your local overlay.</p>

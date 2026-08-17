@@ -494,10 +494,80 @@ pub struct FsSettingsStore {
 pub struct FsSyncStore {
     cooldowns_path: PathBuf,
     artist_genres_path: PathBuf,
+    spotify_library_path: PathBuf,
 }
 
 pub struct FsPlaylistStore {
     path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SpotifyLibraryState {
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub saved_tracks: BTreeMap<String, Option<u64>>,
+    #[serde(default)]
+    pub saved_albums: BTreeMap<String, SavedAlbumRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SavedAlbumRecord {
+    pub uri: String,
+    pub name: String,
+    pub artists: Vec<String>,
+    pub release_date: Option<String>,
+    pub album_type: Option<String>,
+    pub added_at: Option<u64>,
+    pub track_uris: Vec<String>,
+}
+
+impl SpotifyLibraryState {
+    pub fn is_exact(&self) -> bool {
+        self.complete && !self.account_id.is_empty()
+    }
+
+    pub fn add_saved_track(&mut self, uri: String, added_at: Option<u64>) {
+        self.saved_tracks
+            .entry(uri)
+            .and_modify(|known| *known = earliest_added_at(*known, added_at))
+            .or_insert(added_at);
+    }
+
+    pub fn add_saved_album(&mut self, mut album: SavedAlbumRecord) {
+        if let Some(existing) = self.saved_albums.get(&album.uri) {
+            album.added_at = earliest_added_at(existing.added_at, album.added_at);
+        }
+        self.saved_albums.insert(album.uri.clone(), album);
+    }
+
+    pub fn merge_earliest_times(self, incoming: Self) -> Self {
+        if self.account_id != incoming.account_id {
+            return incoming;
+        }
+        let mut merged = incoming;
+        for (uri, added_at) in self.saved_tracks {
+            if let Some(current) = merged.saved_tracks.get_mut(&uri) {
+                *current = earliest_added_at(*current, added_at);
+            }
+        }
+        for (uri, existing) in self.saved_albums {
+            if let Some(current) = merged.saved_albums.get_mut(&uri) {
+                current.added_at = earliest_added_at(existing.added_at, current.added_at);
+            }
+        }
+        merged
+    }
+}
+
+fn earliest_added_at(current: Option<u64>, discovered: Option<u64>) -> Option<u64> {
+    match (current, discovered) {
+        (Some(current), Some(discovered)) => Some(current.min(discovered)),
+        (None, discovered) => discovered,
+        (current, None) => current,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -535,6 +605,7 @@ impl FsSyncStore {
         Self {
             cooldowns_path: app_data_dir.as_ref().join("cooldowns.json"),
             artist_genres_path: app_data_dir.as_ref().join("artist-genres.json"),
+            spotify_library_path: app_data_dir.as_ref().join("spotify-library.json"),
         }
     }
 
@@ -558,6 +629,14 @@ impl FsSyncStore {
 
     pub fn save_artist_genres(&self, genres: &BTreeMap<String, Vec<String>>) -> StoreResult<()> {
         atomic_write(&self.artist_genres_path, &serde_json::to_vec(genres)?)
+    }
+
+    pub fn spotify_library(&self) -> StoreResult<SpotifyLibraryState> {
+        read_json_or_default(&self.spotify_library_path)
+    }
+
+    pub fn save_spotify_library(&self, state: &SpotifyLibraryState) -> StoreResult<()> {
+        atomic_write(&self.spotify_library_path, &serde_json::to_vec(state)?)
     }
 }
 
@@ -1026,6 +1105,79 @@ mod tests {
             FsSyncStore::new(dir.path()).artist_genres().unwrap()["artist-1"],
             ["rock"]
         );
+    }
+
+    #[test]
+    fn spotify_library_state_is_separate_and_survives_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SpotifyLibraryState {
+            account_id: "account".into(),
+            complete: true,
+            saved_tracks: BTreeMap::from([("spotify:track:one".into(), Some(10))]),
+            saved_albums: BTreeMap::from([(
+                "spotify:album:one".into(),
+                SavedAlbumRecord {
+                    uri: "spotify:album:one".into(),
+                    name: "Album".into(),
+                    artists: vec!["Artist".into()],
+                    release_date: Some("2024-01-02".into()),
+                    album_type: Some("album".into()),
+                    added_at: Some(11),
+                    track_uris: vec!["spotify:track:one".into()],
+                },
+            )]),
+        };
+        let store = FsSyncStore::new(dir.path());
+
+        store.save_spotify_library(&state).unwrap();
+
+        assert_eq!(
+            FsSyncStore::new(dir.path()).spotify_library().unwrap(),
+            state
+        );
+        assert!(dir.path().join("spotify-library.json").is_file());
+        assert!(!dir.path().join("library.json").exists());
+    }
+
+    #[test]
+    fn spotify_library_state_merges_earliest_known_membership_times() {
+        let mut current = SpotifyLibraryState {
+            account_id: "account".into(),
+            complete: true,
+            saved_tracks: BTreeMap::from([("spotify:track:one".into(), Some(200))]),
+            saved_albums: BTreeMap::new(),
+        };
+        current.add_saved_album(SavedAlbumRecord {
+            uri: "spotify:album:one".into(),
+            name: "Album".into(),
+            artists: vec![],
+            release_date: None,
+            album_type: None,
+            added_at: Some(300),
+            track_uris: vec![],
+        });
+        let incoming = SpotifyLibraryState {
+            account_id: "account".into(),
+            complete: true,
+            saved_tracks: BTreeMap::from([("spotify:track:one".into(), Some(100))]),
+            saved_albums: BTreeMap::from([(
+                "spotify:album:one".into(),
+                SavedAlbumRecord {
+                    uri: "spotify:album:one".into(),
+                    name: "Album".into(),
+                    artists: vec![],
+                    release_date: None,
+                    album_type: None,
+                    added_at: Some(400),
+                    track_uris: vec![],
+                },
+            )]),
+        };
+
+        let merged = current.merge_earliest_times(incoming);
+
+        assert_eq!(merged.saved_tracks["spotify:track:one"], Some(100));
+        assert_eq!(merged.saved_albums["spotify:album:one"].added_at, Some(300));
     }
 
     #[test]

@@ -45,12 +45,32 @@ cooldowns prevent relaunch from immediately repeating a blocked request.
 
 Saved tracks, albums, shows, episodes, and audiobooks are fetched sequentially.
 Each successful batch is normalized and applied immediately; a later failure
-leaves useful partial results. Core upsert preserves local overlay edits.
-Spotify may return alternate track URIs for the same album slot. The shell
-collapses matches with the same artist, album, disc, track, title, duration, and
-release date during sync and explicit album adds, preserving the existing
-overlay record. This fallback cannot depend on `linked_from`, which Spotify no
-longer returns in Development Mode track responses.
+leaves useful partial results. Core upsert preserves local overlay edits and
+merges `added_at` using the earliest credible value. Spotify may return
+alternate track URIs for the same album slot. The shell collapses matches with
+the same artist, album, disc, track, title, duration, and release date during
+sync and explicit album adds, preserving the existing overlay record. This
+fallback cannot depend on `linked_from`, which Spotify no longer returns in
+Development Mode track responses.
+
+The shell records exact music membership in the account-scoped
+`spotify-library.json` state: individually saved track URIs and saved album
+records (including their membership time and materialized track URIs). A
+complete `/me/tracks` plus `/me/albums` sync replaces those membership sets;
+partial syncs leave the last complete exact state untouched and never prune.
+Complete reconciliation prunes only unreferenced Spotify music, so a track is
+retained while any individual membership or saved album references it. Missing
+or incomplete exact state keeps the legacy local-presence fallback for UI
+membership flags. Explicit upstream removals also retain local records when
+exact membership state is unknown or incomplete; a later complete sync is what
+authorizes destructive reconciliation.
+
+Search album and track rows expose their respective exact membership as
+`inLibrary` when known. Album-page DTOs keep `savedAlbum` separate from
+`contentComplete`, expose album `addedAt`, and mark each track
+`savedIndividually`; album rating eligibility follows content completeness,
+not saved-album membership. Local track IDs remain available for rating and
+playback even when an individual Spotify membership is absent.
 
 Artist genres use an in-memory and persistent cache. Uncached artist lookups are
 paced and capped per sync. Artist discography initially requests albums and
@@ -68,9 +88,10 @@ group as `items`, `total`, and `nextOffset`.
 
 The search view stores successful pages by offset, merges every group returned
 by a page, and deduplicates artists by Spotify ID and albums/tracks by URI.
-Album and track rows carry membership flags from the local library snapshot so
-the explicit Add action can render its current state without changing Spotify
-playback behavior.
+Album and track rows carry exact membership flags from the local Spotify state
+when available, otherwise the legacy local-presence fallback, so the explicit
+Add action can render its current state without changing Spotify playback
+behavior.
 Visible counts are transient UI state: All starts at five per group and a
 filtered group starts at ten. Query changes discard pages; filter changes reset
 visible counts but retain pages for the same query. A failed later page leaves
@@ -80,6 +101,9 @@ existing rows visible and can be retried for that group.
 
 Overlay metadata never writes to Spotify. Explicit content actions may save or
 remove library items, follow/unfollow artists, and create or mutate playlists.
+Album save/remove actions send only the album URI to the generic library
+endpoint; track save/remove actions send only track URIs. Album actions still
+materialize album tracks locally, while membership state remains independent.
 Any operation containing a local-file URI fails before an HTTP request.
 
 Spotify is canonical for owned-playlist content. Reordering uses snapshot IDs to

@@ -1,7 +1,11 @@
 use super::*;
-use crate::provider::SearchGroup;
+use crate::provider::{saved_album_record, SearchGroup};
 use librespot_core::{authentication::Credentials, config::SessionConfig, session::Session};
 use retune_spotify::tokens::PlaybackCredentials;
+
+fn album_library_uris(uri: &str) -> Vec<String> {
+    vec![uri.to_owned()]
+}
 
 #[tauri::command]
 pub(super) fn connection_state(
@@ -164,6 +168,15 @@ pub(super) async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), Stri
     state.playback.stop(client.as_deref()).await?;
     state.playback.switch_to_connect().await;
     set_auto_connect(&app, false)?;
+    let spotify_library = SpotifyLibraryState::default();
+    state
+        .sync_store
+        .save_spotify_library(&spotify_library)
+        .map_err(|error| error.to_string())?;
+    *state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned") = spotify_library;
     app.state::<AppState>()
         .token_store
         .clear()
@@ -229,12 +242,19 @@ pub(super) async fn spotify_search(
     }
     let provider = provider_from(&state)?;
     let mut results = provider::search(provider.as_ref(), query.trim(), offset).await?;
+    let spotify_library = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
     mark_album_membership(
         &state.library.lock().expect("library mutex poisoned"),
+        &spotify_library,
         &mut results.albums.items,
     );
     mark_track_membership(
         &state.library.lock().expect("library mutex poisoned"),
+        &spotify_library,
         &mut results.tracks.items,
     );
     Ok(results)
@@ -251,7 +271,12 @@ pub(super) async fn spotify_album_page(
         .await
         .map_err(|error| error.to_string())?;
     let library = state.library.lock().expect("library mutex poisoned");
-    Ok(album_page_view(&library, album))
+    let spotify_library = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    Ok(album_page_view(&library, &spotify_library, album))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -311,6 +336,11 @@ pub(super) async fn spotify_artist_albums(
     .await?;
     mark_album_membership(
         &state.library.lock().expect("library mutex poisoned"),
+        &state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned")
+            .clone(),
         &mut page.albums,
     );
     Ok(page)
@@ -323,10 +353,12 @@ pub(super) async fn add_spotify_album(
     name: String,
     artist: String,
 ) -> Result<(), String> {
-    playlists::reject_local_uris(std::slice::from_ref(&uri), |_| Some(name.clone()))?;
+    album_id(&uri).ok_or_else(|| "Expected a Spotify album URI".to_string())?;
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
-    let mut tracks = provider::album_tracks(provider.as_ref(), &uri).await?;
+    let added_at = unix_now();
+    let (album, mut tracks) =
+        provider::album_content(provider.as_ref(), &uri, Some(added_at)).await?;
     for track in &mut tracks {
         if track.alb.is_empty() {
             track.alb.clone_from(&name);
@@ -335,24 +367,35 @@ pub(super) async fn add_spotify_album(
             track.art.clone_from(&artist);
         }
     }
-    {
-        let library = state.library.lock().expect("library mutex poisoned");
-        tracks.retain(|track| spotify_track_match(&library, track).is_none());
-    }
-    if tracks.is_empty() {
-        return Ok(());
-    }
-    let uris = tracks
-        .iter()
-        .map(|track| track.uri.clone())
-        .collect::<Vec<_>>();
+    let album_record = saved_album_record(&album, album_track_uris(&album), Some(added_at));
+    let album_uris = album_library_uris(&album.uri);
+    let current = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
     provider
-        .save_to_library(&uris)
+        .save_to_library(&album_uris)
         .await
         .map_err(|error| error.to_string())?;
+    if current.is_exact() {
+        let mut next = current;
+        next.add_saved_album(album_record);
+        state
+            .sync_store
+            .save_spotify_library(&next)
+            .map_err(|error| error.to_string())?;
+        *state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned") = next;
+    }
     mutate_library(&state, |library| {
         for track in tracks {
-            library.add(track);
+            if spotify_track_match(library, &track).is_none_or(|existing| existing.uri == track.uri)
+            {
+                library.upsert(track);
+            }
         }
         Ok(())
     })?;
@@ -362,20 +405,51 @@ pub(super) async fn add_spotify_album(
 
 #[tauri::command]
 pub(super) async fn remove_spotify_album(app: tauri::AppHandle, uri: String) -> Result<(), String> {
+    album_id(&uri).ok_or_else(|| "Expected a Spotify album URI".to_string())?;
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
-    let id = spotify_id(&uri);
-    let album = provider
-        .album(id)
+    let current = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    if !current.is_exact() {
+        provider
+            .remove_from_library(&album_library_uris(&uri))
+            .await
+            .map_err(|error| error.to_string())?;
+        return app
+            .emit("library-changed", ())
+            .map_err(|error| error.to_string());
+    }
+    let (album, tracks) = provider::album_content(provider.as_ref(), &uri, None)
         .await
         .map_err(|error| error.to_string())?;
-    let uris = album_track_uris(&album);
+    let uris = tracks
+        .iter()
+        .map(|track| track.uri.clone())
+        .collect::<Vec<_>>();
+    let aliases = {
+        let library = state.library.lock().expect("library mutex poisoned");
+        sync::spotify_track_aliases(&library, &tracks)
+    };
+    let album_uris = album_library_uris(&album.uri);
     provider
-        .remove_from_library(&uris)
+        .remove_from_library(&album_uris)
         .await
         .map_err(|error| error.to_string())?;
+    let mut next = current;
+    next.saved_albums.remove(&album.uri);
+    state
+        .sync_store
+        .save_spotify_library(&next)
+        .map_err(|error| error.to_string())?;
+    *state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned") = next.clone();
     mutate_library(&state, |library| {
-        remove_album_tracks(library, &album);
+        sync::prune_unreferenced_spotify_tracks_with_aliases(library, &next, &uris, &aliases);
         Ok(())
     })?;
     app.emit("library-changed", ())
@@ -394,17 +468,23 @@ pub(super) async fn add_spotify_tracks(
 ) -> Result<Vec<u64>, String> {
     let state = app.state::<AppState>();
     let mut seen = HashSet::new();
-    let mut uris = uris
+    let uris = uris
         .into_iter()
         .filter(|uri| seen.insert(uri.clone()))
         .collect::<Vec<_>>();
     if uris.iter().any(|uri| track_id(uri).is_none()) {
         return Err("Expected Spotify track URIs".into());
     }
+    let added_at = unix_now();
     let mut ids = vec![];
+    let requested_uris = uris.clone();
+    if requested_uris.is_empty() {
+        return Ok(ids);
+    }
+    let mut missing_uris = uris;
     {
         let library = state.library.lock().expect("library mutex poisoned");
-        uris.retain(
+        missing_uris.retain(
             |uri| match library.tracks().iter().find(|track| &track.uri == uri) {
                 Some(track) => {
                     ids.push(track.id.0);
@@ -414,12 +494,9 @@ pub(super) async fn add_spotify_tracks(
             },
         );
     }
-    if uris.is_empty() {
-        return Ok(ids);
-    }
     let provider = provider_from(&state)?;
-    let mut tracks = Vec::with_capacity(uris.len());
-    for uri in &uris {
+    let mut tracks = Vec::with_capacity(missing_uris.len());
+    for uri in &missing_uris {
         let track = provider
             .track(track_id(uri).expect("validated above"))
             .await
@@ -433,15 +510,40 @@ pub(super) async fn add_spotify_tracks(
             artist.as_ref(),
             None,
         ));
+        tracks.last_mut().expect("track was just pushed").added_at = Some(added_at);
     }
+    let current = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    let next = if current.is_exact() {
+        let mut next = current;
+        for uri in &requested_uris {
+            next.add_saved_track(uri.clone(), Some(added_at));
+        }
+        Some(next)
+    } else {
+        None
+    };
     provider
-        .save_to_library(&uris)
+        .save_to_library(&requested_uris)
         .await
         .map_err(|error| error.to_string())?;
+    if let Some(next) = next {
+        state
+            .sync_store
+            .save_spotify_library(&next)
+            .map_err(|error| error.to_string())?;
+        *state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned") = next;
+    }
     ids.extend(mutate_library(&state, |library| {
         Ok(tracks
             .into_iter()
-            .map(|track| library.add(track).0)
+            .map(|track| library.upsert(track).0)
             .collect::<Vec<_>>())
     })?);
     app.emit("library-changed", ())
@@ -451,17 +553,62 @@ pub(super) async fn add_spotify_tracks(
 
 #[tauri::command]
 pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> Result<(), String> {
-    track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
+    let id = track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
+    let current = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    let needs_alias = current.is_exact() && {
+        let library = state.library.lock().expect("library mutex poisoned");
+        !library.tracks().iter().any(|track| track.uri == uri)
+            && library.tracks().iter().any(|track| {
+                track.source == SourceId::Music && track.uri.starts_with("spotify:track:")
+            })
+    };
+    let aliases = if needs_alias {
+        let remote_track = provider
+            .track(id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let candidate = retune_spotify::normalize::track(&remote_track, None, None);
+        let library = state.library.lock().expect("library mutex poisoned");
+        sync::spotify_track_aliases(&library, std::slice::from_ref(&candidate))
+    } else {
+        std::collections::HashMap::new()
+    };
+    let next = if current.is_exact() {
+        let mut next = current;
+        next.saved_tracks.remove(&uri);
+        Some(next)
+    } else {
+        None
+    };
     provider
         .remove_from_library(std::slice::from_ref(&uri))
         .await
         .map_err(|error| error.to_string())?;
-    mutate_library(&state, |library| {
-        library.remove_uris(std::slice::from_ref(&uri));
-        Ok(())
-    })?;
+    if let Some(next) = next {
+        state
+            .sync_store
+            .save_spotify_library(&next)
+            .map_err(|error| error.to_string())?;
+        *state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned") = next.clone();
+        mutate_library(&state, |library| {
+            sync::prune_unreferenced_spotify_tracks_with_aliases(
+                library,
+                &next,
+                std::slice::from_ref(&uri),
+                &aliases,
+            );
+            Ok(())
+        })?;
+    }
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())
 }
@@ -469,6 +616,14 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
 #[cfg(test)]
 mod tests {
     use super::playback_credentials;
+
+    #[test]
+    fn album_library_actions_use_only_the_album_uri() {
+        assert_eq!(
+            super::album_library_uris("spotify:album:album"),
+            ["spotify:album:album"]
+        );
+    }
 
     #[test]
     fn playback_credentials_require_both_session_parts() {

@@ -21,12 +21,20 @@ same text merges their Retune album group.
 - The first category divergence records the provider category. The override
   marker is shown only while current and original categories differ.
 - Provider upsert refreshes track/disc, release date, kind, bitrate, and provider category.
-  It preserves overlay name/artist/album/rating, play history, and added time.
+  It preserves overlay name/artist/album/rating and play history. `added_at` is
+  backfilled when missing and takes the earliest credible discovered value; a
+  later provider timestamp never moves it forward.
 - Adding or merging deduplicates by URI. Existing overlay values win.
 - Provider refresh preserves each track's playback-enabled overlay value.
 - Restoring replaces the library after validating the imported envelope.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
+
+Spotify saved-track and saved-album memberships are not core-library state.
+The shell keeps those account-scoped memberships separately while materializing
+their Spotify tracks here for playback, ratings, and play counts. A materialized
+track may therefore be individually saved, referenced by one or more saved
+albums, both, or neither.
 
 ## Browse projection
 
