@@ -58,12 +58,23 @@ The shell records exact music membership in the account-scoped
 records (including their membership time and materialized track URIs). A
 complete `/me/tracks` plus `/me/albums` sync replaces those membership sets;
 partial syncs leave the last complete exact state untouched and never prune.
+An undecodable saved-track, saved-album, or album-track item makes the sync
+partial even when Spotify returns the rest of its page, because a decoded
+subset cannot prove exact absence. Explicit album actions likewise stop before
+writing when album content is incomplete.
 Complete reconciliation prunes only unreferenced Spotify music, so a track is
 retained while any individual membership or saved album references it. Missing
 or incomplete exact state keeps the legacy local-presence fallback for UI
 membership flags. Explicit upstream removals also retain local records when
 exact membership state is unknown or incomplete; a later complete sync is what
 authorizes destructive reconciliation.
+
+One async membership gate serializes complete sync snapshots with explicit
+album/track saves and removals, preventing a stale snapshot or concurrent
+command from overwriting a completed Spotify write. Replacing the Web API OAuth
+token first resets persisted membership to unknown, before the new connection
+is exposed or `/me` is queried, so state from a previous account is never
+projected under new credentials.
 
 Search album and track rows expose their respective exact membership as
 `inLibrary` when known. Album-page DTOs keep `savedAlbum` separate from
@@ -91,7 +102,9 @@ by a page, and deduplicates artists by Spotify ID and albums/tracks by URI.
 Album and track rows carry exact membership flags from the local Spotify state
 when available, otherwise the legacy local-presence fallback, so the explicit
 Add action can render its current state without changing Spotify playback
-behavior.
+behavior. Successful membership mutations are retained as search-level URI
+overrides while navigating into album or artist pages, so returning to cached
+results cannot restore stale action state.
 Visible counts are transient UI state: All starts at five per group and a
 filtered group starts at ten. Query changes discard pages; filter changes reset
 visible counts but retain pages for the same query. A failed later page leaves

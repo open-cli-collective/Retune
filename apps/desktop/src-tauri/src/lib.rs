@@ -70,6 +70,7 @@ struct AppState {
     library: Mutex<Library>,
     store: FsOverlayStore,
     spotify_library: Mutex<SpotifyLibraryState>,
+    spotify_library_gate: tokio::sync::Mutex<()>,
     settings: Mutex<Settings>,
     settings_store: FsSettingsStore,
     sync_store: FsSyncStore,
@@ -1058,6 +1059,7 @@ fn partial_import_message(
 async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, String> {
     log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify before syncing.".into());
     }
@@ -1078,14 +1080,11 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
                 account_id: account_id.clone(),
                 ..SpotifyLibraryState::default()
             };
-            state
-                .sync_store
-                .save_spotify_library(&reset)
-                .map_err(|error| error.to_string())?;
-            *state
-                .spotify_library
-                .lock()
-                .expect("Spotify library mutex poisoned") = reset;
+            spotify_commands::replace_spotify_library_state(
+                &state.sync_store,
+                &state.spotify_library,
+                reset,
+            )?;
         }
     }
     let sync_provider =
@@ -2380,6 +2379,7 @@ pub fn run() {
                 library: Mutex::new(library),
                 store,
                 spotify_library: Mutex::new(spotify_library),
+                spotify_library_gate: tokio::sync::Mutex::new(()),
                 settings: Mutex::new(settings),
                 settings_store,
                 sync_store,

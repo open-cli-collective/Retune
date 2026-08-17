@@ -7,6 +7,18 @@ fn album_library_uris(uri: &str) -> Vec<String> {
     vec![uri.to_owned()]
 }
 
+pub(super) fn replace_spotify_library_state(
+    store: &FsSyncStore,
+    current: &Mutex<SpotifyLibraryState>,
+    next: SpotifyLibraryState,
+) -> Result<(), String> {
+    store
+        .save_spotify_library(&next)
+        .map_err(|error| error.to_string())?;
+    *current.lock().expect("Spotify library mutex poisoned") = next;
+    Ok(())
+}
+
 #[tauri::command]
 pub(super) fn connection_state(
     state: tauri::State<'_, AppState>,
@@ -59,6 +71,7 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
         .ok_or_else(|| "Spotify did not return a refresh token".to_string())?;
     let now = unix_now();
     let state = app.state::<AppState>();
+    let membership_guard = state.spotify_library_gate.lock().await;
     let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.clone());
     let playback_credentials = state
         .token_store
@@ -75,10 +88,16 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
             playback_credentials,
         })
         .map_err(|error| error.to_string())?;
+    replace_spotify_library_state(
+        &state.sync_store,
+        &state.spotify_library,
+        SpotifyLibraryState::default(),
+    )?;
     *state.spotify.lock().expect("spotify mutex poisoned") =
         spotify_provider(&client_id, Arc::clone(&state.token_store))?;
     set_auto_connect(&app, true)?;
     emit_connection_state(&app)?;
+    drop(membership_guard);
     sync_spotify(&app).await
 }
 
@@ -167,16 +186,13 @@ pub(super) async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), Stri
         .clone();
     state.playback.stop(client.as_deref()).await?;
     state.playback.switch_to_connect().await;
+    let _membership_guard = state.spotify_library_gate.lock().await;
     set_auto_connect(&app, false)?;
-    let spotify_library = SpotifyLibraryState::default();
-    state
-        .sync_store
-        .save_spotify_library(&spotify_library)
-        .map_err(|error| error.to_string())?;
-    *state
-        .spotify_library
-        .lock()
-        .expect("Spotify library mutex poisoned") = spotify_library;
+    replace_spotify_library_state(
+        &state.sync_store,
+        &state.spotify_library,
+        SpotifyLibraryState::default(),
+    )?;
     app.state::<AppState>()
         .token_store
         .clear()
@@ -355,6 +371,7 @@ pub(super) async fn add_spotify_album(
 ) -> Result<(), String> {
     album_id(&uri).ok_or_else(|| "Expected a Spotify album URI".to_string())?;
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let provider = provider_from(&state)?;
     let added_at = unix_now();
     let (album, mut tracks) =
@@ -407,6 +424,7 @@ pub(super) async fn add_spotify_album(
 pub(super) async fn remove_spotify_album(app: tauri::AppHandle, uri: String) -> Result<(), String> {
     album_id(&uri).ok_or_else(|| "Expected a Spotify album URI".to_string())?;
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let provider = provider_from(&state)?;
     let current = state
         .spotify_library
@@ -467,6 +485,7 @@ pub(super) async fn add_spotify_tracks(
     uris: Vec<String>,
 ) -> Result<Vec<u64>, String> {
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let mut seen = HashSet::new();
     let uris = uris
         .into_iter()
@@ -555,6 +574,7 @@ pub(super) async fn add_spotify_tracks(
 pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> Result<(), String> {
     let id = track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let provider = provider_from(&state)?;
     let current = state
         .spotify_library
@@ -615,7 +635,31 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::playback_credentials;
+    use super::{
+        playback_credentials, replace_spotify_library_state, FsSyncStore, Mutex,
+        SpotifyLibraryState,
+    };
+
+    #[test]
+    fn replacing_oauth_state_clears_prior_exact_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSyncStore::new(dir.path());
+        let current = Mutex::new(SpotifyLibraryState {
+            account_id: "prior-account".into(),
+            complete: true,
+            ..SpotifyLibraryState::default()
+        });
+
+        replace_spotify_library_state(
+            &store,
+            &current,
+            SpotifyLibraryState::default(),
+        )
+        .unwrap();
+
+        assert!(!current.lock().unwrap().is_exact());
+        assert!(!store.spotify_library().unwrap().is_exact());
+    }
 
     #[test]
     fn album_library_actions_use_only_the_album_uri() {

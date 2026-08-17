@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { AlbumPageView, ArtistAlbumsPage, ArtistPageView, PlaybackTrack, PlaylistSubject, SearchAlbum, SearchArtist, SearchTrack, SpotifyNavEntry, SpotifyResults } from './types.ts'
-import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifySearchGroupHeader, spotifySearchPendingPageKey, type SpotifySearchState } from './spotifySearch.ts'
+import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey, type SpotifyMembershipOverrides, type SpotifySearchState } from './spotifySearch.ts'
 import { DRAG_TYPE, formatTime, mergeByUri, SYNTHETIC_BASE } from './ui.ts'
 import { ContextMenu, RatingStars } from './viewShared.tsx'
 
@@ -101,15 +101,18 @@ export function SpotifyPageBack({ label, onBack }: { label: string; onBack: () =
   return <button className="spotify-page-back" onClick={onBack}>‹ Back to {label}</button>
 }
 
-function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArtist, onAdd, onRemove, onPlay, onPlaylist, onError }: {
+function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, onBack, onArtist, onAdd, onRemove, onAddTrack, onRemoveTrack, onPlay, onPlaylist, onError }: {
   entry: Extract<SpotifyNavEntry, { kind: 'album' }>
   backLabel: string
   adding: boolean
+  membership: SpotifyMembershipOverrides
   playingUri: string | null
   onBack: () => void
   onArtist: (id: string) => void
   onAdd: (album: { uri: string; name: string; artist: string }) => Promise<boolean>
   onRemove: (uri: string) => Promise<boolean>
+  onAddTrack: (uri: string) => Promise<boolean>
+  onRemoveTrack: (uri: string) => Promise<boolean>
   onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
   onPlaylist: (subject: PlaylistSubject) => void
   onError: (error: string) => void
@@ -118,11 +121,9 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
   const [revision, setRevision] = useState(0)
   const [busy, setBusy] = useState(false)
   const [trackBusy, setTrackBusy] = useState<string>()
-  const [trackMembership, setTrackMembership] = useState<Record<string, boolean>>({})
   const [menu, setMenu] = useState<{ x: number; y: number; index: number }>()
   const highlighted = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    setTrackMembership({})
     setTrackBusy(undefined)
   }, [entry.uri])
   useEffect(() => {
@@ -139,7 +140,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
   if (!page) return <div className="spotify-page"><SpotifyPageBack label={backLabel} onBack={onBack} /><div className="spotify-stub">Loading album…</div></div>
   const tracks = albumPlaybackTracks(page)
   const refresh = () => setRevision((current) => current + 1)
-  const trackIsSavedIndividually = (track: AlbumPageView['tracks'][number]) => trackMembership[track.uri] ?? track.savedIndividually
+  const trackIsSavedIndividually = (track: AlbumPageView['tracks'][number]) => spotifyMembership(track.savedIndividually, track.uri, membership)
   const rateAlbum = (stars: number) => invoke('set_album_rating', {
     source: 'music', art: page.artist, alb: page.name, stars: stars === page.albumRating ? null : stars,
   }).then(refresh).catch((error) => onError(String(error)))
@@ -158,13 +159,8 @@ function SpotifyAlbumPage({ entry, backLabel, adding, playingUri, onBack, onArti
   const toggleTrack = async (track: AlbumPageView['tracks'][number]) => {
     const savedIndividually = trackIsSavedIndividually(track)
     setTrackBusy(track.uri)
-    setTrackMembership((current) => ({ ...current, [track.uri]: !savedIndividually }))
     try {
-      await invoke(savedIndividually ? 'remove_spotify_track' : 'add_spotify_track', { uri: track.uri })
-      refresh()
-    } catch (error) {
-      setTrackMembership((current) => ({ ...current, [track.uri]: savedIndividually }))
-      onError(String(error))
+      if (await (savedIndividually ? onRemoveTrack(track.uri) : onAddTrack(track.uri))) refresh()
     } finally {
       setTrackBusy(undefined)
     }
@@ -235,12 +231,11 @@ function getArtistAlbumsPage(id: string, offset: number) {
   return request
 }
 
-function SpotifyArtistPage({ id, backLabel, adding, added, removed, onBack, onAlbum, onAdd, onRemove, onPlaylist, onError }: {
+function SpotifyArtistPage({ id, backLabel, adding, membership, onBack, onAlbum, onAdd, onRemove, onPlaylist, onError }: {
   id: string
   backLabel: string
   adding: string | undefined
-  added: ReadonlySet<string>
-  removed: ReadonlySet<string>
+  membership: SpotifyMembershipOverrides
   onBack: () => void
   onAlbum: (uri: string) => void
   onAdd: (album: { uri: string; name: string; artist: string }) => Promise<boolean>
@@ -323,7 +318,7 @@ function SpotifyArtistPage({ id, backLabel, adding, added, removed, onBack, onAl
     </header>
     <section className="spotify-page-section">
       <h2>Discography{discography.total ? ` · ${discography.albums.length} of ${discography.total}` : ''}</h2>
-      {discography.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={(album.inLibrary || added.has(album.uri)) && !removed.has(album.uri)} onAdd={() => { void onAdd(album) }} onRemove={() => { void onRemove(album.uri) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
+      {discography.albums.map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={spotifyMembership(album.inLibrary, album.uri, membership)} onAdd={() => { void onAdd(album) }} onRemove={() => { void onRemove(album.uri) }} onOpen={() => onAlbum(album.uri)} onPlaylist={onPlaylist} openOnClick showType />)}
       {loadingAlbums && <p>Loading albums…</p>}
       {albumsError && <div className="spotify-page-load-more"><span>{albumsError}</span><button onClick={() => void loadMore()}>Try again</button></div>}
       {!loadingAlbums && !albumsError && !discography.albums.length && discography.nextOffset === null && <p>No albums or singles found.</p>}
@@ -350,8 +345,7 @@ export function SpotifySearch({ query, searching, results, navigation, playingUr
   const searchStateRef = useRef(searchState)
   const [adding, setAdding] = useState<string>()
   const [playingAlbum, setPlayingAlbum] = useState<string>()
-  const [added, setAdded] = useState<ReadonlySet<string>>(new Set())
-  const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set())
+  const [membership, setMembership] = useState<Record<string, boolean>>({})
   const [nav, setNav] = useState<SpotifyNavEntry[]>(navigation ? [navigation] : [])
   const [menu, setMenu] = useState<{ x: number; y: number; track: SpotifyResults['tracks']['items'][number] }>()
   const pendingPages = useRef(new Map<string, Promise<SpotifyResults>>())
@@ -362,8 +356,7 @@ export function SpotifySearch({ query, searching, results, navigation, playingUr
       searchStateRef.current = next
       return next
     })
-    setAdded(new Set())
-    setRemoved(new Set())
+    setMembership({})
     setNav(navigation ? [navigation] : [])
   }, [query, navigation])
   useEffect(() => {
@@ -393,75 +386,32 @@ export function SpotifySearch({ query, searching, results, navigation, playingUr
     page.then((next) => setSearchState((state) => receiveSpotifySearchPage(state, request.group, request.offset, next, request.generation)))
       .catch((error) => setSearchState((state) => failSpotifySearchGroup(state, request.group, String(error), request.generation)))
   }
-  const add = async (album: { uri: string; name: string; artist: string }) => {
-    const wasAdded = added.has(album.uri)
-    const wasRemoved = removed.has(album.uri)
-    setAdded((previous) => new Set(previous).add(album.uri))
-    setRemoved((previous) => { const next = new Set(previous); next.delete(album.uri); return next })
-    setAdding(album.uri)
-    try {
-      await onAdd(album)
-      return true
-    } catch {
-      setAdded((previous) => { const next = new Set(previous); if (wasAdded) next.add(album.uri); else next.delete(album.uri); return next })
-      setRemoved((previous) => { const next = new Set(previous); if (wasRemoved) next.add(album.uri); else next.delete(album.uri); return next })
-      return false
-    } finally {
-      setAdding(undefined)
-    }
-  }
-  const remove = async (uri: string) => {
-    const wasAdded = added.has(uri)
-    const wasRemoved = removed.has(uri)
-    setRemoved((previous) => new Set(previous).add(uri))
-    setAdded((previous) => { const next = new Set(previous); next.delete(uri); return next })
+  const mutateMembership = async (uri: string, saved: boolean, action: () => Promise<unknown>) => {
+    const hadOverride = uri in membership
+    const previous = membership[uri]
+    setMembership((current) => ({ ...current, [uri]: saved }))
     setAdding(uri)
     try {
-      await invoke('remove_spotify_album', { uri })
-      return true
-    } catch (error) {
-      setAdded((previous) => { const next = new Set(previous); if (wasAdded) next.add(uri); else next.delete(uri); return next })
-      setRemoved((previous) => { const next = new Set(previous); if (wasRemoved) next.add(uri); else next.delete(uri); return next })
-      onError(String(error))
-      return false
-    } finally {
-      setAdding(undefined)
-    }
-  }
-  const addTrack = async (track: SearchTrack) => {
-    const wasAdded = added.has(track.uri)
-    const wasRemoved = removed.has(track.uri)
-    setAdded((previous) => new Set(previous).add(track.uri))
-    setRemoved((previous) => { const next = new Set(previous); next.delete(track.uri); return next })
-    setAdding(track.uri)
-    try {
-      await onAddTrack(track.uri)
+      await action()
       return true
     } catch {
-      setAdded((previous) => { const next = new Set(previous); if (wasAdded) next.add(track.uri); else next.delete(track.uri); return next })
-      setRemoved((previous) => { const next = new Set(previous); if (wasRemoved) next.add(track.uri); else next.delete(track.uri); return next })
+      setMembership((current) => {
+        const next = { ...current }
+        if (hadOverride) next[uri] = previous
+        else delete next[uri]
+        return next
+      })
       return false
     } finally {
       setAdding(undefined)
     }
   }
-  const removeTrack = async (uri: string) => {
-    const wasAdded = added.has(uri)
-    const wasRemoved = removed.has(uri)
-    setRemoved((previous) => new Set(previous).add(uri))
-    setAdded((previous) => { const next = new Set(previous); next.delete(uri); return next })
-    setAdding(uri)
-    try {
-      await onRemoveTrack(uri)
-      return true
-    } catch {
-      setAdded((previous) => { const next = new Set(previous); if (wasAdded) next.add(uri); else next.delete(uri); return next })
-      setRemoved((previous) => { const next = new Set(previous); if (wasRemoved) next.add(uri); else next.delete(uri); return next })
-      return false
-    } finally {
-      setAdding(undefined)
-    }
-  }
+  const add = (album: { uri: string; name: string; artist: string }) =>
+    mutateMembership(album.uri, true, () => onAdd(album))
+  const remove = (uri: string) => mutateMembership(uri, false, () =>
+    invoke('remove_spotify_album', { uri }).catch((error) => { onError(String(error)); throw error }))
+  const addTrack = (uri: string) => mutateMembership(uri, true, () => onAddTrack(uri))
+  const removeTrack = (uri: string) => mutateMembership(uri, false, () => onRemoveTrack(uri))
   const playAlbum = async (album: SearchAlbum) => {
     setPlayingAlbum(album.uri)
     try {
@@ -480,8 +430,8 @@ export function SpotifySearch({ query, searching, results, navigation, playingUr
   const backLabel = below?.kind ?? (navigation ? 'library' : 'results')
   const back = () => nav.length === 1 && navigation ? onClose() : setNav((current) => current.slice(0, -1))
   if (searching) return <div className="spotify-stub">Searching Spotify…</div>
-  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} playingUri={playingUri} onBack={back} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onRemove={remove} onPlay={onPlay} onPlaylist={onPlaylist} onError={onError} />
-  if (top?.kind === 'artist') return <SpotifyArtistPage id={top.id} backLabel={backLabel} adding={adding} added={added} removed={removed} onBack={back} onAlbum={pushAlbum} onAdd={add} onRemove={remove} onPlaylist={onPlaylist} onError={onError} />
+  if (top?.kind === 'album') return <SpotifyAlbumPage entry={top} backLabel={backLabel} adding={adding === top.uri} membership={membership} playingUri={playingUri} onBack={back} onArtist={(id) => setNav((current) => [...current, { kind: 'artist', id }])} onAdd={add} onRemove={remove} onAddTrack={addTrack} onRemoveTrack={removeTrack} onPlay={onPlay} onPlaylist={onPlaylist} onError={onError} />
+  if (top?.kind === 'artist') return <SpotifyArtistPage id={top.id} backLabel={backLabel} adding={adding} membership={membership} onBack={back} onAlbum={pushAlbum} onAdd={add} onRemove={remove} onPlaylist={onPlaylist} onError={onError} />
   const tab = searchState.tab
   const counts = {
     artists: searchState.groups.artists.total,
@@ -504,7 +454,7 @@ export function SpotifySearch({ query, searching, results, navigation, playingUr
         {searchState.groups.artists.items.slice(0, searchState.visible.artists).map((artist) => <SpotifyArtistRow key={artist.id} artist={artist} onOpen={() => setNav((current) => [...current, { kind: 'artist', id: artist.id }])} />)}
       </SpotifySearchSection>}
       {(tab === 'all' || tab === 'albums') && <SpotifySearchSection group="albums" state={searchState} onMore={() => requestGroup('albums')} onRetry={() => requestGroup('albums', true)}>
-        {searchState.groups.albums.items.slice(0, searchState.visible.albums).map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={(album.inLibrary || added.has(album.uri)) && !removed.has(album.uri)} onAdd={() => { void add(album) }} onRemove={() => { void remove(album.uri) }} onOpen={() => pushAlbum(album.uri)} onPlaylist={onPlaylist} searchActions onPlay={() => { void playAlbum(album) }} playing={playingAlbum === album.uri || playingUri === album.uri} />)}
+        {searchState.groups.albums.items.slice(0, searchState.visible.albums).map((album) => <SpotifyAlbumRow key={album.uri} album={album} adding={adding === album.uri} added={spotifyMembership(album.inLibrary, album.uri, membership)} onAdd={() => { void add(album) }} onRemove={() => { void remove(album.uri) }} onOpen={() => pushAlbum(album.uri)} onPlaylist={onPlaylist} searchActions onPlay={() => { void playAlbum(album) }} playing={playingAlbum === album.uri || playingUri === album.uri} />)}
       </SpotifySearchSection>}
       {(tab === 'all' || tab === 'tracks') && <SpotifySearchSection group="tracks" state={searchState} onMore={() => requestGroup('tracks')} onRetry={() => requestGroup('tracks', true)}>
         {searchState.groups.tracks.items.slice(0, searchState.visible.tracks).map((track, index) => {
@@ -513,7 +463,7 @@ export function SpotifySearch({ query, searching, results, navigation, playingUr
           return <div className="spotify-row spotify-search-row" key={track.uri} onDoubleClick={open} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, track }) }}>
             <SpotifyArtwork imageUrl={track.imageUrl} />
             <span className="spotify-copy"><strong>{track.name}</strong><small>{track.artist} · {track.alb}</small></span>
-            <SpotifyResultActions name={track.name} meta={formatTime(track.durationSecs)} onPlay={() => onPlay(playback.id, [playback])} playing={playingUri === track.uri} adding={adding === track.uri} added={(track.inLibrary || added.has(track.uri)) && !removed.has(track.uri)} onAdd={() => { void addTrack(track) }} onRemove={() => { void removeTrack(track.uri) }} onOpen={track.albumUri ? open : undefined} />
+            <SpotifyResultActions name={track.name} meta={formatTime(track.durationSecs)} onPlay={() => onPlay(playback.id, [playback])} playing={playingUri === track.uri} adding={adding === track.uri} added={spotifyMembership(track.inLibrary, track.uri, membership)} onAdd={() => { void addTrack(track.uri) }} onRemove={() => { void removeTrack(track.uri) }} onOpen={track.albumUri ? open : undefined} />
           </div>
         })}
       </SpotifySearchSection>}
