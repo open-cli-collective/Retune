@@ -1,6 +1,7 @@
 mod diagnostics;
 mod fixture;
 mod lastfm;
+mod lastfm_import;
 mod library_commands;
 mod localfiles;
 mod media_keys;
@@ -83,6 +84,7 @@ struct AppState {
     artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
     lastfm: Arc<lastfm::Service>,
+    lastfm_import: Arc<lastfm_import::Service>,
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
     playlist_reauth_notified: AtomicBool,
@@ -2264,6 +2266,20 @@ pub fn run() {
             lastfm::connect_lastfm,
             lastfm::finish_lastfm,
             lastfm::disconnect_lastfm,
+            lastfm_import::open_lastfm_importer,
+            lastfm_import::lastfm_import_state,
+            lastfm_import::lastfm_import_queue,
+            lastfm_import::lastfm_import_page,
+            lastfm_import::start_lastfm_import,
+            lastfm_import::lastfm_import_review,
+            lastfm_import::lastfm_import_options,
+            lastfm_import::lastfm_import_count_mode,
+            lastfm_import::lastfm_import_search_terms,
+            lastfm_import::lastfm_import_select_match,
+            lastfm_import::lastfm_import_change_track,
+            lastfm_import::lastfm_import_change_album,
+            lastfm_import::lastfm_import_apply,
+            lastfm_import::lastfm_import_accept_all_page,
             diagnostics::load_diagnostics,
             diagnostics::email_diagnostics
         ])
@@ -2329,6 +2345,7 @@ pub fn run() {
                 use_dev_token_store,
                 settings.lastfm_scrobbling,
             );
+            let lastfm_import = lastfm_import::Service::new(&app_data_dir);
             // Native credential-store access can fail transiently; start
             // disconnected rather than aborting startup.
             let connection = match token_store.load() {
@@ -2392,6 +2409,7 @@ pub fn run() {
                 artwork_cache: Mutex::default(),
                 playback: Arc::clone(&playback),
                 lastfm: Arc::clone(&lastfm),
+                lastfm_import,
                 media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
                 playlist_reauth_notified: AtomicBool::new(false),

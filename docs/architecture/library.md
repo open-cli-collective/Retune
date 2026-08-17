@@ -30,6 +30,35 @@ same text merges their Retune album group.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
 
+## Last.fm historical import
+
+Last.fm import is an application-shell boundary in
+`apps/desktop/src-tauri/src/lastfm_import.rs`; `retune-core` remains a pure,
+deterministic mutation target. History is an absolute baseline: resolved source
+counts use one session-persisted Sum, highest-played spelling Overwrite, or Zero
+decision per collapsed Spotify track target, then local play count takes the maximum of current and historical
+values. `last_played_at` takes the latest relevant scrobble and `added_at` takes
+the earliest; Zero never erases known Retune plays. Blank genre/rating options
+are no-ops. Whole-album rating is stored as an album rating, while
+selected-track mode stores explicit track ratings only.
+
+Each page has two independent intents: import Spotify content and include
+historical play counts. Both default on, at least one must remain on, and
+whole-album is a separate page-level content mode defaulting off. Content-only
+acceptance saves membership and applies source `added_at` without changing
+plays or `last_played_at`; counts-only performs no Spotify write and updates
+only already-materialized matched Retune tracks.
+
+The importer’s “Show Spotify search terms” preference is session-level and is
+restored on resume. Fuzzy disclosures use all source rows in the session that
+resolve to a target, so the target-wide count decision remains truthful when
+those rows came from different artist/album pages.
+
+The source snapshot stores compact spelling variants with count, earliest, and
+latest timestamps rather than raw Last.fm responses. Excluded rows remain
+source-history decisions and can be undone before acceptance; they never remove
+a track inherently materialized by a saved whole album.
+
 Spotify saved-track and saved-album memberships are not core-library state.
 The shell keeps those account-scoped memberships separately while materializing
 their Spotify tracks here for playback, ratings, and play counts. A materialized

@@ -8,7 +8,7 @@ import { defaultSettings, initialState, reducer, type Action, type State } from 
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
-import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
+import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, LastFmImportState, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
@@ -270,6 +270,9 @@ function App() {
     invoke<LastFmState>('lastfm_state')
       .then((lastfm) => dispatch({ type: 'lastfm', lastfm }))
       .catch(fail)
+    invoke<LastFmImportState>('lastfm_import_state')
+      .then((lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
+      .catch(fail)
   }, [fail])
 
   const saveKey = useMemo(
@@ -293,6 +296,7 @@ function App() {
   useTauriEvent('operation-recovered', () => dispatch({ type: 'clear-error' }))
   useTauriEvent<ConnectionState>('connection-changed', (connection) => dispatch({ type: 'connection', connection }))
   useTauriEvent<LastFmState>('lastfm-changed', (lastfm) => dispatch({ type: 'lastfm', lastfm }))
+  useTauriEvent<LastFmImportState>('lastfm-import-changed', (lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
   useTauriEvent<Settings>('settings-changed', (settings) => dispatch({ type: 'hydrateSettings', settings }))
   useTauriEvent<string>('sync-progress', (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
   useTauriEvent<{ tracks: number; fraction: number }>('sync-progress-count', (progress) => dispatch({ type: 'syncProgress', progress }))
@@ -386,6 +390,9 @@ function App() {
   const openPreferences = () => {
     preferenceZoom.current = state.settings.zoom
     dispatch({ type: 'preferences', open: true })
+  }
+  const openLastfmImporter = () => {
+    invoke('open_lastfm_importer').catch(fail)
   }
   const cancelPreferences = () => {
     skipSettingsSave.current = true
@@ -681,7 +688,7 @@ function App() {
             </>
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} empty={libraryEmpty} />
+          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} lastfmRemaining={state.lastfmImport.remaining} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
@@ -697,7 +704,7 @@ function App() {
           return invoke('sync_from_spotify')
         })
         .catch(fail)} />}
-      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} onZoom={setZoom} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onSave={({ browserPanes, ...settings }) => {
+      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} onZoom={setZoom} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSave={({ browserPanes, ...settings }) => {
         const audioChanged = settings.streamingBitrate !== state.settings.streamingBitrate
           || settings.normalizeVolume !== state.settings.normalizeVolume
           || settings.gapless !== state.settings.gapless
@@ -1357,13 +1364,14 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   </ModalDialog>
 }
 
-function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; empty: boolean }) {
+function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, lastfmRemaining, onLastfmImport, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; lastfmRemaining: number; onLastfmImport: () => void; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
   return <footer className="status-bar">{syncProgress
     ? <span className="sync-status"><span>⟳ Syncing from Spotify…</span><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></span>
+    : lastfmRemaining > 0 ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Finish importing from Last.fm — {lastfmRemaining} left</button>
     : <span>{syncPhase ?? importStatus ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span>}</footer>
 }
 

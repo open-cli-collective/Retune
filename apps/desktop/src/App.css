@@ -243,6 +243,8 @@ button { color: inherit; }
 .spotify-top-track-row > strong, .spotify-top-track-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-bar { height: 26px; flex: 0 0 26px; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); }
 .status-bar > span { text-align: center; }
+.status-import-link { justify-self: center; padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.status-import-link:hover, .status-import-link:focus-visible { text-decoration: underline; }
 .sync-status { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .sync-meter { width: 120px; height: 5px; accent-color: var(--accent); }
 .error-banner { position: absolute; right: 10px; bottom: 30px; max-width: 430px; padding: 5px 8px; border: 1px solid #b33; color: #fff; background: #8d2d2d; }

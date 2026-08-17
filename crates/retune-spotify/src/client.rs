@@ -528,11 +528,22 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn search(&self, query: &str, offset: u32, limit: u32) -> Result<SearchResults> {
+        self.search_with_types(query, "artist,album,track", offset, limit)
+            .await
+    }
+
+    pub async fn search_with_types(
+        &self,
+        query: &str,
+        types: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<SearchResults> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", query)
-            .append_pair("type", "artist,album,track")
+            .append_pair("type", types)
             .append_pair("offset", &offset.to_string())
-            .append_pair("limit", &limit.to_string())
+            .append_pair("limit", &limit.min(10).to_string())
             .finish();
         self.get(&format!("/search?{query}")).await
     }
