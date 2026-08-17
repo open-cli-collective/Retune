@@ -7,6 +7,21 @@ fn album_library_uris(uri: &str) -> Vec<String> {
     vec![uri.to_owned()]
 }
 
+fn web_oauth_tokens(
+    access: String,
+    refresh: String,
+    expires_at: u64,
+    scopes: String,
+) -> Tokens {
+    Tokens {
+        access,
+        refresh,
+        expires_at,
+        scopes,
+        playback_credentials: None,
+    }
+}
+
 pub(super) fn replace_spotify_library_state(
     store: &FsSyncStore,
     current: &Mutex<SpotifyLibraryState>,
@@ -73,26 +88,20 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
     let state = app.state::<AppState>();
     let membership_guard = state.spotify_library_gate.lock().await;
     let granted_scopes = token.scope.unwrap_or_else(|| auth::SCOPES.clone());
-    let playback_credentials = state
-        .token_store
-        .load()
-        .map_err(|error| error.to_string())?
-        .and_then(|tokens| tokens.playback_credentials);
-    state
-        .token_store
-        .save(&Tokens {
-            access: token.access_token,
-            refresh,
-            expires_at: now.saturating_add(token.expires_in),
-            scopes: granted_scopes,
-            playback_credentials,
-        })
-        .map_err(|error| error.to_string())?;
     replace_spotify_library_state(
         &state.sync_store,
         &state.spotify_library,
         SpotifyLibraryState::default(),
     )?;
+    state
+        .token_store
+        .save(&web_oauth_tokens(
+            token.access_token,
+            refresh,
+            now.saturating_add(token.expires_in),
+            granted_scopes,
+        ))
+        .map_err(|error| error.to_string())?;
     *state.spotify.lock().expect("spotify mutex poisoned") =
         spotify_provider(&client_id, Arc::clone(&state.token_store))?;
     set_auto_connect(&app, true)?;
@@ -636,8 +645,8 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        playback_credentials, replace_spotify_library_state, FsSyncStore, Mutex,
-        SpotifyLibraryState,
+        playback_credentials, replace_spotify_library_state, web_oauth_tokens, FsSyncStore,
+        Mutex, SpotifyLibraryState,
     };
 
     #[test]
@@ -659,6 +668,18 @@ mod tests {
 
         assert!(!current.lock().unwrap().is_exact());
         assert!(!store.spotify_library().unwrap().is_exact());
+    }
+
+    #[test]
+    fn web_oauth_replacement_requires_playback_reauthorization() {
+        let tokens = web_oauth_tokens(
+            "new-access".into(),
+            "new-refresh".into(),
+            10,
+            "scope".into(),
+        );
+
+        assert!(tokens.playback_credentials.is_none());
     }
 
     #[test]

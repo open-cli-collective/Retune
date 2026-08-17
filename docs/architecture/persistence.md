@@ -37,7 +37,9 @@ so older token files remain readable. Release builds keep it inside encrypted
 boundary.
 Refreshing the Web API token preserves the playback credential. Playback
 rejection removes only this field, while explicit Spotify disconnect removes the
-whole token record. It is machine-specific and never belongs in backup/export.
+whole token record. Replacing the Web OAuth grant clears the playback credential
+because the new grant may belong to a different account. It is machine-specific
+and never belongs in backup/export.
 
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.

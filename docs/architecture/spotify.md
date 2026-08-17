@@ -72,9 +72,11 @@ authorizes destructive reconciliation.
 One async membership gate serializes complete sync snapshots with explicit
 album/track saves and removals, preventing a stale snapshot or concurrent
 command from overwriting a completed Spotify write. Replacing the Web API OAuth
-token first resets persisted membership to unknown, before the new connection
-is exposed or `/me` is queried, so state from a previous account is never
-projected under new credentials.
+token first resets persisted membership to unknown before replacement tokens
+enter the shared token store, then exposes the new connection and queries
+`/me`, so state from a previous account is never projected under new
+credentials. A new Web OAuth grant also clears reusable playback credentials;
+the user must explicitly authorize built-in playback for that account.
 
 Search album and track rows expose their respective exact membership as
 `inLibrary` when known. Album-page DTOs keep `savedAlbum` separate from
