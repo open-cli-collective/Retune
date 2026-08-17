@@ -1489,7 +1489,7 @@ mod tests {
         );
         assert!(client.transport().requests()[1]
             .url
-            .contains("/albums/album-1/tracks?offset=1&limit=50"));
+            .contains("/albums/1/tracks?offset=1&limit=50"));
     }
 
     #[tokio::test]
