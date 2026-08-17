@@ -13,6 +13,10 @@ export type SpotifySearchState = {
   generation: number
 }
 export type SpotifySearchRequest = { group: SpotifyResultGroupKey; offset: number; generation: number }
+export type SpotifyMembershipOverrides = Readonly<Record<string, boolean>>
+
+export const spotifyMembership = (providerValue: boolean, uri: string, overrides: SpotifyMembershipOverrides) =>
+  overrides[uri] ?? providerValue
 
 export const spotifySearchPendingPageKey = (query: string, offset: number, generation: number) => `${query}:${offset}:${generation}`
 

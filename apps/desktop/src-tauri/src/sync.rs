@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use retune_core::{
     io::{export_json, import},
@@ -8,7 +8,7 @@ use retune_core::{
 use crate::{
     provider::{MediaProvider, SectionProgress, SyncBatch},
     spotify_track_match,
-    store::OverlayStore,
+    store::{OverlayStore, SpotifyLibraryState},
 };
 
 #[cfg(test)]
@@ -20,7 +20,7 @@ pub async fn reconcile<P: MediaProvider, S: OverlayStore>(
     mut progress: impl FnMut(&str),
 ) -> Result<(), String> {
     let outcome = snapshot(provider, &mut progress, &|_| {}).await?;
-    apply(library, store, first_sync, outcome.tracks)
+    apply(library, store, first_sync, outcome.tracks, None)
 }
 
 pub struct SnapshotOutcome {
@@ -31,6 +31,7 @@ pub struct SnapshotOutcome {
     pub progress: Vec<SectionProgress>,
     pub earliest_cooldown: Option<u64>,
     pub request_counts: std::collections::BTreeMap<String, u64>,
+    pub spotify_library: Option<SpotifyLibraryState>,
 }
 
 pub async fn snapshot<P: MediaProvider>(
@@ -43,6 +44,9 @@ pub async fn snapshot<P: MediaProvider>(
     let mut partial = false;
     let mut quota_exhausted = false;
     let mut section_progress = vec![];
+    let mut account_id = None;
+    let mut saved_tracks = None;
+    let mut saved_albums = None;
     for kind in crate::provider::LibraryKind::ALL {
         progress(kind.phase());
         let snapshot = provider.library_snapshot(kind, on_batch).await?;
@@ -52,10 +56,34 @@ pub async fn snapshot<P: MediaProvider>(
         if let Some(progress) = snapshot.progress {
             section_progress.push(progress);
         }
+        if account_id.is_none() {
+            account_id = snapshot.account_id;
+        }
+        if snapshot.saved_tracks.is_some() {
+            saved_tracks = snapshot.saved_tracks;
+        }
+        if snapshot.saved_albums.is_some() {
+            saved_albums = snapshot.saved_albums;
+        }
         for batch in snapshot.batches {
             incoming.extend(batch);
         }
     }
+    let spotify_library = if partial {
+        None
+    } else {
+        match (account_id, saved_tracks, saved_albums) {
+            (Some(account_id), Some(saved_tracks), Some(saved_albums)) => {
+                Some(SpotifyLibraryState {
+                    account_id,
+                    complete: true,
+                    saved_tracks,
+                    saved_albums,
+                })
+            }
+            _ => None,
+        }
+    };
     Ok(SnapshotOutcome {
         tracks: incoming,
         genres_degraded,
@@ -64,6 +92,7 @@ pub async fn snapshot<P: MediaProvider>(
         progress: section_progress,
         earliest_cooldown: provider.earliest_cooldown(),
         request_counts: provider.request_counts(),
+        spotify_library,
     })
 }
 
@@ -72,15 +101,117 @@ pub fn apply<S: OverlayStore>(
     store: &S,
     first_sync: bool,
     incoming: Vec<retune_core::model::NewTrack>,
+    spotify_library: Option<&SpotifyLibraryState>,
 ) -> Result<(), String> {
     if first_sync {
         *library = without_fixtures(library)?;
     }
-    apply_in_memory(library, incoming);
+    let aliases = apply_in_memory_with_aliases(library, incoming);
+    if let Some(spotify_library) = spotify_library {
+        prune_unreferenced_spotify_music_with_aliases(library, spotify_library, &aliases);
+    }
     store.save(library).map_err(|error| error.to_string())
 }
 
+pub fn prune_unreferenced_spotify_music_with_aliases(
+    library: &mut Library,
+    spotify_library: &SpotifyLibraryState,
+    aliases: &HashMap<String, String>,
+) -> usize {
+    if !spotify_library.is_exact() {
+        return 0;
+    }
+    let referenced = referenced_local_uris(spotify_library, aliases);
+    let uris = library
+        .tracks()
+        .iter()
+        .filter(|track| {
+            track.source == retune_core::model::SourceId::Music
+                && track.uri.starts_with("spotify:track:")
+                && !referenced.contains(&track.uri)
+        })
+        .map(|track| track.uri.clone())
+        .collect::<Vec<_>>();
+    library.remove_uris(&uris)
+}
+
+#[cfg(test)]
+pub fn prune_unreferenced_spotify_tracks(
+    library: &mut Library,
+    spotify_library: &SpotifyLibraryState,
+    candidates: &[String],
+) -> usize {
+    prune_unreferenced_spotify_tracks_with_aliases(
+        library,
+        spotify_library,
+        candidates,
+        &HashMap::new(),
+    )
+}
+
+pub fn prune_unreferenced_spotify_tracks_with_aliases(
+    library: &mut Library,
+    spotify_library: &SpotifyLibraryState,
+    candidates: &[String],
+    aliases: &HashMap<String, String>,
+) -> usize {
+    if !spotify_library.is_exact() {
+        return 0;
+    }
+    let referenced = referenced_local_uris(spotify_library, aliases);
+    let mut seen = HashSet::new();
+    let uris = candidates
+        .iter()
+        .map(|uri| aliases.get(uri).unwrap_or(uri))
+        .filter(|uri| seen.insert(uri.as_str()))
+        .filter(|uri| !referenced.contains(*uri))
+        .cloned()
+        .collect::<Vec<_>>();
+    library.remove_uris(&uris)
+}
+
 pub fn apply_in_memory(library: &mut Library, incoming: Vec<retune_core::model::NewTrack>) {
+    let _ = apply_in_memory_with_aliases(library, incoming);
+}
+
+pub fn spotify_track_aliases(
+    library: &Library,
+    incoming: &[retune_core::model::NewTrack],
+) -> HashMap<String, String> {
+    incoming
+        .iter()
+        .filter_map(|track| {
+            spotify_track_match(library, track)
+                .map(|existing| (track.uri.clone(), existing.uri.clone()))
+        })
+        .collect()
+}
+
+fn referenced_local_uris(
+    spotify_library: &SpotifyLibraryState,
+    aliases: &HashMap<String, String>,
+) -> HashSet<String> {
+    let remote_uris = spotify_library.saved_tracks.keys().cloned().chain(
+        spotify_library
+            .saved_albums
+            .values()
+            .flat_map(|album| album.track_uris.iter().cloned()),
+    );
+    let mut referenced = HashSet::new();
+    for remote_uri in remote_uris {
+        referenced.insert(remote_uri.clone());
+        if let Some(local_uri) = aliases.get(&remote_uri) {
+            referenced.insert(local_uri.clone());
+        }
+    }
+    referenced
+}
+
+fn apply_in_memory_with_aliases(
+    library: &mut Library,
+    incoming: Vec<retune_core::model::NewTrack>,
+) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
     let provider_genres = library
         .tracks()
         .iter()
@@ -100,12 +231,18 @@ pub fn apply_in_memory(library: &mut Library, incoming: Vec<retune_core::model::
                 track.cat.clone_from(existing);
             }
         }
-        let is_alias =
-            spotify_track_match(library, &track).is_some_and(|existing| existing.uri != track.uri);
-        if !is_alias {
+        let incoming_uri = track.uri.clone();
+        let existing_uri =
+            spotify_track_match(library, &track).map(|existing| existing.uri.clone());
+        aliases.insert(
+            incoming_uri.clone(),
+            existing_uri.clone().unwrap_or_else(|| incoming_uri.clone()),
+        );
+        if existing_uri.is_none_or(|uri| uri == incoming_uri) {
             library.upsert(track);
         }
     }
+    aliases
 }
 
 pub fn without_fixtures(library: &Library) -> Result<Library, String> {
@@ -127,15 +264,19 @@ pub fn without_fixtures(library: &Library) -> Result<Library, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex, time::Duration};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::Mutex,
+        time::Duration,
+    };
 
-    use retune_core::model::{NewTrack, TrackEdit};
+    use retune_core::model::{NewTrack, Rating, TrackEdit};
 
     use super::*;
     use crate::{
         fixture,
         provider::{FakeProvider, LibraryKind},
-        store::StoreResult,
+        store::{SavedAlbumRecord, SpotifyLibraryState, StoreResult},
     };
 
     #[derive(Default)]
@@ -190,6 +331,110 @@ mod tests {
         assert_eq!(library.tracks()[0].uri, "spotify:track:original");
         assert_eq!(library.tracks()[1].uri, "spotify:track:next");
         assert_eq!(library.tracks()[2].uri, "spotify:track:rerelease");
+    }
+
+    #[test]
+    fn complete_sync_and_removal_preserve_alias_overlays_until_last_reference() {
+        let mut library = Library::new();
+        let mut original = track("spotify:track:original", "Song");
+        original.track_no = Some(1);
+        original.disc_no = Some(1);
+        let original_id = library.add(original);
+        {
+            let retained = library
+                .tracks_mut()
+                .iter_mut()
+                .find(|track| track.id == original_id)
+                .unwrap();
+            retained.rating = Rating::new(4);
+            retained.play_count = 7;
+            retained.last_played_at = Some(99);
+        }
+
+        let mut alias = track("spotify:track:alias", "Song");
+        alias.track_no = Some(1);
+        alias.disc_no = Some(1);
+        let state = SpotifyLibraryState {
+            account_id: "account".into(),
+            complete: true,
+            saved_tracks: BTreeMap::from([("spotify:track:alias".into(), Some(1))]),
+            saved_albums: BTreeMap::from([(
+                "spotify:album:album".into(),
+                SavedAlbumRecord {
+                    uri: "spotify:album:album".into(),
+                    name: "Album".into(),
+                    artists: vec!["Artist".into()],
+                    release_date: None,
+                    album_type: Some("album".into()),
+                    added_at: Some(1),
+                    track_uris: vec!["spotify:track:alias".into()],
+                },
+            )]),
+        };
+        let store = RecordingStore::default();
+
+        apply(
+            &mut library,
+            &store,
+            false,
+            vec![alias.clone()],
+            Some(&state),
+        )
+        .unwrap();
+
+        let retained = &library.tracks()[0];
+        assert_eq!(library.tracks().len(), 1);
+        assert_eq!(retained.id, original_id);
+        assert_eq!(retained.uri, "spotify:track:original");
+        assert_eq!(retained.rating, Rating::new(4));
+        assert_eq!(retained.play_count, 7);
+        assert_eq!(retained.last_played_at, Some(99));
+
+        let aliases = spotify_track_aliases(&library, &[alias]);
+        let mut without_individual = state.clone();
+        without_individual.saved_tracks.clear();
+        prune_unreferenced_spotify_tracks_with_aliases(
+            &mut library,
+            &without_individual,
+            &["spotify:track:alias".into()],
+            &aliases,
+        );
+        assert_eq!(library.tracks().len(), 1);
+
+        without_individual.saved_albums.clear();
+        prune_unreferenced_spotify_tracks_with_aliases(
+            &mut library,
+            &without_individual,
+            &["spotify:track:alias".into()],
+            &aliases,
+        );
+        assert!(library.tracks().is_empty());
+    }
+
+    #[test]
+    fn unknown_membership_never_prunes_local_tracks() {
+        for state in [
+            SpotifyLibraryState::default(),
+            SpotifyLibraryState {
+                account_id: "account".into(),
+                complete: false,
+                ..SpotifyLibraryState::default()
+            },
+        ] {
+            let mut library = Library::new();
+            library.add(track("spotify:track:unknown", "Unknown"));
+
+            assert_eq!(
+                prune_unreferenced_spotify_tracks_with_aliases(
+                    &mut library,
+                    &state,
+                    &["spotify:track:unknown".into()],
+                    &HashMap::new(),
+                ),
+                0
+            );
+            assert_eq!(library.tracks().len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -273,7 +518,7 @@ mod tests {
 
         let outcome = snapshot(&provider, |_| {}, &|_| {}).await.unwrap();
         assert!(outcome.partial);
-        apply(&mut library, &store, false, outcome.tracks).unwrap();
+        apply(&mut library, &store, false, outcome.tracks, None).unwrap();
 
         assert!(library
             .tracks()
@@ -289,12 +534,12 @@ mod tests {
         let mut degraded = track("spotify:track:one", "Changed");
         degraded.cat = retune_spotify::normalize::UNCATEGORIZED.into();
 
-        apply(&mut library, &store, false, vec![degraded]).unwrap();
+        apply(&mut library, &store, false, vec![degraded], None).unwrap();
         assert_eq!(library.get(id).unwrap().cat, "Rock");
 
         let mut healthy = track("spotify:track:one", "Changed again");
         healthy.cat = "Metal".into();
-        apply(&mut library, &store, false, vec![healthy]).unwrap();
+        apply(&mut library, &store, false, vec![healthy], None).unwrap();
         assert_eq!(library.get(id).unwrap().cat, "Metal");
     }
 
@@ -319,12 +564,117 @@ mod tests {
         for batch in incoming.chunks(1) {
             apply_in_memory(&mut incremental, batch.to_vec());
         }
-        apply(&mut incremental, &store, false, incoming.clone()).unwrap();
+        apply(&mut incremental, &store, false, incoming.clone(), None).unwrap();
 
         let mut single = base;
-        apply(&mut single, &store, false, incoming).unwrap();
+        apply(&mut single, &store, false, incoming, None).unwrap();
 
         assert_eq!(export_json(&incremental), export_json(&single));
         assert_eq!(incremental.get(id).unwrap().name, "Local name");
+    }
+
+    #[test]
+    fn partial_apply_keeps_existing_tracks_and_complete_apply_prunes_only_unreferenced_music() {
+        let mut library = Library::new();
+        library.add(track("spotify:track:keep", "Keep"));
+        library.add(track("spotify:track:album", "Album"));
+        library.add(track("spotify:track:drop", "Drop"));
+        let store = RecordingStore::default();
+        let state = SpotifyLibraryState {
+            account_id: "account".into(),
+            complete: true,
+            saved_tracks: HashMap::from([("spotify:track:keep".into(), Some(1))])
+                .into_iter()
+                .collect(),
+            saved_albums: [(
+                "spotify:album:one".into(),
+                SavedAlbumRecord {
+                    uri: "spotify:album:one".into(),
+                    name: "Album".into(),
+                    artists: vec!["Artist".into()],
+                    release_date: None,
+                    album_type: None,
+                    added_at: Some(1),
+                    track_uris: vec!["spotify:track:album".into()],
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        apply(
+            &mut library,
+            &store,
+            false,
+            vec![track("spotify:track:new", "New")],
+            None,
+        )
+        .unwrap();
+        assert!(library
+            .tracks()
+            .iter()
+            .any(|track| track.uri == "spotify:track:drop"));
+
+        apply(&mut library, &store, false, vec![], Some(&state)).unwrap();
+        assert!(library
+            .tracks()
+            .iter()
+            .any(|track| track.uri == "spotify:track:keep"));
+        assert!(library
+            .tracks()
+            .iter()
+            .any(|track| track.uri == "spotify:track:album"));
+        assert!(!library
+            .tracks()
+            .iter()
+            .any(|track| track.uri == "spotify:track:drop"));
+    }
+
+    #[test]
+    fn overlapping_album_references_retain_tracks_until_the_last_reference_is_removed() {
+        let mut library = Library::new();
+        library.add(track("spotify:track:shared", "Shared"));
+        library.add(track("spotify:track:other", "Other"));
+        let mut state = SpotifyLibraryState {
+            account_id: "account".into(),
+            complete: true,
+            ..SpotifyLibraryState::default()
+        };
+        for (uri, track_uris) in [
+            ("spotify:album:left", vec!["spotify:track:shared"]),
+            (
+                "spotify:album:right",
+                vec!["spotify:track:shared", "spotify:track:other"],
+            ),
+        ] {
+            state.saved_albums.insert(
+                uri.into(),
+                SavedAlbumRecord {
+                    uri: uri.into(),
+                    name: "Album".into(),
+                    artists: vec![],
+                    release_date: None,
+                    album_type: None,
+                    added_at: None,
+                    track_uris: track_uris.into_iter().map(String::from).collect(),
+                },
+            );
+        }
+
+        state.saved_albums.remove("spotify:album:left");
+        prune_unreferenced_spotify_tracks(
+            &mut library,
+            &state,
+            &["spotify:track:shared".into(), "spotify:track:other".into()],
+        );
+        assert_eq!(library.tracks().len(), 2);
+
+        state.saved_albums.remove("spotify:album:right");
+        prune_unreferenced_spotify_tracks(
+            &mut library,
+            &state,
+            &["spotify:track:shared".into(), "spotify:track:other".into()],
+        );
+        assert!(library.tracks().is_empty());
     }
 }

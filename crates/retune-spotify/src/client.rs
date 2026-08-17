@@ -1175,6 +1175,8 @@ pub struct Album {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SavedAlbum {
+    #[serde(default, deserialize_with = "deserialize_added_at")]
+    pub added_at: Option<u64>,
     pub album: Album,
 }
 
@@ -1357,6 +1359,25 @@ mod tests {
             format!("{API_BASE}/me/tracks?offset=20&limit=10")
         );
         assert_eq!(requests[0].headers["authorization"], "Bearer old");
+    }
+
+    #[tokio::test]
+    async fn saved_album_decodes_membership_time() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(
+                200,
+                serde_json::json!({"items": [{"added_at": "2024-01-02T03:04:05Z", "album": {
+                    "id": "album-1", "uri": "spotify:album:1", "name": "Album",
+                    "artists": [], "images": []
+                }}], "next": null}),
+            )]),
+            tokens(),
+        );
+
+        let page = client.saved_albums(0, 1).await.unwrap();
+
+        assert_eq!(page.items[0].added_at, Some(1_704_164_645));
     }
 
     #[tokio::test]
@@ -1725,6 +1746,44 @@ mod tests {
         assert_eq!(url.path(), "/v1/me/library");
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
+            [("uris".into(), "spotify:track:track".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn library_writes_keep_album_and_track_memberships_distinct() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(204, serde_json::Value::Null),
+                Response::json(204, serde_json::Value::Null),
+            ]),
+            tokens(),
+        );
+
+        client
+            .save_to_library(&["spotify:album:album".into()])
+            .await
+            .unwrap();
+        client
+            .save_to_library(&["spotify:track:track".into()])
+            .await
+            .unwrap();
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            url::Url::parse(&requests[0].url)
+                .unwrap()
+                .query_pairs()
+                .collect::<Vec<_>>(),
+            [("uris".into(), "spotify:album:album".into())]
+        );
+        assert_eq!(
+            url::Url::parse(&requests[1].url)
+                .unwrap()
+                .query_pairs()
+                .collect::<Vec<_>>(),
             [("uris".into(), "spotify:track:track".into())]
         );
     }

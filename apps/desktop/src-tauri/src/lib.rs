@@ -53,7 +53,7 @@ use retune_spotify::{
 use serde::{Deserialize, Serialize};
 use store::{
     BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore, OverlayStore,
-    Settings, StoreError, Theme,
+    Settings, SpotifyLibraryState, StoreError, Theme,
 };
 use sync_orchestrator::SyncOrchestrator;
 use tauri::{
@@ -69,6 +69,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 struct AppState {
     library: Mutex<Library>,
     store: FsOverlayStore,
+    spotify_library: Mutex<SpotifyLibraryState>,
+    spotify_library_gate: tokio::sync::Mutex<()>,
     settings: Mutex<Settings>,
     settings_store: FsSettingsStore,
     sync_store: FsSyncStore,
@@ -394,6 +396,7 @@ struct AlbumPageTrackView {
     duration_secs: u64,
     enabled: bool,
     track_id: Option<u64>,
+    saved_individually: bool,
     rating: Option<RatingView>,
 }
 
@@ -408,7 +411,9 @@ struct AlbumPageView {
     year: Option<String>,
     image_url: Option<String>,
     total_duration_secs: u64,
-    in_library: bool,
+    saved_album: bool,
+    content_complete: bool,
+    added_at: Option<u64>,
     album_rating: Option<u8>,
     tracks: Vec<AlbumPageTrackView>,
 }
@@ -834,6 +839,11 @@ fn track_id(uri: &str) -> Option<&str> {
         .filter(|id| !id.is_empty() && !id.contains(':'))
 }
 
+fn album_id(uri: &str) -> Option<&str> {
+    uri.strip_prefix("spotify:album:")
+        .filter(|id| !id.is_empty() && !id.contains(':'))
+}
+
 async fn resolve_track_artwork<T: Transport, S: TokenStore>(
     client: Option<&SpotifyClient<T, S>>,
     cache: &Mutex<HashMap<(String, u32), Option<String>>>,
@@ -1049,11 +1059,36 @@ fn partial_import_message(
 async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, String> {
     log::info!("Starting Spotify sync");
     let state = app.state::<AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     if !stored_connection_state(&state.token_store)?.connected {
         return Err("Connect to Spotify before syncing.".into());
     }
     let provider = provider_from(&state)?;
-    let sync_provider = SpotifySyncProvider::new(provider.as_ref(), &state.sync_store)?;
+    let account_id = provider
+        .me()
+        .await
+        .map_err(|error| format!("Could not identify the Spotify account: {error}"))?
+        .id;
+    {
+        let current = state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned")
+            .clone();
+        if !current.account_id.is_empty() && current.account_id != account_id {
+            let reset = SpotifyLibraryState {
+                account_id: account_id.clone(),
+                ..SpotifyLibraryState::default()
+            };
+            spotify_commands::replace_spotify_library_state(
+                &state.sync_store,
+                &state.spotify_library,
+                reset,
+            )?;
+        }
+    }
+    let sync_provider =
+        SpotifySyncProvider::for_account(provider.as_ref(), &state.sync_store, account_id)?;
     let first_sync = !state
         .settings
         .lock()
@@ -1094,6 +1129,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         progress,
         earliest_cooldown,
         request_counts,
+        spotify_library,
     } = outcome;
     let tracks_synced = sync_progress
         .lock()
@@ -1109,9 +1145,58 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
     .map_err(|error| error.to_string())?;
     app.emit("sync-progress", "Saving library…")
         .map_err(|error| error.to_string())?;
+    let spotify_library = spotify_library.map(|incoming| {
+        let current = state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned")
+            .clone();
+        let mut merged = if current.is_exact() {
+            current.merge_earliest_times(incoming)
+        } else {
+            incoming
+        };
+        let library = state.library.lock().expect("library mutex poisoned");
+        let added_times = library
+            .tracks()
+            .iter()
+            .map(|track| (track.uri.as_str(), track.added_at))
+            .collect::<HashMap<_, _>>();
+        let aliases = sync::spotify_track_aliases(&library, &tracks);
+        for album in merged.saved_albums.values_mut() {
+            if album.added_at.is_none() {
+                album.added_at = album
+                    .track_uris
+                    .iter()
+                    .filter_map(|uri| {
+                        let local_uri = aliases.get(uri).unwrap_or(uri);
+                        added_times.get(local_uri.as_str()).copied().flatten()
+                    })
+                    .min()
+                    .or_else(|| Some(unix_now()));
+            }
+        }
+        merged
+    });
+    if let Some(spotify_library) = spotify_library.as_ref() {
+        state
+            .sync_store
+            .save_spotify_library(spotify_library)
+            .map_err(|error| error.to_string())?;
+        *state
+            .spotify_library
+            .lock()
+            .expect("Spotify library mutex poisoned") = spotify_library.clone();
+    }
     {
         let mut library = state.library.lock().expect("library mutex poisoned");
-        sync::apply(&mut library, &state.store, first_sync, tracks)?;
+        sync::apply(
+            &mut library,
+            &state.store,
+            first_sync,
+            tracks,
+            spotify_library.as_ref(),
+        )?;
         log::info!(
             "Spotify sync applied; {} library tracks",
             library.tracks().len()
@@ -1240,7 +1325,11 @@ fn initial_library(debug: bool) -> Library {
     }
 }
 
-fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
+fn album_page_view(
+    library: &Library,
+    spotify_library: &SpotifyLibraryState,
+    album: Album,
+) -> AlbumPageView {
     let artist = album.artists.first();
     let artist_name = artist.map(|artist| artist.name.clone()).unwrap_or_default();
     let total_duration_secs = album
@@ -1251,23 +1340,38 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
         .map(|track| track.duration_ms.unwrap_or_default())
         .sum::<u64>()
         / 1_000;
+    let local_added_at = album
+        .tracks
+        .as_ref()
+        .into_iter()
+        .flat_map(|page| &page.items)
+        .filter_map(|track| {
+            let normalized = retune_spotify::normalize::track(track, None, Some(&album));
+            spotify_track_match(library, &normalized).and_then(|track| track.added_at)
+        })
+        .min();
     let tracks = album
         .tracks
+        .clone()
         .map(|page| {
             page.items
                 .into_iter()
                 .map(|track| {
-                    let local = library
-                        .tracks()
-                        .iter()
-                        .find(|candidate| candidate.uri == track.uri);
+                    let uri = track.uri.clone();
+                    let normalized = retune_spotify::normalize::track(&track, None, Some(&album));
+                    let local = spotify_track_match(library, &normalized);
                     AlbumPageTrackView {
-                        uri: track.uri,
+                        uri: uri.clone(),
                         name: track.name,
                         track_no: track.track_number,
                         duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
                         enabled: local.is_none_or(|track| track.enabled),
                         track_id: local.map(|track| track.id.0),
+                        saved_individually: if spotify_library.is_exact() {
+                            spotify_library.saved_tracks.contains_key(&uri)
+                        } else {
+                            local.is_some()
+                        },
                         rating: local
                             .and_then(|track| library.effective_rating(track.id).map(rating_view)),
                     }
@@ -1275,8 +1379,24 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let in_library = !tracks.is_empty() && tracks.iter().all(|track| track.track_id.is_some());
-    let album_rating = in_library
+    let content_complete =
+        !tracks.is_empty() && tracks.iter().all(|track| track.track_id.is_some());
+    let saved_album = if spotify_library.is_exact() {
+        spotify_library.saved_albums.contains_key(&album.uri)
+    } else {
+        content_complete
+    };
+    let added_at = spotify_library
+        .is_exact()
+        .then(|| {
+            spotify_library
+                .saved_albums
+                .get(&album.uri)
+                .and_then(|album| album.added_at)
+        })
+        .flatten()
+        .or(local_added_at);
+    let album_rating = content_complete
         .then(|| {
             library.album_rating(&AlbumKey {
                 source: SourceId::Music,
@@ -1299,14 +1419,24 @@ fn album_page_view(library: &Library, album: Album) -> AlbumPageView {
             .map(str::to_owned),
         image_url: image_url(&album.images),
         total_duration_secs,
-        in_library,
+        saved_album,
+        content_complete,
+        added_at,
         album_rating,
         tracks,
     }
 }
 
-fn mark_album_membership(library: &Library, albums: &mut [provider::SearchAlbum]) {
+fn mark_album_membership(
+    library: &Library,
+    spotify_library: &SpotifyLibraryState,
+    albums: &mut [provider::SearchAlbum],
+) {
     for album in albums {
+        if spotify_library.is_exact() {
+            album.in_library = spotify_library.saved_albums.contains_key(&album.uri);
+            continue;
+        }
         // ponytail: local album identity is artist/title; store Spotify album URIs if
         // same-named editions become a real ambiguity.
         album.in_library = album.track_count > 0
@@ -1323,12 +1453,20 @@ fn mark_album_membership(library: &Library, albums: &mut [provider::SearchAlbum]
     }
 }
 
-fn mark_track_membership(library: &Library, tracks: &mut [provider::SearchTrack]) {
+fn mark_track_membership(
+    library: &Library,
+    spotify_library: &SpotifyLibraryState,
+    tracks: &mut [provider::SearchTrack],
+) {
     for track in tracks {
-        track.in_library = library
-            .tracks()
-            .iter()
-            .any(|candidate| candidate.source == SourceId::Music && candidate.uri == track.uri);
+        track.in_library = if spotify_library.is_exact() {
+            spotify_library.saved_tracks.contains_key(&track.uri)
+        } else {
+            library
+                .tracks()
+                .iter()
+                .any(|candidate| candidate.source == SourceId::Music && candidate.uri == track.uri)
+        };
     }
 }
 
@@ -1342,6 +1480,7 @@ fn album_track_uris(album: &Album) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
     library.remove_uris(&album_track_uris(album))
 }
@@ -2170,6 +2309,7 @@ pub fn run() {
             }
             let settings_store = FsSettingsStore::new(&app_data_dir);
             let sync_store = FsSyncStore::new(&app_data_dir);
+            let spotify_library = sync_store.spotify_library()?;
             let playlist_store = FsPlaylistStore::new(&app_data_dir);
             let playlists = playlist_store.load()?;
             let settings = settings_store.load()?.unwrap_or_default();
@@ -2238,6 +2378,8 @@ pub fn run() {
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
+                spotify_library: Mutex::new(spotify_library),
+                spotify_library_gate: tokio::sync::Mutex::new(()),
                 settings: Mutex::new(settings),
                 settings_store,
                 sync_store,
@@ -2379,6 +2521,15 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn spotify_album_id_accepts_only_strict_album_uris() {
+        assert_eq!(album_id("spotify:album:album"), Some("album"));
+        assert_eq!(album_id("spotify:album:"), None);
+        assert_eq!(album_id("spotify:album:album:extra"), None);
+        assert_eq!(album_id("spotify:track:track"), None);
+        assert_eq!(album_id("file:///tmp/album"), None);
+    }
 
     fn shared_token_store(tokens: Option<Tokens>) -> SharedTokenStore {
         Arc::new(CachedTokenStore::new(
@@ -2917,12 +3068,9 @@ mod tests {
     #[test]
     fn album_page_resolves_library_ids_ratings_and_completeness() {
         let mut library = Library::new();
-        let id = library.add(metadata_track(
-            "spotify:track:one",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
+        let mut first = metadata_track("spotify:track:one", "Rock", "Artist", "Album");
+        first.added_at = Some(42);
+        let id = library.add(first);
         library.set_track_rating(id, Rating::new(4)).unwrap();
         library.set_album_rating(
             AlbumKey {
@@ -2933,12 +3081,14 @@ mod tests {
             Rating::new(5),
         );
 
-        let page = album_page_view(&library, spotify_album());
+        let page = album_page_view(&library, &SpotifyLibraryState::default(), spotify_album());
 
         assert_eq!(page.album_type, "Compilation");
         assert_eq!(page.year.as_deref(), Some("2024"));
         assert_eq!(page.total_duration_secs, 4);
-        assert!(!page.in_library);
+        assert!(!page.saved_album);
+        assert!(!page.content_complete);
+        assert_eq!(page.added_at, Some(42));
         assert_eq!(page.album_rating, None);
         assert_eq!(page.tracks[0].track_id, Some(id.0));
         assert_eq!(
@@ -2956,9 +3106,141 @@ mod tests {
             "Artist",
             "Album",
         ));
-        let page = album_page_view(&library, spotify_album());
-        assert!(page.in_library);
+        let page = album_page_view(&library, &SpotifyLibraryState::default(), spotify_album());
+        assert!(page.saved_album);
+        assert!(page.content_complete);
         assert_eq!(page.album_rating, Some(5));
+    }
+
+    #[test]
+    fn album_page_resolves_alternate_track_uri_to_retained_overlay() {
+        let mut library = Library::new();
+        let mut retained = metadata_track("spotify:track:retained", "Rock", "Artist", "Album");
+        retained.name = "One".into();
+        retained.duration = Duration::from_millis(1_500);
+        retained.track_no = Some(1);
+        retained.disc_no = Some(1);
+        retained.release_date = Some("2024-02-03".into());
+        retained.kind = Some("Spotify".into());
+        retained.added_at = Some(42);
+        let id = library.add(retained);
+        library.set_track_rating(id, Rating::new(4)).unwrap();
+        library.add(metadata_track(
+            "spotify:track:two",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        library.set_album_rating(
+            AlbumKey {
+                source: SourceId::Music,
+                art: "Artist".into(),
+                alb: "Album".into(),
+            },
+            Rating::new(5),
+        );
+
+        let mut album = spotify_album();
+        album.tracks.as_mut().unwrap().items[0].uri = "spotify:track:alternate".into();
+        let page = album_page_view(&library, &SpotifyLibraryState::default(), album);
+
+        assert_eq!(page.tracks[0].track_id, Some(id.0));
+        assert_eq!(
+            page.tracks[0].rating,
+            Some(RatingView {
+                stars: 4,
+                explicit: true
+            })
+        );
+        assert!(page.content_complete);
+        assert_eq!(page.album_rating, Some(5));
+        assert_eq!(page.added_at, Some(42));
+    }
+
+    #[test]
+    fn exact_membership_distinguishes_album_and_individual_track_states() {
+        for (saved_album, saved_track) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut library = Library::new();
+            library.add(metadata_track(
+                "spotify:track:one",
+                "Rock",
+                "Artist",
+                "Album",
+            ));
+            library.add(metadata_track(
+                "spotify:track:two",
+                "Rock",
+                "Artist",
+                "Album",
+            ));
+            library.set_album_rating(
+                AlbumKey {
+                    source: SourceId::Music,
+                    art: "Artist".into(),
+                    alb: "Album".into(),
+                },
+                Rating::new(4),
+            );
+            let mut spotify_library = SpotifyLibraryState {
+                account_id: "account".into(),
+                complete: true,
+                ..SpotifyLibraryState::default()
+            };
+            if saved_track {
+                spotify_library
+                    .saved_tracks
+                    .insert("spotify:track:one".into(), Some(10));
+            }
+            if saved_album {
+                spotify_library.saved_albums.insert(
+                    "spotify:album:album".into(),
+                    store::SavedAlbumRecord {
+                        uri: "spotify:album:album".into(),
+                        name: "Album".into(),
+                        artists: vec!["Artist".into()],
+                        release_date: Some("2024-02-03".into()),
+                        album_type: Some("album".into()),
+                        added_at: Some(11),
+                        track_uris: vec!["spotify:track:one".into(), "spotify:track:two".into()],
+                    },
+                );
+            }
+
+            let mut albums = vec![provider::SearchAlbum {
+                uri: "spotify:album:album".into(),
+                name: "Album".into(),
+                artist: "Artist".into(),
+                year: Some("2024".into()),
+                image_url: None,
+                album_type: Some("Album".into()),
+                track_count: 2,
+                in_library: false,
+            }];
+            let mut tracks = vec![provider::SearchTrack {
+                uri: "spotify:track:one".into(),
+                name: "One".into(),
+                artist: "Artist".into(),
+                alb: "Album".into(),
+                duration_secs: 1,
+                image_url: None,
+                album_uri: Some("spotify:album:album".into()),
+                in_library: false,
+            }];
+
+            mark_album_membership(&library, &spotify_library, &mut albums);
+            mark_track_membership(&library, &spotify_library, &mut tracks);
+            let page = album_page_view(&library, &spotify_library, spotify_album());
+
+            assert_eq!(albums[0].in_library, saved_album);
+            assert_eq!(tracks[0].in_library, saved_track);
+            assert!(page.content_complete);
+            assert_eq!(page.saved_album, saved_album);
+            assert_eq!(page.tracks[0].saved_individually, saved_track);
+            assert!(!page.tracks[1].saved_individually);
+            assert_eq!(page.album_rating, Some(4));
+        }
     }
 
     #[test]
@@ -2993,7 +3275,7 @@ mod tests {
             },
         ];
 
-        mark_album_membership(&library, &mut albums);
+        mark_album_membership(&library, &SpotifyLibraryState::default(), &mut albums);
 
         assert!(!albums[0].in_library);
         assert!(!albums[1].in_library);
@@ -3004,7 +3286,7 @@ mod tests {
             "Sum 41",
             "All Killer No Filler",
         ));
-        mark_album_membership(&library, &mut albums);
+        mark_album_membership(&library, &SpotifyLibraryState::default(), &mut albums);
 
         assert!(albums[0].in_library);
     }
@@ -3041,7 +3323,7 @@ mod tests {
             },
         ];
 
-        mark_track_membership(&library, &mut tracks);
+        mark_track_membership(&library, &SpotifyLibraryState::default(), &mut tracks);
 
         assert!(tracks[0].in_library);
         assert!(!tracks[1].in_library);

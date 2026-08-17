@@ -12,6 +12,7 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `playlists.json` | Playlist metadata/content cache |
 | `cooldowns.json` | Typed Spotify endpoint cooldowns |
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
+| `spotify-library.json` | Account-scoped exact Spotify saved-track and saved-album membership |
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state; mode 0600 on Unix |
 | `dev-lastfm-session.json` | Development Last.fm session; mode 0600 on Unix |
@@ -36,7 +37,9 @@ so older token files remain readable. Release builds keep it inside encrypted
 boundary.
 Refreshing the Web API token preserves the playback credential. Playback
 rejection removes only this field, while explicit Spotify disconnect removes the
-whole token record. It is machine-specific and never belongs in backup/export.
+whole token record. Replacing the Web OAuth grant clears the playback credential
+because the new grant may belong to a different account. It is machine-specific
+and never belongs in backup/export.
 
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.
@@ -44,6 +47,16 @@ is disposable; library and settings files are not.
 The playlist cache retains Spotify display metadata for every fetched track,
 including disc/track numbers and album release date. Older caches deserialize
 with defaults and are refreshed once before snapshot-based fetch skipping resumes.
+
+`spotify-library.json` is separate from `library.json` and is not included in
+portable backup or restore. Its minimal shape is `SpotifyLibraryState`:
+`account_id`, `complete`, `saved_tracks` (track URI to optional `added_at`), and
+`saved_albums` (album URI to `SavedAlbumRecord`). Each saved album record stores
+`uri`, `name`, `artists`, `release_date`, `album_type`, `added_at`, and
+`track_uris`; artwork and popularity are deliberately omitted. It is written
+with the same temporary-file-and-rename atomic replacement as other app data.
+Missing or incomplete state is unknown and does not authorize destructive
+reconciliation until a complete sync establishes the exact account state.
 
 Column layout is UI state in `settings.json`: the Library has one order, width map,
 and hidden-column list. Playlists have independent metadata-column order, width,

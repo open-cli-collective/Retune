@@ -219,6 +219,11 @@ impl Library {
             track.kind = incoming.kind;
             track.bitrate_kbps = incoming.bitrate_kbps;
             track.release_date = incoming.release_date;
+            track.added_at = match (track.added_at, incoming.added_at) {
+                (Some(existing), Some(discovered)) => Some(existing.min(discovered)),
+                (None, discovered) => discovered,
+                (existing, None) => existing,
+            };
             if track.orig_cat.is_some() {
                 track.orig_cat = Some(incoming.cat);
             } else {
@@ -549,6 +554,27 @@ mod tests {
         assert_eq!(track.release_date.as_deref(), Some("2024-02-03"));
         assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
         assert_eq!(track.bitrate_kbps, Some(192));
+    }
+
+    #[test]
+    fn upsert_backfills_added_time_and_keeps_the_earliest_known_value() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+
+        let mut discovered = track("one", "Rock", "Artist", "Album");
+        discovered.added_at = Some(200);
+        library.upsert(discovered);
+        assert_eq!(library.get(id).unwrap().added_at, Some(200));
+
+        let mut earlier = track("one", "Rock", "Artist", "Album");
+        earlier.added_at = Some(100);
+        library.upsert(earlier);
+        assert_eq!(library.get(id).unwrap().added_at, Some(100));
+
+        let mut later = track("one", "Rock", "Artist", "Album");
+        later.added_at = Some(300);
+        library.upsert(later);
+        assert_eq!(library.get(id).unwrap().added_at, Some(100));
     }
 
     #[test]

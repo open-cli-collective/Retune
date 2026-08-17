@@ -94,7 +94,9 @@ export type AlbumPageView = {
   year: string | null
   imageUrl: string | null
   totalDurationSecs: number
-  inLibrary: boolean
+  savedAlbum: boolean
+  contentComplete: boolean
+  addedAt: number | null
   albumRating: number | null
   tracks: {
     uri: string
@@ -103,6 +105,7 @@ export type AlbumPageView = {
     durationSecs: number
     enabled: boolean
     trackId: number | null
+    savedIndividually: boolean
     rating: RatingView | null
   }[]
 }
