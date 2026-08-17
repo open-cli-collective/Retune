@@ -173,3 +173,7 @@ export function nextRemainingImportQueue(items: ImportQueueItem[], current: Impo
 export function importStatusLabel(status: QueueStatus): string {
   return status === 'ignored-album' ? 'ignored-album' : status === 'ignored-artist' ? 'ignored-artist' : status
 }
+
+export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {
+  return requestGeneration === currentGeneration
+}

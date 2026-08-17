@@ -72,6 +72,10 @@ atomic replacement helper and mode 0600 on Unix. Serialized sessions are capped
 at 100 MiB; corrupt or unknown versions are quarantined and never applied. This
 machine/account state is deliberately outside normal backup/restore, like
 `spotify-library.json` and the scrobble queue.
+Every session read-modify-write is serialized from its in-memory snapshot
+through JSON serialization, blocking atomic replacement, and the in-memory
+swap; suspended account-bound reads are redacted rather than exposing the
+previous owner.
 
 Column layout is UI state in `settings.json`: the Library has one order, width map,
 and hidden-column list. Playlists have independent metadata-column order, width,

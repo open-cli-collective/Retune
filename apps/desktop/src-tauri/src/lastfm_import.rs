@@ -693,6 +693,7 @@ pub(crate) fn apply_metadata(
     Ok(())
 }
 
+#[derive(Clone)]
 pub(crate) struct ImportSessionStore {
     path: PathBuf,
 }
@@ -777,30 +778,58 @@ impl Service {
     }
 
     pub(crate) async fn state(&self) -> ImportStateView {
-        state_view(self.session.lock().await.as_ref())
+        let session = self.session.lock().await;
+        match session.as_ref() {
+            Some(session) if session.phase == ImportPhase::Suspended => suspended_state_view(),
+            session => state_view(session),
+        }
     }
 
     async fn snapshot(&self) -> Option<LastFmImportSessionV1> {
         self.session.lock().await.clone()
     }
 
+    async fn persist(&self, session: LastFmImportSessionV1) -> Result<(), String> {
+        let store = self.store.clone();
+        tauri::async_runtime::spawn_blocking(move || store.save(&session))
+            .await
+            .map_err(|_| "Last.fm import persistence task stopped.".to_string())?
+    }
+
+    #[cfg(test)]
     async fn save(&self, session: LastFmImportSessionV1) -> Result<(), String> {
-        self.store.save(&session)?;
-        *self.session.lock().await = Some(session);
-        Ok(())
+        self.mutate_session(|_| Ok((Some(session), ()))).await
+    }
+
+    async fn mutate_session<R, F>(&self, mutation: F) -> Result<R, String>
+    where
+        F: FnOnce(
+            Option<LastFmImportSessionV1>,
+        ) -> Result<(Option<LastFmImportSessionV1>, R), String>,
+    {
+        let mut current = self.session.lock().await;
+        let (next, result) = mutation(current.clone())?;
+        if let Some(session) = next.as_ref() {
+            self.persist(session.clone()).await?;
+        }
+        *current = next;
+        Ok(result)
     }
 
     async fn suspend_for_account_mismatch(&self) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Ok(());
-        };
-        session.phase = ImportPhase::Suspended;
-        session.retryable_error = Some(RetryableError {
-            message: "This import belongs to a different Last.fm or Spotify account.".into(),
-            attempt: 0,
-            retryable: false,
-        });
-        self.save(session).await
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Ok((None, ()));
+            };
+            session.phase = ImportPhase::Suspended;
+            session.retryable_error = Some(RetryableError {
+                message: "This import is suspended because the connected account changed. Reconnect Last.fm and Spotify to resume.".into(),
+                attempt: 0,
+                retryable: false,
+            });
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     pub(crate) async fn start_or_resume(
@@ -813,41 +842,49 @@ impl Service {
         if let Some(defaults) = &defaults {
             defaults.validate()?;
         }
-        let current = self.snapshot().await;
-        let session = match current {
-            Some(mut session) => {
-                if session.lastfm_username != username
-                    || session.spotify_account_id != spotify_account_id
-                {
-                    self.suspend_for_account_mismatch().await?;
-                    return Err("The saved Last.fm import belongs to a different account; it is suspended for safety.".into());
-                }
-                if session.phase == ImportPhase::Suspended {
-                    session.phase = if session
-                        .total_pages
-                        .is_some_and(|total_pages| session.next_page > total_pages)
-                    {
-                        ImportPhase::Matching
-                    } else {
-                        ImportPhase::Downloading
-                    };
-                    session.retryable_error = None;
-                    self.save(session.clone()).await?;
-                }
-                session
-            }
-            None => {
-                let session = LastFmImportSessionV1::new_with_defaults(
-                    username.to_owned(),
-                    spotify_account_id.to_owned(),
-                    snapshot_to,
-                    defaults.unwrap_or_default(),
-                );
-                self.save(session.clone()).await?;
-                session
-            }
-        };
-        Ok(state_view(Some(&session)))
+        let result = self
+            .mutate_session(|current| {
+                let session = match current {
+                    Some(mut session) => {
+                        if session.lastfm_username != username
+                            || session.spotify_account_id != spotify_account_id
+                        {
+                            session.phase = ImportPhase::Suspended;
+                            session.retryable_error = Some(RetryableError {
+                                message: "This import is suspended because the connected account changed. Reconnect Last.fm and Spotify to resume.".into(),
+                                attempt: 0,
+                                retryable: false,
+                            });
+                            return Ok((
+                                Some(session),
+                                Err("The saved Last.fm import belongs to a different account; it is suspended for safety.".into()),
+                            ));
+                        }
+                        if session.phase == ImportPhase::Suspended {
+                            session.phase = if session
+                                .total_pages
+                                .is_some_and(|total_pages| session.next_page > total_pages)
+                            {
+                                ImportPhase::Matching
+                            } else {
+                                ImportPhase::Downloading
+                            };
+                            session.retryable_error = None;
+                        }
+                        session
+                    }
+                    None => LastFmImportSessionV1::new_with_defaults(
+                        username.to_owned(),
+                        spotify_account_id.to_owned(),
+                        snapshot_to,
+                        defaults.unwrap_or_default(),
+                    ),
+                };
+                let view = state_view(Some(&session));
+                Ok((Some(session), Ok(view)))
+            })
+            .await?;
+        result
     }
 
     async fn checkpoint_page(
@@ -855,65 +892,76 @@ impl Service {
         page: u32,
         parsed: &ParsedRecentTracksPage,
     ) -> Result<ImportStateView, String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        if session.phase != ImportPhase::Downloading {
-            return Ok(state_view(Some(&session)));
-        }
-        if parsed.page != page {
-            return Err(format!(
-                "Last.fm response was for page {}, expected page {page}.",
-                parsed.page
-            ));
-        }
-        if page < session.next_page {
-            return Ok(state_view(Some(&session)));
-        }
-        if page > session.next_page {
-            return Err("Last.fm import pages must be checkpointed sequentially.".into());
-        }
-        aggregate_scrobbles(&mut session.rows, &parsed.tracks);
-        session.total_pages = parsed.total_pages.or(session.total_pages);
-        session.total_scrobbles = parsed.total.unwrap_or(session.total_scrobbles);
-        session.included_scrobbles = session
-            .included_scrobbles
-            .saturating_add(parsed.tracks.len() as u64);
-        session.skipped_now_playing = session
-            .skipped_now_playing
-            .saturating_add(parsed.skipped_now_playing);
-        session.skipped_undated = session
-            .skipped_undated
-            .saturating_add(parsed.skipped_undated);
-        session.batches.push(ImportBatch {
-            page,
-            source_ids: parsed
-                .tracks
-                .iter()
-                .map(|track| source_id(&track.artist, &track.album, &track.track))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        });
-        session.next_page = page.saturating_add(1);
-        if session
-            .total_pages
-            .is_some_and(|total_pages| session.next_page > total_pages)
-            || (parsed.total_pages.is_none() && parsed.tracks.len() < LASTFM_PAGE_LIMIT as usize)
-        {
-            session.phase = ImportPhase::Matching;
-        }
-        session.retryable_error = None;
-        self.save(session.clone()).await?;
-        Ok(state_view(Some(&session)))
+        let result = self
+            .mutate_session(|current| {
+                let Some(mut session) = current else {
+                    return Err("No Last.fm import session is active.".into());
+                };
+                if session.phase != ImportPhase::Downloading {
+                    return Ok((Some(session.clone()), state_view(Some(&session))));
+                }
+                if parsed.page != page {
+                    return Err(format!(
+                        "Last.fm response was for page {}, expected page {page}.",
+                        parsed.page
+                    ));
+                }
+                if page < session.next_page {
+                    return Ok((Some(session.clone()), state_view(Some(&session))));
+                }
+                if page > session.next_page {
+                    return Err("Last.fm import pages must be checkpointed sequentially.".into());
+                }
+                aggregate_scrobbles(&mut session.rows, &parsed.tracks);
+                session.total_pages = parsed.total_pages.or(session.total_pages);
+                session.total_scrobbles = parsed.total.unwrap_or(session.total_scrobbles);
+                session.included_scrobbles = session
+                    .included_scrobbles
+                    .saturating_add(parsed.tracks.len() as u64);
+                session.skipped_now_playing = session
+                    .skipped_now_playing
+                    .saturating_add(parsed.skipped_now_playing);
+                session.skipped_undated = session
+                    .skipped_undated
+                    .saturating_add(parsed.skipped_undated);
+                session.batches.push(ImportBatch {
+                    page,
+                    source_ids: parsed
+                        .tracks
+                        .iter()
+                        .map(|track| source_id(&track.artist, &track.album, &track.track))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                });
+                session.next_page = page.saturating_add(1);
+                if session
+                    .total_pages
+                    .is_some_and(|total_pages| session.next_page > total_pages)
+                    || (parsed.total_pages.is_none()
+                        && parsed.tracks.len() < LASTFM_PAGE_LIMIT as usize)
+                {
+                    session.phase = ImportPhase::Matching;
+                }
+                session.retryable_error = None;
+                Ok((Some(session.clone()), state_view(Some(&session))))
+            })
+            .await?;
+        Ok(result)
     }
 
     async fn set_retryable_error(&self, error: RetryableError) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Ok(());
-        };
-        session.retryable_error = Some(error);
-        self.save(session).await
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Ok((None, ()));
+            };
+            if session.phase == ImportPhase::Suspended {
+                return Ok((Some(session), ()));
+            }
+            session.retryable_error = Some(error);
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     async fn set_match(&self, result: MatchResult) -> Result<(), String> {
@@ -921,55 +969,106 @@ impl Service {
     }
 
     async fn set_matches(&self, results: Vec<MatchResult>) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        for result in results {
-            session.matches.insert(result.source_id.clone(), result);
-        }
-        self.save(session).await
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.phase == ImportPhase::Suspended {
+                return Err("The Last.fm import is suspended for account safety.".into());
+            }
+            for result in results {
+                session.matches.insert(result.source_id.clone(), result);
+            }
+            Ok((Some(session), ()))
+        })
+        .await
+    }
+
+    async fn set_matches_during_matching(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        results: Vec<MatchResult>,
+    ) -> Result<(), String> {
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.phase != ImportPhase::Matching
+                || session.lastfm_username != username
+                || session.spotify_account_id != spotify_account_id
+            {
+                return Err("Last.fm matching stopped because the connected account or import phase changed.".into());
+            }
+            for result in results {
+                session.matches.insert(result.source_id.clone(), result);
+            }
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     async fn set_count_mode(&self, target_uri: &str, mode: CountMode) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        let current = session
-            .count_modes
-            .get(target_uri)
-            .copied()
-            .unwrap_or(CountMode::Sum);
-        if current == mode {
-            return Ok(());
-        }
-        if locked_count_modes(&session).contains(target_uri) {
-            return Err("This Spotify target's play-count strategy is locked after import.".into());
-        }
-        session.count_modes.insert(target_uri.to_owned(), mode);
-        self.save(session).await
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            let current = session
+                .count_modes
+                .get(target_uri)
+                .copied()
+                .unwrap_or(CountMode::Sum);
+            if current != mode && locked_count_modes(&session).contains(target_uri) {
+                return Err(
+                    "This Spotify target's play-count strategy is locked after import.".into(),
+                );
+            }
+            session.count_modes.insert(target_uri.to_owned(), mode);
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     async fn set_search_terms(&self, search_terms: bool) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        session.search_terms = search_terms;
-        self.save(session).await
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            session.search_terms = search_terms;
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
-    async fn finish_matching(&self) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Ok(());
-        };
-        session.phase = ImportPhase::Review;
-        session.retryable_error = None;
-        self.save(session).await
+    async fn finish_matching_if_current(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+    ) -> Result<(), String> {
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Ok((None, ()));
+            };
+            if session.phase != ImportPhase::Matching
+                || session.lastfm_username != username
+                || session.spotify_account_id != spotify_account_id
+            {
+                return Err("Last.fm matching stopped because the connected account or import phase changed.".into());
+            }
+            session.phase = ImportPhase::Review;
+            session.retryable_error = None;
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     pub(crate) async fn queue(&self) -> Vec<ImportQueueItem> {
         let Some(session) = self.snapshot().await else {
             return Vec::new();
         };
+        if session.phase == ImportPhase::Suspended {
+            return Vec::new();
+        }
         let mut grouped = BTreeMap::<(String, String), Vec<&SourceRow>>::new();
         for row in &session.rows {
             grouped
@@ -1039,6 +1138,9 @@ impl Service {
 
     pub(crate) async fn page(&self, artist: &str, album: &str) -> Option<ImportPageView> {
         let session = self.snapshot().await?;
+        if session.phase == ImportPhase::Suspended {
+            return None;
+        }
         let pages = session
             .rows
             .iter()
@@ -1110,13 +1212,16 @@ impl Service {
         options: PageOptions,
     ) -> Result<(), String> {
         options.validate()?;
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        session
-            .page_options
-            .insert(format!("{artist}\u{1f}{album}"), options);
-        self.save(session).await
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            session
+                .page_options
+                .insert(format!("{artist}\u{1f}{album}"), options);
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     async fn review_action(
@@ -1126,35 +1231,38 @@ impl Service {
         artist: &str,
         album: &str,
     ) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        match action {
-            "exclude" | "undo-exclude" => {
-                exclude_row(&mut session, id, action == "exclude");
-            }
-            "ignore-album" => ignore_album(&mut session, artist, album),
-            "ignore-artist" => ignore_artist(&mut session, artist),
-            "skip-album" => skip_album(&mut session, artist, album),
-            "restore" => {
-                let ids = session
-                    .rows
-                    .iter()
-                    .filter(|row| {
-                        row.artist == artist
-                            && row.album == album
-                            && is_actionable(&session, &row.stable_id)
-                    })
-                    .map(|row| row.stable_id.clone())
-                    .collect::<Vec<_>>();
-                for id in ids {
-                    session.decisions.insert(id, RowDecision::default());
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            match action {
+                "exclude" | "undo-exclude" => {
+                    exclude_row(&mut session, id, action == "exclude");
                 }
+                "ignore-album" => ignore_album(&mut session, artist, album),
+                "ignore-artist" => ignore_artist(&mut session, artist),
+                "skip-album" => skip_album(&mut session, artist, album),
+                "restore" => {
+                    let ids = session
+                        .rows
+                        .iter()
+                        .filter(|row| {
+                            row.artist == artist
+                                && row.album == album
+                                && is_actionable(&session, &row.stable_id)
+                        })
+                        .map(|row| row.stable_id.clone())
+                        .collect::<Vec<_>>();
+                    for id in ids {
+                        session.decisions.insert(id, RowDecision::default());
+                    }
+                }
+                _ => return Err("Unknown Last.fm import review action.".into()),
             }
-            _ => return Err("Unknown Last.fm import review action.".into()),
-        }
-        update_review_phase(&mut session);
-        self.save(session).await
+            update_review_phase(&mut session);
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     async fn commit_rows(
@@ -1164,89 +1272,98 @@ impl Service {
         album: &str,
         options: PageOptions,
     ) -> Result<ImportStateView, String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        session
-            .page_options
-            .insert(format!("{artist}\u{1f}{album}"), options);
-        for id in ids {
-            session.decisions.insert(
-                id.clone(),
-                RowDecision {
-                    status: RowStatus::Done,
-                    excluded: false,
-                },
-            );
-        }
-        if session.remaining() == 0 {
-            session.phase = ImportPhase::Done;
-        }
-        self.save(session.clone()).await?;
-        Ok(state_view(Some(&session)))
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            session
+                .page_options
+                .insert(format!("{artist}\u{1f}{album}"), options);
+            for id in ids {
+                session.decisions.insert(
+                    id.clone(),
+                    RowDecision {
+                        status: RowStatus::Done,
+                        excluded: false,
+                    },
+                );
+            }
+            if session.remaining() == 0 {
+                session.phase = ImportPhase::Done;
+            }
+            let view = state_view(Some(&session));
+            Ok((Some(session), view))
+        })
+        .await
     }
 
     async fn select_match(&self, source_id: &str, uri: &str) -> Result<(), String> {
-        let Some(mut session) = self.snapshot().await else {
-            return Err("No Last.fm import session is active.".into());
-        };
-        let Some((row_artist, row_album)) = session
-            .rows
-            .iter()
-            .find(|row| row.stable_id == source_id)
-            .map(|row| (row.artist.clone(), row.album.clone()))
-        else {
-            return Err("Unknown Last.fm import source row.".into());
-        };
-        let Some(candidate) = session
-            .matches
-            .get(source_id)
-            .and_then(|result| {
-                result
-                    .candidates
-                    .iter()
-                    .find(|candidate| candidate.uri == uri)
-            })
-            .cloned()
-        else {
-            return Err("This source row has no Spotify candidates.".into());
-        };
-        if candidate.relation.is_none() && !candidate.uri.starts_with("spotify:track:") {
-            return Err("That Spotify match is not supported by the source track set.".into());
-        }
-        if candidate.uri.starts_with("spotify:album:") {
-            let related = session
-                .rows
-                .iter()
-                .filter(|row| row.artist == row_artist && row.album == row_album)
-                .map(|row| (row.stable_id.clone(), row.track.clone()))
-                .collect::<Vec<_>>();
-            for (id, track) in related {
-                let Some(result) = session.matches.get_mut(&id) else {
-                    continue;
-                };
-                let Some(candidate) = result
-                    .candidates
-                    .iter()
-                    .find(|candidate| candidate.uri == uri)
-                    .cloned()
-                else {
-                    continue;
-                };
-                update_selected_match(result, &id, &track, &candidate);
+        self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.phase == ImportPhase::Suspended {
+                return Err("The Last.fm import is suspended for account safety.".into());
             }
-        } else {
-            let row_track = session
+            let Some((row_artist, row_album)) = session
                 .rows
                 .iter()
                 .find(|row| row.stable_id == source_id)
-                .map(|row| row.track.clone())
-                .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
-            if let Some(result) = session.matches.get_mut(source_id) {
-                update_selected_match(result, source_id, &row_track, &candidate);
+                .map(|row| (row.artist.clone(), row.album.clone()))
+            else {
+                return Err("Unknown Last.fm import source row.".into());
+            };
+            let Some(candidate) = session
+                .matches
+                .get(source_id)
+                .and_then(|result| {
+                    result
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.uri == uri)
+                })
+                .cloned()
+            else {
+                return Err("This source row has no Spotify candidates.".into());
+            };
+            if candidate.relation.is_none() && !candidate.uri.starts_with("spotify:track:") {
+                return Err("That Spotify match is not supported by the source track set.".into());
             }
-        }
-        self.save(session).await
+            if candidate.uri.starts_with("spotify:album:") {
+                let related = session
+                    .rows
+                    .iter()
+                    .filter(|row| row.artist == row_artist && row.album == row_album)
+                    .map(|row| (row.stable_id.clone(), row.track.clone()))
+                    .collect::<Vec<_>>();
+                for (id, track) in related {
+                    let Some(result) = session.matches.get_mut(&id) else {
+                        continue;
+                    };
+                    let Some(candidate) = result
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.uri == uri)
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    update_selected_match(result, &id, &track, &candidate);
+                }
+            } else {
+                let row_track = session
+                    .rows
+                    .iter()
+                    .find(|row| row.stable_id == source_id)
+                    .map(|row| row.track.clone())
+                    .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
+                if let Some(result) = session.matches.get_mut(source_id) {
+                    update_selected_match(result, source_id, &row_track, &candidate);
+                }
+            }
+            Ok((Some(session), ()))
+        })
+        .await
     }
 
     fn claim_runner(&self) -> bool {
@@ -1288,6 +1405,28 @@ fn state_view(session: Option<&LastFmImportSessionV1>) -> ImportStateView {
     }
 }
 
+fn suspended_state_view() -> ImportStateView {
+    ImportStateView {
+        phase: Some(ImportPhase::Suspended),
+        username: None,
+        spotify_account_id: None,
+        next_page: 1,
+        total_pages: None,
+        total_scrobbles: 0,
+        included_scrobbles: 0,
+        matched_rows: 0,
+        match_total: 0,
+        defaults: ImportDefaults::default(),
+        remaining: 0,
+        retryable_error: Some(RetryableError {
+            message: "This import is suspended because the connected account changed. Reconnect Last.fm and Spotify to resume.".into(),
+            attempt: 0,
+            retryable: false,
+        }),
+        search_terms: true,
+    }
+}
+
 async fn connected_accounts(app: &tauri::AppHandle) -> Result<(String, String), String> {
     let state = app.state::<crate::AppState>();
     let _membership_guard = state.spotify_library_gate.lock().await;
@@ -1295,18 +1434,30 @@ async fn connected_accounts(app: &tauri::AppHandle) -> Result<(String, String), 
 }
 
 async fn connected_accounts_locked(state: &crate::AppState) -> Result<(String, String), String> {
+    if !crate::stored_connection_state(&state.token_store)?.connected {
+        return Err("Connect Spotify before importing its library.".into());
+    }
     let username = state
         .lastfm
         .state()
         .await
         .username
         .ok_or_else(|| "Connect Last.fm before importing its history.".to_string())?;
-    let provider = crate::provider_from(state)?;
-    let spotify_account_id = provider
-        .me()
-        .await
-        .map_err(|error| format!("Could not identify the connected Spotify account: {error}"))?
-        .id;
+    let cached_library = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    let spotify_account_id = if cached_library.is_exact() {
+        cached_library.account_id
+    } else {
+        let provider = crate::provider_from(state)?;
+        provider
+            .me()
+            .await
+            .map_err(|error| format!("Could not identify the connected Spotify account: {error}"))?
+            .id
+    };
     Ok((username, spotify_account_id))
 }
 
@@ -1335,6 +1486,32 @@ async fn assert_current_account_locked(
         );
     }
     Ok((username, spotify_account_id))
+}
+
+async fn ensure_import_readable(app: &tauri::AppHandle, service: &Service) -> Result<bool, String> {
+    let Some(session) = service.snapshot().await else {
+        return Ok(true);
+    };
+    if session.phase == ImportPhase::Suspended {
+        return Ok(false);
+    }
+    let state = app.state::<crate::AppState>();
+    let current = {
+        let _membership_guard = state.spotify_library_gate.lock().await;
+        connected_accounts_locked(&state).await
+    };
+    match current {
+        Ok((username, spotify_account_id))
+            if username == session.lastfm_username
+                && spotify_account_id == session.spotify_account_id =>
+        {
+            Ok(true)
+        }
+        Ok(_) | Err(_) => {
+            service.suspend_for_account_mismatch().await?;
+            Ok(false)
+        }
+    }
 }
 
 async fn emit_import_changed(
@@ -1438,7 +1615,7 @@ async fn run_import(
                     }
                 }
                 ImportPhase::Matching => {
-                    run_matching(&app, &service, &spotify_account_id).await?;
+                    run_matching(&app, &service, &username, &spotify_account_id).await?;
                 }
                 ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended => break,
             }
@@ -1514,14 +1691,31 @@ fn candidate_rank(relation: Option<AlbumRelation>) -> u8 {
     }
 }
 
+async fn checkpoint_matching(
+    app: &tauri::AppHandle,
+    service: &Service,
+    username: &str,
+    spotify_account_id: &str,
+    results: Vec<MatchResult>,
+) -> Result<(), String> {
+    let (current_username, current_account_id) = assert_current_account(app, service).await?;
+    if current_username != username || current_account_id != spotify_account_id {
+        return Err("The connected account changed during matching.".into());
+    }
+    service
+        .set_matches_during_matching(username, spotify_account_id, results)
+        .await
+}
+
 async fn run_matching(
     app: &tauri::AppHandle,
     service: &Service,
+    username: &str,
     spotify_account_id: &str,
 ) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
-    let (_, current_account_id) = assert_current_account(app, service).await?;
-    if current_account_id != spotify_account_id {
+    let (current_username, current_account_id) = assert_current_account(app, service).await?;
+    if current_username != username || current_account_id != spotify_account_id {
         return Err("The connected Spotify account changed during matching.".into());
     }
     let Some(session) = service.snapshot().await else {
@@ -1579,16 +1773,21 @@ async fn run_matching(
                 if let Some(uri) = selected_uri.clone() {
                     track_matches.insert(row.stable_id.clone(), uri);
                 }
-                service
-                    .set_match(MatchResult {
+                checkpoint_matching(
+                    app,
+                    service,
+                    username,
+                    spotify_account_id,
+                    vec![MatchResult {
                         source_id: row.stable_id,
                         search_term,
                         confidence,
                         selected_uri,
                         candidates,
                         track_matches,
-                    })
-                    .await?;
+                    }],
+                )
+                .await?;
                 let _ = app.emit("lastfm-import-changed", service.state().await);
             }
             continue;
@@ -1648,10 +1847,16 @@ async fn run_matching(
                 track_matches: track_matches.clone(),
             })
             .collect();
-        service.set_matches(matches).await?;
+        checkpoint_matching(app, service, username, spotify_account_id, matches).await?;
         let _ = app.emit("lastfm-import-changed", service.state().await);
     }
-    service.finish_matching().await
+    let (final_username, final_account_id) = assert_current_account(app, service).await?;
+    if final_username != username || final_account_id != spotify_account_id {
+        return Err("The connected account changed before matching completed.".into());
+    }
+    service
+        .finish_matching_if_current(username, spotify_account_id)
+        .await
 }
 
 fn matched_track_uri(result: &MatchResult, source_id: &str) -> Option<String> {
@@ -2028,26 +2233,34 @@ pub(crate) async fn open_lastfm_importer(app: tauri::AppHandle) -> Result<(), St
 }
 
 #[tauri::command]
-pub(crate) async fn lastfm_import_state(
-    state: tauri::State<'_, crate::AppState>,
-) -> Result<ImportStateView, String> {
-    Ok(state.lastfm_import.state().await)
+pub(crate) async fn lastfm_import_state(app: tauri::AppHandle) -> Result<ImportStateView, String> {
+    let service = &app.state::<crate::AppState>().lastfm_import;
+    let _ = ensure_import_readable(&app, service.as_ref()).await?;
+    Ok(service.state().await)
 }
 
 #[tauri::command]
 pub(crate) async fn lastfm_import_queue(
-    state: tauri::State<'_, crate::AppState>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<ImportQueueItem>, String> {
-    Ok(state.lastfm_import.queue().await)
+    let service = &app.state::<crate::AppState>().lastfm_import;
+    if !ensure_import_readable(&app, service.as_ref()).await? {
+        return Ok(Vec::new());
+    }
+    Ok(service.queue().await)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_page(
-    state: tauri::State<'_, crate::AppState>,
+    app: tauri::AppHandle,
     artist: String,
     album: String,
 ) -> Result<Option<ImportPageView>, String> {
-    Ok(state.lastfm_import.page(&artist, &album).await)
+    let service = &app.state::<crate::AppState>().lastfm_import;
+    if !ensure_import_readable(&app, service.as_ref()).await? {
+        return Ok(None);
+    }
+    Ok(service.page(&artist, &album).await)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3348,6 +3561,110 @@ mod tests {
         assert!(!service.state().await.search_terms);
         let resumed = Service::new(dir.path());
         assert!(!resumed.state().await.search_terms);
+    }
+
+    #[tokio::test]
+    async fn overlapping_mutations_preserve_memory_and_disk_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", "spotify-user", 500, None)
+            .await
+            .unwrap();
+        let (search_terms, count_mode) = tokio::join!(
+            service.set_search_terms(false),
+            service.set_count_mode("spotify:track:target", CountMode::Overwrite),
+        );
+        search_terms.unwrap();
+        count_mode.unwrap();
+        let current = service.snapshot().await.unwrap();
+        assert!(!current.search_terms);
+        assert_eq!(
+            current.count_modes.get("spotify:track:target"),
+            Some(&CountMode::Overwrite)
+        );
+        let resumed = Service::new(dir.path());
+        let persisted = resumed.snapshot().await.unwrap();
+        assert!(!persisted.search_terms);
+        assert_eq!(
+            persisted.count_modes.get("spotify:track:target"),
+            Some(&CountMode::Overwrite)
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_checkpoint_and_finalization_cannot_write_through_suspension() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", "spotify-user", 500, None)
+            .await
+            .unwrap();
+        service
+            .checkpoint_page(
+                1,
+                &ParsedRecentTracksPage {
+                    page: 1,
+                    total_pages: Some(1),
+                    tracks: vec![scrobble("Artist", "Album", "Track", 10)],
+                    ..ParsedRecentTracksPage::default()
+                },
+            )
+            .await
+            .unwrap();
+        service.suspend_for_account_mismatch().await.unwrap();
+        let result = service
+            .set_matches_during_matching(
+                "lastfm-user",
+                "spotify-user",
+                vec![MatchResult {
+                    source_id: "artist\u{1f}album\u{1f}track".into(),
+                    search_term: "track search".into(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some("spotify:track:target".into()),
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::new(),
+                }],
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(service
+            .finish_matching_if_current("lastfm-user", "spotify-user")
+            .await
+            .is_err());
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.phase, ImportPhase::Suspended);
+        assert!(session.matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn suspended_reads_are_redacted_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("prior-user", "prior-spotify", 500, None)
+            .await
+            .unwrap();
+        service
+            .checkpoint_page(
+                1,
+                &ParsedRecentTracksPage {
+                    page: 1,
+                    total_pages: Some(1),
+                    tracks: vec![scrobble("Prior Artist", "Prior Album", "Track", 10)],
+                    ..ParsedRecentTracksPage::default()
+                },
+            )
+            .await
+            .unwrap();
+        service.suspend_for_account_mismatch().await.unwrap();
+        let state = service.state().await;
+        assert_eq!(state.phase, Some(ImportPhase::Suspended));
+        assert_eq!(state.username, None);
+        assert_eq!(state.spotify_account_id, None);
+        assert_eq!(state.remaining, 0);
+        assert!(service.queue().await.is_empty());
+        assert!(service.page("Prior Artist", "Prior Album").await.is_none());
     }
 
     #[tokio::test]

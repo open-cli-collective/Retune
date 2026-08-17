@@ -90,6 +90,10 @@ Whole-album acceptance sends one album URI to Spotify and updates
 and metadata mutation, and a durable decision is marked done only after that
 mutation succeeds. The session is bound to both the Last.fm username and
 Spotify `/me` account ID; a mismatch suspends it.
+The importer serializes each session mutation through durable replacement before
+updating memory, and matching rechecks the expected account and phase at every
+durable checkpoint and before entering review. Suspended state exposes no prior
+account identity or queue.
 
 ## Cross-cutting rules
 

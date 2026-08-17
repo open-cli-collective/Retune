@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, Settings } from './types.ts'
-import { excludedImportCount, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { excludedImportCount, isCurrentImportPageResponse, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
@@ -290,10 +290,12 @@ export default function LastFmImporter() {
   const [error, setError] = useState<string>()
   const [acceptAllOpen, setAcceptAllOpen] = useState(false)
   const [pendingDefaults, setPendingDefaults] = useState<LastFmImportDefaults>(emptyDefaults)
+  const pageRequestGeneration = useRef(0)
   const orderedQueue = useMemo(() => sortImportQueue(queue, sort), [queue, sort])
   const selectedArtist = selected?.artist
   const selectedAlbum = selected?.album
   const refresh = useCallback(async (): Promise<ImportQueueItem[]> => {
+    const requestGeneration = ++pageRequestGeneration.current
     try {
       const [nextState, nextQueue] = await Promise.all([invoke<ImportStateView>('lastfm_import_state'), invoke<ImportQueueItem[]>('lastfm_import_queue')])
       setState(nextState)
@@ -305,13 +307,17 @@ export default function LastFmImporter() {
       const target = current ?? ((nextState.phase === 'review' || nextState.phase === 'done') ? firstRemaining : undefined)
       if (target) {
         if (target.artist !== selectedArtist || target.album !== selectedAlbum) setSelected(target)
-        setPage(pageWithQueuePosition(await invoke<PageView | null>('lastfm_import_page', { artist: target.artist, album: target.album }), nextQueue, sort))
-      } else if (nextState.phase !== 'review' && nextState.phase !== 'done') {
+        const nextPage = await invoke<PageView | null>('lastfm_import_page', { artist: target.artist, album: target.album })
+        if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setPage(pageWithQueuePosition(nextPage, nextQueue, sort))
+      } else if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current) && nextState.phase !== 'review' && nextState.phase !== 'done') {
         setSelected(null)
         setPage(null)
       }
       return nextQueue
-    } catch (reason) { setError(String(reason)); return [] }
+    } catch (reason) {
+      if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setError(String(reason))
+      return []
+    }
   }, [selectedArtist, selectedAlbum, sort])
   useEffect(() => {
     void refresh()
@@ -337,8 +343,14 @@ export default function LastFmImporter() {
     try { await invoke('start_lastfm_import', { defaults: pendingDefaults }); await refresh() } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
   }
   const openQueueItem = async (item: ImportQueueItem, queueSnapshot = queue) => {
+    const requestGeneration = ++pageRequestGeneration.current
     setSelected(item)
-    try { setPage(pageWithQueuePosition(await invoke<PageView | null>('lastfm_import_page', { artist: item.artist, album: item.album }), queueSnapshot, sort)) } catch (reason) { setError(String(reason)) }
+    try {
+      const nextPage = await invoke<PageView | null>('lastfm_import_page', { artist: item.artist, album: item.album })
+      if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setPage(pageWithQueuePosition(nextPage, queueSnapshot, sort))
+    } catch (reason) {
+      if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setError(String(reason))
+    }
   }
   const nextQueueItem = (queueSnapshot = queue) => {
     const next = nextRemainingImportQueue(queueSnapshot, selected, sort)
