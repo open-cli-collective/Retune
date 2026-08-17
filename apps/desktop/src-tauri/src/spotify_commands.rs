@@ -7,12 +7,7 @@ fn album_library_uris(uri: &str) -> Vec<String> {
     vec![uri.to_owned()]
 }
 
-fn web_oauth_tokens(
-    access: String,
-    refresh: String,
-    expires_at: u64,
-    scopes: String,
-) -> Tokens {
+fn web_oauth_tokens(access: String, refresh: String, expires_at: u64, scopes: String) -> Tokens {
     Tokens {
         access,
         refresh,
@@ -661,8 +656,8 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        playback_credentials, replace_spotify_library_state, web_oauth_tokens, FsSyncStore,
-        Mutex, SpotifyLibraryState,
+        playback_credentials, replace_spotify_library_state, web_oauth_tokens, FsSyncStore, Mutex,
+        SpotifyLibraryState,
     };
 
     #[test]
@@ -675,12 +670,7 @@ mod tests {
             ..SpotifyLibraryState::default()
         });
 
-        replace_spotify_library_state(
-            &store,
-            &current,
-            SpotifyLibraryState::default(),
-        )
-        .unwrap();
+        replace_spotify_library_state(&store, &current, SpotifyLibraryState::default()).unwrap();
 
         assert!(!current.lock().unwrap().is_exact());
         assert!(!store.spotify_library().unwrap().is_exact());

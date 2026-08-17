@@ -507,7 +507,9 @@ impl<'a> SyncHealth<'a> {
     fn mark_skipped(&self, skipped: usize, section: &str) {
         if skipped > 0 {
             self.partial.store(true, Ordering::Relaxed);
-            log::warn!("Spotify library snapshot is partial: skipped {skipped} undecodable {section}");
+            log::warn!(
+                "Spotify library snapshot is partial: skipped {skipped} undecodable {section}"
+            );
         }
     }
 }
@@ -1479,7 +1481,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            tracks.iter().map(|track| track.uri.as_str()).collect::<Vec<_>>(),
+            tracks
+                .iter()
+                .map(|track| track.uri.as_str())
+                .collect::<Vec<_>>(),
             ["spotify:track:1", "spotify:track:2"]
         );
         assert!(client.transport().requests()[1]
