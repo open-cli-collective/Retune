@@ -1555,7 +1555,10 @@ impl Service {
         Ok(result)
     }
 
-    async fn aggregate_cached(&self) -> Result<ImportStateView, String> {
+    async fn aggregate_cached(
+        &self,
+        lastfm: Option<&crate::lastfm::Service>,
+    ) -> Result<ImportStateView, String> {
         let Some(session) = self.snapshot().await else {
             return Err("No Last.fm import session is active.".into());
         };
@@ -1581,8 +1584,8 @@ impl Service {
                 return Err(error);
             }
         };
-        let result = self
-            .mutate_session(|current| {
+        let commit = || async {
+            self.mutate_session(|current| {
                 let Some(mut current) = current else {
                     return Err("No Last.fm import session is active.".into());
                 };
@@ -1600,7 +1603,21 @@ impl Service {
                 current.retryable_error = None;
                 Ok((Some(current.clone()), state_view(Some(&current))))
             })
-            .await?;
+            .await
+        };
+        let result = match lastfm {
+            Some(lastfm) => match lastfm
+                .with_import_owner(&session.lastfm_username, commit)
+                .await?
+            {
+                Some(result) => result,
+                None => {
+                    self.suspend_for_account_mismatch().await?;
+                    return Ok(self.state().await);
+                }
+            },
+            None => commit().await?,
+        };
         self.store.remove_snapshot(&session.cache_id);
         Ok(result)
     }
@@ -1728,79 +1745,6 @@ impl Service {
         .await
     }
 
-    pub(crate) async fn queue(&self) -> Vec<ImportQueueItem> {
-        let Some(session) = self.snapshot().await else {
-            return Vec::new();
-        };
-        if session.phase == ImportPhase::Suspended {
-            return Vec::new();
-        }
-        let rows_by_id = source_row_map(&session);
-        review_batches(&session)
-            .into_iter()
-            .filter_map(|batch| {
-                let rows = batch_rows(&batch, &rows_by_id);
-                let first = rows.first()?;
-                let artist = first.artist.clone();
-                let album = first.album.clone();
-                let options = session.options_for_batch(batch.page, &artist, &album);
-                let remaining = rows.iter().any(|row| {
-                    let decision = default_decision(&session, &row.stable_id);
-                    matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
-                        && !decision.excluded
-                });
-                let selected = rows
-                    .iter()
-                    .filter(|row| {
-                        let decision = default_decision(&session, &row.stable_id);
-                        options.selected_track_ids.contains(&row.stable_id)
-                            && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
-                            && !decision.excluded
-                    })
-                    .collect::<Vec<_>>();
-                let mut album_entities = 0;
-                let mut track_uris = BTreeSet::new();
-                if options.import_content {
-                    if options.whole_album {
-                        album_entities = selected
-                            .iter()
-                            .filter_map(|row| session.matches.get(&row.stable_id))
-                            .filter_map(|result| {
-                                result.selected_uri.as_deref().or_else(|| {
-                                    best_candidate(result).map(|candidate| candidate.uri.as_str())
-                                })
-                            })
-                            .any(|uri| uri.starts_with("spotify:album:"))
-                            as u32;
-                    } else {
-                        for row in &selected {
-                            if let Some(result) = session.matches.get(&row.stable_id) {
-                                if let Some(uri) = matched_track_uri_for_row(result, row) {
-                                    track_uris.insert(uri);
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(ImportQueueItem {
-                    page: batch.page,
-                    artist,
-                    album,
-                    play_count: rows
-                        .iter()
-                        .map(|row| row.play_count)
-                        .fold(0, u64::saturating_add),
-                    latest: rows.iter().map(|row| row.latest).max().unwrap_or_default(),
-                    source_count: batch.source_ids.len(),
-                    remaining,
-                    album_entities,
-                    track_entities: track_uris.len() as u32,
-                    status: queue_status(&session, &rows),
-                })
-            })
-            .collect()
-    }
-
     pub(crate) async fn queue_page(
         &self,
         cursor: usize,
@@ -1811,14 +1755,43 @@ impl Service {
                 "Last.fm import queue limit must be between 1 and {LASTFM_QUEUE_PAGE_LIMIT}."
             ));
         }
-        let queue = self.queue().await;
-        let total = queue.len();
+        let Some(session) = self.snapshot().await else {
+            return Ok(ImportQueuePage {
+                items: Vec::new(),
+                cursor,
+                next_cursor: None,
+                total: 0,
+            });
+        };
+        if session.phase == ImportPhase::Suspended {
+            return Ok(ImportQueuePage {
+                items: Vec::new(),
+                cursor,
+                next_cursor: None,
+                total: 0,
+            });
+        }
+        let rows_by_id = source_row_map(&session);
+        let mut items = Vec::with_capacity(limit);
+        let mut total = 0;
+        for batch in review_batches(&session) {
+            let rows = batch_rows(&batch, &rows_by_id);
+            if rows.is_empty() {
+                continue;
+            }
+            if total >= cursor && items.len() < limit {
+                if let Some(item) = queue_item(&session, &batch, &rows) {
+                    items.push(item);
+                }
+            }
+            total += 1;
+        }
         if cursor > total {
             return Err("Last.fm import queue cursor is out of range.".into());
         }
-        let end = cursor.saturating_add(limit).min(total);
+        let end = cursor.saturating_add(items.len()).min(total);
         Ok(ImportQueuePage {
-            items: queue.into_iter().skip(cursor).take(end - cursor).collect(),
+            items,
             cursor,
             next_cursor: (end < total).then_some(end),
             total,
@@ -1881,6 +1854,17 @@ impl Service {
         }
         fuzzy_groups
             .retain(|_, rows| rows.len() > 1 || rows.iter().any(|row| row.variants.len() > 1));
+        let visible_targets = fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>();
+        let count_modes = session
+            .count_modes
+            .iter()
+            .filter(|(target, _)| visible_targets.contains(*target))
+            .map(|(target, mode)| (target.clone(), *mode))
+            .collect();
+        let locked_count_modes = locked_count_modes(&session)
+            .into_iter()
+            .filter(|target| visible_targets.contains(target))
+            .collect();
         Some(ImportPageView {
             state: state_view(Some(&session)),
             batch_id,
@@ -1891,8 +1875,8 @@ impl Service {
             rows: items,
             options,
             fuzzy_groups,
-            count_modes: session.count_modes.clone(),
-            locked_count_modes: locked_count_modes(&session),
+            count_modes,
+            locked_count_modes,
         })
     }
 
@@ -2367,10 +2351,31 @@ async fn emit_import_changed(
     app: &tauri::AppHandle,
     service: &Service,
 ) -> Result<ImportStateView, String> {
-    let view = service.state().await;
-    app.emit("lastfm-import-changed", &view)
-        .map_err(|error| error.to_string())?;
-    Ok(view)
+    let Some(session) = service.snapshot().await else {
+        let view = service.state().await;
+        app.emit("lastfm-import-changed", &view)
+            .map_err(|error| error.to_string())?;
+        return Ok(view);
+    };
+    let lastfm = Arc::clone(&app.state::<crate::AppState>().lastfm);
+    match lastfm
+        .with_import_owner(&session.lastfm_username, || async {
+            let view = service.state().await;
+            app.emit("lastfm-import-changed", &view)
+                .map_err(|error| error.to_string())?;
+            Ok(view)
+        })
+        .await?
+    {
+        Some(view) => Ok(view),
+        None => {
+            service.suspend_for_account_mismatch().await?;
+            let view = service.state().await;
+            app.emit("lastfm-import-changed", &view)
+                .map_err(|error| error.to_string())?;
+            Ok(view)
+        }
+    }
 }
 
 async fn start_import(
@@ -2518,7 +2523,7 @@ async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: Stri
                                 .await?;
                         }
                         SourceRunnerStep::Aggregate => {
-                            service.aggregate_cached().await?;
+                            service.aggregate_cached(Some(lastfm.as_ref())).await?;
                         }
                         SourceRunnerStep::Page(page) => {
                             let payload = fetch_import_page_with_retry(
@@ -2545,10 +2550,11 @@ async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: Stri
                             service.checkpoint_page(page, &parsed).await?;
                         }
                     }
-                    let _ = app.emit("lastfm-import-changed", service.state().await);
+                    let _ = emit_import_changed(&app, &service).await;
                 }
                 ImportPhase::Aggregating => {
-                    service.aggregate_cached().await?;
+                    let lastfm = Arc::clone(&app.state::<crate::AppState>().lastfm);
+                    service.aggregate_cached(Some(lastfm.as_ref())).await?;
                 }
                 ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended => break,
             }
@@ -2566,7 +2572,7 @@ async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: Stri
             .await;
     }
     service.release_runner();
-    let _ = app.emit("lastfm-import-changed", service.state().await);
+    let _ = emit_import_changed(&app, &service).await;
 }
 
 async fn fetch_import_page_with_retry(
@@ -3890,6 +3896,69 @@ fn locked_count_modes(session: &LastFmImportSessionV2) -> BTreeSet<String> {
         .collect()
 }
 
+fn queue_item(
+    session: &LastFmImportSessionV2,
+    batch: &ImportBatch,
+    rows: &[&SourceRow],
+) -> Option<ImportQueueItem> {
+    let first = rows.first()?;
+    let artist = first.artist.clone();
+    let album = first.album.clone();
+    let options = session.options_for_batch(batch.page, &artist, &album);
+    let remaining = rows.iter().any(|row| {
+        let decision = default_decision(session, &row.stable_id);
+        matches!(decision.status, RowStatus::Pending | RowStatus::Skipped) && !decision.excluded
+    });
+    let selected = rows
+        .iter()
+        .filter(|row| {
+            let decision = default_decision(session, &row.stable_id);
+            options.selected_track_ids.contains(&row.stable_id)
+                && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
+                && !decision.excluded
+        })
+        .collect::<Vec<_>>();
+    let mut album_entities = 0;
+    let mut track_uris = BTreeSet::new();
+    if options.import_content {
+        if options.whole_album {
+            album_entities = selected
+                .iter()
+                .filter_map(|row| session.matches.get(&row.stable_id))
+                .filter_map(|result| {
+                    result
+                        .selected_uri
+                        .as_deref()
+                        .or_else(|| best_candidate(result).map(|candidate| candidate.uri.as_str()))
+                })
+                .any(|uri| uri.starts_with("spotify:album:")) as u32;
+        } else {
+            for row in &selected {
+                if let Some(result) = session.matches.get(&row.stable_id) {
+                    if let Some(uri) = matched_track_uri_for_row(result, row) {
+                        track_uris.insert(uri);
+                    }
+                }
+            }
+        }
+    }
+    Some(ImportQueueItem {
+        page: batch.page,
+        artist,
+        album,
+        play_count: rows
+            .iter()
+            .map(|row| row.play_count)
+            .fold(0, u64::saturating_add),
+        latest: rows.iter().map(|row| row.latest).max().unwrap_or_default(),
+        source_count: batch.source_ids.len(),
+        remaining,
+        album_entities,
+        track_entities: track_uris.len() as u32,
+        status: queue_status(session, rows),
+    })
+}
+
 fn queue_status(session: &LastFmImportSessionV2, rows: &[&SourceRow]) -> Option<QueueStatus> {
     if rows
         .iter()
@@ -4430,7 +4499,7 @@ mod tests {
             )
             .await
             .unwrap();
-        review_service.aggregate_cached().await.unwrap();
+        review_service.aggregate_cached(None).await.unwrap();
         review_service.suspend_for_account_mismatch().await.unwrap();
         assert_eq!(
             Service::new(review_dir.path())
@@ -4483,7 +4552,7 @@ mod tests {
             )
             .await
             .unwrap();
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let source_id = service.snapshot().await.unwrap().rows[0].stable_id.clone();
         service
             .set_match(
@@ -4542,7 +4611,7 @@ mod tests {
         assert_eq!(complete.phase, ImportPhase::Aggregating);
         assert_eq!(complete.downloaded_pages, 2);
         assert!(complete.rows.is_empty());
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let review = service.snapshot().await.unwrap();
         assert_eq!(review.phase, ImportPhase::Review);
         assert_eq!(
@@ -4569,7 +4638,7 @@ mod tests {
             .await
             .unwrap();
 
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
 
         let session = service.snapshot().await.unwrap();
         assert_eq!(session.phase, ImportPhase::Done);
@@ -4605,7 +4674,7 @@ mod tests {
         let session = service.snapshot().await.unwrap();
         assert_eq!(session.included_scrobbles, 1);
         assert_eq!(session.phase, ImportPhase::Aggregating);
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let session = service.snapshot().await.unwrap();
         assert_eq!(session.rows.len(), 1);
         assert_eq!(session.rows[0].track, "Before");
@@ -5342,7 +5411,104 @@ mod tests {
             BTreeSet::from(["Selected"])
         );
         assert!(!page.fuzzy_groups.contains_key(&target));
-        assert!(page.locked_count_modes.contains(&target));
+        assert!(!page.locked_count_modes.contains(&target));
+    }
+
+    #[tokio::test]
+    async fn page_projects_count_modes_to_visible_fuzzy_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[
+                scrobble("Artist", "Hidden", "Track", 1),
+                scrobble("Artist", "Visible", "Track", 2),
+                scrobble("Artist", "Visible", "Track (Live)", 3),
+            ],
+        );
+        let visible_ids = session
+            .rows
+            .iter()
+            .filter(|row| row.album == "Visible")
+            .map(|row| row.stable_id.clone())
+            .collect::<Vec<_>>();
+        let hidden_id = session
+            .rows
+            .iter()
+            .find(|row| row.album == "Hidden")
+            .unwrap()
+            .stable_id
+            .clone();
+        let visible_target = "spotify:track:visible".to_owned();
+        let hidden_target = "spotify:track:hidden".to_owned();
+        for (source_id, target) in visible_ids
+            .iter()
+            .map(|id| (id, &visible_target))
+            .chain(std::iter::once((&hidden_id, &hidden_target)))
+        {
+            session.matches.insert(
+                source_id.clone(),
+                MatchResult {
+                    source_id: source_id.clone(),
+                    search_term: String::new(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some(target.clone()),
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::from([(source_id.clone(), target.clone())]),
+                },
+            );
+        }
+        session.decisions.insert(
+            visible_ids[0].clone(),
+            RowDecision {
+                status: RowStatus::Done,
+                excluded: false,
+            },
+        );
+        session.decisions.insert(
+            hidden_id,
+            RowDecision {
+                status: RowStatus::Done,
+                excluded: false,
+            },
+        );
+        session
+            .count_modes
+            .insert(visible_target.clone(), CountMode::Overwrite);
+        session.count_modes.insert(hidden_target, CountMode::Zero);
+        session.page_options.insert(
+            "Artist\u{1f}Visible".into(),
+            PageOptions {
+                selected_track_ids: visible_ids.iter().cloned().collect(),
+                ..PageOptions::default()
+            },
+        );
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+
+        let session = service.snapshot().await.unwrap();
+        let visible_page = review_batches(&session)
+            .into_iter()
+            .find(|batch| {
+                batch_rows(batch, &source_row_map(&session))
+                    .iter()
+                    .any(|row| row.album == "Visible")
+            })
+            .unwrap();
+        let page = service
+            .page(visible_page.page, "Artist", "Visible")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([visible_target.clone()])
+        );
+        assert_eq!(
+            page.count_modes,
+            BTreeMap::from([(visible_target.clone(), CountMode::Overwrite)])
+        );
+        assert_eq!(page.locked_count_modes, BTreeSet::from([visible_target]));
     }
 
     #[tokio::test]
@@ -5897,7 +6063,7 @@ mod tests {
             )
             .await
             .unwrap();
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let mut session = service.snapshot().await.unwrap();
         session.phase = ImportPhase::Review;
         service.save(session.clone()).await.unwrap();
@@ -5948,7 +6114,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert_eq!(queue.len(), 3);
         assert!(queue
             .iter()
@@ -5966,7 +6136,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert!(queue
             .iter()
             .all(|item| item.status.is_none() && item.remaining));
@@ -5983,7 +6157,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert!(queue
             .iter()
             .all(|item| item.status == Some(QueueStatus::Skipped) && item.remaining));
@@ -6142,7 +6320,7 @@ mod tests {
             .checkpoint_page(1, &parsed_page(1, 2, Vec::new()))
             .await
             .unwrap();
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let resumed = Service::new(dir.path());
         let session = resumed.snapshot().await.unwrap();
         assert_eq!(session.next_page, 0);
@@ -6300,7 +6478,12 @@ mod tests {
         assert_eq!(state.username, None);
         assert_eq!(state.spotify_account_id, None);
         assert_eq!(state.remaining, 0);
-        assert!(service.queue().await.is_empty());
+        assert!(service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items
+            .is_empty());
         assert!(service
             .page(1, "Prior Artist", "Prior Album")
             .await
@@ -6326,7 +6509,7 @@ mod tests {
             ],
         );
         service.checkpoint_page(1, &duplicate_page).await.unwrap();
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let session = service.snapshot().await.unwrap();
         assert_eq!(session.batches[0].source_ids.len(), 1);
         assert_eq!(session.next_page, 0);
@@ -6348,7 +6531,7 @@ mod tests {
             ..ParsedRecentTracksPage::default()
         };
         service.checkpoint_page(1, &parsed).await.unwrap();
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();
@@ -6383,7 +6566,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert_eq!((queue[0].album_entities, queue[0].track_entities), (0, 2));
 
         service
@@ -6401,7 +6588,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert_eq!((queue[0].album_entities, queue[0].track_entities), (1, 0));
 
         let selected_track_ids = rows
@@ -6423,7 +6614,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert_eq!((queue[0].album_entities, queue[0].track_entities), (0, 2));
 
         service
@@ -6441,7 +6636,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let queue = service.queue().await;
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .items;
         assert_eq!((queue[0].album_entities, queue[0].track_entities), (0, 0));
     }
 
@@ -6460,7 +6659,7 @@ mod tests {
             ..ParsedRecentTracksPage::default()
         };
         service.checkpoint_page(1, &parsed).await.unwrap();
-        service.aggregate_cached().await.unwrap();
+        service.aggregate_cached(None).await.unwrap();
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();

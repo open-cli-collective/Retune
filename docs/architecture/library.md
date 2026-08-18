@@ -70,7 +70,9 @@ and the cache is best-effort deleted. A saved Downloading or Aggregating session
 is claimed and resumed once by the Tauri shell after Last.fm hydration using its
 stored username and cutoff; Downloading remains Last.fm-only, while Aggregating
 also verifies the live Last.fm username before claiming the runner and suspends
-with redacted state on mismatch. React only observes that work. An empty state
+with redacted state on mismatch. The owner is revalidated and held through the
+aggregation transition and emitted state, so a connected-account change cannot
+expose the completed snapshot. React only observes that work. An empty state
 does not create one.
 
 Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.

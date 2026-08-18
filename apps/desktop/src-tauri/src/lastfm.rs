@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -686,6 +687,28 @@ impl Service {
             reconnect_required: available && runtime.reconnect_required,
             problem,
         }
+    }
+
+    pub(crate) async fn with_import_owner<F, Fut, T>(
+        &self,
+        username: &str,
+        operation: F,
+    ) -> Result<Option<T>, String>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<T, String>> + Send,
+        T: Send,
+    {
+        let _runtime = self.runtime.lock().await;
+        if _runtime
+            .session
+            .as_ref()
+            .map(|session| session.username.as_str())
+            != Some(username)
+        {
+            return Ok(None);
+        }
+        Ok(Some(operation().await?))
     }
 
     pub(crate) async fn set_enabled(self: &Arc<Self>, enabled: bool) {
@@ -1657,6 +1680,31 @@ mod tests {
         assert!(credentials_from(Some(""), Some("secret")).is_none());
         assert!(credentials_from(Some("key"), Some(" ")).is_none());
         assert!(credentials_from(Some(" key "), Some(" secret ")).is_some());
+    }
+
+    #[tokio::test]
+    async fn import_owner_guard_rejects_a_different_connected_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path(), true, true);
+        service.runtime.lock().await.session = Some(LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        });
+
+        assert_eq!(
+            service
+                .with_import_owner("user", || async { Ok::<_, String>(7) })
+                .await
+                .unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            service
+                .with_import_owner("other", || async { Ok::<_, String>(7) })
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
