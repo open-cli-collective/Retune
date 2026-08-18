@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "enables the default permissions",
+  "identifier": "lastfm-importer",
+  "description": "Permissions for the Last.fm importer window",
   "windows": [
-    "main"
+    "lastfm-importer"
   ],
   "permissions": [
     "core:default",

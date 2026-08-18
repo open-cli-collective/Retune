@@ -221,7 +221,7 @@ fn write_secret_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
     atomic_write(path, &bytes, true)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], secret: bool) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8], secret: bool) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "Last.fm store path has no parent.".to_string())?;
@@ -348,6 +348,13 @@ enum Failure {
     Http(u16),
     Api(u32),
     Response,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportFetchError {
+    pub message: String,
+    pub retryable: bool,
+    pub account_mismatch: bool,
 }
 
 impl Failure {
@@ -869,6 +876,66 @@ impl Service {
                 .problem
                 .unwrap_or_else(|| "Last.fm is unavailable in this build.".into()))
         }
+    }
+
+    pub(crate) async fn import_recent_tracks_page(
+        &self,
+        username: &str,
+        page: u32,
+        to: u64,
+    ) -> Result<Value, ImportFetchError> {
+        if let Err(message) = self.ensure_available().await {
+            return Err(ImportFetchError {
+                message,
+                retryable: false,
+                account_mismatch: false,
+            });
+        }
+        let connected_username = self
+            .runtime
+            .lock()
+            .await
+            .session
+            .as_ref()
+            .map(|session| session.username.clone());
+        if connected_username.as_deref() != Some(username) {
+            return Err(ImportFetchError {
+                message:
+                    "The connected Last.fm account changed; resume the importer after reconnecting."
+                        .into(),
+                retryable: false,
+                account_mismatch: true,
+            });
+        }
+        let params = vec![
+            ("user".into(), username.into()),
+            ("page".into(), page.to_string()),
+            (
+                "limit".into(),
+                crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
+            ),
+            ("to".into(), to.to_string()),
+        ];
+        for attempt in 0..=RETRY_DELAYS.len() {
+            match self
+                .post("user.getRecentTracks", params.clone(), None)
+                .await
+            {
+                Ok(value) => return Ok(value),
+                Err(failure) if is_retryable(failure) && attempt < RETRY_DELAYS.len() => {
+                    tokio::time::sleep(retry_delay(attempt)).await;
+                }
+                Err(failure) => {
+                    let retryable = is_retryable(failure);
+                    return Err(ImportFetchError {
+                        message: self.handle_failure(failure).await,
+                        retryable,
+                        account_mismatch: false,
+                    });
+                }
+            }
+        }
+        unreachable!("the Last.fm import retry loop always returns")
     }
 
     async fn send_now_playing(&self, scrobble: Scrobble) {

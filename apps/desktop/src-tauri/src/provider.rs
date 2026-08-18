@@ -1045,6 +1045,46 @@ pub async fn search<T: Transport, S: TokenStore>(
     })
 }
 
+pub async fn search_albums<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+) -> Result<SearchGroup<SearchAlbum>, String> {
+    let results = SpotifyClient::search_with_types(client, query, "album", 0, SEARCH_PAGE_SIZE)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(search_group(results.albums, 0, search_album))
+}
+
+pub async fn search_tracks<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+) -> Result<SearchGroup<SearchTrack>, String> {
+    let results = SpotifyClient::search_with_types(client, query, "track", 0, SEARCH_PAGE_SIZE)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(search_group(results.tracks, 0, |track| SearchTrack {
+        uri: track.uri,
+        name: track.name,
+        artist: track
+            .artists
+            .first()
+            .map(|artist| artist.name.clone())
+            .unwrap_or_default(),
+        alb: track
+            .album
+            .as_ref()
+            .map(|album| album.name.clone())
+            .unwrap_or_default(),
+        duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+        image_url: track
+            .album
+            .as_ref()
+            .and_then(|album| image_url(&album.images)),
+        album_uri: track.album.map(|album| album.uri),
+        in_library: false,
+    }))
+}
+
 pub async fn album_tracks<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     album: &str,

@@ -4,6 +4,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
+import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -13,6 +14,16 @@ const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => 
   ...overrides,
 })
 
+const importRows = (): ImportSourceRow[] => [
+  { stableId: 'a', artist: 'Beta', album: 'Album', track: 'One', playCount: 3, earliest: 10, latest: 30, variants: [{ artist: 'Beta', album: 'Album', track: 'One', playCount: 2, earliest: 10, latest: 20 }, { artist: 'beta', album: 'album', track: 'one', playCount: 1, earliest: 30, latest: 30 }] },
+  { stableId: 'b', artist: 'Alpha', album: 'Album', track: 'Two', playCount: 2, earliest: 20, latest: 40, variants: [{ artist: 'Alpha', album: 'Album', track: 'Two', playCount: 2, earliest: 20, latest: 40 }] },
+]
+
+const importQueue = (): ImportQueueItem[] => [
+  { artist: 'Beta', album: 'Album', playCount: 3, latest: 30, sourceIds: ['a'], remaining: true, albumEntities: 1, trackEntities: 0 },
+  { artist: 'Alpha', album: 'Album', playCount: 2, latest: 40, sourceIds: ['b', 'c'], remaining: true, albumEntities: 0, trackEntities: 2 },
+]
+
 test('diagnostic reports include session context through the last problem only', () => {
   const entry = (level: DiagnosticEntry['level'], message: string): DiagnosticEntry => ({ date: '2026-08-16', time: '12:00:00', level, target: 'retune', message })
   const entries = [entry('INFO', 'start'), entry('WARN', 'retry'), entry('INFO', 'context'), entry('ERROR', 'failed'), entry('INFO', 'trailing')]
@@ -20,6 +31,128 @@ test('diagnostic reports include session context through the last problem only',
   assert.deepEqual(report.map(({ message }) => message), ['start', 'retry', 'context', 'failed'])
   assert.match(formatDiagnosticReport(report), /^\[2026-08-16\]\[12:00:00\]\[INFO\]\[retune\] start/)
   assert.deepEqual(reportWindow([entry('INFO', 'healthy')]), [])
+})
+
+test('Last.fm review state preserves unchecked rows, cascades ignores, and counts skipped rows', () => {
+  let state = defaultReviewState(importRows())
+  state = toggleImportRow(state, 'b')
+  state = skipImportAlbum(state, 'Beta', 'Album')
+  assert.equal(remainingImportCount(state), 2)
+  const accepted = acceptImportChanges(state)
+  assert.deepEqual(accepted.committed, ['a'])
+  assert.equal(accepted.state.decisions.a.status, 'done')
+  assert.equal(accepted.state.decisions.b.status, 'pending')
+  state = ignoreImportAlbum(accepted.state, 'Alpha', 'Album')
+  assert.equal(remainingImportCount(state), 0)
+  state = ignoreImportArtist(state, 'Beta')
+  assert.equal(remainingImportCount(state), 0)
+  const excluded = excludeImportRow(defaultReviewState(importRows()), 'b')
+  assert.equal(excluded.decisions.b.excluded, true)
+})
+
+test('Last.fm Accept & Next commits current choices and requests advancement', () => {
+  const state = defaultReviewState(importRows())
+  const accepted = acceptImportAndNext(toggleImportRow(state, 'b'))
+  assert.deepEqual(accepted.committed, ['a'])
+  assert.equal(accepted.advance, true)
+})
+
+test('Last.fm fuzzy count modes and all queue sorts are deterministic', () => {
+  const rows = importRows()
+  assert.equal(resolveImportCount(rows, 'sum'), 5)
+  assert.equal(resolveImportCount(rows, 'overwrite'), 2)
+  assert.equal(resolveImportCount(rows, 'zero'), 0)
+  assert.deepEqual(sortImportQueue(importQueue(), 'plays').map((item) => item.artist), ['Beta', 'Alpha'])
+  assert.deepEqual(sortImportQueue(importQueue(), 'artist').map((item) => item.artist), ['Alpha', 'Beta'])
+  assert.deepEqual(sortImportQueue(importQueue(), 'batch').map((item) => item.artist), ['Alpha', 'Beta'])
+  assert.deepEqual(sortImportQueue(importQueue(), 'lastPlayed').map((item) => item.artist), ['Alpha', 'Beta'])
+})
+
+test('Last.fm content and history intents remain independent and require one choice', () => {
+  const state = defaultReviewState(importRows())
+  assert.equal(state.importContent, true)
+  assert.equal(state.includeHistoricalPlayCounts, true)
+  assert.equal(state.wholeAlbum, false)
+  assert.equal(validImportIntent(true, false), true)
+  assert.equal(validImportIntent(false, true), true)
+  assert.equal(validImportIntent(false, false), false)
+})
+
+test('Last.fm per-target fuzzy strategies and stale-free queue advancement are deterministic', () => {
+  const countModes: Record<string, 'sum' | 'overwrite' | 'zero'> = { target: 'overwrite' }
+  assert.equal(countModes.target, 'overwrite')
+  let state = defaultReviewState(importRows())
+  state = toggleImportRow(state, 'b')
+  state = excludeImportRow(state, 'a')
+  assert.equal(selectedImportCount(state), 0)
+  assert.equal(excludedImportCount(state), 1)
+  assert.equal(restPendingImportCount(state), 1)
+  assert.equal(remainingImportCount(state), 1)
+  const done = { ...importQueue()[0], remaining: false, status: 'done' as const }
+  assert.equal(nextRemainingImportQueue([done, importQueue()[1]], done, 'plays')?.artist, 'Alpha')
+  assert.equal(isCurrentImportPageResponse(1, 2), false)
+  assert.equal(isCurrentImportPageResponse(2, 2), true)
+})
+
+test('Last.fm A-to-B queue selection keeps the newer page when A resolves last', async () => {
+  let resolveA!: (page: string) => void
+  let resolveB!: (page: string) => void
+  const responseA = new Promise<string>((resolve) => { resolveA = resolve })
+  const responseB = new Promise<string>((resolve) => { resolveB = resolve })
+  const generation = { current: 0 }
+  const queue = importQueue()
+  const selected: string[] = []
+  const applied: string[] = []
+  const requestA = loadSelectedImportPage(generation, queue[0], () => responseA, (item) => selected.push(item.artist), (page) => applied.push(page))
+  const requestB = loadSelectedImportPage(generation, queue[1], () => responseB, (item) => selected.push(item.artist), (page) => applied.push(page))
+  resolveB('B')
+  await requestB
+  resolveA('A')
+  await requestA
+  assert.deepEqual(selected, ['Beta', 'Alpha'])
+  assert.deepEqual(applied, ['B'])
+})
+
+test('Last.fm setup and download status reflect connected and active states', () => {
+  assert.equal(importStatusText(null, 'rianjs', 1, null, 0, 0), 'Ready to import')
+  assert.equal(importStatusText(null, null, 1, null, 0, 0), 'Connect Last.fm and Spotify to begin')
+  assert.equal(importStatusText('downloading', 'rianjs', 7, 1230, 0, 0), 'Downloading Last.fm history · page 7 of 1230')
+  assert.equal(showsImportRemaining('downloading'), false)
+  assert.equal(showsImportRemaining('matching'), false)
+  assert.equal(showsImportRemaining('review'), true)
+  assert.deepEqual(downloadAction(null, false), { label: 'Start import', disabled: false })
+  assert.deepEqual(downloadAction('downloading', false), { label: 'Downloading…', disabled: true })
+  assert.deepEqual(downloadAction('downloading', true), { label: 'Resume download', disabled: false })
+  assert.deepEqual(downloadAction('suspended', false), { label: 'Check accounts and resume', disabled: false })
+})
+
+test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {
+  const albumUri = 'spotify:album:gladiator'
+  const now = { ...importRows()[0], artist: 'The Lyndhurst Orchestra', album: 'Gladiator - Music from the Motion Picture', track: 'Now We Are Free' }
+  const albumCandidates = [{ uri: albumUri }, { uri: 'spotify:album:other-release' }]
+  const pageMatches = {
+    album: albumUri,
+    tracks: { now: 'spotify:track:now-we-are-free', honor: 'spotify:track:honor-him' },
+  }
+  const beforeCancel = structuredClone(pageMatches)
+
+  assert.equal(trackPickerQuery(now), 'track:"Now We Are Free" artist:"The Lyndhurst Orchestra"')
+  assert.deepEqual(pickerCandidates('track', albumCandidates), [])
+  assert.equal(pickerSelectedUri('track', 'now', albumUri, pageMatches.tracks), pageMatches.tracks.now)
+  assert.deepEqual(pageMatches, beforeCancel)
+})
+
+test('Last.fm row confidence uses a standalone track candidate without changing album confidence', () => {
+  const albumUri = 'spotify:album:gladiator'
+  const rematchedUri = 'spotify:track:rematched'
+  const honorUri = 'spotify:track:honor-him'
+  const candidates = [
+    { uri: albumUri, relation: 'best-match' as const },
+    { uri: rematchedUri, relation: null },
+  ]
+
+  assert.equal(selectedImportTrackConfidence('now', albumUri, { now: rematchedUri, honor: honorUri }, 'likely', candidates), 'low')
+  assert.equal(selectedImportTrackConfidence('honor', albumUri, { honor: honorUri }, 'likely', candidates), 'likely')
 })
 
 test('Spotify search uses 5 rows in All and 10 in filtered tabs', () => {

@@ -13,6 +13,7 @@ desktop application shell
    ├── retune-spotify    OAuth, Web API, normalization
    ├── retune-audio      local-file scan, tags, decoding
    ├── playback          controller + Spotify/file backends
+   ├── lastfm_import     account-bound snapshot, matching, review, and apply boundary
    └── store             app-data persistence
 ```
 
@@ -38,6 +39,10 @@ shell owns orchestration and persistence. Domain crates do not depend on Tauri.
 - The playback controller owns the canonical queue, active order, generation,
   and user-facing playback state.
 - React owns view selection, navigation, dialog state, and transient gestures.
+- `lastfm_import` owns the resumable Last.fm snapshot, compact source variants,
+  Spotify matching results, review decisions, and account-bound application.
+  Its parsing and review helpers do not add network or filesystem concerns to
+  `retune-core`.
 
 ## Principal flows
 
@@ -60,6 +65,35 @@ updated.
 The controller selects the local-file engine or configured Spotify backend for
 the current URI. Backends emit neutral events; one reducer rejects stale events,
 updates state, advances the queue, and records threshold-based play counts.
+
+### Last.fm import
+
+The Preferences action opens a second `lastfm-importer` WebviewWindow at
+1320×840. The importer captures one fixed Last.fm `to` timestamp, fetches
+`user.getRecentTracks` sequentially at 200 rows per page, skips now-playing and
+undated rows, and atomically checkpoints compact aggregate variants plus the
+next page. Its session defaults independently control content and historical
+play counts (both on by default, with whole-album content mode off); at least
+one remains selected. Matching then runs sequentially through the shared
+Spotify client; album candidates are limited to ten and classified from real
+track-set overlap without monopolizing the membership gate.
+
+Fuzzy count strategies are persisted once per Spotify track target for the
+session, and the review page discloses every source row in the session that
+resolves to that target. “Show Spotify search terms” is likewise one persisted
+session preference, restored when the importer resumes rather than copied into
+each page’s options.
+
+Whole-album acceptance sends one album URI to Spotify and updates
+`SavedAlbumRecord`; selected-track acceptance sends only track URIs and updates
+`saved_tracks`. Upstream membership completes before the atomic local history
+and metadata mutation, and a durable decision is marked done only after that
+mutation succeeds. The session is bound to both the Last.fm username and
+Spotify `/me` account ID; a mismatch suspends it.
+The importer serializes each session mutation through durable replacement before
+updating memory, and matching rechecks the expected account and phase at every
+durable checkpoint and before entering review. Suspended state exposes no prior
+account identity or queue.
 
 ## Cross-cutting rules
 

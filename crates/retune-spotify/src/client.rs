@@ -528,11 +528,22 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn search(&self, query: &str, offset: u32, limit: u32) -> Result<SearchResults> {
+        self.search_with_types(query, "artist,album,track", offset, limit)
+            .await
+    }
+
+    pub async fn search_with_types(
+        &self,
+        query: &str,
+        types: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<SearchResults> {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", query)
-            .append_pair("type", "artist,album,track")
+            .append_pair("type", types)
             .append_pair("offset", &offset.to_string())
-            .append_pair("limit", &limit.to_string())
+            .append_pair("limit", &limit.min(10).to_string())
             .finish();
         self.get(&format!("/search?{query}")).await
     }
@@ -952,6 +963,17 @@ pub struct Page<T> {
     pub total: u32,
 }
 
+impl<T> Default for Page<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            next: None,
+            skipped: 0,
+            total: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -1244,8 +1266,11 @@ pub struct Chapter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SearchResults {
+    #[serde(default)]
     pub artists: Page<Artist>,
+    #[serde(default)]
     pub albums: Page<Album>,
+    #[serde(default)]
     pub tracks: Page<Track>,
 }
 
@@ -1359,6 +1384,73 @@ mod tests {
             format!("{API_BASE}/me/tracks?offset=20&limit=10")
         );
         assert_eq!(requests[0].headers["authorization"], "Bearer old");
+    }
+
+    #[tokio::test]
+    async fn type_restricted_search_accepts_omitted_result_groups() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "albums": {
+                            "items": [{
+                                "id": "album-id",
+                                "uri": "spotify:album:album-id",
+                                "name": "Parasite (acoustic)",
+                                "artists": [{"id": "artist-id", "name": "Dead by April"}]
+                            }],
+                            "next": null,
+                            "total": 1
+                        }
+                    }),
+                ),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "tracks": {
+                            "items": [{
+                                "uri": "spotify:track:track-id",
+                                "name": "Parasite",
+                                "artists": [{"id": "artist-id", "name": "Dead by April"}],
+                                "album": {
+                                    "id": "album-id",
+                                    "uri": "spotify:album:album-id",
+                                    "name": "Parasite (acoustic)"
+                                }
+                            }],
+                            "next": null,
+                            "total": 1
+                        }
+                    }),
+                ),
+            ]),
+            tokens(),
+        );
+
+        let albums = client
+            .search_with_types("album query", "album", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(albums.albums.items[0].uri, "spotify:album:album-id");
+        assert_eq!(albums.albums.items[0].artists[0].name, "Dead by April");
+        assert!(albums.artists.items.is_empty());
+        assert!(albums.tracks.items.is_empty());
+
+        let tracks = client
+            .search_with_types("track query", "track", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(tracks.tracks.items[0].uri, "spotify:track:track-id");
+        assert_eq!(tracks.tracks.items[0].name, "Parasite");
+        assert_eq!(tracks.tracks.items[0].artists[0].name, "Dead by April");
+        assert!(tracks.artists.items.is_empty());
+        assert!(tracks.albums.items.is_empty());
+
+        let requests = client.transport().requests();
+        assert!(requests[0].url.contains("type=album"));
+        assert!(requests[1].url.contains("type=track"));
     }
 
     #[tokio::test]

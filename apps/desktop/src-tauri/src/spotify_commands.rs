@@ -389,22 +389,42 @@ pub(super) async fn add_spotify_album(
     name: String,
     artist: String,
 ) -> Result<(), String> {
-    album_id(&uri).ok_or_else(|| "Expected a Spotify album URI".to_string())?;
     let state = app.state::<AppState>();
     let _membership_guard = state.spotify_library_gate.lock().await;
     let provider = provider_from(&state)?;
-    let added_at = unix_now();
-    let (album, mut tracks) =
-        provider::album_content(provider.as_ref(), &uri, Some(added_at)).await?;
+    save_album_operation(&state, provider.as_ref(), &uri, &name, &artist, unix_now()).await?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) struct AlbumSaveResult {
+    pub album_uri: String,
+    pub track_uris: Vec<String>,
+}
+
+/// Saves one album entity upstream and mirrors its content locally. The
+/// caller holds `spotify_library_gate`; replaying this operation is safe
+/// because Spotify's library PUT is idempotent and local upsert deduplicates.
+pub(crate) async fn save_album_operation(
+    state: &AppState,
+    provider: &SpotifyProvider,
+    uri: &str,
+    name: &str,
+    artist: &str,
+    added_at: u64,
+) -> Result<AlbumSaveResult, String> {
+    album_id(uri).ok_or_else(|| "Expected a Spotify album URI".to_string())?;
+    let (album, mut tracks) = provider::album_content(provider, uri, Some(added_at)).await?;
     for track in &mut tracks {
         if track.alb.is_empty() {
-            track.alb.clone_from(&name);
+            track.alb = name.to_owned();
         }
         if track.art.is_empty() {
-            track.art.clone_from(&artist);
+            track.art = artist.to_owned();
         }
     }
-    let album_record = saved_album_record(&album, album_track_uris(&album), Some(added_at));
+    let track_uris = album_track_uris(&album);
+    let album_record = saved_album_record(&album, track_uris.clone(), Some(added_at));
     let album_uris = album_library_uris(&album.uri);
     let current = state
         .spotify_library
@@ -427,7 +447,7 @@ pub(super) async fn add_spotify_album(
             .lock()
             .expect("Spotify library mutex poisoned") = next;
     }
-    mutate_library(&state, |library| {
+    mutate_library(state, |library| {
         for track in tracks {
             if spotify_track_match(library, &track).is_none_or(|existing| existing.uri == track.uri)
             {
@@ -436,8 +456,10 @@ pub(super) async fn add_spotify_album(
         }
         Ok(())
     })?;
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())
+    Ok(AlbumSaveResult {
+        album_uri: album.uri,
+        track_uris,
+    })
 }
 
 #[tauri::command]
@@ -506,6 +528,21 @@ pub(super) async fn add_spotify_tracks(
 ) -> Result<Vec<u64>, String> {
     let state = app.state::<AppState>();
     let _membership_guard = state.spotify_library_gate.lock().await;
+    let provider = provider_from(&state)?;
+    let ids = save_tracks_operation(&state, provider.as_ref(), uris, unix_now()).await?;
+    app.emit("library-changed", ())
+        .map_err(|error| error.to_string())?;
+    Ok(ids)
+}
+
+/// Saves only track entities upstream and mirrors those tracks locally. The
+/// caller holds `spotify_library_gate`; no album URI is synthesized here.
+pub(crate) async fn save_tracks_operation(
+    state: &AppState,
+    provider: &SpotifyProvider,
+    uris: Vec<String>,
+    added_at: u64,
+) -> Result<Vec<u64>, String> {
     let mut seen = HashSet::new();
     let uris = uris
         .into_iter()
@@ -514,7 +551,6 @@ pub(super) async fn add_spotify_tracks(
     if uris.iter().any(|uri| track_id(uri).is_none()) {
         return Err("Expected Spotify track URIs".into());
     }
-    let added_at = unix_now();
     let mut ids = vec![];
     let requested_uris = uris.clone();
     if requested_uris.is_empty() {
@@ -533,7 +569,6 @@ pub(super) async fn add_spotify_tracks(
             },
         );
     }
-    let provider = provider_from(&state)?;
     let mut tracks = Vec::with_capacity(missing_uris.len());
     for uri in &missing_uris {
         let track = provider
@@ -579,14 +614,12 @@ pub(super) async fn add_spotify_tracks(
             .lock()
             .expect("Spotify library mutex poisoned") = next;
     }
-    ids.extend(mutate_library(&state, |library| {
+    ids.extend(mutate_library(state, |library| {
         Ok(tracks
             .into_iter()
             .map(|track| library.upsert(track).0)
             .collect::<Vec<_>>())
     })?);
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())?;
     Ok(ids)
 }
 

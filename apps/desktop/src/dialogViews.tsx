@@ -233,12 +233,13 @@ function BugPreferences() {
   </>
 }
 
-export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSave }: {
+export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onImport, onSave }: {
   settings: Settings
   lastfm: LastFmState
   onZoom: (zoom: number) => void
   onCancel: () => void
   onLastfm: (state: LastFmState) => void
+  onImport: () => void
   onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio' | 'bug'
@@ -323,6 +324,7 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onSa
                   <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect</button>
                 </div>
                 <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Sent once a track passes Last.fm's listening threshold.</small></span></label>
+                <button type="button" className="lastfm-pill primary" onClick={onImport}>Import / Resume</button>
               </> : <div className="lastfm-status-row">
                 <span className={`lastfm-status-dot${lastfm.pending ? ' pending' : ''}`} aria-hidden="true" />
                 <span className="lastfm-status-copy muted">

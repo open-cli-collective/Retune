@@ -1,5 +1,5 @@
 import { LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, selectionAfterFacet } from './ui.ts'
-import type { BrowseView, BrowserPanes, ConnectionState, ImportSummary, InfoDialog, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults } from './types.ts'
+import type { BrowseView, BrowserPanes, ConnectionState, ImportSummary, InfoDialog, LastFmImportState, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults } from './types.ts'
 
 const emptyTracks: PlaybackTrack[] = []
 
@@ -26,6 +26,7 @@ export type State = {
   playbackAuthorization: PlaybackAuthorizationPrompt | null
   connection: ConnectionState
   lastfm: LastFmState
+  lastfmImport: LastFmImportState
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
   spotifyNavigation?: SpotifyNavEntry
@@ -65,6 +66,7 @@ export type Action =
   | { type: 'playbackAuthorization'; prompt: PlaybackAuthorizationPrompt | null }
   | { type: 'connection'; connection: ConnectionState }
   | { type: 'lastfm'; lastfm: LastFmState }
+  | { type: 'lastfmImport'; lastfmImport: LastFmImportState }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
   | { type: 'spotifyNavigate'; entry: SpotifyNavEntry }
@@ -126,6 +128,7 @@ export const initialState: State = {
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
   lastfm: { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null },
+  lastfmImport: { phase: null, username: null, spotifyAccountId: null, nextPage: 1, totalPages: null, totalScrobbles: 0, includedScrobbles: 0, matchedRows: 0, matchTotal: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,
@@ -220,6 +223,8 @@ export function reducer(state: State, action: Action): State {
       return { ...state, connection: action.connection, playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization }
     case 'lastfm':
       return { ...state, lastfm: action.lastfm }
+    case 'lastfmImport':
+      return { ...state, lastfmImport: action.lastfmImport }
     case 'spotifyResults':
       return { ...state, spotifyResults: action.results, spotifySearching: false }
     case 'spotifySearching':

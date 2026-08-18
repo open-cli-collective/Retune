@@ -18,6 +18,7 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `dev-lastfm-session.json` | Development Last.fm session; mode 0600 on Unix |
 | `lastfm-pending-token.json` | Short-lived Last.fm authorization token; mode 0600 on Unix |
 | `lastfm-scrobbles.json` | Ordered durable Last.fm scrobble queue; excluded from backup |
+| `lastfm-import.json` | Versioned, account-bound Last.fm snapshot/match/review session; excluded from backup |
 
 The official Tauri window-state plugin manages the main native window's size,
 position, and maximized state in machine-local application state. Its lifecycle
@@ -57,6 +58,24 @@ portable backup or restore. Its minimal shape is `SpotifyLibraryState`:
 with the same temporary-file-and-rename atomic replacement as other app data.
 Missing or incomplete state is unknown and does not authorize destructive
 reconciliation until a complete sync establishes the exact account state.
+
+`lastfm-import.json` is `LastFmImportSessionV1`. It stores the fixed snapshot
+end timestamp, Last.fm username, Spotify `/me` account ID, phase/page cursor,
+totals, retryable error and attempt, session defaults for the two independent
+intents (content and historical play counts) plus whole-album mode, compact page
+checkpoints with unique source IDs, spelling variants, match
+results/candidates/selected URIs, decisions, page options, a session-level
+Spotify-target-to-Sum/Overwrite/Zero map, and the session-level search-term
+display preference. A response page must match the requested
+cursor before the atomic checkpoint advances. It is written with the Last.fm
+atomic replacement helper and mode 0600 on Unix. Serialized sessions are capped
+at 100 MiB; corrupt or unknown versions are quarantined and never applied. This
+machine/account state is deliberately outside normal backup/restore, like
+`spotify-library.json` and the scrobble queue.
+Every session read-modify-write is serialized from its in-memory snapshot
+through JSON serialization, blocking atomic replacement, and the in-memory
+swap; suspended account-bound reads are redacted rather than exposing the
+previous owner.
 
 Column layout is UI state in `settings.json`: the Library has one order, width map,
 and hidden-column list. Playlists have independent metadata-column order, width,

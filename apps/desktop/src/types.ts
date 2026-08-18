@@ -47,6 +47,26 @@ export type LastFmState = {
   reconnectRequired: boolean
   problem: string | null
 }
+export type LastFmImportDefaults = {
+  importContent: boolean
+  includeHistoricalPlayCounts: boolean
+  wholeAlbum: boolean
+}
+export type LastFmImportState = {
+  phase: 'downloading' | 'matching' | 'review' | 'done' | 'suspended' | null
+  username: string | null
+  spotifyAccountId: string | null
+  nextPage: number
+  totalPages: number | null
+  totalScrobbles: number
+  includedScrobbles: number
+  matchedRows: number
+  matchTotal: number
+  defaults: LastFmImportDefaults
+  remaining: number
+  retryableError: { message: string; attempt: number; retryable: boolean } | null
+  searchTerms: boolean
+}
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'
   message: string

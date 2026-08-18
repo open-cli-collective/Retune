@@ -100,7 +100,9 @@ explicit offset with a limit of 10. This is the Development Mode maximum; the
 UI paginates later offsets through the same `SpotifyClient` request gate, as
 required by Spotify's [current search contract][spotify-search] and [migration
 guidance][spotify-search-migration]. The desktop response exposes each result
-group as `items`, `total`, and `nextOffset`.
+group as `items`, `total`, and `nextOffset`. Type-restricted searches may omit
+the other result groups; the shared client deserializes omitted groups as empty
+pages so provider mapping remains uniform.
 
 The search view stores successful pages by offset, merges every group returned
 by a page, and deduplicates artists by Spotify ID and albums/tracks by URI.
@@ -115,6 +117,12 @@ filtered group starts at ten. Query changes discard pages; filter changes reset
 visible counts but retain pages for the same query. A failed later page leaves
 existing rows visible and can be retried for that group.
 
+Last.fm album matching reuses the same client and request gate with official
+`album:`/`artist:` field filters and a limit of 10, then fetches each candidate's
+tracks for set-overlap classification. Matching does not hold the membership
+mutex across the history; only account checks and the final content save hold
+that gate.
+
 ## Writes and playlists
 
 Overlay metadata never writes to Spotify. Explicit content actions may save or
@@ -128,6 +136,15 @@ Spotify is canonical for owned-playlist content. Reordering uses snapshot IDs to
 detect concurrent changes, then reloads stale state. Retune does not request or
 mutate item contents for playlists the current user does not own; it may display
 their available metadata and cached counts.
+
+The Last.fm importer reuses the same membership gate and shared client. Its
+album search uses the official `album:`/`artist:` field filters with a limit of
+10, then fetches candidate album tracks for overlap classification; track
+rematching uses a direct `track:` search. Import album acceptance calls the
+same reusable album operation as the main UI and sends one album URI. Import
+track acceptance calls the reusable track operation and sends only selected
+track URIs. The generic `PUT /me/library` path is used; deprecated timestamped
+track-save endpoints are not used.
 
 ## Contract changes
 
