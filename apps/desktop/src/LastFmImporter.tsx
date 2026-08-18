@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, Settings } from './types.ts'
-import { applyCurrentImportPageResponse, downloadAction, excludedImportCount, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, resolveImportCount, restPendingImportCount, selectedImportCount, showsImportRemaining, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportPhase, type ImportPickerKind, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { applyCurrentImportPageResponse, downloadAction, excludedImportCount, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportPhase, type ImportPickerKind, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportStateView = {
@@ -178,11 +178,12 @@ function FuzzyPanel({ rows, targetUri, mode, expanded, locked, onMode, onToggle 
 function ImporterRow({ item, checked, fuzzy, fuzzyTarget, onToggle, onExclude, onChangeTrack, onFuzzyMode, onFuzzyToggle, fuzzyExpanded, fuzzyMode, fuzzyLocked, showQuery }: { item: PageItem; checked: boolean; fuzzy?: ImportSourceRow[]; fuzzyTarget?: string; onToggle: () => void; onExclude: () => void; onChangeTrack: () => void; onFuzzyMode: (mode: CountMode) => void; onFuzzyToggle: () => void; fuzzyExpanded: boolean; fuzzyMode: CountMode; fuzzyLocked: boolean; showQuery: boolean }) {
   const match = item.matchResult
   const track = matchedTrack(item)
+  const trackConfidence: ImportConfidence = selectedImportTrackConfidence(item.source.stableId, match?.selectedUri ?? null, match?.trackMatches ?? {}, match?.confidence ?? null, match?.candidates ?? [])
   const excluded = item.decision.excluded
   const disabled = excluded || item.decision.status === 'done'
   return <article className={`import-track-row${excluded ? ' excluded' : ''}`}>
     <div className="import-source-cell"><button type="button" className="import-exclude-glyph" aria-label={excluded ? 'Undo exclusion' : `Exclude ${item.source.track}`} title={excluded ? 'Put this source row back in the queue' : 'Exclude this Last.fm source row'} onClick={onExclude}>{excluded ? '↺' : '⊘'}</button><label className="import-track-check"><input type="checkbox" aria-label={`Include ${item.source.track}`} checked={checked} disabled={disabled} onChange={onToggle} /><span /></label><div className="import-track-copy"><strong>{item.source.track}</strong><small>{item.source.playCount.toLocaleString()} plays · last {new Date(item.source.latest * 1000).toLocaleDateString()}</small>{excluded && <small className="import-excluded-copy">Excluded — won’t be imported or asked about again</small>}{fuzzy && fuzzyTarget && <FuzzyPanel rows={fuzzy} targetUri={fuzzyTarget} mode={fuzzyMode} locked={fuzzyLocked} expanded={fuzzyExpanded} onMode={onFuzzyMode} onToggle={onFuzzyToggle} />}</div></div>
-    <div className="import-match-cell">{track ? <><strong>{track.name}</strong><small>{track.artist} · {track.album}</small><span className={`confidence ${match?.confidence ?? 'low'}`}>{confidenceLabel(match?.confidence ?? 'low')}</span></> : <small className="muted">No supported match</small>}{showQuery && match?.searchTerm && <code>q={match.searchTerm}</code>}<button type="button" className="text-button" disabled={disabled} onClick={onChangeTrack}>Change Track…</button></div>
+    <div className="import-match-cell">{track ? <><strong>{track.name}</strong><small>{track.artist} · {track.album}</small><span className={`confidence ${trackConfidence ?? 'low'}`}>{confidenceLabel(trackConfidence ?? 'low')}</span></> : <small className="muted">No supported match</small>}{showQuery && match?.searchTerm && <code>q={match.searchTerm}</code>}<button type="button" className="text-button" disabled={disabled} onClick={onChangeTrack}>Change Track…</button></div>
   </article>
 }
 

@@ -2,6 +2,8 @@ export type ImportSort = 'plays' | 'artist' | 'batch' | 'lastPlayed'
 export type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
 export type CountMode = 'sum' | 'overwrite' | 'zero'
 export type ImportPickerKind = 'album' | 'track'
+export type ImportConfidence = 'exact' | 'likely' | 'low' | null
+export type ImportMatchRelation = 'best-match' | 'same-songs' | 'superset' | null
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
 export type QueueStatus = ReviewStatus | 'excluded'
 
@@ -164,6 +166,15 @@ export function pickerCandidates<T extends { uri: string }>(kind: ImportPickerKi
 export function pickerSelectedUri(kind: ImportPickerKind, sourceId: string, selectedUri: string | null, trackMatches: Record<string, string>): string | null {
   if (kind === 'track') return trackMatches[sourceId] ?? (selectedUri?.startsWith('spotify:track:') ? selectedUri : null)
   return selectedUri?.startsWith('spotify:album:') ? selectedUri : null
+}
+
+export function selectedImportTrackConfidence(sourceId: string, selectedUri: string | null, trackMatches: Record<string, string>, albumConfidence: ImportConfidence, candidates: Array<{ uri: string; relation: ImportMatchRelation }>): ImportConfidence {
+  const targetUri = trackMatches[sourceId] ?? (selectedUri?.startsWith('spotify:track:') ? selectedUri : null)
+  const standalone = targetUri?.startsWith('spotify:track:') ? candidates.find((candidate) => candidate.uri === targetUri) : undefined
+  if (!standalone) return albumConfidence
+  if (standalone.relation === 'best-match') return 'exact'
+  if (standalone.relation === 'same-songs' || standalone.relation === 'superset') return 'likely'
+  return 'low'
 }
 
 export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): number {
