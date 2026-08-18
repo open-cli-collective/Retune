@@ -54,8 +54,26 @@ restored on resume. Fuzzy disclosures use all source rows in the session that
 resolve to a target, so the target-wide count decision remains truthful when
 those rows came from different artist/album pages.
 
-The source snapshot stores compact spelling variants with count, earliest, and
-latest timestamps rather than raw Last.fm responses. Excluded rows remain
+The source importer is V2. It records a fixed profile-bound `historyTo`, probes
+Last.fm metadata once, downloads pages at the documented 200-row limit from
+oldest toward page 1, and stores parsed raw pages under a snapshot-specific
+machine cache. Rows at or after `historyTo` are rejected before caching or
+counting; the exact Last.fm username is recorded in the manifest and each page.
+The manifest is authoritative: an orphan page file is harmless and may be
+overwritten, while an acknowledged missing, corrupt, oversized, or
+metadata-mismatched page quarantines the whole snapshot and restarts V2. A
+retryable Last.fm failure is persisted and retried in-process at the capped
+backoff without advancing the cursor. No aggregation happens until every page
+is acknowledged; then raw-page reads, sorting, and aggregation run off the
+async runtime before review is entered atomically (or Done when no rows remain)
+and the cache is best-effort deleted. A saved Downloading or Aggregating session resumes once after
+hydration; an empty state does not create one.
+
+Spotify matching is lazy. Opening a visible batch uses the shared client and
+request gate, serializes duplicate requests, binds the Spotify account on the
+first match, and caches the result; reopening it makes no API call. Accept All
+is the only bulk exception and prepares remaining batches sequentially before
+showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
 source-history decisions and can be undone before acceptance; they never remove
 a track inherently materialized by a saved whole album.
 

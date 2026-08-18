@@ -1,12 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use retune_core::model::{AlbumKey, Library, Rating, TrackEdit};
@@ -15,15 +15,16 @@ use serde_json::Value;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex;
 
-pub(crate) const SESSION_VERSION: u8 = 1;
+pub(crate) const SESSION_VERSION: u8 = 2;
 pub(crate) const LASTFM_PAGE_LIMIT: u32 = 200;
 pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
+const MAX_RAW_CACHE_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ImportPhase {
     Downloading,
-    Matching,
+    Aggregating,
     Review,
     Done,
     Suspended,
@@ -227,13 +228,15 @@ pub(crate) struct ImportBatch {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct LastFmImportSessionV1 {
+pub(crate) struct LastFmImportSessionV2 {
     pub version: u8,
     pub lastfm_username: String,
-    pub spotify_account_id: String,
-    pub snapshot_to: u64,
+    pub spotify_account_id: Option<String>,
+    pub history_to: u64,
+    pub cache_id: String,
     pub next_page: u32,
     pub total_pages: Option<u32>,
+    pub downloaded_pages: u32,
     pub total_scrobbles: u64,
     pub included_scrobbles: u64,
     pub skipped_now_playing: u64,
@@ -258,10 +261,9 @@ pub(crate) struct ImportStateView {
     pub spotify_account_id: Option<String>,
     pub next_page: u32,
     pub total_pages: Option<u32>,
+    pub downloaded_pages: u32,
     pub total_scrobbles: u64,
     pub included_scrobbles: u64,
-    pub matched_rows: usize,
-    pub match_total: usize,
     pub defaults: ImportDefaults,
     pub remaining: usize,
     pub retryable_error: Option<RetryableError>,
@@ -294,6 +296,13 @@ pub(crate) struct ImportQueueItem {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AcceptAllSummary {
+    pub album_entities: u32,
+    pub track_entities: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ImportPageItem {
     pub source: SourceRow,
     pub decision: RowDecision,
@@ -315,34 +324,34 @@ pub(crate) struct ImportPageView {
     pub locked_count_modes: BTreeSet<String>,
 }
 
-impl LastFmImportSessionV1 {
-    #[cfg_attr(not(test), allow(dead_code))]
+impl LastFmImportSessionV2 {
+    #[cfg(test)]
     pub(crate) fn new(
         lastfm_username: String,
         spotify_account_id: String,
-        snapshot_to: u64,
+        history_to: u64,
     ) -> Self {
-        Self::new_with_defaults(
-            lastfm_username,
-            spotify_account_id,
-            snapshot_to,
-            ImportDefaults::default(),
-        )
+        let mut session =
+            Self::new_with_defaults(lastfm_username, history_to, ImportDefaults::default());
+        session.spotify_account_id = Some(spotify_account_id);
+        session
     }
 
     pub(crate) fn new_with_defaults(
         lastfm_username: String,
-        spotify_account_id: String,
-        snapshot_to: u64,
+        history_to: u64,
         defaults: ImportDefaults,
     ) -> Self {
+        let cache_id = snapshot_cache_id(&lastfm_username, history_to);
         Self {
             version: SESSION_VERSION,
             lastfm_username,
-            spotify_account_id,
-            snapshot_to,
+            spotify_account_id: None,
+            history_to,
+            cache_id,
             next_page: 1,
             total_pages: None,
+            downloaded_pages: 0,
             total_scrobbles: 0,
             included_scrobbles: 0,
             skipped_now_playing: 0,
@@ -402,7 +411,8 @@ impl LastFmImportSessionV1 {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ParsedRecentTracksPage {
     pub page: u32,
     pub total_pages: Option<u32>,
@@ -412,7 +422,8 @@ pub(crate) struct ParsedRecentTracksPage {
     pub skipped_undated: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ParsedScrobble {
     pub artist: String,
     pub album: String,
@@ -482,6 +493,27 @@ pub(crate) fn parse_recent_tracks_page(value: &Value) -> Result<ParsedRecentTrac
     Ok(parsed)
 }
 
+fn discard_post_cutoff(parsed: &mut ParsedRecentTracksPage, history_to: u64) {
+    parsed
+        .tracks
+        .retain(|scrobble| scrobble.timestamp < history_to);
+}
+
+fn sort_scrobbles(scrobbles: &mut [ParsedScrobble]) {
+    scrobbles.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| {
+                normalize_for_match(&left.artist).cmp(&normalize_for_match(&right.artist))
+            })
+            .then_with(|| normalize_for_match(&left.album).cmp(&normalize_for_match(&right.album)))
+            .then_with(|| normalize_for_match(&left.track).cmp(&normalize_for_match(&right.track)))
+            .then_with(|| left.artist.cmp(&right.artist))
+            .then_with(|| left.album.cmp(&right.album))
+            .then_with(|| left.track.cmp(&right.track))
+    });
+}
+
 fn value_string(value: &Value) -> Option<&str> {
     value.as_str()
 }
@@ -530,12 +562,30 @@ fn source_id(artist: &str, album: &str, track: &str) -> String {
     )
 }
 
+fn snapshot_cache_id(username: &str, history_to: u64) -> String {
+    format!(
+        "{}-{history_to}",
+        username
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
 pub(crate) fn aggregate_scrobbles(rows: &mut Vec<SourceRow>, scrobbles: &[ParsedScrobble]) {
+    let mut row_indices = HashMap::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        row_indices.entry(row.stable_id.clone()).or_insert(index);
+    }
     for scrobble in scrobbles {
         let id = source_id(&scrobble.artist, &scrobble.album, &scrobble.track);
-        let Some(row) = rows.iter_mut().find(|row| row.stable_id == id) else {
+        let index = if let Some(index) = row_indices.get(&id).copied() {
+            index
+        } else {
+            let index = rows.len();
             rows.push(SourceRow {
-                stable_id: id,
+                stable_id: id.clone(),
                 artist: scrobble.artist.clone(),
                 album: scrobble.album.clone(),
                 track: scrobble.track.clone(),
@@ -544,11 +594,10 @@ pub(crate) fn aggregate_scrobbles(rows: &mut Vec<SourceRow>, scrobbles: &[Parsed
                 earliest: scrobble.timestamp,
                 latest: scrobble.timestamp,
             });
-            let row = rows.last_mut().expect("row was just pushed");
-            add_variant(row, scrobble);
-            continue;
+            row_indices.insert(id, index);
+            index
         };
-        add_variant(row, scrobble);
+        add_variant(&mut rows[index], scrobble);
     }
 }
 
@@ -696,16 +745,39 @@ pub(crate) fn apply_metadata(
 #[derive(Clone)]
 pub(crate) struct ImportSessionStore {
     path: PathBuf,
+    cache_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCacheManifest {
+    version: u8,
+    cache_id: String,
+    lastfm_username: String,
+    history_to: u64,
+    total_pages: u32,
+    pages: BTreeMap<u32, u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedRawPage {
+    lastfm_username: String,
+    history_to: u64,
+    total_pages: u32,
+    parsed: ParsedRecentTracksPage,
 }
 
 impl ImportSessionStore {
     pub(crate) fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        let app_data_dir = app_data_dir.as_ref();
         Self {
-            path: app_data_dir.as_ref().join("lastfm-import.json"),
+            path: app_data_dir.join("lastfm-import.json"),
+            cache_root: app_data_dir.join("lastfm-import-cache"),
         }
     }
 
-    pub(crate) fn load(&self) -> Result<Option<LastFmImportSessionV1>, String> {
+    pub(crate) fn load(&self) -> Result<Option<LastFmImportSessionV2>, String> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -713,9 +785,10 @@ impl ImportSessionStore {
         };
         if bytes.len() > MAX_SERIALIZED_SESSION_BYTES {
             self.quarantine()?;
+            self.quarantine_cache_root()?;
             return Ok(None);
         }
-        let parsed = serde_json::from_slice::<LastFmImportSessionV1>(&bytes);
+        let parsed = serde_json::from_slice::<LastFmImportSessionV2>(&bytes);
         match parsed {
             Ok(session)
                 if session.version == SESSION_VERSION
@@ -725,22 +798,272 @@ impl ImportSessionStore {
                         .values()
                         .all(|options| options.validate().is_ok()) =>
             {
+                if matches!(
+                    session.phase,
+                    ImportPhase::Downloading | ImportPhase::Aggregating
+                ) && self.validate_cache(&session).is_err()
+                {
+                    self.quarantine_snapshot(&session.cache_id)?;
+                    self.quarantine()?;
+                    return Ok(None);
+                }
                 Ok(Some(session))
             }
             Ok(_) | Err(_) => {
                 self.quarantine()?;
+                self.quarantine_cache_root()?;
                 Ok(None)
             }
         }
     }
 
-    pub(crate) fn save(&self, session: &LastFmImportSessionV1) -> Result<(), String> {
+    pub(crate) fn save(&self, session: &LastFmImportSessionV2) -> Result<(), String> {
         let bytes = serde_json::to_vec(session)
             .map_err(|_| "Could not serialize the Last.fm import session.".to_string())?;
         if bytes.len() > MAX_SERIALIZED_SESSION_BYTES {
             return Err("The Last.fm import session exceeds the 100 MB safety limit.".into());
         }
         super::lastfm::atomic_write(&self.path, &bytes, true)
+    }
+
+    fn cache_path(&self, cache_id: &str) -> PathBuf {
+        self.cache_root.join(cache_id)
+    }
+
+    fn manifest_path(&self, cache_id: &str) -> PathBuf {
+        self.cache_path(cache_id).join("manifest.json")
+    }
+
+    fn page_path(&self, cache_id: &str, page: u32) -> PathBuf {
+        self.cache_path(cache_id).join(format!("page-{page}.json"))
+    }
+
+    fn read_manifest(
+        &self,
+        session: &LastFmImportSessionV2,
+    ) -> Result<Option<RawCacheManifest>, String> {
+        let path = self.manifest_path(&session.cache_id);
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("Could not read the Last.fm import cache manifest.".into()),
+        };
+        if metadata.len() > MAX_RAW_CACHE_BYTES {
+            return Err(
+                "The Last.fm import cache manifest exceeds the 100 MB safety limit.".into(),
+            );
+        }
+        let bytes = fs::read(path)
+            .map_err(|_| "Could not read the Last.fm import cache manifest.".to_string())?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| "The Last.fm import cache manifest is corrupt.".into())
+    }
+
+    fn write_page(
+        &self,
+        session: &LastFmImportSessionV2,
+        parsed: &ParsedRecentTracksPage,
+    ) -> Result<(), String> {
+        let total_pages = session
+            .total_pages
+            .ok_or_else(|| "Last.fm import metadata is not available yet.".to_string())?;
+        if parsed.page == 0 || parsed.page > total_pages {
+            return Err("Last.fm import page metadata is out of range.".into());
+        }
+        let cached = CachedRawPage {
+            lastfm_username: session.lastfm_username.clone(),
+            history_to: session.history_to,
+            total_pages,
+            parsed: parsed.clone(),
+        };
+        let bytes = serde_json::to_vec(&cached)
+            .map_err(|_| "Could not serialize a Last.fm import page.".to_string())?;
+        if bytes.len() as u64 > MAX_RAW_CACHE_BYTES {
+            return Err("The Last.fm import page exceeds the 100 MB safety limit.".into());
+        }
+
+        let manifest = self.read_manifest(session)?;
+        if let Some(manifest) = &manifest {
+            self.validate_manifest_metadata(manifest, session, total_pages)?;
+        }
+        let mut manifest = manifest.unwrap_or_else(|| RawCacheManifest {
+            version: SESSION_VERSION,
+            cache_id: session.cache_id.clone(),
+            lastfm_username: session.lastfm_username.clone(),
+            history_to: session.history_to,
+            total_pages,
+            pages: BTreeMap::new(),
+        });
+        let previous = manifest.pages.insert(parsed.page, bytes.len() as u64);
+        let current_size = manifest
+            .pages
+            .values()
+            .copied()
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| "The Last.fm import cache size is invalid.".to_string())?;
+        if current_size > MAX_RAW_CACHE_BYTES {
+            match previous {
+                Some(previous) => {
+                    manifest.pages.insert(parsed.page, previous);
+                }
+                None => {
+                    manifest.pages.remove(&parsed.page);
+                }
+            }
+            return Err("The Last.fm import cache exceeds the 100 MB safety limit.".into());
+        }
+        fs::create_dir_all(self.cache_path(&session.cache_id))
+            .map_err(|_| "Could not create the Last.fm import cache.".to_string())?;
+        super::lastfm::atomic_write(
+            &self.page_path(&session.cache_id, parsed.page),
+            &bytes,
+            true,
+        )?;
+        let manifest_bytes = serde_json::to_vec(&manifest)
+            .map_err(|_| "Could not serialize the Last.fm import cache manifest.".to_string())?;
+        super::lastfm::atomic_write(
+            &self.manifest_path(&session.cache_id),
+            &manifest_bytes,
+            true,
+        )
+    }
+
+    fn validate_cache(&self, session: &LastFmImportSessionV2) -> Result<(), String> {
+        let Some(manifest) = self.read_manifest(session)? else {
+            return if session.downloaded_pages == 0 {
+                Ok(())
+            } else {
+                Err("The Last.fm import cache manifest is missing.".into())
+            };
+        };
+        let total_pages = session
+            .total_pages
+            .ok_or_else(|| "The Last.fm import cache has no page total.".to_string())?;
+        self.validate_manifest_metadata(&manifest, session, total_pages)?;
+        if manifest.pages.len() < session.downloaded_pages as usize {
+            return Err("The Last.fm import cache is missing acknowledged pages.".into());
+        }
+        let total_size = manifest
+            .pages
+            .values()
+            .copied()
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| "The Last.fm import cache size is invalid.".to_string())?;
+        if total_size > MAX_RAW_CACHE_BYTES {
+            return Err("The Last.fm import cache exceeds the 100 MB safety limit.".into());
+        }
+        for (&page, &recorded_size) in &manifest.pages {
+            if page == 0 || page > total_pages {
+                return Err("The Last.fm import cache contains an invalid page.".into());
+            }
+            let path = self.page_path(&session.cache_id, page);
+            let actual_size = fs::metadata(&path)
+                .map_err(|_| "An acknowledged Last.fm import page is missing.".to_string())?
+                .len();
+            if actual_size != recorded_size || recorded_size > MAX_RAW_CACHE_BYTES {
+                return Err(
+                    "An acknowledged Last.fm import page is oversized or truncated.".into(),
+                );
+            }
+            let bytes = fs::read(&path)
+                .map_err(|_| "An acknowledged Last.fm import page is missing.".to_string())?;
+            let cached = serde_json::from_slice::<CachedRawPage>(&bytes)
+                .map_err(|_| "An acknowledged Last.fm import page is corrupt.".to_string())?;
+            if cached.lastfm_username != session.lastfm_username
+                || cached.history_to != session.history_to
+                || cached.total_pages != total_pages
+                || cached.parsed.page != page
+                || cached
+                    .parsed
+                    .total_pages
+                    .is_some_and(|value| value != total_pages)
+            {
+                return Err("An acknowledged Last.fm import page has mismatched metadata.".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_manifest_metadata(
+        &self,
+        manifest: &RawCacheManifest,
+        session: &LastFmImportSessionV2,
+        total_pages: u32,
+    ) -> Result<(), String> {
+        if manifest.version != SESSION_VERSION
+            || manifest.cache_id != session.cache_id
+            || manifest.lastfm_username != session.lastfm_username
+            || manifest.history_to != session.history_to
+            || manifest.total_pages != total_pages
+        {
+            return Err("The Last.fm import cache metadata does not match its session.".into());
+        }
+        Ok(())
+    }
+
+    fn read_pages(&self, session: &LastFmImportSessionV2) -> Result<Vec<ParsedScrobble>, String> {
+        self.validate_cache(session)?;
+        let Some(manifest) = self.read_manifest(session)? else {
+            return Ok(Vec::new());
+        };
+        let mut scrobbles = Vec::new();
+        for page in manifest.pages.keys() {
+            let bytes = fs::read(self.page_path(&session.cache_id, *page))
+                .map_err(|_| "An acknowledged Last.fm import page is missing.".to_string())?;
+            let cached = serde_json::from_slice::<CachedRawPage>(&bytes)
+                .map_err(|_| "An acknowledged Last.fm import page is corrupt.".to_string())?;
+            if cached.lastfm_username != session.lastfm_username {
+                return Err(
+                    "An acknowledged Last.fm import page belongs to another Last.fm account."
+                        .into(),
+                );
+            }
+            scrobbles.extend(
+                cached
+                    .parsed
+                    .tracks
+                    .into_iter()
+                    .filter(|scrobble| scrobble.timestamp < session.history_to),
+            );
+        }
+        Ok(scrobbles)
+    }
+
+    fn remove_snapshot(&self, cache_id: &str) {
+        let _ = fs::remove_dir_all(self.cache_path(cache_id));
+    }
+
+    fn quarantine_snapshot(&self, cache_id: &str) -> Result<(), String> {
+        let path = self.cache_path(cache_id);
+        if !path.exists() {
+            return Ok(());
+        }
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        fs::rename(
+            &path,
+            path.with_file_name(format!("{cache_id}.quarantine-{stamp}")),
+        )
+        .map_err(|_| "Could not quarantine the Last.fm import cache.".to_string())
+    }
+
+    fn quarantine_cache_root(&self) -> Result<(), String> {
+        if !self.cache_root.exists() {
+            return Ok(());
+        }
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        fs::rename(
+            &self.cache_root,
+            self.cache_root
+                .with_file_name(format!("lastfm-import-cache.quarantine-{stamp}")),
+        )
+        .map_err(|_| "Could not quarantine the Last.fm import cache.".to_string())
     }
 
     fn quarantine(&self) -> Result<(), String> {
@@ -756,7 +1079,8 @@ impl ImportSessionStore {
 
 pub(crate) struct Service {
     store: ImportSessionStore,
-    session: Mutex<Option<LastFmImportSessionV1>>,
+    session: Mutex<Option<LastFmImportSessionV2>>,
+    lazy_match_lock: Mutex<()>,
     running: AtomicBool,
 }
 
@@ -773,31 +1097,25 @@ impl Service {
         Arc::new(Self {
             store,
             session: Mutex::new(session),
+            lazy_match_lock: Mutex::new(()),
             running: AtomicBool::new(false),
         })
     }
 
     pub(crate) async fn state(&self) -> ImportStateView {
-        self.state_with_identity(None).await
-    }
-
-    pub(crate) async fn state_with_identity(
-        &self,
-        identity: Option<(String, String)>,
-    ) -> ImportStateView {
         let session = self.session.lock().await;
         match session.as_ref() {
             Some(session) if session.phase == ImportPhase::Suspended => suspended_state_view(),
             Some(session) => state_view(Some(session)),
-            None => state_view_with_identity(None, identity.as_ref()),
+            None => state_view(None),
         }
     }
 
-    async fn snapshot(&self) -> Option<LastFmImportSessionV1> {
+    async fn snapshot(&self) -> Option<LastFmImportSessionV2> {
         self.session.lock().await.clone()
     }
 
-    async fn persist(&self, session: LastFmImportSessionV1) -> Result<(), String> {
+    async fn persist(&self, session: LastFmImportSessionV2) -> Result<(), String> {
         let store = self.store.clone();
         tauri::async_runtime::spawn_blocking(move || store.save(&session))
             .await
@@ -805,15 +1123,15 @@ impl Service {
     }
 
     #[cfg(test)]
-    async fn save(&self, session: LastFmImportSessionV1) -> Result<(), String> {
+    async fn save(&self, session: LastFmImportSessionV2) -> Result<(), String> {
         self.mutate_session(|_| Ok((Some(session), ()))).await
     }
 
     async fn mutate_session<R, F>(&self, mutation: F) -> Result<R, String>
     where
         F: FnOnce(
-            Option<LastFmImportSessionV1>,
-        ) -> Result<(Option<LastFmImportSessionV1>, R), String>,
+            Option<LastFmImportSessionV2>,
+        ) -> Result<(Option<LastFmImportSessionV2>, R), String>,
     {
         let mut current = self.session.lock().await;
         let (next, result) = mutation(current.clone())?;
@@ -832,14 +1150,14 @@ impl Service {
         mutation: F,
     ) -> Result<R, String>
     where
-        F: FnOnce(LastFmImportSessionV1) -> Result<(LastFmImportSessionV1, R), String>,
+        F: FnOnce(LastFmImportSessionV2) -> Result<(LastFmImportSessionV2, R), String>,
     {
         self.mutate_session(|session| {
             let Some(session) = session else {
                 return Err("No Last.fm import session is active.".into());
             };
             if session.lastfm_username != username
-                || session.spotify_account_id != spotify_account_id
+                || session.spotify_account_id.as_deref() != Some(spotify_account_id)
                 || !allowed_phase(session.phase)
             {
                 return Err(
@@ -871,8 +1189,7 @@ impl Service {
     pub(crate) async fn start_or_resume(
         &self,
         username: &str,
-        spotify_account_id: &str,
-        snapshot_to: u64,
+        history_to: u64,
         defaults: Option<ImportDefaults>,
     ) -> Result<ImportStateView, String> {
         if let Some(defaults) = &defaults {
@@ -882,9 +1199,7 @@ impl Service {
             .mutate_session(|current| {
                 let session = match current {
                     Some(mut session) => {
-                        if session.lastfm_username != username
-                            || session.spotify_account_id != spotify_account_id
-                        {
+                        if session.lastfm_username != username {
                             session.phase = ImportPhase::Suspended;
                             session.retryable_error = Some(RetryableError {
                                 message: "This import is suspended because the connected account changed. Reconnect Last.fm and Spotify to resume.".into(),
@@ -899,9 +1214,15 @@ impl Service {
                         if session.phase == ImportPhase::Suspended {
                             session.phase = if session
                                 .total_pages
-                                .is_some_and(|total_pages| session.next_page > total_pages)
+                                .is_some_and(|total_pages| {
+                                    total_pages == 0 || session.downloaded_pages >= total_pages
+                                })
                             {
-                                ImportPhase::Matching
+                                if session.rows.is_empty() {
+                                    ImportPhase::Aggregating
+                                } else {
+                                    ImportPhase::Review
+                                }
                             } else {
                                 ImportPhase::Downloading
                             };
@@ -909,12 +1230,13 @@ impl Service {
                         }
                         session
                     }
-                    None => LastFmImportSessionV1::new_with_defaults(
-                        username.to_owned(),
-                        spotify_account_id.to_owned(),
-                        snapshot_to,
-                        defaults.unwrap_or_default(),
-                    ),
+                    None => {
+                        LastFmImportSessionV2::new_with_defaults(
+                            username.to_owned(),
+                            history_to,
+                            defaults.unwrap_or_default(),
+                        )
+                    }
                 };
                 let view = state_view(Some(&session));
                 Ok((Some(session), Ok(view)))
@@ -923,11 +1245,76 @@ impl Service {
         result
     }
 
+    async fn set_metadata(
+        &self,
+        total_pages: u32,
+        total_scrobbles: u64,
+    ) -> Result<ImportStateView, String> {
+        self.mutate_session(|current| {
+            let Some(mut session) = current else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.phase != ImportPhase::Downloading {
+                return Ok((Some(session.clone()), state_view(Some(&session))));
+            }
+            if let Some(existing) = session.total_pages {
+                if existing != total_pages {
+                    return Err("Last.fm import metadata changed during the snapshot.".into());
+                }
+                return Ok((Some(session.clone()), state_view(Some(&session))));
+            }
+            session.total_pages = Some(total_pages);
+            session.total_scrobbles = total_scrobbles;
+            session.next_page = total_pages;
+            session.retryable_error = None;
+            if total_pages == 0 {
+                session.phase = ImportPhase::Aggregating;
+            }
+            Ok((Some(session.clone()), state_view(Some(&session))))
+        })
+        .await
+    }
+
     async fn checkpoint_page(
         &self,
         page: u32,
         parsed: &ParsedRecentTracksPage,
     ) -> Result<ImportStateView, String> {
+        let Some(before) = self.snapshot().await else {
+            return Err("No Last.fm import session is active.".into());
+        };
+        if before.phase != ImportPhase::Downloading {
+            return Ok(state_view(Some(&before)));
+        }
+        if parsed.page != page {
+            return Err(format!(
+                "Last.fm response was for page {}, expected page {page}.",
+                parsed.page
+            ));
+        }
+        let total_pages = before
+            .total_pages
+            .or(parsed.total_pages)
+            .ok_or_else(|| "Last.fm import metadata is not available yet.".to_string())?;
+        if parsed.total_pages.is_some_and(|value| value != total_pages) {
+            return Err("Last.fm page metadata changed during the snapshot.".into());
+        }
+        let expected_page = if before.next_page == 0 {
+            page
+        } else {
+            before.next_page
+        };
+        if page != expected_page {
+            if page < expected_page {
+                return Err("Last.fm import pages must be checkpointed sequentially.".into());
+            }
+            return Ok(state_view(Some(&before)));
+        }
+        let mut cache_session = before.clone();
+        cache_session.total_pages = Some(total_pages);
+        let mut filtered = parsed.clone();
+        discard_post_cutoff(&mut filtered, before.history_to);
+        self.store.write_page(&cache_session, &filtered)?;
         let result = self
             .mutate_session(|current| {
                 let Some(mut session) = current else {
@@ -936,48 +1323,25 @@ impl Service {
                 if session.phase != ImportPhase::Downloading {
                     return Ok((Some(session.clone()), state_view(Some(&session))));
                 }
-                if parsed.page != page {
-                    return Err(format!(
-                        "Last.fm response was for page {}, expected page {page}.",
-                        parsed.page
-                    ));
+                if session.next_page != 0 && session.next_page != page {
+                    return Err("Last.fm import cursor changed before page acknowledgement.".into());
                 }
-                if page < session.next_page {
-                    return Ok((Some(session.clone()), state_view(Some(&session))));
-                }
-                if page > session.next_page {
-                    return Err("Last.fm import pages must be checkpointed sequentially.".into());
-                }
-                aggregate_scrobbles(&mut session.rows, &parsed.tracks);
-                session.total_pages = parsed.total_pages.or(session.total_pages);
-                session.total_scrobbles = parsed.total.unwrap_or(session.total_scrobbles);
+                session.total_pages = Some(total_pages);
+                session.total_scrobbles = filtered.total.unwrap_or(session.total_scrobbles);
                 session.included_scrobbles = session
                     .included_scrobbles
-                    .saturating_add(parsed.tracks.len() as u64);
+                    .saturating_add(filtered.tracks.len() as u64);
                 session.skipped_now_playing = session
                     .skipped_now_playing
-                    .saturating_add(parsed.skipped_now_playing);
+                    .saturating_add(filtered.skipped_now_playing);
                 session.skipped_undated = session
                     .skipped_undated
-                    .saturating_add(parsed.skipped_undated);
-                session.batches.push(ImportBatch {
-                    page,
-                    source_ids: parsed
-                        .tracks
-                        .iter()
-                        .map(|track| source_id(&track.artist, &track.album, &track.track))
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                });
-                session.next_page = page.saturating_add(1);
-                if session
-                    .total_pages
-                    .is_some_and(|total_pages| session.next_page > total_pages)
-                    || (parsed.total_pages.is_none()
-                        && parsed.tracks.len() < LASTFM_PAGE_LIMIT as usize)
-                {
-                    session.phase = ImportPhase::Matching;
+                    .saturating_add(filtered.skipped_undated);
+                session.downloaded_pages = session.downloaded_pages.saturating_add(1);
+                session.next_page = page.saturating_sub(1);
+                if session.downloaded_pages >= total_pages {
+                    session.next_page = 0;
+                    session.phase = ImportPhase::Aggregating;
                 }
                 session.retryable_error = None;
                 Ok((Some(session.clone()), state_view(Some(&session))))
@@ -986,7 +1350,80 @@ impl Service {
         Ok(result)
     }
 
-    async fn set_retryable_error(&self, error: RetryableError) -> Result<(), String> {
+    async fn aggregate_cached(&self) -> Result<ImportStateView, String> {
+        let Some(session) = self.snapshot().await else {
+            return Err("No Last.fm import session is active.".into());
+        };
+        if session.phase != ImportPhase::Aggregating {
+            return Ok(state_view(Some(&session)));
+        }
+        let store = self.store.clone();
+        let blocking_session = session.clone();
+        let aggregation = tauri::async_runtime::spawn_blocking(move || {
+            let mut scrobbles = store.read_pages(&blocking_session)?;
+            sort_scrobbles(&mut scrobbles);
+            let mut rows = Vec::new();
+            aggregate_scrobbles(&mut rows, &scrobbles);
+            let mut groups = BTreeMap::<(String, String), Vec<String>>::new();
+            for row in &rows {
+                groups
+                    .entry((row.artist.clone(), row.album.clone()))
+                    .or_default()
+                    .push(row.stable_id.clone());
+            }
+            let batches = groups
+                .into_values()
+                .map(|source_ids| ImportBatch {
+                    page: 0,
+                    source_ids,
+                })
+                .collect::<Vec<_>>();
+            Ok::<_, String>((rows, batches))
+        })
+        .await
+        .map_err(|_| "Last.fm import aggregation task stopped.".to_string())?;
+        let (rows, batches) = match aggregation {
+            Ok(result) => result,
+            Err(error) => {
+                self.invalidate_snapshot().await?;
+                return Err(error);
+            }
+        };
+        let result = self
+            .mutate_session(|current| {
+                let Some(mut current) = current else {
+                    return Err("No Last.fm import session is active.".into());
+                };
+                if current.cache_id != session.cache_id || current.phase != ImportPhase::Aggregating
+                {
+                    return Err("Last.fm import changed while aggregation was running.".into());
+                }
+                current.rows = rows;
+                current.batches = batches;
+                current.phase = if current.rows.is_empty() {
+                    ImportPhase::Done
+                } else {
+                    ImportPhase::Review
+                };
+                current.retryable_error = None;
+                Ok((Some(current.clone()), state_view(Some(&current))))
+            })
+            .await?;
+        self.store.remove_snapshot(&session.cache_id);
+        Ok(result)
+    }
+
+    async fn invalidate_snapshot(&self) -> Result<(), String> {
+        let mut current = self.session.lock().await;
+        if let Some(session) = current.as_ref() {
+            self.store.quarantine_snapshot(&session.cache_id)?;
+            self.store.quarantine()?;
+        }
+        *current = None;
+        Ok(())
+    }
+
+    async fn set_retryable_error(&self, error: Option<RetryableError>) -> Result<(), String> {
         self.mutate_session(|session| {
             let Some(mut session) = session else {
                 return Ok((None, ()));
@@ -994,7 +1431,7 @@ impl Service {
             if session.phase == ImportPhase::Suspended {
                 return Ok((Some(session), ()));
             }
-            session.retryable_error = Some(error);
+            session.retryable_error = error;
             Ok((Some(session), ()))
         })
         .await
@@ -1016,36 +1453,20 @@ impl Service {
         spotify_account_id: &str,
         results: Vec<MatchResult>,
     ) -> Result<(), String> {
-        self.mutate_owned_session(
-            username,
-            spotify_account_id,
-            review_phase_allowed,
-            |mut session| {
-                for result in results {
-                    session.matches.insert(result.source_id.clone(), result);
-                }
-                Ok((session, ()))
-            },
-        )
-        .await
-    }
-
-    async fn set_matches_during_matching(
-        &self,
-        username: &str,
-        spotify_account_id: &str,
-        results: Vec<MatchResult>,
-    ) -> Result<(), String> {
         self.mutate_session(|session| {
             let Some(mut session) = session else {
                 return Err("No Last.fm import session is active.".into());
             };
-            if session.phase != ImportPhase::Matching
-                || session.lastfm_username != username
-                || session.spotify_account_id != spotify_account_id
+            if session.lastfm_username != username
+                || (session.spotify_account_id.is_some()
+                    && session.spotify_account_id.as_deref() != Some(spotify_account_id))
+                || !review_phase_allowed(session.phase)
             {
-                return Err("Last.fm matching stopped because the connected account or import phase changed.".into());
+                return Err(
+                    "The Last.fm import is no longer active for this account or phase.".into(),
+                );
             }
+            session.spotify_account_id = Some(spotify_account_id.to_owned());
             for result in results {
                 session.matches.insert(result.source_id.clone(), result);
             }
@@ -1098,28 +1519,6 @@ impl Service {
                 Ok((session, ()))
             },
         )
-        .await
-    }
-
-    async fn finish_matching_if_current(
-        &self,
-        username: &str,
-        spotify_account_id: &str,
-    ) -> Result<(), String> {
-        self.mutate_session(|session| {
-            let Some(mut session) = session else {
-                return Ok((None, ()));
-            };
-            if session.phase != ImportPhase::Matching
-                || session.lastfm_username != username
-                || session.spotify_account_id != spotify_account_id
-            {
-                return Err("Last.fm matching stopped because the connected account or import phase changed.".into());
-            }
-            session.phase = ImportPhase::Review;
-            session.retryable_error = None;
-            Ok((Some(session), ()))
-        })
         .await
     }
 
@@ -1500,42 +1899,28 @@ impl Service {
     }
 }
 
-fn state_view(session: Option<&LastFmImportSessionV1>) -> ImportStateView {
-    state_view_with_identity(session, None)
-}
-
-fn state_view_with_identity(
-    session: Option<&LastFmImportSessionV1>,
-    identity: Option<&(String, String)>,
-) -> ImportStateView {
+fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
     ImportStateView {
         phase: session.map(|session| session.phase),
-        username: session
-            .map(|session| session.lastfm_username.clone())
-            .or_else(|| identity.map(|(username, _)| username.clone())),
-        spotify_account_id: session
-            .map(|session| session.spotify_account_id.clone())
-            .or_else(|| identity.map(|(_, account_id)| account_id.clone())),
+        username: session.map(|session| session.lastfm_username.clone()),
+        spotify_account_id: session.and_then(|session| session.spotify_account_id.clone()),
         next_page: session.map(|session| session.next_page).unwrap_or(1),
         total_pages: session.and_then(|session| session.total_pages),
+        downloaded_pages: session
+            .map(|session| session.downloaded_pages)
+            .unwrap_or_default(),
         total_scrobbles: session
             .map(|session| session.total_scrobbles)
             .unwrap_or_default(),
         included_scrobbles: session
             .map(|session| session.included_scrobbles)
             .unwrap_or_default(),
-        matched_rows: session
-            .map(|session| session.matches.len())
-            .unwrap_or_default(),
-        match_total: session
-            .map(|session| session.rows.len())
-            .unwrap_or_default(),
         defaults: session
             .map(|session| session.defaults.clone())
             .unwrap_or_default(),
         remaining: session
             .filter(|session| matches!(session.phase, ImportPhase::Review | ImportPhase::Done))
-            .map(LastFmImportSessionV1::remaining)
+            .map(LastFmImportSessionV2::remaining)
             .unwrap_or_default(),
         retryable_error: session.and_then(|session| session.retryable_error.clone()),
         search_terms: session.map(|session| session.search_terms).unwrap_or(true),
@@ -1549,10 +1934,9 @@ fn suspended_state_view() -> ImportStateView {
         spotify_account_id: None,
         next_page: 1,
         total_pages: None,
+        downloaded_pages: 0,
         total_scrobbles: 0,
         included_scrobbles: 0,
-        matched_rows: 0,
-        match_total: 0,
         defaults: ImportDefaults::default(),
         remaining: 0,
         retryable_error: Some(RetryableError {
@@ -1564,10 +1948,13 @@ fn suspended_state_view() -> ImportStateView {
     }
 }
 
-async fn connected_accounts(app: &tauri::AppHandle) -> Result<(String, String), String> {
-    let state = app.state::<crate::AppState>();
-    let _membership_guard = state.spotify_library_gate.lock().await;
-    connected_accounts_locked(&state).await
+async fn lastfm_username(app: &tauri::AppHandle) -> Result<String, String> {
+    app.state::<crate::AppState>()
+        .lastfm
+        .state()
+        .await
+        .username
+        .ok_or_else(|| "Connect Last.fm before importing its history.".to_string())
 }
 
 async fn connected_accounts_locked(state: &crate::AppState) -> Result<(String, String), String> {
@@ -1615,7 +2002,7 @@ async fn assert_current_account_locked(
     let Some(session) = service.snapshot().await else {
         return Err("No Last.fm import session is active.".into());
     };
-    if session.lastfm_username != username || session.spotify_account_id != spotify_account_id {
+    if !session_account_matches(&session, &username, &spotify_account_id, true) {
         service.suspend_for_account_mismatch().await?;
         return Err(
             "The saved Last.fm import belongs to a different account; it is suspended for safety."
@@ -1635,18 +2022,8 @@ async fn ensure_import_readable(app: &tauri::AppHandle, service: &Service) -> Re
     if session.phase == ImportPhase::Suspended {
         return Ok(false);
     }
-    let state = app.state::<crate::AppState>();
-    let current = {
-        let _membership_guard = state.spotify_library_gate.lock().await;
-        connected_accounts_locked(&state).await
-    };
-    match current {
-        Ok((username, spotify_account_id))
-            if username == session.lastfm_username
-                && spotify_account_id == session.spotify_account_id =>
-        {
-            Ok(true)
-        }
+    match lastfm_username(app).await {
+        Ok(username) if username == session.lastfm_username => Ok(true),
         Ok(_) | Err(_) => {
             service.suspend_for_account_mismatch().await?;
             Ok(false)
@@ -1668,29 +2045,25 @@ async fn start_import(
     app: tauri::AppHandle,
     defaults: Option<ImportDefaults>,
 ) -> Result<ImportStateView, String> {
-    let (username, spotify_account_id) = connected_accounts(&app).await?;
+    let username = lastfm_username(&app).await?;
+    let history_to = crate::history_cutoff_for_import(&app, &username).await?;
     let state = app.state::<crate::AppState>();
     let service = Arc::clone(&state.lastfm_import);
     let view = service
-        .start_or_resume(&username, &spotify_account_id, crate::unix_now(), defaults)
+        .start_or_resume(&username, history_to, defaults)
         .await?;
     app.emit("lastfm-import-changed", &view)
         .map_err(|error| error.to_string())?;
     if service.claim_runner() {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            run_import(app, service, username, spotify_account_id).await;
+            run_import(app, service, username).await;
         });
     }
     Ok(view)
 }
 
-async fn run_import(
-    app: tauri::AppHandle,
-    service: Arc<Service>,
-    username: String,
-    spotify_account_id: String,
-) {
+async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: String) {
     let result = async {
         loop {
             let Some(session) = service.snapshot().await else {
@@ -1699,63 +2072,74 @@ async fn run_import(
             match session.phase {
                 ImportPhase::Downloading => {
                     let lastfm = Arc::clone(&app.state::<crate::AppState>().lastfm);
-                    let payload = match lastfm
-                        .import_recent_tracks_page(
+                    if session.total_pages.is_none() {
+                        let payload = fetch_import_page_with_retry(
+                            &lastfm,
+                            &service,
                             &username,
-                            session.next_page,
-                            session.snapshot_to,
+                            1,
+                            session.history_to,
                         )
-                        .await
-                    {
-                        Ok(payload) => payload,
-                        Err(error) => {
-                            if error.account_mismatch {
-                                service.suspend_for_account_mismatch().await?;
-                                return Err(error.message);
+                        .await?;
+                        let parsed = match parse_recent_tracks_page(&payload) {
+                            Ok(parsed) => parsed,
+                            Err(message) => {
+                                service
+                                    .set_retryable_error(Some(RetryableError {
+                                        message: message.clone(),
+                                        attempt: 0,
+                                        retryable: false,
+                                    }))
+                                    .await?;
+                                return Err(message);
                             }
-                            let attempt = service
-                                .snapshot()
-                                .await
-                                .and_then(|session| session.retryable_error)
-                                .map(|error| error.attempt.saturating_add(1))
-                                .unwrap_or(1);
+                        };
+                        let Some(total_pages) = parsed.total_pages else {
+                            let message =
+                                "Last.fm metadata did not include a total page count.".to_string();
                             service
-                                .set_retryable_error(RetryableError {
-                                    message: error.message.clone(),
-                                    attempt: if error.retryable { attempt } else { 0 },
-                                    retryable: error.retryable,
-                                })
-                                .await?;
-                            return Err(error.message);
-                        }
-                    };
-                    let parsed = match parse_recent_tracks_page(&payload) {
-                        Ok(parsed) => parsed,
-                        Err(message) => {
-                            let attempt = service
-                                .snapshot()
-                                .await
-                                .and_then(|session| session.retryable_error)
-                                .map(|error| error.attempt.saturating_add(1))
-                                .unwrap_or(1);
-                            service
-                                .set_retryable_error(RetryableError {
+                                .set_retryable_error(Some(RetryableError {
                                     message: message.clone(),
-                                    attempt,
+                                    attempt: 0,
                                     retryable: false,
-                                })
+                                }))
                                 .await?;
                             return Err(message);
-                        }
-                    };
-                    service.checkpoint_page(session.next_page, &parsed).await?;
-                    let _ = app.emit("lastfm-import-changed", service.state().await);
-                    if parsed.tracks.len() == LASTFM_PAGE_LIMIT as usize {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        };
+                        service
+                            .set_metadata(total_pages, parsed.total.unwrap_or_default())
+                            .await?;
+                    } else if session.next_page == 0 {
+                        service.aggregate_cached().await?;
+                    } else {
+                        let page = session.next_page;
+                        let payload = fetch_import_page_with_retry(
+                            &lastfm,
+                            &service,
+                            &username,
+                            page,
+                            session.history_to,
+                        )
+                        .await?;
+                        let parsed = match parse_recent_tracks_page(&payload) {
+                            Ok(parsed) => parsed,
+                            Err(message) => {
+                                service
+                                    .set_retryable_error(Some(RetryableError {
+                                        message: message.clone(),
+                                        attempt: 0,
+                                        retryable: false,
+                                    }))
+                                    .await?;
+                                return Err(message);
+                            }
+                        };
+                        service.checkpoint_page(page, &parsed).await?;
                     }
+                    let _ = app.emit("lastfm-import-changed", service.state().await);
                 }
-                ImportPhase::Matching => {
-                    run_matching(&app, &service, &username, &spotify_account_id).await?;
+                ImportPhase::Aggregating => {
+                    service.aggregate_cached().await?;
                 }
                 ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended => break,
             }
@@ -1764,23 +2148,66 @@ async fn run_import(
     }
     .await;
     if let Err(error) = result {
-        let already_recorded = service
-            .snapshot()
-            .await
-            .and_then(|session| session.retryable_error)
-            .is_some();
-        if !already_recorded {
-            let _ = service
-                .set_retryable_error(RetryableError {
-                    message: error,
-                    attempt: 0,
-                    retryable: true,
-                })
-                .await;
-        }
+        let _ = service
+            .set_retryable_error(Some(RetryableError {
+                message: error,
+                attempt: 0,
+                retryable: false,
+            }))
+            .await;
     }
     service.release_runner();
     let _ = app.emit("lastfm-import-changed", service.state().await);
+}
+
+async fn fetch_import_page_with_retry(
+    lastfm: &crate::lastfm::Service,
+    service: &Service,
+    username: &str,
+    page: u32,
+    history_to: u64,
+) -> Result<Value, String> {
+    loop {
+        match lastfm
+            .import_recent_tracks_page(username, page, history_to)
+            .await
+        {
+            Ok(payload) => {
+                service.set_retryable_error(None).await?;
+                return Ok(payload);
+            }
+            Err(error) if error.account_mismatch => {
+                service.suspend_for_account_mismatch().await?;
+                return Err(error.message);
+            }
+            Err(error) if error.retryable => {
+                let attempt = service
+                    .snapshot()
+                    .await
+                    .and_then(|session| session.retryable_error)
+                    .map(|error| error.attempt.saturating_add(1))
+                    .unwrap_or(1);
+                service
+                    .set_retryable_error(Some(RetryableError {
+                        message: error.message,
+                        attempt,
+                        retryable: true,
+                    }))
+                    .await?;
+                tokio::time::sleep(crate::lastfm::import_retry_delay(usize::MAX)).await;
+            }
+            Err(error) => {
+                service
+                    .set_retryable_error(Some(RetryableError {
+                        message: error.message.clone(),
+                        attempt: 0,
+                        retryable: false,
+                    }))
+                    .await?;
+                return Err(error.message);
+            }
+        }
+    }
 }
 
 fn album_search_term(artist: &str, album: &str) -> String {
@@ -1831,172 +2258,199 @@ fn candidate_rank(relation: Option<AlbumRelation>) -> u8 {
     }
 }
 
-async fn checkpoint_matching(
-    app: &tauri::AppHandle,
-    service: &Service,
-    username: &str,
-    spotify_account_id: &str,
-    results: Vec<MatchResult>,
-) -> Result<(), String> {
-    let (current_username, current_account_id) = assert_current_account(app, service).await?;
-    if current_username != username || current_account_id != spotify_account_id {
-        return Err("The connected account changed during matching.".into());
+async fn match_batch<T, S>(
+    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    artist: &str,
+    album: &str,
+    rows: &[SourceRow],
+) -> Result<Vec<MatchResult>, String>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+{
+    if album.is_empty() {
+        let mut matches = Vec::new();
+        for row in rows {
+            let search_term = track_search_term(artist, &row.track);
+            let results = crate::provider::search_tracks(provider, &search_term).await?;
+            let mut candidates = results
+                .items
+                .into_iter()
+                .map(|track| AlbumCandidate {
+                    uri: track.uri.clone(),
+                    name: track.name.clone(),
+                    artist: track.artist.clone(),
+                    track_uris: vec![track.uri.clone()],
+                    track_names: vec![track.name.clone()],
+                    track_artists: vec![track.artist],
+                    track_albums: vec![track.alb],
+                    relation: None,
+                })
+                .collect::<Vec<_>>();
+            classify_album_candidates_by_name(std::slice::from_ref(&row.track), &mut candidates);
+            matches.push(match_result_for(
+                row.stable_id.clone(),
+                search_term,
+                candidates,
+                &row.track,
+                false,
+            ));
+        }
+        return Ok(matches);
     }
-    service
-        .set_matches_during_matching(username, spotify_account_id, results)
-        .await
+    let search_term = album_search_term(artist, album);
+    let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
+    let candidates = album_candidates(provider, &search_term, &source_track_names).await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            match_result_for(
+                row.stable_id.clone(),
+                search_term.clone(),
+                candidates.clone(),
+                &row.track,
+                false,
+            )
+        })
+        .collect())
 }
 
-async fn run_matching(
+async fn current_matching_account(
     app: &tauri::AppHandle,
     service: &Service,
+) -> Result<(String, String), String> {
+    let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    current_matching_account_locked(&state, service).await
+}
+
+async fn current_matching_account_locked(
+    state: &crate::AppState,
+    service: &Service,
+) -> Result<(String, String), String> {
+    let (username, spotify_account_id) = connected_accounts_locked(state).await?;
+    let Some(session) = service.snapshot().await else {
+        return Err("No Last.fm import session is active.".into());
+    };
+    if !session_account_matches(&session, &username, &spotify_account_id, false) {
+        service.suspend_for_account_mismatch().await?;
+        return Err(
+            "The saved Last.fm import belongs to a different account; it is suspended for safety."
+                .into(),
+        );
+    }
+    if !review_phase_allowed(session.phase) {
+        return Err("Last.fm matching is available only after source review begins.".into());
+    }
+    Ok((username, spotify_account_id))
+}
+
+fn session_account_matches(
+    session: &LastFmImportSessionV2,
     username: &str,
     spotify_account_id: &str,
-) -> Result<(), String> {
-    let state = app.state::<crate::AppState>();
-    let (current_username, current_account_id) = assert_current_account(app, service).await?;
-    if current_username != username || current_account_id != spotify_account_id {
-        return Err("The connected Spotify account changed during matching.".into());
-    }
-    let Some(session) = service.snapshot().await else {
-        return Ok(());
-    };
-    if session.spotify_account_id != spotify_account_id || session.phase != ImportPhase::Matching {
-        return Ok(());
-    }
-    let provider = crate::provider_from(&state)?;
-    let mut groups = BTreeMap::<(String, String), Vec<SourceRow>>::new();
-    for row in session.rows {
-        if !session.matches.contains_key(&row.stable_id) {
-            groups
-                .entry((row.artist.clone(), row.album.clone()))
-                .or_default()
-                .push(row);
-        }
-    }
-    for ((artist, album), rows) in groups {
-        if album.is_empty() {
-            for row in rows {
-                let search_term = track_search_term(&artist, &row.track);
-                let results =
-                    crate::provider::search_tracks(provider.as_ref(), &search_term).await?;
-                let mut candidates = results
-                    .items
-                    .into_iter()
-                    .map(|track| AlbumCandidate {
-                        uri: track.uri.clone(),
-                        name: track.name.clone(),
-                        artist: track.artist.clone(),
-                        track_uris: vec![track.uri.clone()],
-                        track_names: vec![track.name.clone()],
-                        track_artists: vec![track.artist],
-                        track_albums: vec![track.alb],
-                        relation: None,
-                    })
-                    .collect::<Vec<_>>();
-                classify_album_candidates_by_name(
-                    std::slice::from_ref(&row.track),
-                    &mut candidates,
-                );
-                let selected = candidates
-                    .iter()
-                    .min_by_key(|candidate| candidate_rank(candidate.relation));
-                let confidence = selected.map(|candidate| match candidate.relation {
-                    Some(AlbumRelation::BestMatch) => Confidence::Exact,
-                    Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
-                    None => Confidence::Low,
-                });
-                let selected_uri = selected
-                    .filter(|candidate| candidate.relation.is_some())
-                    .map(|candidate| candidate.uri.clone());
-                let mut track_matches = BTreeMap::new();
-                if let Some(uri) = selected_uri.clone() {
-                    track_matches.insert(row.stable_id.clone(), uri);
-                }
-                checkpoint_matching(
-                    app,
-                    service,
-                    username,
-                    spotify_account_id,
-                    vec![MatchResult {
-                        source_id: row.stable_id,
-                        search_term,
-                        confidence,
-                        selected_uri,
-                        candidates,
-                        track_matches,
-                    }],
-                )
-                .await?;
-                let _ = app.emit("lastfm-import-changed", service.state().await);
-            }
-            continue;
-        }
-        let search_term = album_search_term(&artist, &album);
-        let results = crate::provider::search_albums(provider.as_ref(), &search_term).await?;
-        let mut candidates = Vec::new();
-        for album_result in results.items.into_iter().take(10) {
-            let tracks =
-                crate::provider::album_tracks(provider.as_ref(), &album_result.uri).await?;
-            candidates.push(AlbumCandidate {
-                uri: album_result.uri,
-                name: album_result.name,
-                artist: album_result.artist,
-                track_uris: tracks.iter().map(|track| track.uri.clone()).collect(),
-                track_names: tracks.iter().map(|track| track.name.clone()).collect(),
-                track_artists: tracks.iter().map(|track| track.art.clone()).collect(),
-                track_albums: tracks.iter().map(|track| track.alb.clone()).collect(),
-                relation: None,
-            });
-        }
-        let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
-        classify_album_candidates_by_name(&source_track_names, &mut candidates);
-        let selected = candidates
-            .iter()
-            .min_by_key(|candidate| candidate_rank(candidate.relation));
-        let confidence = selected.map(|candidate| match candidate.relation {
-            Some(AlbumRelation::BestMatch) => Confidence::Exact,
-            Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
-            None => Confidence::Low,
-        });
-        let selected_uri = selected
-            .filter(|candidate| candidate.relation.is_some())
-            .map(|candidate| candidate.uri.clone());
-        let mut track_matches = BTreeMap::new();
-        if let Some(selected) = selected.filter(|candidate| candidate.relation.is_some()) {
-            for row in &rows {
-                if let Some(index) = selected
-                    .track_names
-                    .iter()
-                    .position(|name| normalize_for_match(name) == normalize_for_match(&row.track))
-                {
-                    if let Some(uri) = selected.track_uris.get(index) {
-                        track_matches.insert(row.stable_id.clone(), uri.clone());
-                    }
-                }
-            }
-        }
-        let matches = rows
-            .into_iter()
-            .map(|row| MatchResult {
-                source_id: row.stable_id,
-                search_term: search_term.clone(),
-                confidence,
-                selected_uri: selected_uri.clone(),
-                candidates: candidates.clone(),
-                track_matches: track_matches.clone(),
+    require_spotify_binding: bool,
+) -> bool {
+    session.lastfm_username == username
+        && session
+            .spotify_account_id
+            .as_deref()
+            .map_or(!require_spotify_binding, |bound| {
+                bound == spotify_account_id
             })
-            .collect();
-        checkpoint_matching(app, service, username, spotify_account_id, matches).await?;
-        let _ = app.emit("lastfm-import-changed", service.state().await);
+}
+
+async fn cached_spotify_binding_is_current(
+    app: &tauri::AppHandle,
+    service: &Service,
+) -> Result<bool, String> {
+    let Some(session) = service.snapshot().await else {
+        return Ok(false);
+    };
+    let Some(expected) = session.spotify_account_id else {
+        return Ok(true);
+    };
+    let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let current = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    if cached_spotify_identity_matches(&expected, &current) == Some(false) {
+        service.suspend_for_account_mismatch().await?;
+        return Ok(false);
     }
-    let (final_username, final_account_id) = assert_current_account(app, service).await?;
-    if final_username != username || final_account_id != spotify_account_id {
-        return Err("The connected account changed before matching completed.".into());
+    assert_current_account_locked(&state, service)
+        .await
+        .map(|_| true)
+}
+
+fn cached_spotify_identity_matches(
+    expected: &str,
+    library: &crate::store::SpotifyLibraryState,
+) -> Option<bool> {
+    library.is_exact().then_some(library.account_id == expected)
+}
+
+async fn lazy_match_page(
+    app: &tauri::AppHandle,
+    service: &Service,
+    artist: &str,
+    album: &str,
+) -> Result<Option<ImportPageView>, String> {
+    let Some(page) = service.page(artist, album).await else {
+        return Ok(None);
+    };
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    if batch_match_plan(&session, Some((artist, album))).is_empty() {
+        return cached_spotify_binding_is_current(app, service)
+            .await
+            .map(|current| current.then_some(page));
+    }
+    // ponytail: one importer-wide lock; use per-batch locks only if throughput requires it.
+    let _match_guard = service.lazy_match_lock.lock().await;
+    let Some(page) = service.page(artist, album).await else {
+        return Ok(None);
+    };
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    if batch_match_plan(&session, Some((artist, album))).is_empty() {
+        return cached_spotify_binding_is_current(app, service)
+            .await
+            .map(|current| current.then_some(page));
+    }
+    let (initial_username, initial_spotify_account_id) =
+        current_matching_account(app, service).await?;
+    let state = app.state::<crate::AppState>();
+    let provider = crate::provider_from(&state)?;
+    let rows = session
+        .rows
+        .iter()
+        .filter(|row| row.artist == artist && row.album == album)
+        .cloned()
+        .collect::<Vec<_>>();
+    let results = match_batch(provider.as_ref(), artist, album, &rows).await?;
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let (username, spotify_account_id) = current_matching_account_locked(&state, service).await?;
+    if username != initial_username || spotify_account_id != initial_spotify_account_id {
+        service.suspend_for_account_mismatch().await?;
+        return Err(
+            "The connected Spotify account changed while matching; the import is suspended for safety."
+                .into(),
+        );
     }
     service
-        .finish_matching_if_current(username, spotify_account_id)
-        .await
+        .set_matches(&username, &spotify_account_id, results)
+        .await?;
+    drop(_membership_guard);
+    let _ = app.emit("lastfm-import-changed", service.state().await);
+    Ok(service.page(artist, album).await)
 }
 
 fn matched_track_uri(result: &MatchResult, source_id: &str) -> Option<String> {
@@ -2031,6 +2485,85 @@ fn matched_track_uri_for_row(result: &MatchResult, row: &SourceRow) -> Option<St
             .position(|name| normalize_for_match(name) == normalize_for_match(&row.track))?;
         candidate.track_uris.get(index).cloned()
     })
+}
+
+fn batch_match_plan(
+    session: &LastFmImportSessionV2,
+    requested: Option<(&str, &str)>,
+) -> Vec<(String, String)> {
+    let keys = session
+        .rows
+        .iter()
+        .map(|row| (row.artist.clone(), row.album.clone()))
+        .collect::<BTreeSet<_>>();
+    keys.into_iter()
+        .filter(|(artist, album)| {
+            let mut rows = session
+                .rows
+                .iter()
+                .filter(|row| row.artist == *artist && row.album == *album);
+            let selected = requested.is_some_and(|(requested_artist, requested_album)| {
+                requested_artist == artist && requested_album == album
+            });
+            let remaining = requested.is_none()
+                && rows
+                    .clone()
+                    .any(|row| is_actionable(session, &row.stable_id));
+            (selected || remaining) && rows.any(|row| !session.matches.contains_key(&row.stable_id))
+        })
+        .collect()
+}
+
+fn accept_all_entity_uris(session: &LastFmImportSessionV2) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut album_uris = BTreeSet::new();
+    let mut track_uris = BTreeSet::new();
+    let mut grouped = BTreeMap::<(String, String), Vec<&SourceRow>>::new();
+    for row in &session.rows {
+        grouped
+            .entry((row.artist.clone(), row.album.clone()))
+            .or_default()
+            .push(row);
+    }
+    for ((artist, album), rows) in grouped {
+        let options = session.options_for(&artist, &album);
+        let selected = rows
+            .into_iter()
+            .filter(|row| {
+                options.selected_track_ids.contains(&row.stable_id)
+                    && is_actionable(session, &row.stable_id)
+            })
+            .collect::<Vec<_>>();
+        if !options.import_content {
+            continue;
+        }
+        if options.whole_album {
+            for row in selected {
+                if let Some(uri) = session
+                    .matches
+                    .get(&row.stable_id)
+                    .and_then(|result| {
+                        result.selected_uri.as_deref().or_else(|| {
+                            best_candidate(result).map(|candidate| candidate.uri.as_str())
+                        })
+                    })
+                    .filter(|uri| uri.starts_with("spotify:album:"))
+                {
+                    album_uris.insert(uri.to_owned());
+                }
+            }
+        } else {
+            for row in selected {
+                if let Some(uri) = session
+                    .matches
+                    .get(&row.stable_id)
+                    .and_then(|result| matched_track_uri_for_row(result, row))
+                {
+                    track_uris.insert(uri);
+                }
+            }
+        }
+    }
+    (album_uris, track_uris)
 }
 
 fn membership_uris_for_import(
@@ -2074,7 +2607,7 @@ fn committed_source_ids(
 }
 
 fn historical_count_for_target(
-    session: &LastFmImportSessionV1,
+    session: &LastFmImportSessionV2,
     target_uri: &str,
     current_rows: &[&SourceRow],
     current_options: &PageOptions,
@@ -2425,14 +2958,14 @@ pub(crate) async fn open_lastfm_importer(app: tauri::AppHandle) -> Result<(), St
 pub(crate) async fn lastfm_import_state(app: tauri::AppHandle) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
     let service = &state.lastfm_import;
-    let identity = if service.snapshot().await.is_none() {
-        let _membership_guard = state.spotify_library_gate.lock().await;
-        connected_accounts_locked(&state).await.ok()
-    } else {
+    if service.snapshot().await.is_some() {
         let _ = ensure_import_readable(&app, service.as_ref()).await?;
-        None
-    };
-    Ok(service.state_with_identity(identity).await)
+    }
+    let mut view = service.state().await;
+    if view.phase.is_none() {
+        view.username = lastfm_username(&app).await.ok();
+    }
+    Ok(view)
 }
 
 #[tauri::command]
@@ -2456,7 +2989,7 @@ pub(crate) async fn lastfm_import_page(
     if !ensure_import_readable(&app, service.as_ref()).await? {
         return Ok(None);
     }
-    Ok(service.page(&artist, &album).await)
+    lazy_match_page(&app, service.as_ref(), &artist, &album).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2468,8 +3001,9 @@ pub(crate) async fn lastfm_import_review(
     album: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .review_action(
@@ -2481,6 +3015,7 @@ pub(crate) async fn lastfm_import_review(
             &album,
         )
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2492,12 +3027,14 @@ pub(crate) async fn lastfm_import_options(
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .update_options(&username, &spotify_account_id, &artist, &album, options)
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2508,12 +3045,14 @@ pub(crate) async fn lastfm_import_count_mode(
     mode: CountMode,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .set_count_mode(&username, &spotify_account_id, &target_uri, mode)
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2523,12 +3062,14 @@ pub(crate) async fn lastfm_import_search_terms(
     show: bool,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .set_search_terms(&username, &spotify_account_id, show)
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2539,12 +3080,14 @@ pub(crate) async fn lastfm_import_select_match(
     uri: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .select_match(&username, &spotify_account_id, &id, &uri)
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2555,8 +3098,7 @@ pub(crate) async fn lastfm_import_change_track(
     query: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
-    let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+    let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
     let session = state
         .lastfm_import
         .snapshot()
@@ -2595,11 +3137,14 @@ pub(crate) async fn lastfm_import_change_track(
         session.matches.get(&id),
         &id,
     );
-    let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let (username, spotify_account_id) =
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .set_match(&username, &spotify_account_id, result)
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2610,8 +3155,7 @@ pub(crate) async fn lastfm_import_change_album(
     query: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
-    let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+    let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
     let session = state
         .lastfm_import
         .snapshot()
@@ -2653,11 +3197,14 @@ pub(crate) async fn lastfm_import_change_album(
             )
         })
         .collect();
-    let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let (username, spotify_account_id) =
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
         .set_matches(&username, &spotify_account_id, matches)
         .await?;
+    drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
 
@@ -2684,6 +3231,36 @@ pub(crate) async fn lastfm_import_apply(
     Ok(view)
 }
 
+#[tauri::command]
+pub(crate) async fn lastfm_import_prepare_accept_all(
+    app: tauri::AppHandle,
+) -> Result<AcceptAllSummary, String> {
+    let state = app.state::<crate::AppState>();
+    let service = state.lastfm_import.as_ref();
+    if !ensure_import_readable(&app, service).await? {
+        return Ok(AcceptAllSummary {
+            album_entities: 0,
+            track_entities: 0,
+        });
+    }
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    for (artist, album) in batch_match_plan(&session, None) {
+        let _ = lazy_match_page(&app, service, &artist, &album).await?;
+    }
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    let (albums, tracks) = accept_all_entity_uris(&session);
+    Ok(AcceptAllSummary {
+        album_entities: albums.len() as u32,
+        track_entities: tracks.len() as u32,
+    })
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_accept_all_page(
     app: tauri::AppHandle,
@@ -2691,11 +3268,15 @@ pub(crate) async fn lastfm_import_accept_all_page(
     album: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
-        assert_current_account(&app, state.lastfm_import.as_ref()).await?;
+        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     let Some(page) = state.lastfm_import.page(&artist, &album).await else {
         return Ok(state.lastfm_import.state().await);
     };
+    if page.rows.iter().any(|item| item.match_result.is_none()) {
+        return Err("Prepare Accept All before applying its confirmed batches.".into());
+    }
     let mut selected_album_uris = BTreeSet::new();
     for item in &page.rows {
         if !page
@@ -2743,6 +3324,7 @@ pub(crate) async fn lastfm_import_accept_all_page(
                 .await?;
         }
     }
+    drop(_membership_guard);
     let Some(page) = state.lastfm_import.page(&artist, &album).await else {
         return Ok(state.lastfm_import.state().await);
     };
@@ -2784,11 +3366,11 @@ pub(crate) async fn start_lastfm_import(
     start_import(app, defaults).await
 }
 
-pub(crate) fn default_decision(session: &LastFmImportSessionV1, id: &str) -> RowDecision {
+pub(crate) fn default_decision(session: &LastFmImportSessionV2, id: &str) -> RowDecision {
     session.decisions.get(id).cloned().unwrap_or_default()
 }
 
-fn locked_count_modes(session: &LastFmImportSessionV1) -> BTreeSet<String> {
+fn locked_count_modes(session: &LastFmImportSessionV2) -> BTreeSet<String> {
     session
         .rows
         .iter()
@@ -2802,7 +3384,7 @@ fn locked_count_modes(session: &LastFmImportSessionV1) -> BTreeSet<String> {
         .collect()
 }
 
-fn queue_status(session: &LastFmImportSessionV1, rows: &[&SourceRow]) -> Option<QueueStatus> {
+fn queue_status(session: &LastFmImportSessionV2, rows: &[&SourceRow]) -> Option<QueueStatus> {
     if rows
         .iter()
         .all(|row| default_decision(session, &row.stable_id).excluded)
@@ -2828,7 +3410,7 @@ fn queue_status(session: &LastFmImportSessionV1, rows: &[&SourceRow]) -> Option<
     })
 }
 
-fn update_review_phase(session: &mut LastFmImportSessionV1) {
+fn update_review_phase(session: &mut LastFmImportSessionV2) {
     if session.remaining() == 0 {
         session.phase = ImportPhase::Done;
     } else if session.phase == ImportPhase::Done {
@@ -2840,25 +3422,25 @@ fn review_phase_allowed(phase: ImportPhase) -> bool {
     matches!(phase, ImportPhase::Review | ImportPhase::Done)
 }
 
-fn exclude_row(session: &mut LastFmImportSessionV1, id: &str, excluded: bool) {
+fn exclude_row(session: &mut LastFmImportSessionV2, id: &str, excluded: bool) {
     if is_reviewable(session, id) {
         let decision = session.decisions.entry(id.to_owned()).or_default();
         decision.excluded = excluded;
     }
 }
 
-fn is_reviewable(session: &LastFmImportSessionV1, id: &str) -> bool {
+fn is_reviewable(session: &LastFmImportSessionV2, id: &str) -> bool {
     matches!(
         default_decision(session, id).status,
         RowStatus::Pending | RowStatus::Skipped
     )
 }
 
-fn is_actionable(session: &LastFmImportSessionV1, id: &str) -> bool {
+fn is_actionable(session: &LastFmImportSessionV2, id: &str) -> bool {
     is_reviewable(session, id) && !default_decision(session, id).excluded
 }
 
-pub(crate) fn ignore_album(session: &mut LastFmImportSessionV1, artist: &str, album: &str) {
+pub(crate) fn ignore_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
     let ids = session
         .rows
         .iter()
@@ -2878,7 +3460,7 @@ pub(crate) fn ignore_album(session: &mut LastFmImportSessionV1, artist: &str, al
     }
 }
 
-pub(crate) fn ignore_artist(session: &mut LastFmImportSessionV1, artist: &str) {
+pub(crate) fn ignore_artist(session: &mut LastFmImportSessionV2, artist: &str) {
     let ids = session
         .rows
         .iter()
@@ -2896,7 +3478,7 @@ pub(crate) fn ignore_artist(session: &mut LastFmImportSessionV1, artist: &str) {
     }
 }
 
-pub(crate) fn skip_album(session: &mut LastFmImportSessionV1, artist: &str, album: &str) {
+pub(crate) fn skip_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
     let ids = session
         .rows
         .iter()
@@ -2941,6 +3523,531 @@ mod tests {
             track: track.into(),
             timestamp,
         }
+    }
+
+    #[test]
+    fn aggregation_input_is_sorted_oldest_first_with_deterministic_ties() {
+        let mut scrobbles = vec![
+            scrobble("B", "Album", "Track", 20),
+            scrobble("A", "Album", "Track", 10),
+            scrobble("A", "Album", "Other", 10),
+        ];
+        sort_scrobbles(&mut scrobbles);
+        assert_eq!(
+            scrobbles
+                .iter()
+                .map(|row| (row.artist.clone(), row.track.clone(), row.timestamp))
+                .collect::<Vec<_>>(),
+            vec![
+                ("A".to_owned(), "Other".to_owned(), 10),
+                ("A".to_owned(), "Track".to_owned(), 10),
+                ("B".to_owned(), "Track".to_owned(), 20),
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregation_handles_a_large_unique_input_with_indexed_rows() {
+        const UNIQUE_SCROBBLES: usize = 50_000;
+        let scrobbles = (0..UNIQUE_SCROBBLES)
+            .map(|index| scrobble("Artist", "Album", &format!("Track {index}"), index as u64))
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+
+        aggregate_scrobbles(&mut rows, &scrobbles);
+
+        assert_eq!(rows.len(), UNIQUE_SCROBBLES);
+        assert_eq!(rows[0].track, "Track 0");
+        assert_eq!(rows[UNIQUE_SCROBBLES - 1].track, "Track 49999");
+    }
+
+    #[test]
+    fn cached_spotify_identity_only_trusts_an_exact_matching_cache() {
+        let mut library = SpotifyLibraryState {
+            account_id: "spotify-a".into(),
+            complete: true,
+            ..SpotifyLibraryState::default()
+        };
+        assert_eq!(
+            cached_spotify_identity_matches("spotify-a", &library),
+            Some(true)
+        );
+        assert_eq!(
+            cached_spotify_identity_matches("spotify-b", &library),
+            Some(false)
+        );
+
+        library.complete = false;
+        assert_eq!(cached_spotify_identity_matches("spotify-a", &library), None);
+    }
+
+    #[test]
+    fn session_account_matching_requires_bound_identity_for_owned_mutations() {
+        let mut session = LastFmImportSessionV2::new("lastfm-user".into(), "spotify-a".into(), 1);
+        assert!(session_account_matches(
+            &session,
+            "lastfm-user",
+            "spotify-a",
+            true
+        ));
+        assert!(!session_account_matches(
+            &session,
+            "lastfm-user",
+            "spotify-b",
+            true
+        ));
+
+        session.spotify_account_id = None;
+        assert!(!session_account_matches(
+            &session,
+            "lastfm-user",
+            "spotify-a",
+            true
+        ));
+        assert!(session_account_matches(
+            &session,
+            "lastfm-user",
+            "spotify-a",
+            false
+        ));
+    }
+
+    fn parsed_page(
+        page: u32,
+        total_pages: u32,
+        tracks: Vec<ParsedScrobble>,
+    ) -> ParsedRecentTracksPage {
+        ParsedRecentTracksPage {
+            page,
+            total_pages: Some(total_pages),
+            total: Some(tracks.len() as u64),
+            tracks,
+            ..ParsedRecentTracksPage::default()
+        }
+    }
+
+    async fn start_bound(service: &Service, username: &str, spotify: &str, history_to: u64) {
+        service
+            .start_or_resume(username, history_to, None)
+            .await
+            .unwrap();
+        let mut session = service.snapshot().await.unwrap();
+        session.spotify_account_id = Some(spotify.into());
+        service.save(session).await.unwrap();
+    }
+
+    #[test]
+    fn manifest_is_authoritative_and_acknowledged_page_damage_quarantines_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImportSessionStore::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
+        session.total_pages = Some(2);
+        session.next_page = 2;
+        let orphan = store.page_path(&session.cache_id, 2);
+        fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, b"orphan").unwrap();
+        assert!(store.validate_cache(&session).is_ok());
+
+        store
+            .write_page(
+                &session,
+                &parsed_page(2, 2, vec![scrobble("Artist", "Album", "Track", 2)]),
+            )
+            .unwrap();
+        assert!(store.validate_cache(&session).is_ok());
+        fs::remove_file(&orphan).unwrap();
+        session.downloaded_pages = 1;
+        store.save(&session).unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("quarantine")
+        }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImportSessionStore::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
+        session.total_pages = Some(1);
+        session.next_page = 1;
+        store
+            .write_page(
+                &session,
+                &parsed_page(1, 1, vec![scrobble("Artist", "Album", "Track", 2)]),
+            )
+            .unwrap();
+        session.downloaded_pages = 1;
+        store.save(&session).unwrap();
+        let page_path = store.page_path(&session.cache_id, 1);
+        let damaged = CachedRawPage {
+            lastfm_username: session.lastfm_username.clone(),
+            history_to: 43,
+            total_pages: 1,
+            parsed: parsed_page(1, 1, vec![scrobble("Artist", "Album", "Track", 2)]),
+        };
+        fs::write(&page_path, serde_json::to_vec(&damaged).unwrap()).unwrap();
+        assert!(store.load().unwrap().is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImportSessionStore::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
+        session.total_pages = Some(1);
+        session.next_page = 1;
+        session.downloaded_pages = 1;
+        let manifest = RawCacheManifest {
+            version: SESSION_VERSION,
+            cache_id: session.cache_id.clone(),
+            lastfm_username: session.lastfm_username.clone(),
+            history_to: session.history_to,
+            total_pages: 1,
+            pages: BTreeMap::from([(1, MAX_RAW_CACHE_BYTES + 1)]),
+        };
+        fs::create_dir_all(store.cache_path(&session.cache_id)).unwrap();
+        fs::write(
+            store.manifest_path(&session.cache_id),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        store.save(&session).unwrap();
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_state_round_trips_without_advancing_the_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", 500, None)
+            .await
+            .unwrap();
+        service.set_metadata(3, 600).await.unwrap();
+        service
+            .set_retryable_error(Some(RetryableError {
+                message: "temporary".into(),
+                attempt: 4,
+                retryable: true,
+            }))
+            .await
+            .unwrap();
+
+        let session = Service::new(dir.path()).snapshot().await.unwrap();
+        assert_eq!(session.next_page, 3);
+        assert_eq!(session.downloaded_pages, 0);
+        assert_eq!(session.retryable_error.unwrap().attempt, 4);
+    }
+
+    #[tokio::test]
+    async fn spotify_binding_waits_for_the_first_review_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", 500, None)
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await.unwrap().spotify_account_id, None);
+        service.set_metadata(1, 1).await.unwrap();
+        service
+            .checkpoint_page(
+                1,
+                &parsed_page(1, 1, vec![scrobble("Artist", "Album", "Track", 10)]),
+            )
+            .await
+            .unwrap();
+        service.aggregate_cached().await.unwrap();
+        let source_id = service.snapshot().await.unwrap().rows[0].stable_id.clone();
+        service
+            .set_match(
+                "lastfm-user",
+                "spotify-user",
+                MatchResult {
+                    source_id,
+                    search_term: "track search".into(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some("spotify:track:target".into()),
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .snapshot()
+                .await
+                .unwrap()
+                .spotify_account_id
+                .as_deref(),
+            Some("spotify-user")
+        );
+    }
+
+    #[tokio::test]
+    async fn all_pages_are_present_before_aggregation_and_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", 500, None)
+            .await
+            .unwrap();
+        service.set_metadata(2, 2).await.unwrap();
+        service
+            .checkpoint_page(
+                2,
+                &parsed_page(2, 2, vec![scrobble("Artist", "Album", "New", 20)]),
+            )
+            .await
+            .unwrap();
+        let partial = service.snapshot().await.unwrap();
+        assert_eq!(partial.phase, ImportPhase::Downloading);
+        assert!(partial.rows.is_empty());
+        service
+            .checkpoint_page(
+                1,
+                &parsed_page(1, 2, vec![scrobble("Artist", "Album", "Old", 10)]),
+            )
+            .await
+            .unwrap();
+        let complete = service.snapshot().await.unwrap();
+        assert_eq!(complete.phase, ImportPhase::Aggregating);
+        assert_eq!(complete.downloaded_pages, 2);
+        assert!(complete.rows.is_empty());
+        service.aggregate_cached().await.unwrap();
+        let review = service.snapshot().await.unwrap();
+        assert_eq!(review.phase, ImportPhase::Review);
+        assert_eq!(
+            review
+                .rows
+                .iter()
+                .map(|row| row.track.as_str())
+                .collect::<Vec<_>>(),
+            ["Old", "New"]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_aggregate_enters_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", 500, None)
+            .await
+            .unwrap();
+        service.set_metadata(1, 0).await.unwrap();
+        service
+            .checkpoint_page(1, &parsed_page(1, 1, Vec::new()))
+            .await
+            .unwrap();
+
+        service.aggregate_cached().await.unwrap();
+
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.phase, ImportPhase::Done);
+        assert!(session.rows.is_empty());
+        assert_eq!(session.remaining(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_discards_rows_at_or_after_history_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .start_or_resume("lastfm-user", 500, None)
+            .await
+            .unwrap();
+        service.set_metadata(1, 3).await.unwrap();
+        service
+            .checkpoint_page(
+                1,
+                &parsed_page(
+                    1,
+                    1,
+                    vec![
+                        scrobble("Artist", "Album", "Before", 499),
+                        scrobble("Artist", "Album", "At cutoff", 500),
+                        scrobble("Artist", "Album", "After", 501),
+                    ],
+                ),
+            )
+            .await
+            .unwrap();
+
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.included_scrobbles, 1);
+        assert_eq!(session.phase, ImportPhase::Aggregating);
+        service.aggregate_cached().await.unwrap();
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.rows.len(), 1);
+        assert_eq!(session.rows[0].track, "Before");
+    }
+
+    #[test]
+    fn cache_identity_uses_exact_username_and_rejects_metadata_mismatch() {
+        assert_ne!(
+            snapshot_cache_id("user.name", 42),
+            snapshot_cache_id("username", 42)
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImportSessionStore::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user.name".into(), "spotify".into(), 42);
+        session.total_pages = Some(1);
+        session.next_page = 1;
+        store
+            .write_page(
+                &session,
+                &parsed_page(1, 1, vec![scrobble("Artist", "Album", "Track", 2)]),
+            )
+            .unwrap();
+
+        let mut mismatch = session.clone();
+        mismatch.lastfm_username = "user-name".into();
+        mismatch.cache_id = session.cache_id.clone();
+        assert!(store.validate_cache(&mismatch).is_err());
+        store.save(&mismatch).unwrap();
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn visible_batch_matching_is_lazy_and_accept_all_is_the_bulk_plan() {
+        let mut session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 100, ImportDefaults::default());
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[
+                scrobble("Artist A", "Album A", "One", 1),
+                scrobble("Artist B", "Album B", "Two", 2),
+                scrobble("Artist C", "Album C", "Three", 3),
+            ],
+        );
+        let first_id = session.rows[0].stable_id.clone();
+        let first_key = "Artist A\u{1f}Album A".to_owned();
+        session.page_options.insert(
+            first_key,
+            PageOptions {
+                selected_track_ids: BTreeSet::from([first_id.clone()]),
+                ..PageOptions::default()
+            },
+        );
+
+        assert_eq!(
+            batch_match_plan(&session, Some(("Artist A", "Album A"))),
+            vec![("Artist A".into(), "Album A".into())]
+        );
+        session.matches.insert(
+            first_id.clone(),
+            MatchResult {
+                source_id: first_id,
+                search_term: "track".into(),
+                confidence: Some(Confidence::Exact),
+                selected_uri: Some("spotify:track:first".into()),
+                candidates: Vec::new(),
+                track_matches: BTreeMap::new(),
+            },
+        );
+        assert!(batch_match_plan(&session, Some(("Artist A", "Album A"))).is_empty());
+        assert_eq!(
+            batch_match_plan(&session, None),
+            vec![
+                ("Artist B".into(), "Album B".into()),
+                ("Artist C".into(), "Album C".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn accept_all_entity_counts_are_unique_across_batches() {
+        let mut session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 100, ImportDefaults::default());
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[
+                scrobble("Artist A", "Album A", "One", 1),
+                scrobble("Artist B", "Album B", "Two", 2),
+            ],
+        );
+        for row in &session.rows {
+            session.page_options.insert(
+                format!("{}\u{1f}{}", row.artist, row.album),
+                PageOptions {
+                    whole_album: true,
+                    selected_track_ids: BTreeSet::from([row.stable_id.clone()]),
+                    ..PageOptions::default()
+                },
+            );
+            session.matches.insert(
+                row.stable_id.clone(),
+                MatchResult {
+                    source_id: row.stable_id.clone(),
+                    search_term: "album".into(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some("spotify:album:shared".into()),
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::new(),
+                },
+            );
+        }
+        let (albums, tracks) = accept_all_entity_uris(&session);
+        assert_eq!(albums, BTreeSet::from(["spotify:album:shared".into()]));
+        assert!(tracks.is_empty());
+
+        for options in session.page_options.values_mut() {
+            options.whole_album = false;
+        }
+        for row in &session.rows {
+            session
+                .matches
+                .get_mut(&row.stable_id)
+                .unwrap()
+                .track_matches =
+                BTreeMap::from([(row.stable_id.clone(), "spotify:track:shared".into())]);
+        }
+        let (albums, tracks) = accept_all_entity_uris(&session);
+        assert!(albums.is_empty());
+        assert_eq!(tracks, BTreeSet::from(["spotify:track:shared".into()]));
+    }
+
+    #[tokio::test]
+    async fn one_lazy_batch_uses_only_its_spotify_requests() {
+        let client = retune_spotify::client::fake_client(
+            [retune_spotify::client::Response::json(
+                200,
+                serde_json::json!({
+                    "tracks": {
+                        "items": [{
+                            "uri": "spotify:track:one",
+                            "name": "One",
+                            "artists": [{"id": "artist", "name": "Artist"}],
+                            "album": {
+                                "id": "album",
+                                "uri": "spotify:album:album",
+                                "name": "Album"
+                            }
+                        }],
+                        "next": null,
+                        "total": 1
+                    }
+                }),
+            )],
+            "",
+        );
+        let rows = vec![SourceRow {
+            stable_id: "artist\u{1f}\u{1f}one".into(),
+            artist: "Artist".into(),
+            album: String::new(),
+            track: "One".into(),
+            variants: Vec::new(),
+            play_count: 1,
+            earliest: 1,
+            latest: 1,
+        }];
+        let matches = match_batch(&client, "Artist", "", &rows).await.unwrap();
+        assert_eq!(matches.len(), 1);
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("/search?"));
+        assert!(requests[0].url.contains("type=track"));
     }
 
     #[test]
@@ -2991,15 +4098,14 @@ mod tests {
     }
 
     #[test]
-    fn setup_state_view_reports_identity_and_review_only_remaining() {
-        let identity = ("rianjs".to_owned(), "spotify-user".to_owned());
-        let setup = state_view_with_identity(None, Some(&identity));
+    fn setup_state_view_reports_review_only_remaining() {
+        let setup = state_view(None);
         assert_eq!(setup.phase, None);
-        assert_eq!(setup.username.as_deref(), Some("rianjs"));
-        assert_eq!(setup.spotify_account_id.as_deref(), Some("spotify-user"));
+        assert_eq!(setup.username, None);
+        assert_eq!(setup.spotify_account_id, None);
         assert_eq!(setup.remaining, 0);
 
-        let mut session = LastFmImportSessionV1::new("rianjs".into(), "spotify-user".into(), 10);
+        let mut session = LastFmImportSessionV2::new("rianjs".into(), "spotify-user".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
             &[scrobble("Artist", "Album", "Track", 10)],
@@ -3031,7 +4137,7 @@ mod tests {
     async fn page_fuzzy_groups_only_include_rows_selected_for_import() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        let mut session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 10);
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
             &[
@@ -3134,7 +4240,7 @@ mod tests {
     async fn count_mode_change_is_rejected_after_target_is_done() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        let mut session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 10);
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
             &[scrobble("Artist", "Album", "Track", 1)],
@@ -3181,7 +4287,7 @@ mod tests {
 
     #[test]
     fn target_count_mode_is_session_scoped_across_pages_and_persisted() {
-        let mut session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 10);
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
             &[
@@ -3285,7 +4391,7 @@ mod tests {
 
     #[test]
     fn fuzzy_strategy_remains_independent_per_target() {
-        let mut session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 10);
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
             &[
@@ -3635,7 +4741,7 @@ mod tests {
 
     #[test]
     fn review_actions_cascade_and_remaining_count_is_durable() {
-        let mut session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 10);
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
             &[
@@ -3666,10 +4772,7 @@ mod tests {
     async fn fully_excluded_review_action_reaches_done_and_has_view_only_queue_status() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         service
             .checkpoint_page(
                 1,
@@ -3685,6 +4788,7 @@ mod tests {
             )
             .await
             .unwrap();
+        service.aggregate_cached().await.unwrap();
         let mut session = service.snapshot().await.unwrap();
         session.phase = ImportPhase::Review;
         service.save(session.clone()).await.unwrap();
@@ -3712,7 +4816,7 @@ mod tests {
     async fn owned_review_mutations_reject_mismatch_and_suspension() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        let mut session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 10);
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         session.phase = ImportPhase::Review;
         service.save(session).await.unwrap();
 
@@ -3771,7 +4875,7 @@ mod tests {
     fn persistence_round_trip_quarantines_corrupt_unknown_and_rejects_oversize() {
         let dir = tempfile::tempdir().unwrap();
         let store = ImportSessionStore::new(dir.path());
-        let session = LastFmImportSessionV1::new("user".into(), "spotify".into(), 42);
+        let session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
         store.save(&session).unwrap();
         assert_eq!(store.load().unwrap(), Some(session.clone()));
         #[cfg(unix)]
@@ -3812,13 +4916,13 @@ mod tests {
             .to_string_lossy()
             .contains("quarantine")));
 
-        let mut unknown = LastFmImportSessionV1::new("user".into(), "spotify".into(), 42);
+        let mut unknown = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
         unknown.version = 99;
         store.save(&unknown).unwrap();
         assert_eq!(store.load().unwrap(), None);
         assert!(fs::read_dir(dir.path()).unwrap().count() >= 2);
 
-        let mut too_large = LastFmImportSessionV1::new("user".into(), "spotify".into(), 42);
+        let mut too_large = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
         too_large.rows.push(SourceRow {
             stable_id: "x".into(),
             artist: "a".into(),
@@ -3844,48 +4948,40 @@ mod tests {
     async fn page_checkpoint_resume_is_idempotent_and_account_mismatch_suspends() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
+        service.set_metadata(2, 2).await.unwrap();
+        let parsed = parsed_page(2, 2, vec![scrobble("Artist", "Album", "Track", 10)]);
+        service.checkpoint_page(2, &parsed).await.unwrap();
+        service.checkpoint_page(2, &parsed).await.unwrap();
         service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
+            .checkpoint_page(1, &parsed_page(1, 2, Vec::new()))
             .await
             .unwrap();
-        let parsed = ParsedRecentTracksPage {
-            page: 1,
-            total_pages: Some(2),
-            total: Some(2),
-            tracks: vec![scrobble("Artist", "Album", "Track", 10)],
-            ..ParsedRecentTracksPage::default()
-        };
-        service.checkpoint_page(1, &parsed).await.unwrap();
-        service.checkpoint_page(1, &parsed).await.unwrap();
+        service.aggregate_cached().await.unwrap();
         let resumed = Service::new(dir.path());
         let session = resumed.snapshot().await.unwrap();
-        assert_eq!(session.next_page, 2);
+        assert_eq!(session.next_page, 0);
         assert_eq!(session.rows.len(), 1);
         assert_eq!(session.included_scrobbles, 1);
 
-        let mismatch = resumed
-            .start_or_resume("other-user", "spotify-user", 600, None)
-            .await;
+        let mismatch = resumed.start_or_resume("other-user", 600, None).await;
         assert!(mismatch.is_err());
         assert_eq!(
             resumed.snapshot().await.unwrap().phase,
             ImportPhase::Suspended
         );
         let resumed_for_owner = resumed
-            .start_or_resume("lastfm-user", "spotify-user", 600, None)
+            .start_or_resume("lastfm-user", 600, None)
             .await
             .unwrap();
-        assert_eq!(resumed_for_owner.phase, Some(ImportPhase::Downloading));
+        assert_eq!(resumed_for_owner.phase, Some(ImportPhase::Review));
     }
 
     #[tokio::test]
     async fn search_terms_preference_round_trips_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();
@@ -3902,10 +4998,7 @@ mod tests {
     async fn overlapping_mutations_preserve_memory_and_disk_changes() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();
@@ -3939,10 +5032,7 @@ mod tests {
     async fn failed_blocking_persistence_does_not_commit_live_mutation() {
         let dir = tempfile::tempdir().unwrap();
         let mut service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();
@@ -3964,13 +5054,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_checkpoint_and_finalization_cannot_write_through_suspension() {
+    async fn matching_cannot_write_through_suspension() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         service
             .checkpoint_page(
                 1,
@@ -3985,7 +5072,7 @@ mod tests {
             .unwrap();
         service.suspend_for_account_mismatch().await.unwrap();
         let result = service
-            .set_matches_during_matching(
+            .set_matches(
                 "lastfm-user",
                 "spotify-user",
                 vec![MatchResult {
@@ -3999,10 +5086,6 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(service
-            .finish_matching_if_current("lastfm-user", "spotify-user")
-            .await
-            .is_err());
         let session = service.snapshot().await.unwrap();
         assert_eq!(session.phase, ImportPhase::Suspended);
         assert!(session.matches.is_empty());
@@ -4012,10 +5095,7 @@ mod tests {
     async fn suspended_reads_are_redacted_and_empty() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("prior-user", "prior-spotify", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "prior-user", "prior-spotify", 500).await;
         service
             .checkpoint_page(
                 1,
@@ -4042,39 +5122,32 @@ mod tests {
     async fn mismatched_pages_do_not_advance_and_page_batches_are_compact() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
-        let mismatched = ParsedRecentTracksPage {
-            page: 2,
-            tracks: vec![scrobble("Artist", "Album", "Track", 10)],
-            ..ParsedRecentTracksPage::default()
-        };
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
+        service.set_metadata(2, 1).await.unwrap();
+        let mismatched = parsed_page(2, 2, vec![scrobble("Artist", "Album", "Track", 10)]);
         assert!(service.checkpoint_page(1, &mismatched).await.is_err());
-        assert_eq!(service.snapshot().await.unwrap().next_page, 1);
-        let duplicate_page = ParsedRecentTracksPage {
-            page: 1,
-            tracks: vec![
+        assert_eq!(service.snapshot().await.unwrap().next_page, 2);
+        service.checkpoint_page(2, &mismatched).await.unwrap();
+        let duplicate_page = parsed_page(
+            1,
+            2,
+            vec![
                 scrobble("Artist", "Album", "Track", 10),
                 scrobble("artist", "album", "track", 20),
             ],
-            ..ParsedRecentTracksPage::default()
-        };
+        );
         service.checkpoint_page(1, &duplicate_page).await.unwrap();
+        service.aggregate_cached().await.unwrap();
         let session = service.snapshot().await.unwrap();
         assert_eq!(session.batches[0].source_ids.len(), 1);
-        assert_eq!(session.next_page, 2);
+        assert_eq!(session.next_page, 0);
     }
 
     #[tokio::test]
     async fn queue_reports_exact_entity_counts_for_current_page_choices() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         let parsed = ParsedRecentTracksPage {
             page: 1,
             total_pages: Some(1),
@@ -4086,6 +5159,7 @@ mod tests {
             ..ParsedRecentTracksPage::default()
         };
         service.checkpoint_page(1, &parsed).await.unwrap();
+        service.aggregate_cached().await.unwrap();
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();
@@ -4182,10 +5256,7 @@ mod tests {
     async fn selecting_an_album_candidate_remaps_every_related_source_track() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        service
-            .start_or_resume("lastfm-user", "spotify-user", 500, None)
-            .await
-            .unwrap();
+        start_bound(&service, "lastfm-user", "spotify-user", 500).await;
         let parsed = ParsedRecentTracksPage {
             page: 1,
             total_pages: Some(1),
@@ -4196,6 +5267,7 @@ mod tests {
             ..ParsedRecentTracksPage::default()
         };
         service.checkpoint_page(1, &parsed).await.unwrap();
+        service.aggregate_cached().await.unwrap();
         let mut review_session = service.snapshot().await.unwrap();
         review_session.phase = ImportPhase::Review;
         service.save(review_session).await.unwrap();

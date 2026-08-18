@@ -13,7 +13,7 @@ desktop application shell
    ├── retune-spotify    OAuth, Web API, normalization
    ├── retune-audio      local-file scan, tags, decoding
    ├── playback          controller + Spotify/file backends
-   ├── lastfm_import     account-bound snapshot, matching, review, and apply boundary
+   ├── lastfm_import     account-bound snapshot, lazy matching, review, and apply boundary
    └── store             app-data persistence
 ```
 
@@ -39,8 +39,9 @@ shell owns orchestration and persistence. Domain crates do not depend on Tauri.
 - The playback controller owns the canonical queue, active order, generation,
   and user-facing playback state.
 - React owns view selection, navigation, dialog state, and transient gestures.
-- `lastfm_import` owns the resumable Last.fm snapshot, compact source variants,
-  Spotify matching results, review decisions, and account-bound application.
+- `lastfm_import` owns the resumable Last.fm snapshot, raw-page cache, compact
+  source variants, lazy Spotify matching results, review decisions, and
+  account-bound application.
   Its parsing and review helpers do not add network or filesystem concerns to
   `retune-core`.
 
@@ -69,14 +70,38 @@ updates state, advances the queue, and records threshold-based play counts.
 ### Last.fm import
 
 The Preferences action opens a second `lastfm-importer` WebviewWindow at
-1320×840. The importer captures one fixed Last.fm `to` timestamp, fetches
-`user.getRecentTracks` sequentially at 200 rows per page, skips now-playing and
-undated rows, and atomically checkpoints compact aggregate variants plus the
-next page. Its session defaults independently control content and historical
-play counts (both on by default, with whole-album content mode off); at least
-one remains selected. Matching then runs sequentially through the shared
-Spotify client; album candidates are limited to ten and classified from real
-track-set overlap without monopolizing the membership gate.
+1320×840. An account-bound `lastfmScrobblingProfile` records the first
+successful connection/enable timestamp for each Last.fm username; toggling
+preserves the same username's timestamp and a different username replaces it.
+The importer captures that fixed `historyTo`, probes metadata once, and fetches
+`user.getRecentTracks` at its documented 200-row limit from the oldest page
+toward page 1. It skips now-playing and undated rows, writes parsed raw pages
+under a snapshot-specific machine cache, discards rows at or after `historyTo`
+before caching or counting, acknowledges each page in a manifest only after
+the atomic page write, and enforces 100 MiB session/cache ceilings. The exact
+Last.fm username is recorded in both manifest and page metadata. No
+aggregation or Spotify request occurs during source work. Once every manifest
+page is present, raw-page reads, sorting, and aggregation run off the async
+runtime; the importer then atomically enters review, or Done when no rows remain,
+before best-effort cache cleanup.
+
+The source runner persists retry state after Last.fm's internal capped retry is
+exhausted, waits at the capped delay, and retries the same probe/page in
+process while the app remains running; a failed request never advances its
+cursor. An acknowledged missing, corrupt, oversized, or metadata-mismatched
+page quarantines the snapshot and starts a fresh V2 session. An unacknowledged
+page file is an ignorable orphan and can be overwritten on retry. V1 caches are
+quarantined because the fixed cutoff changes page boundaries. Relaunching with
+a saved Downloading or Aggregating session resumes it once after hydration;
+an empty state never creates a session implicitly.
+
+Opening a visible review batch lazily searches through the shared Spotify
+client/request gate, serializes duplicate batch requests, binds the Spotify
+account on the first match, and caches the results. Revisiting a cached batch
+does not call Spotify and there is no adjacent prefetch. Accept All is the
+explicit bulk exception: it sequentially prepares every remaining batch,
+shows global unique album/track URI counts, then applies only after
+confirmation.
 
 Fuzzy count strategies are persisted once per Spotify track target for the
 session, and the review page discloses every source row in the session that
@@ -88,11 +113,15 @@ Whole-album acceptance sends one album URI to Spotify and updates
 `SavedAlbumRecord`; selected-track acceptance sends only track URIs and updates
 `saved_tracks`. Upstream membership completes before the atomic local history
 and metadata mutation, and a durable decision is marked done only after that
-mutation succeeds. The session is bound to both the Last.fm username and
-Spotify `/me` account ID; a mismatch suspends it.
+mutation succeeds. The source session is bound to Last.fm first; Spotify
+`/me` is nullable until the first lazy match. A later Spotify mismatch
+suspends Spotify-derived work without invalidating the source snapshot.
 The importer serializes each session mutation through durable replacement before
 updating memory, and matching rechecks the expected account and phase at every
-durable checkpoint and before entering review. Suspended state exposes no prior
+durable checkpoint and before entering review. Cached Spotify-derived pages
+trust only an exact cached library identity; otherwise the current `/me` account
+is resolved. Post-search ownership validation and match persistence hold the
+shared Spotify membership gate together. Suspended state exposes no prior
 account identity or queue.
 
 ## Cross-cutting rules

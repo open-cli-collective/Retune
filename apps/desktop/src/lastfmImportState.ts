@@ -1,5 +1,5 @@
 export type ImportSort = 'plays' | 'artist' | 'batch' | 'lastPlayed'
-export type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
+export type ImportPhase = 'downloading' | 'aggregating' | 'review' | 'done' | 'suspended'
 export type CountMode = 'sum' | 'overwrite' | 'zero'
 export type ImportPickerKind = 'album' | 'track'
 export type ImportConfidence = 'exact' | 'likely' | 'low' | null
@@ -202,23 +202,35 @@ export function importStatusLabel(status: QueueStatus): string {
   return status === 'ignored-album' ? 'ignored-album' : status === 'ignored-artist' ? 'ignored-artist' : status
 }
 
-export function importStatusText(phase: ImportPhase | null, username: string | null, nextPage: number, totalPages: number | null, matchedRows: number, matchTotal: number): string {
+export function importStatusText(phase: ImportPhase | null, username: string | null, nextPage: number, totalPages: number | null): string {
   if (phase === 'downloading') return `Downloading Last.fm history · page ${nextPage}${totalPages ? ` of ${totalPages}` : ''}`
-  if (phase === 'matching') return `Matching Last.fm history · ${matchedRows.toLocaleString()} of ${matchTotal.toLocaleString()} tracks`
+  if (phase === 'aggregating') return 'Preparing Last.fm review'
   if (phase === 'suspended') return 'Import suspended for account safety'
   if (phase === 'done') return 'Import complete'
-  return username ? 'Ready to import' : 'Connect Last.fm and Spotify to begin'
+  return username ? 'Ready to import' : 'Connect Last.fm to begin'
 }
 
 export function showsImportRemaining(phase: ImportPhase | null): boolean {
   return phase === 'review' || phase === 'done'
 }
 
-export function downloadAction(phase: ImportPhase | null, hasRetryableError: boolean): { label: string; disabled: boolean } {
+export function downloadAction(phase: ImportPhase | null, retryableError: { retryable: boolean } | null): { label: string; disabled: boolean } {
   if (phase === null) return { label: 'Start import', disabled: false }
   if (phase === 'suspended') return { label: 'Check accounts and resume', disabled: false }
-  if (phase === 'downloading' && !hasRetryableError) return { label: 'Downloading…', disabled: true }
+  if (retryableError?.retryable && (phase === 'downloading' || phase === 'aggregating')) return { label: 'Retrying automatically…', disabled: true }
+  if (phase === 'aggregating') return { label: 'Preparing review…', disabled: true }
+  if (phase === 'downloading' && !retryableError) return { label: 'Downloading…', disabled: true }
   return { label: 'Resume download', disabled: false }
+}
+
+export function importEmptyPageMessage(phase: ImportPhase | null, pageLoading: boolean): { title: string; detail: string } {
+  if (pageLoading) return { title: 'Matching this review batch…', detail: 'Spotify is contacted only for the visible batch.' }
+  if (phase === 'done') return { title: 'Import complete', detail: 'All review batches are complete.' }
+  return { title: 'No review page selected', detail: 'Select an album from the queue.' }
+}
+
+export function shouldAutoResumeImport(phase: ImportPhase | null | undefined, attempted: boolean): boolean {
+  return !attempted && (phase === 'downloading' || phase === 'aggregating')
 }
 
 export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {

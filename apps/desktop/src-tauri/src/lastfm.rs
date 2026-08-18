@@ -1547,6 +1547,10 @@ fn retry_delay(attempt: usize) -> Duration {
     RETRY_DELAYS[attempt.min(RETRY_DELAYS.len() - 1)]
 }
 
+pub(crate) fn import_retry_delay(attempt: usize) -> Duration {
+    retry_delay(attempt)
+}
+
 pub(crate) fn scrobble_threshold_ms(duration_secs: u64) -> Option<u64> {
     (duration_secs > 30).then(|| (duration_secs.saturating_mul(500)).min(240_000))
 }
@@ -1568,7 +1572,7 @@ pub(crate) async fn finish_lastfm(app: tauri::AppHandle) -> Result<LastFmState, 
     let state = app.state::<crate::AppState>();
     let result = state.lastfm.finish(&app).await?;
     state.lastfm.set_enabled(true).await;
-    crate::set_lastfm_scrobbling(&app, true)?;
+    crate::set_lastfm_scrobbling(&app, true).await?;
     Ok(result)
 }
 

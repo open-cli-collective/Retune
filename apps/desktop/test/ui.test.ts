@@ -4,7 +4,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importEmptyPageMessage, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldAutoResumeImport, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -114,16 +114,26 @@ test('Last.fm A-to-B queue selection keeps the newer page when A resolves last',
 })
 
 test('Last.fm setup and download status reflect connected and active states', () => {
-  assert.equal(importStatusText(null, 'rianjs', 1, null, 0, 0), 'Ready to import')
-  assert.equal(importStatusText(null, null, 1, null, 0, 0), 'Connect Last.fm and Spotify to begin')
-  assert.equal(importStatusText('downloading', 'rianjs', 7, 1230, 0, 0), 'Downloading Last.fm history · page 7 of 1230')
+  assert.equal(importStatusText(null, 'rianjs', 1, null), 'Ready to import')
+  assert.equal(importStatusText(null, null, 1, null), 'Connect Last.fm to begin')
+  assert.equal(importStatusText('downloading', 'rianjs', 7, 1230), 'Downloading Last.fm history · page 7 of 1230')
   assert.equal(showsImportRemaining('downloading'), false)
-  assert.equal(showsImportRemaining('matching'), false)
+  assert.equal(showsImportRemaining('aggregating'), false)
   assert.equal(showsImportRemaining('review'), true)
-  assert.deepEqual(downloadAction(null, false), { label: 'Start import', disabled: false })
-  assert.deepEqual(downloadAction('downloading', false), { label: 'Downloading…', disabled: true })
-  assert.deepEqual(downloadAction('downloading', true), { label: 'Resume download', disabled: false })
-  assert.deepEqual(downloadAction('suspended', false), { label: 'Check accounts and resume', disabled: false })
+  assert.deepEqual(downloadAction(null, null), { label: 'Start import', disabled: false })
+  assert.deepEqual(downloadAction('downloading', null), { label: 'Downloading…', disabled: true })
+  assert.deepEqual(downloadAction('downloading', { retryable: true }), { label: 'Retrying automatically…', disabled: true })
+  assert.deepEqual(downloadAction('downloading', { retryable: false }), { label: 'Resume download', disabled: false })
+  assert.deepEqual(downloadAction('suspended', null), { label: 'Check accounts and resume', disabled: false })
+  assert.deepEqual(downloadAction('aggregating', null), { label: 'Preparing review…', disabled: true })
+  assert.deepEqual(importEmptyPageMessage('review', true), { title: 'Matching this review batch…', detail: 'Spotify is contacted only for the visible batch.' })
+  assert.deepEqual(importEmptyPageMessage('review', false), { title: 'No review page selected', detail: 'Select an album from the queue.' })
+  assert.deepEqual(importEmptyPageMessage('done', false), { title: 'Import complete', detail: 'All review batches are complete.' })
+  assert.equal(shouldAutoResumeImport('downloading', false), true)
+  assert.equal(shouldAutoResumeImport('aggregating', false), true)
+  assert.equal(shouldAutoResumeImport(null, false), false)
+  assert.equal(shouldAutoResumeImport('review', false), false)
+  assert.equal(shouldAutoResumeImport('downloading', true), false)
 })
 
 test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {

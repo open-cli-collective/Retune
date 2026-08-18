@@ -36,6 +36,7 @@ export type Settings = {
   gapless: boolean
   playThresholdPercent: PlayThresholdPercent
   lastfmScrobbling: boolean
+  lastfmScrobblingProfile: { username: string; startedAt: number } | null
 }
 
 export type ConnectionState = { connected: boolean; needs_reauth: boolean; playback_authorized: boolean }
@@ -53,15 +54,14 @@ export type LastFmImportDefaults = {
   wholeAlbum: boolean
 }
 export type LastFmImportState = {
-  phase: 'downloading' | 'matching' | 'review' | 'done' | 'suspended' | null
+  phase: 'downloading' | 'aggregating' | 'review' | 'done' | 'suspended' | null
   username: string | null
   spotifyAccountId: string | null
   nextPage: number
   totalPages: number | null
+  downloadedPages: number
   totalScrobbles: number
   includedScrobbles: number
-  matchedRows: number
-  matchTotal: number
   defaults: LastFmImportDefaults
   remaining: number
   retryableError: { message: string; attempt: number; retryable: boolean } | null

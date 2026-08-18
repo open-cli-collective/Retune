@@ -76,6 +76,13 @@ pub struct FsOverlayStore {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LastFmScrobblingProfile {
+    pub username: String,
+    pub started_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub theme: Theme,
     pub zoom: f64,
@@ -128,6 +135,8 @@ pub struct Settings {
     pub play_threshold_percent: u8,
     #[serde(default = "default_true")]
     pub lastfm_scrobbling: bool,
+    #[serde(default)]
+    pub lastfm_scrobbling_profile: Option<LastFmScrobblingProfile>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -210,6 +219,7 @@ impl Default for Settings {
             gapless: true,
             play_threshold_percent: default_play_threshold_percent(),
             lastfm_scrobbling: true,
+            lastfm_scrobbling_profile: None,
         }
     }
 }
@@ -416,6 +426,15 @@ impl Settings {
         if !matches!(self.streaming_bitrate, 96 | 160 | 320) {
             return Err(StoreError::InvalidSettings(
                 "settings streamingBitrate must be 96, 160, or 320",
+            ));
+        }
+        if self
+            .lastfm_scrobbling_profile
+            .as_ref()
+            .is_some_and(|profile| profile.username.trim().is_empty() || profile.started_at == 0)
+        {
+            return Err(StoreError::InvalidSettings(
+                "settings lastfmScrobblingProfile must have a username and positive startedAt",
             ));
         }
         Ok(())
@@ -939,6 +958,10 @@ mod tests {
             gapless: false,
             play_threshold_percent: 75,
             lastfm_scrobbling: false,
+            lastfm_scrobbling_profile: Some(LastFmScrobblingProfile {
+                username: "rianjs".into(),
+                started_at: 42,
+            }),
         };
 
         assert!(store.load().unwrap().is_none());
@@ -1509,6 +1532,38 @@ mod tests {
         assert_eq!(settings.repeat, "off");
         settings.repeat = "sometimes".into();
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn lastfm_scrobbling_profile_is_validated_on_load_and_save() {
+        for profile in [
+            LastFmScrobblingProfile {
+                username: "   ".into(),
+                started_at: 1,
+            },
+            LastFmScrobblingProfile {
+                username: "user".into(),
+                started_at: 0,
+            },
+        ] {
+            let settings = Settings {
+                lastfm_scrobbling_profile: Some(profile.clone()),
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_err());
+
+            let dir = tempfile::tempdir().unwrap();
+            let store = FsSettingsStore::new(dir.path());
+            let mut json = serde_json::to_value(Settings::default()).unwrap();
+            json["lastfmScrobblingProfile"] = serde_json::to_value(profile).unwrap();
+            fs::write(
+                dir.path().join("settings.json"),
+                serde_json::to_vec(&json).unwrap(),
+            )
+            .unwrap();
+            assert!(store.load().is_err());
+            assert!(store.save(&settings).is_err());
+        }
     }
 
     #[test]
