@@ -130,7 +130,9 @@ and durable match mutation stay under the shared membership gate, and a later
 identity mismatch suspends Spotify-derived work. Accept All is the explicit
 sequential bulk exception: it sequentially prepares every remaining batch,
 reports global unique album/track URI counts, and only then permits
-confirmation and application.
+confirmation and application. Review batches are stable persisted pages capped
+at 100 source rows, so matching, fuzzy disclosures, and command source-ID
+validation never widen to an adjacent batch.
 
 ## Writes and playlists
 

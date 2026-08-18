@@ -2484,6 +2484,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 lastfm_startup.set_enabled(lastfm_enabled).await;
                 let _ = set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
+                lastfm_import::resume_persisted_import(profile_app.clone()).await;
             });
             let completion_app = app.handle().clone();
             let lastfm = Arc::clone(&lastfm);

@@ -65,7 +65,8 @@ reconciliation until a complete sync establishes the exact account state.
 ID, descending page cursor, downloaded/total pages, totals, retryable error and
 attempt, session defaults for the two independent intents (content and
 historical play counts) plus whole-album mode, compact aggregated rows,
-decisions, page options, match results/candidates/selected URIs, a
+decisions, stable 1-based `ImportBatch` pages capped at 100 source rows, batch
+options, match results/candidates/selected URIs, a
 session-level Spotify-target-to-Sum/Overwrite/Zero map, and the session-level
 search-term display preference. Last.fm pages are written atomically as parsed
 raw-page files; the manifest is written only after the page file and is the
@@ -95,8 +96,10 @@ live validation keeps the completed V2 session, profile, and recovery backup;
 the backup is restored only when validation fails or rollback is required.
 Every session read-modify-write is serialized from its in-memory snapshot
 through JSON serialization, blocking atomic replacement, and the in-memory
-swap; suspended account-bound reads are redacted rather than exposing the
-previous owner.
+swap. Raw-page writes and aggregation are kept off the async runtime, and the
+session cursor is rechecked after a page write before acknowledgement.
+Suspended account-bound reads are redacted rather than exposing the previous
+owner.
 
 Column layout is UI state in `settings.json`: the Library has one order, width map,
 and hidden-column list. Playlists have independent metadata-column order, width,

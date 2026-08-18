@@ -4,7 +4,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importEmptyPageMessage, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldAutoResumeImport, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importEmptyPageMessage, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -20,8 +20,8 @@ const importRows = (): ImportSourceRow[] => [
 ]
 
 const importQueue = (): ImportQueueItem[] => [
-  { artist: 'Beta', album: 'Album', playCount: 3, latest: 30, sourceIds: ['a'], remaining: true, albumEntities: 1, trackEntities: 0 },
-  { artist: 'Alpha', album: 'Album', playCount: 2, latest: 40, sourceIds: ['b', 'c'], remaining: true, albumEntities: 0, trackEntities: 2 },
+  { page: 1, artist: 'Beta', album: 'Album', playCount: 3, latest: 30, sourceIds: ['a'], remaining: true, albumEntities: 1, trackEntities: 0 },
+  { page: 2, artist: 'Alpha', album: 'Album', playCount: 2, latest: 40, sourceIds: ['b', 'c'], remaining: true, albumEntities: 0, trackEntities: 2 },
 ]
 
 test('diagnostic reports include session context through the last problem only', () => {
@@ -103,14 +103,18 @@ test('Last.fm A-to-B queue selection keeps the newer page when A resolves last',
   const queue = importQueue()
   const selected: string[] = []
   const applied: string[] = []
-  const requestA = loadSelectedImportPage(generation, queue[0], () => responseA, (item) => selected.push(item.artist), (page) => applied.push(page))
-  const requestB = loadSelectedImportPage(generation, queue[1], () => responseB, (item) => selected.push(item.artist), (page) => applied.push(page))
+  let visible: string | null = 'A'
+  const requestA = loadSelectedImportPage(generation, queue[0], () => responseA, (item) => selected.push(item.artist), (page) => { visible = page; applied.push(page) }, () => { visible = null })
+  const requestB = loadSelectedImportPage(generation, queue[1], () => responseB, (item) => selected.push(item.artist), (page) => { visible = page; applied.push(page) }, () => { visible = null })
+  assert.equal(visible, null)
   resolveB('B')
   await requestB
+  assert.equal(visible, 'B')
   resolveA('A')
   await requestA
   assert.deepEqual(selected, ['Beta', 'Alpha'])
   assert.deepEqual(applied, ['B'])
+  assert.equal(visible, 'B')
 })
 
 test('Last.fm setup and download status reflect connected and active states', () => {
@@ -129,11 +133,6 @@ test('Last.fm setup and download status reflect connected and active states', ()
   assert.deepEqual(importEmptyPageMessage('review', true), { title: 'Matching this review batch…', detail: 'Spotify is contacted only for the visible batch.' })
   assert.deepEqual(importEmptyPageMessage('review', false), { title: 'No review page selected', detail: 'Select an album from the queue.' })
   assert.deepEqual(importEmptyPageMessage('done', false), { title: 'Import complete', detail: 'All review batches are complete.' })
-  assert.equal(shouldAutoResumeImport('downloading', false), true)
-  assert.equal(shouldAutoResumeImport('aggregating', false), true)
-  assert.equal(shouldAutoResumeImport(null, false), false)
-  assert.equal(shouldAutoResumeImport('review', false), false)
-  assert.equal(shouldAutoResumeImport('downloading', true), false)
 })
 
 test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {

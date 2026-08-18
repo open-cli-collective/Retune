@@ -97,17 +97,22 @@ an empty state never creates a session implicitly.
 
 Opening a visible review batch lazily searches through the shared Spotify
 client/request gate, serializes duplicate batch requests, binds the Spotify
-account on the first match, and caches the results. Revisiting a cached batch
-does not call Spotify and there is no adjacent prefetch. Accept All is the
-explicit bulk exception: it sequentially prepares every remaining batch,
-shows global unique album/track URI counts, then applies only after
-confirmation.
+account on the first match, and caches the results. Review batches are
+persisted as stable `ImportBatch` pages capped at 100 source rows; large
+artist/album groups, including singles, are split without changing the
+artist-level cascade. Commands validate the page and source IDs, and fuzzy
+disclosures stay inside the visible batch while count modes remain target-wide.
+Revisiting a cached batch does not call Spotify and there is no adjacent
+prefetch. Accept All is the explicit bulk exception: it sequentially prepares
+every remaining batch, shows global unique album/track URI counts, then applies
+only after confirmation.
 
 Fuzzy count strategies are persisted once per Spotify track target for the
-session, and the review page discloses every source row in the session that
-resolves to that target. “Show Spotify search terms” is likewise one persisted
-session preference, restored when the importer resumes rather than copied into
-each page’s options.
+session, while fuzzy disclosures are bounded to the visible persisted batch.
+The target-wide count decision still includes completed source rows from other
+batches. “Show Spotify search terms” is likewise one persisted session
+preference, restored when the importer resumes rather than copied into each
+page’s options.
 
 Whole-album acceptance sends one album URI to Spotify and updates
 `SavedAlbumRecord`; selected-track acceptance sends only track URIs and updates
@@ -122,7 +127,13 @@ durable checkpoint and before entering review. Cached Spotify-derived pages
 trust only an exact cached library identity; otherwise the current `/me` account
 is resolved. Post-search ownership validation and match persistence hold the
 shared Spotify membership gate together. Suspended state exposes no prior
-account identity or queue.
+account identity or queue. Source-phase Downloading/Aggregating state remains
+Spotify-free; bound Review/Done reads and bound Suspended resume validate exact
+Spotify ownership under the shared gate, while an unbound source suspension
+requires only Last.fm. After Last.fm hydration, the Tauri shell—not React—
+claims and starts one persisted Downloading/Aggregating runner using its stored
+username and cutoff. React only observes progress and offers explicit
+first-start/manual-resume actions.
 
 ## Cross-cutting rules
 

@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 
 pub(crate) const SESSION_VERSION: u8 = 2;
 pub(crate) const LASTFM_PAGE_LIMIT: u32 = 200;
+pub(crate) const LASTFM_REVIEW_BATCH_SIZE: usize = 100;
 pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
 const MAX_RAW_CACHE_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -284,6 +285,7 @@ pub(crate) enum QueueStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportQueueItem {
+    pub page: u32,
     pub artist: String,
     pub album: String,
     pub play_count: u64,
@@ -314,6 +316,7 @@ pub(crate) struct ImportPageItem {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportPageView {
     pub state: ImportStateView,
+    pub batch_id: u32,
     pub artist: String,
     pub album: String,
     pub page_number: usize,
@@ -409,6 +412,13 @@ impl LastFmImportSessionV2 {
                     ..PageOptions::from_defaults(&self.defaults)
                 }
             })
+    }
+
+    fn options_for_batch(&self, batch_id: u32, artist: &str, album: &str) -> PageOptions {
+        self.page_options
+            .get(&batch_options_key(batch_id))
+            .cloned()
+            .unwrap_or_else(|| self.options_for(artist, album))
     }
 }
 
@@ -624,6 +634,85 @@ fn add_variant(row: &mut SourceRow, scrobble: &ParsedScrobble) {
         earliest: scrobble.timestamp,
         latest: scrobble.timestamp,
     });
+}
+
+fn batch_options_key(batch_id: u32) -> String {
+    format!("batch:{batch_id}")
+}
+
+fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
+    let mut grouped = BTreeMap::<(String, String), Vec<String>>::new();
+    for row in rows {
+        grouped
+            .entry((row.artist.clone(), row.album.clone()))
+            .or_default()
+            .push(row.stable_id.clone());
+    }
+    let mut page = 1;
+    let mut batches = Vec::new();
+    for source_ids in grouped.into_values() {
+        for chunk in source_ids.chunks(LASTFM_REVIEW_BATCH_SIZE) {
+            batches.push(ImportBatch {
+                page,
+                source_ids: chunk.to_vec(),
+            });
+            page += 1;
+        }
+    }
+    batches
+}
+
+fn review_batches(session: &LastFmImportSessionV2) -> Vec<ImportBatch> {
+    if session.batches.is_empty() || session.batches.iter().any(|batch| batch.page == 0) {
+        build_review_batches(&session.rows)
+    } else {
+        session.batches.clone()
+    }
+}
+
+fn source_row_map(session: &LastFmImportSessionV2) -> HashMap<&str, &SourceRow> {
+    session
+        .rows
+        .iter()
+        .map(|row| (row.stable_id.as_str(), row))
+        .collect()
+}
+
+fn source_batch_map(session: &LastFmImportSessionV2) -> HashMap<String, u32> {
+    let mut result = HashMap::new();
+    for batch in review_batches(session) {
+        for source_id in &batch.source_ids {
+            result.insert(source_id.clone(), batch.page);
+        }
+    }
+    result
+}
+
+fn batch_rows<'a>(
+    batch: &ImportBatch,
+    rows: &HashMap<&'a str, &'a SourceRow>,
+) -> Vec<&'a SourceRow> {
+    batch
+        .source_ids
+        .iter()
+        .filter_map(|id| rows.get(id.as_str()).copied())
+        .collect()
+}
+
+fn requested_batch(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+    artist: &str,
+    album: &str,
+) -> Option<ImportBatch> {
+    let rows = source_row_map(session);
+    review_batches(session).into_iter().find(|batch| {
+        batch.page == batch_id
+            && batch_rows(batch, &rows).len() == batch.source_ids.len()
+            && batch_rows(batch, &rows)
+                .iter()
+                .all(|row| row.artist == artist && row.album == album)
+    })
 }
 
 pub(crate) fn resolved_play_count(rows: &[&SourceRow], mode: CountMode) -> u64 {
@@ -1103,6 +1192,14 @@ fn suspended_source_phase(session: &LastFmImportSessionV2) -> bool {
     session.phase == ImportPhase::Suspended && session.rows.is_empty()
 }
 
+fn requires_spotify_ownership(session: &LastFmImportSessionV2) -> bool {
+    session.spotify_account_id.is_some()
+        && matches!(
+            session.phase,
+            ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended
+        )
+}
+
 pub(crate) struct Service {
     store: ImportSessionStore,
     session: Mutex<Option<LastFmImportSessionV2>>,
@@ -1345,7 +1442,13 @@ impl Service {
         cache_session.total_pages = Some(total_pages);
         let mut filtered = parsed.clone();
         discard_post_cutoff(&mut filtered, before.history_to);
-        self.store.write_page(&cache_session, &filtered)?;
+        let store = self.store.clone();
+        let cached_page = filtered.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            store.write_page(&cache_session, &cached_page)
+        })
+        .await
+        .map_err(|_| "Last.fm import cache task stopped.".to_string())??;
         let result = self
             .mutate_session(|current| {
                 let Some(mut session) = current else {
@@ -1395,20 +1498,7 @@ impl Service {
             sort_scrobbles(&mut scrobbles);
             let mut rows = Vec::new();
             aggregate_scrobbles(&mut rows, &scrobbles);
-            let mut groups = BTreeMap::<(String, String), Vec<String>>::new();
-            for row in &rows {
-                groups
-                    .entry((row.artist.clone(), row.album.clone()))
-                    .or_default()
-                    .push(row.stable_id.clone());
-            }
-            let batches = groups
-                .into_values()
-                .map(|source_ids| ImportBatch {
-                    page: 0,
-                    source_ids,
-                })
-                .collect::<Vec<_>>();
+            let batches = build_review_batches(&rows);
             Ok::<_, String>((rows, batches))
         })
         .await
@@ -1472,9 +1562,10 @@ impl Service {
         &self,
         username: &str,
         spotify_account_id: &str,
+        batch_id: u32,
         result: MatchResult,
     ) -> Result<(), String> {
-        self.set_matches(username, spotify_account_id, vec![result])
+        self.set_matches(username, spotify_account_id, batch_id, vec![result])
             .await
     }
 
@@ -1482,6 +1573,7 @@ impl Service {
         &self,
         username: &str,
         spotify_account_id: &str,
+        batch_id: u32,
         results: Vec<MatchResult>,
     ) -> Result<(), String> {
         self.mutate_session(|session| {
@@ -1496,6 +1588,18 @@ impl Service {
                 return Err(
                     "The Last.fm import is no longer active for this account or phase.".into(),
                 );
+            }
+            let Some(batch) = review_batches(&session)
+                .into_iter()
+                .find(|batch| batch.page == batch_id)
+            else {
+                return Err("Unknown Last.fm import review batch.".into());
+            };
+            if results
+                .iter()
+                .any(|result| !batch.source_ids.iter().any(|id| id == &result.source_id))
+            {
+                return Err("A match does not belong to this review batch.".into());
             }
             session.spotify_account_id = Some(spotify_account_id.to_owned());
             for result in results {
@@ -1560,17 +1664,15 @@ impl Service {
         if session.phase == ImportPhase::Suspended {
             return Vec::new();
         }
-        let mut grouped = BTreeMap::<(String, String), Vec<&SourceRow>>::new();
-        for row in &session.rows {
-            grouped
-                .entry((row.artist.clone(), row.album.clone()))
-                .or_default()
-                .push(row);
-        }
-        grouped
+        let rows_by_id = source_row_map(&session);
+        review_batches(&session)
             .into_iter()
-            .map(|((artist, album), rows)| {
-                let options = session.options_for(&artist, &album);
+            .filter_map(|batch| {
+                let rows = batch_rows(&batch, &rows_by_id);
+                let first = rows.first()?;
+                let artist = first.artist.clone();
+                let album = first.album.clone();
+                let options = session.options_for_batch(batch.page, &artist, &album);
                 let remaining = rows.iter().any(|row| {
                     let decision = default_decision(&session, &row.stable_id);
                     matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
@@ -1609,7 +1711,8 @@ impl Service {
                         }
                     }
                 }
-                ImportQueueItem {
+                Some(ImportQueueItem {
+                    page: batch.page,
                     artist,
                     album,
                     play_count: rows
@@ -1617,50 +1720,51 @@ impl Service {
                         .map(|row| row.play_count)
                         .fold(0, u64::saturating_add),
                     latest: rows.iter().map(|row| row.latest).max().unwrap_or_default(),
-                    source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
+                    source_ids: batch.source_ids,
                     remaining,
                     album_entities,
                     track_entities: track_uris.len() as u32,
                     status: queue_status(&session, &rows),
-                }
+                })
             })
             .collect()
     }
 
-    pub(crate) async fn page(&self, artist: &str, album: &str) -> Option<ImportPageView> {
+    pub(crate) async fn page(
+        &self,
+        batch_id: u32,
+        artist: &str,
+        album: &str,
+    ) -> Option<ImportPageView> {
         let session = self.snapshot().await?;
         if session.phase == ImportPhase::Suspended {
             return None;
         }
-        let pages = session
-            .rows
+        let batches = review_batches(&session);
+        let batch = requested_batch(&session, batch_id, artist, album)?;
+        let rows_by_id = source_row_map(&session);
+        let rows = batch_rows(&batch, &rows_by_id);
+        let page_number = batches
             .iter()
-            .map(|row| (row.artist.clone(), row.album.clone()))
-            .collect::<BTreeSet<_>>();
-        let page_number = pages
+            .position(|candidate| candidate.page == batch_id)?
+            + 1;
+        let items = rows
             .iter()
-            .position(|(page_artist, page_album)| page_artist == artist && page_album == album)
-            .map(|index| index + 1)
-            .unwrap_or(1);
-        let rows = session
-            .rows
-            .iter()
-            .filter(|row| row.artist == artist && row.album == album)
             .map(|row| ImportPageItem {
-                source: row.clone(),
+                source: (*row).clone(),
                 decision: default_decision(&session, &row.stable_id),
                 match_result: session.matches.get(&row.stable_id).cloned(),
             })
             .collect();
-        let options = session.options_for(artist, album);
+        let options = session.options_for_batch(batch.page, artist, album);
         let mut fuzzy_groups = BTreeMap::<String, Vec<SourceRow>>::new();
-        for row in &session.rows {
+        for row in &rows {
             let decision = default_decision(&session, &row.stable_id);
             let participates = !decision.excluded
                 && match decision.status {
                     RowStatus::Done => true,
                     RowStatus::Pending | RowStatus::Skipped => session
-                        .options_for(&row.artist, &row.album)
+                        .options_for_batch(batch.page, artist, album)
                         .selected_track_ids
                         .contains(&row.stable_id),
                     RowStatus::IgnoredAlbum | RowStatus::IgnoredArtist => false,
@@ -1678,17 +1782,18 @@ impl Service {
             fuzzy_groups
                 .entry(target_uri)
                 .or_default()
-                .push(row.clone());
+                .push((*row).clone());
         }
         fuzzy_groups
             .retain(|_, rows| rows.len() > 1 || rows.iter().any(|row| row.variants.len() > 1));
         Some(ImportPageView {
             state: state_view(Some(&session)),
+            batch_id,
             artist: artist.to_owned(),
             album: album.to_owned(),
             page_number,
-            page_count: pages.len(),
-            rows,
+            page_count: batches.len(),
+            rows: items,
             options,
             fuzzy_groups,
             count_modes: session.count_modes.clone(),
@@ -1700,6 +1805,7 @@ impl Service {
         &self,
         username: &str,
         spotify_account_id: &str,
+        batch_id: u32,
         artist: &str,
         album: &str,
         options: PageOptions,
@@ -1710,19 +1816,24 @@ impl Service {
             spotify_account_id,
             review_phase_allowed,
             |mut session| {
+                if requested_batch(&session, batch_id, artist, album).is_none() {
+                    return Err("Unknown Last.fm import review batch.".into());
+                }
                 session
                     .page_options
-                    .insert(format!("{artist}\u{1f}{album}"), options);
+                    .insert(batch_options_key(batch_id), options);
                 Ok((session, ()))
             },
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn review_action(
         &self,
         username: &str,
         spotify_account_id: &str,
+        batch_id: u32,
         id: &str,
         action: &str,
         artist: &str,
@@ -1733,20 +1844,52 @@ impl Service {
             spotify_account_id,
             review_phase_allowed,
             |mut session| {
+                let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
+                    return Err("Unknown Last.fm import review batch.".into());
+                };
+                if !batch.source_ids.iter().any(|source_id| source_id == id) {
+                    return Err("The source row does not belong to this review batch.".into());
+                }
                 match action {
                     "exclude" | "undo-exclude" => {
                         exclude_row(&mut session, id, action == "exclude");
                     }
-                    "ignore-album" => ignore_album(&mut session, artist, album),
+                    "ignore-album" => {
+                        for source_id in &batch.source_ids {
+                            if is_actionable(&session, source_id) {
+                                session.decisions.insert(
+                                    source_id.clone(),
+                                    RowDecision {
+                                        status: RowStatus::IgnoredAlbum,
+                                        excluded: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     "ignore-artist" => ignore_artist(&mut session, artist),
-                    "skip-album" => skip_album(&mut session, artist, album),
+                    "skip-album" => {
+                        for source_id in &batch.source_ids {
+                            if is_actionable(&session, source_id) {
+                                session.decisions.insert(
+                                    source_id.clone(),
+                                    RowDecision {
+                                        status: RowStatus::Skipped,
+                                        excluded: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     "restore" => {
                         let ids = session
                             .rows
                             .iter()
                             .filter(|row| {
-                                row.artist == artist
-                                    && row.album == album
+                                batch
+                                    .source_ids
+                                    .iter()
+                                    .any(|source_id| source_id == &row.stable_id)
                                     && is_actionable(&session, &row.stable_id)
                             })
                             .map(|row| row.stable_id.clone())
@@ -1764,10 +1907,12 @@ impl Service {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn commit_rows(
         &self,
         username: &str,
         spotify_account_id: &str,
+        batch_id: u32,
         ids: &[String],
         artist: &str,
         album: &str,
@@ -1778,9 +1923,20 @@ impl Service {
             spotify_account_id,
             review_phase_allowed,
             |mut session| {
+                let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
+                    return Err("Unknown Last.fm import review batch.".into());
+                };
+                if ids
+                    .iter()
+                    .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
+                {
+                    return Err(
+                        "A selected source row does not belong to this review batch.".into(),
+                    );
+                }
                 session
                     .page_options
-                    .insert(format!("{artist}\u{1f}{album}"), options);
+                    .insert(batch_options_key(batch_id), options);
                 for id in ids {
                     session.decisions.insert(
                         id.clone(),
@@ -1804,6 +1960,7 @@ impl Service {
         &self,
         username: &str,
         spotify_account_id: &str,
+        batch_id: u32,
         source_id: &str,
         uri: &str,
     ) -> Result<(), String> {
@@ -1820,6 +1977,11 @@ impl Service {
                 else {
                     return Err("Unknown Last.fm import source row.".into());
                 };
+                let Some(batch) = requested_batch(&session, batch_id, &row_artist, &row_album)
+                else {
+                    return Err("The source row does not belong to this review batch.".into());
+                };
+                let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
                 let Some(candidate) = session
                     .matches
                     .get(source_id)
@@ -1842,7 +2004,7 @@ impl Service {
                     let related = session
                         .rows
                         .iter()
-                        .filter(|row| row.artist == row_artist && row.album == row_album)
+                        .filter(|row| batch_ids.contains(&row.stable_id))
                         .map(|row| (row.stable_id.clone(), row.track.clone()))
                         .collect::<Vec<_>>();
                     let mut group_track_matches = BTreeMap::new();
@@ -1866,7 +2028,7 @@ impl Service {
                     for row in session
                         .rows
                         .iter()
-                        .filter(|row| row.artist == row_artist && row.album == row_album)
+                        .filter(|row| batch_ids.contains(&row.stable_id))
                     {
                         if let Some(result) = session.matches.get_mut(&row.stable_id) {
                             result.track_matches = group_track_matches.clone();
@@ -1889,7 +2051,7 @@ impl Service {
                         let related_ids = session
                             .rows
                             .iter()
-                            .filter(|row| row.artist == row_artist && row.album == row_album)
+                            .filter(|row| batch_ids.contains(&row.stable_id))
                             .map(|row| row.stable_id.clone())
                             .collect::<BTreeSet<_>>();
                         let mut group_track_matches = BTreeMap::new();
@@ -2050,16 +2212,64 @@ async fn ensure_import_readable(app: &tauri::AppHandle, service: &Service) -> Re
     let Some(session) = service.snapshot().await else {
         return Ok(true);
     };
-    if session.phase == ImportPhase::Suspended {
-        return Ok(false);
-    }
     match lastfm_username(app).await {
-        Ok(username) if username == session.lastfm_username => Ok(true),
+        Ok(username) if username == session.lastfm_username => {
+            if session.phase == ImportPhase::Suspended {
+                if requires_spotify_ownership(&session) {
+                    let _ = current_spotify_binding_is_current(app, service, true).await?;
+                }
+                return Ok(false);
+            }
+            if requires_spotify_ownership(&session) {
+                current_spotify_binding_is_current(app, service, false).await
+            } else {
+                Ok(true)
+            }
+        }
         Ok(_) | Err(_) => {
             service.suspend_for_account_mismatch().await?;
             Ok(false)
         }
     }
+}
+
+async fn current_spotify_binding_is_current(
+    app: &tauri::AppHandle,
+    service: &Service,
+    allow_suspended: bool,
+) -> Result<bool, String> {
+    let Some(session) = service.snapshot().await else {
+        return Ok(false);
+    };
+    if session.spotify_account_id.is_none() {
+        return Ok(true);
+    }
+    let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let expected = session.spotify_account_id.as_deref().unwrap_or_default();
+    let cached = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    if cached_spotify_identity_matches(expected, &cached) == Some(false) {
+        service.suspend_for_account_mismatch().await?;
+        return Ok(false);
+    }
+    let (username, spotify_account_id) = match connected_accounts_locked(&state).await {
+        Ok(accounts) => accounts,
+        Err(_) => {
+            service.suspend_for_account_mismatch().await?;
+            return Ok(false);
+        }
+    };
+    if !session_account_matches(&session, &username, &spotify_account_id, true)
+        || (session.phase == ImportPhase::Suspended && !allow_suspended)
+    {
+        service.suspend_for_account_mismatch().await?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 async fn emit_import_changed(
@@ -2080,6 +2290,17 @@ async fn start_import(
     let history_to = crate::history_cutoff_for_import(&app, &username).await?;
     let state = app.state::<crate::AppState>();
     let service = Arc::clone(&state.lastfm_import);
+    if let Some(session) = service.snapshot().await {
+        if session.phase == ImportPhase::Suspended
+            && requires_spotify_ownership(&session)
+            && !current_spotify_binding_is_current(&app, service.as_ref(), true).await?
+        {
+            let view = service.state().await;
+            app.emit("lastfm-import-changed", &view)
+                .map_err(|error| error.to_string())?;
+            return Ok(view);
+        }
+    }
     let view = service
         .start_or_resume(&username, history_to, defaults)
         .await?;
@@ -2092,6 +2313,18 @@ async fn start_import(
         });
     }
     Ok(view)
+}
+
+pub(crate) async fn resume_persisted_import(app: tauri::AppHandle) {
+    let state = app.state::<crate::AppState>();
+    let service = Arc::clone(&state.lastfm_import);
+    let Some((username, _history_to)) = startup_resume_plan(service.snapshot().await.as_ref())
+    else {
+        return;
+    };
+    if service.claim_runner() {
+        run_import(app, service, username).await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2109,6 +2342,17 @@ fn source_runner_step(session: &LastFmImportSessionV2) -> SourceRunnerStep {
     } else {
         SourceRunnerStep::Page(session.next_page)
     }
+}
+
+fn startup_resume_plan(session: Option<&LastFmImportSessionV2>) -> Option<(String, u64)> {
+    session
+        .filter(|session| {
+            matches!(
+                session.phase,
+                ImportPhase::Downloading | ImportPhase::Aggregating
+            )
+        })
+        .map(|session| (session.lastfm_username.clone(), session.history_to))
 }
 
 async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: String) {
@@ -2407,26 +2651,7 @@ async fn cached_spotify_binding_is_current(
     app: &tauri::AppHandle,
     service: &Service,
 ) -> Result<bool, String> {
-    let Some(session) = service.snapshot().await else {
-        return Ok(false);
-    };
-    let Some(expected) = session.spotify_account_id else {
-        return Ok(true);
-    };
-    let state = app.state::<crate::AppState>();
-    let _membership_guard = state.spotify_library_gate.lock().await;
-    let current = state
-        .spotify_library
-        .lock()
-        .expect("Spotify library mutex poisoned")
-        .clone();
-    if cached_spotify_identity_matches(&expected, &current) == Some(false) {
-        service.suspend_for_account_mismatch().await?;
-        return Ok(false);
-    }
-    assert_current_account_locked(&state, service)
-        .await
-        .map(|_| true)
+    current_spotify_binding_is_current(app, service, false).await
 }
 
 fn cached_spotify_identity_matches(
@@ -2439,6 +2664,7 @@ fn cached_spotify_identity_matches(
 async fn lazy_match_page_with_search<A, AFut, F, FFut>(
     service: &Service,
     spotify_library_gate: &tokio::sync::Mutex<()>,
+    batch_id: u32,
     artist: &str,
     album: &str,
     current_account: A,
@@ -2450,14 +2676,14 @@ where
     F: FnOnce(Vec<SourceRow>) -> FFut,
     FFut: Future<Output = Result<Vec<MatchResult>, String>>,
 {
-    let Some(page) = service.page(artist, album).await else {
+    let Some(page) = service.page(batch_id, artist, album).await else {
         return Ok(None);
     };
     let session = service
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    if batch_match_plan(&session, Some((artist, album))).is_empty() {
+    if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
         let _membership_guard = spotify_library_gate.lock().await;
         current_account().await?;
         return Ok(Some(page));
@@ -2465,14 +2691,14 @@ where
 
     // ponytail: one importer-wide lock; use per-batch locks only if throughput requires it.
     let _match_guard = service.lazy_match_lock.lock().await;
-    let Some(page) = service.page(artist, album).await else {
+    let Some(page) = service.page(batch_id, artist, album).await else {
         return Ok(None);
     };
     let session = service
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    if batch_match_plan(&session, Some((artist, album))).is_empty() {
+    if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
         let _membership_guard = spotify_library_gate.lock().await;
         current_account().await?;
         return Ok(Some(page));
@@ -2481,10 +2707,11 @@ where
         let _membership_guard = spotify_library_gate.lock().await;
         current_account().await?
     };
-    let rows = session
-        .rows
-        .iter()
-        .filter(|row| row.artist == artist && row.album == album)
+    let batch = requested_batch(&session, batch_id, artist, album)
+        .ok_or_else(|| "Unknown Last.fm import review batch.".to_string())?;
+    let rows_by_id = source_row_map(&session);
+    let rows = batch_rows(&batch, &rows_by_id)
+        .into_iter()
         .cloned()
         .collect::<Vec<_>>();
     let results = search(rows).await?;
@@ -2500,25 +2727,26 @@ where
         );
     }
     service
-        .set_matches(&username, &spotify_account_id, results)
+        .set_matches(&username, &spotify_account_id, batch_id, results)
         .await?;
-    Ok(service.page(artist, album).await)
+    Ok(service.page(batch_id, artist, album).await)
 }
 
 async fn lazy_match_page(
     app: &tauri::AppHandle,
     service: &Service,
+    batch_id: u32,
     artist: &str,
     album: &str,
 ) -> Result<Option<ImportPageView>, String> {
-    let Some(page) = service.page(artist, album).await else {
+    let Some(page) = service.page(batch_id, artist, album).await else {
         return Ok(None);
     };
     let session = service
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    if batch_match_plan(&session, Some((artist, album))).is_empty() {
+    if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
         return cached_spotify_binding_is_current(app, service)
             .await
             .map(|current| current.then_some(page));
@@ -2528,6 +2756,7 @@ async fn lazy_match_page(
     let page = lazy_match_page_with_search(
         service,
         &state_ref.spotify_library_gate,
+        batch_id,
         artist,
         album,
         || current_matching_account_locked(state_ref, service),
@@ -2579,27 +2808,30 @@ fn matched_track_uri_for_row(result: &MatchResult, row: &SourceRow) -> Option<St
 
 fn batch_match_plan(
     session: &LastFmImportSessionV2,
-    requested: Option<(&str, &str)>,
-) -> Vec<(String, String)> {
-    let keys = session
-        .rows
-        .iter()
-        .map(|row| (row.artist.clone(), row.album.clone()))
-        .collect::<BTreeSet<_>>();
-    keys.into_iter()
-        .filter(|(artist, album)| {
-            let mut rows = session
-                .rows
-                .iter()
-                .filter(|row| row.artist == *artist && row.album == *album);
-            let selected = requested.is_some_and(|(requested_artist, requested_album)| {
-                requested_artist == artist && requested_album == album
+    requested: Option<(u32, &str, &str)>,
+) -> Vec<(u32, String, String)> {
+    let rows_by_id = source_row_map(session);
+    review_batches(session)
+        .into_iter()
+        .filter_map(|batch| {
+            let rows = batch_rows(&batch, &rows_by_id);
+            let first = rows.first()?;
+            let selected = requested.is_some_and(|(requested_page, artist, album)| {
+                requested_page == batch.page && artist == first.artist && album == first.album
             });
             let remaining = requested.is_none()
                 && rows
-                    .clone()
+                    .iter()
                     .any(|row| is_actionable(session, &row.stable_id));
-            (selected || remaining) && rows.any(|row| !session.matches.contains_key(&row.stable_id))
+            if (selected || remaining)
+                && rows
+                    .iter()
+                    .any(|row| !session.matches.contains_key(&row.stable_id))
+            {
+                Some((batch.page, first.artist.clone(), first.album.clone()))
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -2607,15 +2839,13 @@ fn batch_match_plan(
 fn accept_all_entity_uris(session: &LastFmImportSessionV2) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut album_uris = BTreeSet::new();
     let mut track_uris = BTreeSet::new();
-    let mut grouped = BTreeMap::<(String, String), Vec<&SourceRow>>::new();
-    for row in &session.rows {
-        grouped
-            .entry((row.artist.clone(), row.album.clone()))
-            .or_default()
-            .push(row);
-    }
-    for ((artist, album), rows) in grouped {
-        let options = session.options_for(&artist, &album);
+    let rows_by_id = source_row_map(session);
+    for batch in review_batches(session) {
+        let rows = batch_rows(&batch, &rows_by_id);
+        let Some(first) = rows.first() else {
+            continue;
+        };
+        let options = session.options_for_batch(batch.page, &first.artist, &first.album);
         let selected = rows
             .into_iter()
             .filter(|row| {
@@ -2706,6 +2936,7 @@ fn historical_count_for_target(
         .iter()
         .map(|row| row.stable_id.as_str())
         .collect::<BTreeSet<_>>();
+    let source_batches = source_batch_map(session);
     let mut relevant = Vec::new();
     for row in &session.rows {
         let decision = default_decision(session, &row.stable_id);
@@ -2714,7 +2945,10 @@ fn historical_count_for_target(
         let page_options = if current_page {
             current_options.clone()
         } else {
-            session.options_for(&row.artist, &row.album)
+            source_batches
+                .get(row.stable_id.as_str())
+                .map(|batch_id| session.options_for_batch(*batch_id, &row.artist, &row.album))
+                .unwrap_or_else(|| session.options_for(&row.artist, &row.album))
         };
         if included
             && page_options.include_historical_play_counts
@@ -2771,6 +3005,7 @@ fn update_selected_match(
 async fn apply_page(
     app: &tauri::AppHandle,
     service: &Service,
+    batch_id: u32,
     artist: &str,
     album: &str,
     selected_ids: &[String],
@@ -2783,11 +3018,19 @@ async fn apply_page(
     let Some(session) = service.snapshot().await else {
         return Err("No Last.fm import session is active.".into());
     };
+    let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
+        return Err("Unknown Last.fm import review batch.".into());
+    };
     let selected = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let rows = session
-        .rows
+    if selected_ids
         .iter()
-        .filter(|row| row.artist == artist && row.album == album)
+        .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
+    {
+        return Err("A selected source row does not belong to this review batch.".into());
+    }
+    let rows_by_id = source_row_map(&session);
+    let rows = batch_rows(&batch, &rows_by_id)
+        .into_iter()
         .filter(|row| selected.contains(&row.stable_id))
         .filter(|row| {
             let decision = default_decision(&session, &row.stable_id);
@@ -2900,6 +3143,7 @@ async fn apply_page(
         .commit_rows(
             &username,
             &spotify_account_id,
+            batch_id,
             &committed,
             artist,
             album,
@@ -3072,6 +3316,7 @@ pub(crate) async fn lastfm_import_queue(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_page(
     app: tauri::AppHandle,
+    batch_id: u32,
     artist: String,
     album: String,
 ) -> Result<Option<ImportPageView>, String> {
@@ -3079,12 +3324,13 @@ pub(crate) async fn lastfm_import_page(
     if !ensure_import_readable(&app, service.as_ref()).await? {
         return Ok(None);
     }
-    lazy_match_page(&app, service.as_ref(), &artist, &album).await
+    lazy_match_page(&app, service.as_ref(), batch_id, &artist, &album).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
+    batch_id: u32,
     id: String,
     action: String,
     artist: String,
@@ -3099,6 +3345,7 @@ pub(crate) async fn lastfm_import_review(
         .review_action(
             &username,
             &spotify_account_id,
+            batch_id,
             &id,
             &action,
             &artist,
@@ -3112,6 +3359,7 @@ pub(crate) async fn lastfm_import_review(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_options(
     app: tauri::AppHandle,
+    batch_id: u32,
     artist: String,
     album: String,
     options: PageOptions,
@@ -3122,7 +3370,14 @@ pub(crate) async fn lastfm_import_options(
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
-        .update_options(&username, &spotify_account_id, &artist, &album, options)
+        .update_options(
+            &username,
+            &spotify_account_id,
+            batch_id,
+            &artist,
+            &album,
+            options,
+        )
         .await?;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
@@ -3166,6 +3421,7 @@ pub(crate) async fn lastfm_import_search_terms(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_select_match(
     app: tauri::AppHandle,
+    batch_id: u32,
     id: String,
     uri: String,
 ) -> Result<ImportStateView, String> {
@@ -3175,7 +3431,7 @@ pub(crate) async fn lastfm_import_select_match(
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
-        .select_match(&username, &spotify_account_id, &id, &uri)
+        .select_match(&username, &spotify_account_id, batch_id, &id, &uri)
         .await?;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
@@ -3184,6 +3440,7 @@ pub(crate) async fn lastfm_import_select_match(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_change_track(
     app: tauri::AppHandle,
+    batch_id: u32,
     id: String,
     query: String,
 ) -> Result<ImportStateView, String> {
@@ -3199,6 +3456,9 @@ pub(crate) async fn lastfm_import_change_track(
         .iter()
         .find(|row| row.stable_id == id)
         .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
+    if requested_batch(&session, batch_id, &row.artist, &row.album).is_none() {
+        return Err("The source row does not belong to this review batch.".into());
+    }
     let search_term = if query.trim().is_empty() {
         track_search_term(&row.artist, &row.track)
     } else {
@@ -3232,7 +3492,7 @@ pub(crate) async fn lastfm_import_change_track(
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
-        .set_match(&username, &spotify_account_id, result)
+        .set_match(&username, &spotify_account_id, batch_id, result)
         .await?;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
@@ -3241,6 +3501,7 @@ pub(crate) async fn lastfm_import_change_track(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_change_album(
     app: tauri::AppHandle,
+    batch_id: u32,
     id: String,
     query: String,
 ) -> Result<ImportStateView, String> {
@@ -3256,10 +3517,11 @@ pub(crate) async fn lastfm_import_change_album(
         .iter()
         .find(|row| row.stable_id == id)
         .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
-    let related = session
-        .rows
-        .iter()
-        .filter(|candidate| candidate.artist == row.artist && candidate.album == row.album)
+    let batch = requested_batch(&session, batch_id, &row.artist, &row.album)
+        .ok_or_else(|| "The source row does not belong to this review batch.".to_string())?;
+    let rows_by_id = source_row_map(&session);
+    let related = batch_rows(&batch, &rows_by_id)
+        .into_iter()
         .map(|candidate| candidate.track.clone())
         .collect::<Vec<_>>();
     let search_term = if query.trim().is_empty() {
@@ -3269,10 +3531,8 @@ pub(crate) async fn lastfm_import_change_album(
     };
     let provider = crate::provider_from(&state)?;
     let candidates = album_candidates(provider.as_ref(), &search_term, &related).await?;
-    let matches = session
-        .rows
-        .iter()
-        .filter(|candidate| candidate.artist == row.artist && candidate.album == row.album)
+    let matches = batch_rows(&batch, &rows_by_id)
+        .into_iter()
         .map(|candidate_row| {
             preserve_match_selection(
                 match_result_for(
@@ -3292,7 +3552,7 @@ pub(crate) async fn lastfm_import_change_album(
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
-        .set_matches(&username, &spotify_account_id, matches)
+        .set_matches(&username, &spotify_account_id, batch_id, matches)
         .await?;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
@@ -3301,6 +3561,7 @@ pub(crate) async fn lastfm_import_change_album(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_apply(
     app: tauri::AppHandle,
+    batch_id: u32,
     artist: String,
     album: String,
     selected_ids: Vec<String>,
@@ -3310,6 +3571,7 @@ pub(crate) async fn lastfm_import_apply(
     let view = apply_page(
         &app,
         state.lastfm_import.as_ref(),
+        batch_id,
         &artist,
         &album,
         &selected_ids,
@@ -3334,10 +3596,10 @@ pub(crate) async fn lastfm_import_prepare_accept_all(
         });
     }
     let app_for_prepare = app.clone();
-    prepare_accept_all_batches(service, |artist, album| {
+    prepare_accept_all_batches(service, |batch_id, artist, album| {
         let app = app_for_prepare.clone();
         async move {
-            lazy_match_page(&app, service, &artist, &album)
+            lazy_match_page(&app, service, batch_id, &artist, &album)
                 .await
                 .map(|_| ())
         }
@@ -3350,15 +3612,15 @@ async fn prepare_accept_all_batches<F, Fut>(
     mut prepare: F,
 ) -> Result<AcceptAllSummary, String>
 where
-    F: FnMut(String, String) -> Fut,
+    F: FnMut(u32, String, String) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
     let session = service
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    for (artist, album) in batch_match_plan(&session, None) {
-        prepare(artist, album).await?;
+    for (batch_id, artist, album) in batch_match_plan(&session, None) {
+        prepare(batch_id, artist, album).await?;
     }
     let session = service
         .snapshot()
@@ -3374,6 +3636,7 @@ where
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_accept_all_page(
     app: tauri::AppHandle,
+    batch_id: u32,
     artist: String,
     album: String,
 ) -> Result<ImportStateView, String> {
@@ -3381,7 +3644,7 @@ pub(crate) async fn lastfm_import_accept_all_page(
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
-    let Some(page) = state.lastfm_import.page(&artist, &album).await else {
+    let Some(page) = state.lastfm_import.page(batch_id, &artist, &album).await else {
         return Ok(state.lastfm_import.state().await);
     };
     if page.rows.iter().any(|item| item.match_result.is_none()) {
@@ -3417,6 +3680,7 @@ pub(crate) async fn lastfm_import_accept_all_page(
                     .select_match(
                         &username,
                         &spotify_account_id,
+                        batch_id,
                         &item.source.stable_id,
                         &candidate.uri,
                     )
@@ -3428,6 +3692,7 @@ pub(crate) async fn lastfm_import_accept_all_page(
                 .select_match(
                     &username,
                     &spotify_account_id,
+                    batch_id,
                     &item.source.stable_id,
                     &candidate.uri,
                 )
@@ -3435,7 +3700,7 @@ pub(crate) async fn lastfm_import_accept_all_page(
         }
     }
     drop(_membership_guard);
-    let Some(page) = state.lastfm_import.page(&artist, &album).await else {
+    let Some(page) = state.lastfm_import.page(batch_id, &artist, &album).await else {
         return Ok(state.lastfm_import.state().await);
     };
     let selected_ids = page
@@ -3457,6 +3722,7 @@ pub(crate) async fn lastfm_import_accept_all_page(
     let view = apply_page(
         &app,
         state.lastfm_import.as_ref(),
+        batch_id,
         &artist,
         &album,
         &selected_ids,
@@ -3550,6 +3816,7 @@ fn is_actionable(session: &LastFmImportSessionV2, id: &str) -> bool {
     is_reviewable(session, id) && !default_decision(session, id).excluded
 }
 
+#[cfg(test)]
 pub(crate) fn ignore_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
     let ids = session
         .rows
@@ -3588,6 +3855,7 @@ pub(crate) fn ignore_artist(session: &mut LastFmImportSessionV2, artist: &str) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn skip_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
     let ids = session
         .rows
@@ -3700,6 +3968,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_resume_plan_uses_the_persisted_source_identity_only() {
+        let mut session = LastFmImportSessionV2::new_with_defaults(
+            "fixed-user".into(),
+            1786804381,
+            ImportDefaults::default(),
+        );
+        assert_eq!(
+            startup_resume_plan(Some(&session)),
+            Some(("fixed-user".into(), 1786804381))
+        );
+        session.phase = ImportPhase::Aggregating;
+        assert_eq!(
+            startup_resume_plan(Some(&session)),
+            Some(("fixed-user".into(), 1786804381))
+        );
+        session.phase = ImportPhase::Review;
+        assert_eq!(startup_resume_plan(Some(&session)), None);
+        assert_eq!(startup_resume_plan(None), None);
+    }
+
+    #[test]
     fn cached_spotify_identity_only_trusts_an_exact_matching_cache() {
         let mut library = SpotifyLibraryState {
             account_id: "spotify-a".into(),
@@ -3748,6 +4037,30 @@ mod tests {
             "spotify-a",
             false
         ));
+    }
+
+    #[test]
+    fn source_and_review_phases_choose_the_correct_account_boundary() {
+        let mut session = LastFmImportSessionV2::new_with_defaults(
+            "lastfm-user".into(),
+            1,
+            ImportDefaults::default(),
+        );
+        assert!(!requires_spotify_ownership(&session));
+        session.total_pages = Some(1);
+        session.phase = ImportPhase::Aggregating;
+        assert!(!requires_spotify_ownership(&session));
+
+        session.phase = ImportPhase::Review;
+        assert!(!requires_spotify_ownership(&session));
+        session.spotify_account_id = Some("spotify-a".into());
+        assert!(requires_spotify_ownership(&session));
+        session.phase = ImportPhase::Done;
+        assert!(requires_spotify_ownership(&session));
+        session.phase = ImportPhase::Suspended;
+        assert!(requires_spotify_ownership(&session));
+        session.spotify_account_id = None;
+        assert!(!requires_spotify_ownership(&session));
     }
 
     fn parsed_page(
@@ -4034,6 +4347,7 @@ mod tests {
             .set_match(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 MatchResult {
                     source_id,
                     search_term: "track search".into(),
@@ -4205,8 +4519,8 @@ mod tests {
         );
 
         assert_eq!(
-            batch_match_plan(&session, Some(("Artist A", "Album A"))),
-            vec![("Artist A".into(), "Album A".into())]
+            batch_match_plan(&session, Some((1, "Artist A", "Album A"))),
+            vec![(1, "Artist A".into(), "Album A".into())]
         );
         session.matches.insert(
             first_id.clone(),
@@ -4219,14 +4533,43 @@ mod tests {
                 track_matches: BTreeMap::new(),
             },
         );
-        assert!(batch_match_plan(&session, Some(("Artist A", "Album A"))).is_empty());
+        assert!(batch_match_plan(&session, Some((1, "Artist A", "Album A"))).is_empty());
         assert_eq!(
             batch_match_plan(&session, None),
             vec![
-                ("Artist B".into(), "Album B".into()),
-                ("Artist C".into(), "Album C".into()),
+                (2, "Artist B".into(), "Album B".into()),
+                (3, "Artist C".into(), "Album C".into()),
             ]
         );
+    }
+
+    #[test]
+    fn review_batches_split_large_single_groups_into_stable_bounded_pages() {
+        let rows = (0..205)
+            .map(|index| SourceRow {
+                stable_id: format!("source-{index}"),
+                artist: "Artist".into(),
+                album: String::new(),
+                track: format!("Track {index}"),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: index as u64,
+                latest: index as u64,
+            })
+            .collect::<Vec<_>>();
+        let batches = build_review_batches(&rows);
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(
+            batches.iter().map(|batch| batch.page).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(batches[0].source_ids.len(), LASTFM_REVIEW_BATCH_SIZE);
+        assert_eq!(batches[1].source_ids.len(), LASTFM_REVIEW_BATCH_SIZE);
+        assert_eq!(batches[2].source_ids.len(), 5);
+        assert_eq!(batches[0].source_ids[0], "source-0");
+        assert_eq!(batches[1].source_ids[0], "source-100");
+        assert_eq!(batches[2].source_ids[0], "source-200");
     }
 
     #[test]
@@ -4306,6 +4649,7 @@ mod tests {
             lazy_match_page_with_search(
                 first_service.as_ref(),
                 first_gate.as_ref(),
+                1,
                 "Artist A",
                 "Album A",
                 || async { Ok(("user".into(), "spotify".into())) },
@@ -4341,6 +4685,7 @@ mod tests {
             lazy_match_page_with_search(
                 second_service.as_ref(),
                 second_gate.as_ref(),
+                1,
                 "Artist A",
                 "Album A",
                 || async { Ok(("user".into(), "spotify".into())) },
@@ -4383,6 +4728,7 @@ mod tests {
         let cached = lazy_match_page_with_search(
             &service,
             gate.as_ref(),
+            1,
             "Artist A",
             "Album A",
             || async { Ok(("user".into(), "spotify".into())) },
@@ -4416,6 +4762,7 @@ mod tests {
         let error = lazy_match_page_with_search(
             &service,
             &gate,
+            1,
             "Artist",
             "Album",
             {
@@ -4487,7 +4834,7 @@ mod tests {
         let summary = prepare_accept_all_batches(&service, {
             let service = Arc::clone(&service);
             let order = Arc::clone(&order);
-            move |artist, album| {
+            move |batch_id, artist, album| {
                 let service = Arc::clone(&service);
                 let order = Arc::clone(&order);
                 async move {
@@ -4509,7 +4856,9 @@ mod tests {
                             )]),
                         })
                         .collect();
-                    service.set_matches("user", "spotify", results).await
+                    service
+                        .set_matches("user", "spotify", batch_id, results)
+                        .await
                 }
             }
         })
@@ -4654,7 +5003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_fuzzy_groups_only_include_rows_selected_for_import() {
+    async fn page_fuzzy_groups_stay_inside_the_requested_batch() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
         let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
@@ -4737,22 +5086,28 @@ mod tests {
         }
         service.save(session).await.unwrap();
 
-        let page = service.page("Artist", "Selected").await.unwrap();
-        let included = page
-            .fuzzy_groups
-            .get(&target)
+        let session = service.snapshot().await.unwrap();
+        let selected_page = review_batches(&session)
+            .into_iter()
+            .find(|batch| {
+                batch_rows(batch, &source_row_map(&session))
+                    .iter()
+                    .any(|row| row.album == "Selected")
+            })
             .unwrap()
-            .iter()
-            .map(|row| row.album.clone())
-            .collect::<BTreeSet<_>>();
+            .page;
+        let page = service
+            .page(selected_page, "Artist", "Selected")
+            .await
+            .unwrap();
         assert_eq!(
-            included,
-            BTreeSet::from([
-                "Done".to_owned(),
-                "Selected".to_owned(),
-                "Skipped".to_owned(),
-            ])
+            page.rows
+                .iter()
+                .map(|item| item.source.album.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["Selected"])
         );
+        assert!(!page.fuzzy_groups.contains_key(&target));
         assert!(page.locked_count_modes.contains(&target));
     }
 
@@ -5317,6 +5672,7 @@ mod tests {
                 .review_action(
                     "lastfm-user",
                     "spotify-user",
+                    1,
                     &row.stable_id,
                     "exclude",
                     "A",
@@ -5349,11 +5705,18 @@ mod tests {
         service.save(session).await.unwrap();
 
         assert!(service
-            .review_action("user", "spotify", "id", "exclude", "Artist", "Album")
+            .review_action("user", "spotify", 1, "id", "exclude", "Artist", "Album")
             .await
             .is_err());
         assert!(service
-            .update_options("user", "spotify", "Artist", "Album", PageOptions::default(),)
+            .update_options(
+                "user",
+                "spotify",
+                1,
+                "Artist",
+                "Album",
+                PageOptions::default(),
+            )
             .await
             .is_err());
         assert!(service
@@ -5368,6 +5731,7 @@ mod tests {
             .set_match(
                 "user",
                 "spotify",
+                1,
                 MatchResult {
                     source_id: "id".into(),
                     search_term: "track".into(),
@@ -5380,7 +5744,7 @@ mod tests {
             .await
             .is_err());
         assert!(service
-            .select_match("user", "spotify", "id", "spotify:track:target")
+            .select_match("user", "spotify", 1, "id", "spotify:track:target")
             .await
             .is_err());
 
@@ -5595,6 +5959,7 @@ mod tests {
             .set_matches(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 vec![MatchResult {
                     source_id: "artist\u{1f}album\u{1f}track".into(),
                     search_term: "track search".into(),
@@ -5635,7 +6000,10 @@ mod tests {
         assert_eq!(state.spotify_account_id, None);
         assert_eq!(state.remaining, 0);
         assert!(service.queue().await.is_empty());
-        assert!(service.page("Prior Artist", "Prior Album").await.is_none());
+        assert!(service
+            .page(1, "Prior Artist", "Prior Album")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -5692,6 +6060,7 @@ mod tests {
                 .set_match(
                     "lastfm-user",
                     "spotify-user",
+                    1,
                     MatchResult {
                         source_id: row.stable_id.clone(),
                         search_term: "album search".into(),
@@ -5720,6 +6089,7 @@ mod tests {
             .update_options(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 "Artist",
                 "Album",
                 PageOptions {
@@ -5741,6 +6111,7 @@ mod tests {
             .update_options(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 "Artist",
                 "Album",
                 PageOptions {
@@ -5758,6 +6129,7 @@ mod tests {
             .update_options(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 "Artist",
                 "Album",
                 PageOptions {
@@ -5835,6 +6207,7 @@ mod tests {
                 .set_match(
                     "lastfm-user",
                     "spotify-user",
+                    1,
                     MatchResult {
                         source_id: row.stable_id.clone(),
                         search_term: "album search".into(),
@@ -5852,6 +6225,7 @@ mod tests {
             .select_match(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 &rows[0].stable_id,
                 "spotify:album:new",
             )
@@ -5874,6 +6248,7 @@ mod tests {
             .select_match(
                 "lastfm-user",
                 "spotify-user",
+                1,
                 &first_id,
                 "spotify:track:rematched",
             )

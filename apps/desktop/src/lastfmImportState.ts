@@ -17,6 +17,7 @@ export type ImportVariant = {
 }
 
 export type ImportQueueItem = {
+  page: number
   artist: string
   album: string
   playCount: number
@@ -185,16 +186,16 @@ export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): nu
 
 export function sortImportQueue(items: ImportQueueItem[], sort: ImportSort): ImportQueueItem[] {
   return [...items].sort((left, right) => {
-    if (sort === 'artist') return left.artist.localeCompare(right.artist) || left.album.localeCompare(right.album)
-    if (sort === 'batch') return right.sourceIds.length - left.sourceIds.length || left.artist.localeCompare(right.artist)
-    if (sort === 'lastPlayed') return right.latest - left.latest || left.artist.localeCompare(right.artist)
-    return right.playCount - left.playCount || left.artist.localeCompare(right.artist)
+    if (sort === 'artist') return left.artist.localeCompare(right.artist) || left.album.localeCompare(right.album) || left.page - right.page
+    if (sort === 'batch') return right.sourceIds.length - left.sourceIds.length || left.artist.localeCompare(right.artist) || left.page - right.page
+    if (sort === 'lastPlayed') return right.latest - left.latest || left.artist.localeCompare(right.artist) || left.page - right.page
+    return right.playCount - left.playCount || left.artist.localeCompare(right.artist) || left.page - right.page
   })
 }
 
 export function nextRemainingImportQueue(items: ImportQueueItem[], current: ImportQueueItem | null, sort: ImportSort): ImportQueueItem | null {
   const ordered = sortImportQueue(items, sort)
-  const currentIndex = current ? ordered.findIndex((item) => item.artist === current.artist && item.album === current.album) : -1
+  const currentIndex = current ? ordered.findIndex((item) => item.page === current.page) : -1
   return ordered.slice(currentIndex + 1).find((item) => item.remaining) ?? ordered.slice(0, Math.max(0, currentIndex)).find((item) => item.remaining) ?? null
 }
 
@@ -229,10 +230,6 @@ export function importEmptyPageMessage(phase: ImportPhase | null, pageLoading: b
   return { title: 'No review page selected', detail: 'Select an album from the queue.' }
 }
 
-export function shouldAutoResumeImport(phase: ImportPhase | null | undefined, attempted: boolean): boolean {
-  return !attempted && (phase === 'downloading' || phase === 'aggregating')
-}
-
 export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {
   return requestGeneration === currentGeneration
 }
@@ -242,8 +239,9 @@ export async function applyCurrentImportPageResponse<T>(requestGeneration: numbe
   if (isCurrentImportPageResponse(requestGeneration, currentGeneration())) apply(value)
 }
 
-export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void): Promise<void> {
+export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void, invalidate: () => void = () => {}): Promise<void> {
   const requestGeneration = ++generation.current
+  invalidate()
   select(item)
   await applyCurrentImportPageResponse(requestGeneration, () => generation.current, load(item), apply)
 }

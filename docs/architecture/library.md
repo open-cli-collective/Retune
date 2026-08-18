@@ -50,9 +50,9 @@ plays or `last_played_at`; counts-only performs no Spotify write and updates
 only already-materialized matched Retune tracks.
 
 The importer’s “Show Spotify search terms” preference is session-level and is
-restored on resume. Fuzzy disclosures use all source rows in the session that
-resolve to a target, so the target-wide count decision remains truthful when
-those rows came from different artist/album pages.
+restored on resume. Fuzzy disclosures are bounded to the visible persisted
+`ImportBatch`; the target-wide count decision still includes completed source
+rows from other batches.
 
 The source importer is V2. It records a fixed profile-bound `historyTo`, probes
 Last.fm metadata once, downloads pages at the documented 200-row limit from
@@ -66,8 +66,15 @@ retryable Last.fm failure is persisted and retried in-process at the capped
 backoff without advancing the cursor. No aggregation happens until every page
 is acknowledged; then raw-page reads, sorting, and aggregation run off the
 async runtime before review is entered atomically (or Done when no rows remain)
-and the cache is best-effort deleted. A saved Downloading or Aggregating session resumes once after
-hydration; an empty state does not create one.
+and the cache is best-effort deleted. A saved Downloading or Aggregating session
+is claimed and resumed once by the Tauri shell after Last.fm hydration using its
+stored username and cutoff; React only observes that work. An empty state does
+not create one.
+
+Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.
+Normal albums under the cap remain one batch; larger albums and singles split
+deterministically, and command arguments must identify the requested batch and
+its source rows.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the
