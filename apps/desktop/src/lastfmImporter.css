@@ -1,4 +1,4 @@
-.lastfm-importer { height: 100%; display: flex; flex-direction: column; color: var(--text); background: var(--list); }
+.lastfm-importer { height: 100%; display: flex; flex-direction: column; color: var(--text); background: var(--list); font-size: 11px; }
 .lastfm-importer button, .lastfm-importer input, .lastfm-importer select { color: var(--text); font: inherit; }
 .lastfm-importer button { min-height: 26px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 5px; background: linear-gradient(var(--list), var(--control)); cursor: pointer; }
 .lastfm-importer button:hover, .lastfm-importer button:focus-visible, .import-queue-row.selected { border-color: var(--accent); }
@@ -15,9 +15,9 @@
 .import-toolbar-actions a:hover, .import-toolbar-actions a:focus-visible { text-decoration: underline; }
 .import-sort-label { color: var(--dim); font-size: 10px; }
 .import-sort-control { gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--control); }
-.import-sort-control button { min-height: 22px; padding: 2px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--dim); font-size: 10.5px; }
+.import-sort-control button { min-height: 22px; padding: 2px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--dim); font-size: 11px; }
 .import-sort-control button.active { color: #fff; background: var(--accent); font-weight: 650; }
-.import-query-toggle { color: var(--dim); font-size: 10.5px; white-space: nowrap; }
+.import-query-toggle { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .import-query-toggle input { margin: 0; }
 .import-error { margin: 9px 18px 0; padding: 8px 10px; border: 1px solid #d66; border-radius: 5px; color: #a22; background: color-mix(in srgb, #f88 12%, var(--list)); font-size: 12px; }
 .import-workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(248px, 28%) minmax(0, 1fr); }
@@ -37,8 +37,8 @@
 .import-queue-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .import-queue-row strong, .import-queue-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-queue-row strong { font-size: 11.5px; }
-.import-queue-row small { color: var(--dim); font-size: 10px; }
-.import-queue-count { display: flex; flex-direction: column; align-items: flex-end; color: var(--text); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.import-queue-row small { color: var(--dim); font-size: 11px; }
+.import-queue-count { display: flex; flex-direction: column; align-items: flex-end; color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
 .import-queue-count small { color: var(--dim); }
 .import-queue-progress { display: flex; flex-direction: column; gap: 5px; padding: 9px 12px; border-top: 1px solid var(--border); color: var(--dim); font-size: 10.5px; }
 .import-queue-progress progress, .import-progress-copy progress { width: 100%; height: 8px; accent-color: var(--accent); }
@@ -68,9 +68,9 @@
 .import-album-strip p { margin: 0; color: var(--dim); font-size: 9.5px; font-weight: 700; letter-spacing: .08em; }
 .import-album-strip strong, .import-album-strip small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-album-strip strong { font-size: 13px; }
-.import-album-strip small { color: var(--dim); font-size: 10.5px; }
+.import-album-strip small { color: var(--dim); font-size: 11px; }
 .import-album-strip button { align-self: flex-start; margin-top: 3px; }
-.import-options { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 15px; padding: 8px 16px; border-bottom: 1px solid var(--border); color: var(--dim); font-size: 10.5px; }
+.import-options { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 15px; padding: 8px 16px; border-bottom: 1px solid var(--border); color: var(--dim); font-size: 11px; }
 .import-options label { display: flex; align-items: center; gap: 5px; }
 .import-options input[type="text"], .import-options select { min-width: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--control); font-size: 11px; }
 .import-options input[type="text"] { width: 120px; padding: 3px 5px; }
@@ -87,7 +87,7 @@
 .import-track-copy, .import-match-cell { min-width: 0; }
 .import-track-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; }
 .import-track-copy strong, .import-match-cell > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.import-track-copy small, .import-match-cell small { color: var(--dim); font-size: 10px; }
+.import-track-copy small, .import-match-cell small { color: var(--dim); font-size: 11px; }
 .import-excluded-copy { color: #a34747 !important; }
 .import-exclude-glyph { width: 18px; min-height: 18px !important; flex: 0 0 auto; padding: 0 !important; border-radius: 50% !important; color: var(--dim) !important; background: transparent !important; font-size: 11px; }
 .import-track-row.excluded .import-exclude-glyph { color: #b44 !important; border-color: #c98b8b !important; }
@@ -97,7 +97,7 @@
 .confidence.likely { color: #a66b00; }
 .confidence.low { color: var(--dim); }
 .muted { color: var(--dim); }
-.text-button { align-self: flex-start; min-height: 20px !important; padding: 0 !important; border: 0 !important; color: var(--accent) !important; background: none !important; font-size: 10px !important; }
+.text-button { align-self: flex-start; min-height: 20px !important; padding: 0 !important; border: 0 !important; color: var(--accent) !important; background: none !important; font-size: 11px !important; }
 .import-fuzzy-panel { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 5px; background: color-mix(in srgb, var(--panel) 86%, var(--control)); }
 .import-fuzzy-heading { display: flex; align-items: center; gap: 7px; }
 .import-fuzzy-heading > strong { padding: 1px 5px; border-radius: 3px; color: #8a5a00; background: color-mix(in srgb, #e0a92a 18%, transparent); font-size: 9.5px; letter-spacing: .04em; }
@@ -123,7 +123,8 @@
 .import-picker-option span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .import-picker-option strong, .import-picker-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-picker-option strong { font-size: 11.5px; }
-.import-picker-option small, .import-picker-option em { color: var(--dim); font-size: 10px; font-style: normal; }
+.import-picker-option small { color: var(--dim); font-size: 11px; }
+.import-picker-option em { color: var(--dim); font-size: 10px; font-style: normal; }
 .import-picker-note, .import-confirm-dialog p { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
 .import-picker-dialog footer, .import-confirm-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 3px; }
 @media (max-width: 980px) {
