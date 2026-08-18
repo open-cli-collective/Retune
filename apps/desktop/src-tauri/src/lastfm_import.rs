@@ -415,10 +415,45 @@ impl LastFmImportSessionV2 {
     }
 
     fn options_for_batch(&self, batch_id: u32, artist: &str, album: &str) -> PageOptions {
-        self.page_options
-            .get(&batch_options_key(batch_id))
-            .cloned()
-            .unwrap_or_else(|| self.options_for(artist, album))
+        let Some(batch) = review_batches(self)
+            .into_iter()
+            .find(|batch| batch.page == batch_id)
+        else {
+            let mut options = self.options_for(artist, album);
+            options.selected_track_ids.clear();
+            return options;
+        };
+        let batch_ids = batch.source_ids.iter().collect::<BTreeSet<_>>();
+        let batch_options = self.page_options.get(&batch_options_key(batch_id)).cloned();
+        let legacy_options = self
+            .page_options
+            .get(&format!("{artist}\u{1f}{album}"))
+            .cloned();
+        let mut options = batch_options
+            .clone()
+            .or(legacy_options.clone())
+            .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
+        if batch_options.is_some() || legacy_options.is_some() {
+            options
+                .selected_track_ids
+                .retain(|id| batch_ids.contains(id));
+        } else {
+            options.selected_track_ids = batch
+                .source_ids
+                .iter()
+                .filter(|id| {
+                    let id = (*id).as_str();
+                    self.rows.iter().any(|row| {
+                        row.stable_id == id
+                            && row.artist == artist
+                            && row.album == album
+                            && is_actionable(self, &row.stable_id)
+                    })
+                })
+                .cloned()
+                .collect();
+        }
+        options
     }
 }
 
@@ -1855,10 +1890,10 @@ impl Service {
                         exclude_row(&mut session, id, action == "exclude");
                     }
                     "ignore-album" => {
-                        for source_id in &batch.source_ids {
-                            if is_actionable(&session, source_id) {
+                        for source_id in album_source_ids(&session, artist, album) {
+                            if is_actionable(&session, &source_id) {
                                 session.decisions.insert(
-                                    source_id.clone(),
+                                    source_id,
                                     RowDecision {
                                         status: RowStatus::IgnoredAlbum,
                                         excluded: false,
@@ -1869,10 +1904,10 @@ impl Service {
                     }
                     "ignore-artist" => ignore_artist(&mut session, artist),
                     "skip-album" => {
-                        for source_id in &batch.source_ids {
-                            if is_actionable(&session, source_id) {
+                        for source_id in album_source_ids(&session, artist, album) {
+                            if is_actionable(&session, &source_id) {
                                 session.decisions.insert(
-                                    source_id.clone(),
+                                    source_id,
                                     RowDecision {
                                         status: RowStatus::Skipped,
                                         excluded: false,
@@ -1882,20 +1917,16 @@ impl Service {
                         }
                     }
                     "restore" => {
-                        let ids = session
-                            .rows
-                            .iter()
-                            .filter(|row| {
-                                batch
-                                    .source_ids
-                                    .iter()
-                                    .any(|source_id| source_id == &row.stable_id)
-                                    && is_actionable(&session, &row.stable_id)
-                            })
-                            .map(|row| row.stable_id.clone())
-                            .collect::<Vec<_>>();
-                        for id in ids {
-                            session.decisions.insert(id, RowDecision::default());
+                        for source_id in album_source_ids(&session, artist, album) {
+                            let decision = default_decision(&session, &source_id);
+                            if !decision.excluded
+                                && matches!(
+                                    decision.status,
+                                    RowStatus::IgnoredAlbum | RowStatus::Skipped
+                                )
+                            {
+                                session.decisions.insert(source_id, RowDecision::default());
+                            }
                         }
                     }
                     _ => return Err("Unknown Last.fm import review action.".into()),
@@ -3816,24 +3847,28 @@ fn is_actionable(session: &LastFmImportSessionV2, id: &str) -> bool {
     is_reviewable(session, id) && !default_decision(session, id).excluded
 }
 
-#[cfg(test)]
-pub(crate) fn ignore_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
-    let ids = session
+fn album_source_ids(session: &LastFmImportSessionV2, artist: &str, album: &str) -> Vec<String> {
+    session
         .rows
         .iter()
-        .filter(|row| {
-            row.artist == artist && row.album == album && is_actionable(session, &row.stable_id)
-        })
+        .filter(|row| row.artist == artist && row.album == album)
         .map(|row| row.stable_id.clone())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn ignore_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
+    let ids = album_source_ids(session, artist, album);
     for id in ids {
-        session.decisions.insert(
-            id,
-            RowDecision {
-                status: RowStatus::IgnoredAlbum,
-                excluded: false,
-            },
-        );
+        if is_actionable(session, &id) {
+            session.decisions.insert(
+                id,
+                RowDecision {
+                    status: RowStatus::IgnoredAlbum,
+                    excluded: false,
+                },
+            );
+        }
     }
 }
 
@@ -3857,22 +3892,17 @@ pub(crate) fn ignore_artist(session: &mut LastFmImportSessionV2, artist: &str) {
 
 #[cfg(test)]
 pub(crate) fn skip_album(session: &mut LastFmImportSessionV2, artist: &str, album: &str) {
-    let ids = session
-        .rows
-        .iter()
-        .filter(|row| {
-            row.artist == artist && row.album == album && is_actionable(session, &row.stable_id)
-        })
-        .map(|row| row.stable_id.clone())
-        .collect::<Vec<_>>();
+    let ids = album_source_ids(session, artist, album);
     for id in ids {
-        session.decisions.insert(
-            id,
-            RowDecision {
-                status: RowStatus::Skipped,
-                excluded: false,
-            },
-        );
+        if is_actionable(session, &id) {
+            session.decisions.insert(
+                id,
+                RowDecision {
+                    status: RowStatus::Skipped,
+                    excluded: false,
+                },
+            );
+        }
     }
 }
 
@@ -4570,6 +4600,51 @@ mod tests {
         assert_eq!(batches[0].source_ids[0], "source-0");
         assert_eq!(batches[1].source_ids[0], "source-100");
         assert_eq!(batches[2].source_ids[0], "source-200");
+    }
+
+    #[tokio::test]
+    async fn split_batch_default_options_are_local_and_each_batch_can_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &(0..205)
+                .map(|index| scrobble("Artist", "Album", &format!("Track {index}"), index + 1))
+                .collect::<Vec<_>>(),
+        );
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+
+        for batch_id in 1..=3 {
+            let page = service.page(batch_id, "Artist", "Album").await.unwrap();
+            let source_ids = page
+                .rows
+                .iter()
+                .map(|item| item.source.stable_id.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(page.options.selected_track_ids, source_ids);
+            let selected_ids = page
+                .options
+                .selected_track_ids
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            service
+                .commit_rows(
+                    "user",
+                    "spotify",
+                    batch_id,
+                    &selected_ids,
+                    "Artist",
+                    "Album",
+                    page.options,
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(service.snapshot().await.unwrap().phase, ImportPhase::Done);
     }
 
     #[test]
@@ -5686,6 +5761,73 @@ mod tests {
         assert_eq!(session.phase, ImportPhase::Done);
         assert_eq!(queue_status(&session, &refs), Some(QueueStatus::Excluded));
         assert_eq!(session.remaining(), 0);
+    }
+
+    #[tokio::test]
+    async fn album_review_actions_cascade_across_split_batches_and_restore_from_any_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &(0..205)
+                .map(|index| scrobble("Artist", "Album", &format!("Track {index}"), index + 1))
+                .collect::<Vec<_>>(),
+        );
+        session.phase = ImportPhase::Review;
+        service.save(session.clone()).await.unwrap();
+
+        service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                &session.rows[0].stable_id,
+                "ignore-album",
+                "Artist",
+                "Album",
+            )
+            .await
+            .unwrap();
+        let queue = service.queue().await;
+        assert_eq!(queue.len(), 3);
+        assert!(queue
+            .iter()
+            .all(|item| item.status == Some(QueueStatus::IgnoredAlbum) && !item.remaining));
+
+        service
+            .review_action(
+                "user",
+                "spotify",
+                2,
+                &session.rows[100].stable_id,
+                "restore",
+                "Artist",
+                "Album",
+            )
+            .await
+            .unwrap();
+        let queue = service.queue().await;
+        assert!(queue
+            .iter()
+            .all(|item| item.status.is_none() && item.remaining));
+
+        service
+            .review_action(
+                "user",
+                "spotify",
+                3,
+                &session.rows[200].stable_id,
+                "skip-album",
+                "Artist",
+                "Album",
+            )
+            .await
+            .unwrap();
+        let queue = service.queue().await;
+        assert!(queue
+            .iter()
+            .all(|item| item.status == Some(QueueStatus::Skipped) && item.remaining));
     }
 
     #[tokio::test]
