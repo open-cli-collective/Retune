@@ -357,6 +357,18 @@ pub(crate) struct ImportFetchError {
     pub account_mismatch: bool,
 }
 
+fn import_recent_tracks_params(username: &str, page: u32, to: u64) -> Vec<(String, String)> {
+    vec![
+        ("user".into(), username.into()),
+        ("page".into(), page.to_string()),
+        (
+            "limit".into(),
+            crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
+        ),
+        ("to".into(), to.to_string()),
+    ]
+}
+
 impl Failure {
     fn code(self) -> Option<u32> {
         match self {
@@ -907,15 +919,7 @@ impl Service {
                 account_mismatch: true,
             });
         }
-        let params = vec![
-            ("user".into(), username.into()),
-            ("page".into(), page.to_string()),
-            (
-                "limit".into(),
-                crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
-            ),
-            ("to".into(), to.to_string()),
-        ];
+        let params = import_recent_tracks_params(username, page, to);
         for attempt in 0..=RETRY_DELAYS.len() {
             match self
                 .post("user.getRecentTracks", params.clone(), None)
@@ -1704,6 +1708,19 @@ mod tests {
         assert_eq!(
             signature(&params, "SECRET"),
             "5529e8d265523c2b48a5183272fcac8b"
+        );
+    }
+
+    #[test]
+    fn recent_tracks_import_params_keep_the_fixed_cutoff_and_page_limit() {
+        assert_eq!(
+            import_recent_tracks_params("last.fm-user", 7, 1786804381),
+            vec![
+                ("user".into(), "last.fm-user".into()),
+                ("page".into(), "7".into()),
+                ("limit".into(), "200".into()),
+                ("to".into(), "1786804381".into()),
+            ]
         );
     }
 
