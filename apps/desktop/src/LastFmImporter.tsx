@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, Settings } from './types.ts'
-import { applyCurrentImportPageResponse, downloadAction, excludedImportCount, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, resolveImportCount, restPendingImportCount, selectedImportCount, showsImportRemaining, sortImportQueue, toggleImportRow, validImportIntent, type CountMode, type ImportPhase, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { applyCurrentImportPageResponse, downloadAction, excludedImportCount, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, resolveImportCount, restPendingImportCount, selectedImportCount, showsImportRemaining, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportPhase, type ImportPickerKind, type ImportQueueItem, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportStateView = {
@@ -26,7 +26,7 @@ type AlbumCandidate = { uri: string; name: string; artist: string; relation: 'be
 type MatchResult = { sourceId: string; searchTerm: string; confidence: 'exact' | 'likely' | 'low' | null; selectedUri: string | null; candidates: AlbumCandidate[]; trackMatches: Record<string, string> }
 type PageItem = { source: ImportSourceRow; decision: { status: 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'; excluded: boolean }; matchResult: MatchResult | null }
 type PageView = { state: ImportStateView; artist: string; album: string; pageNumber: number; pageCount: number; rows: PageItem[]; options: { importContent: boolean; includeHistoricalPlayCounts: boolean; wholeAlbum: boolean; genre: string | null; rating: number | null; selectedTrackIds: string[] }; fuzzyGroups: Record<string, ImportSourceRow[]>; countModes: Record<string, CountMode>; lockedCountModes: string[] }
-type PickerKind = 'album' | 'track'
+type PickerKind = ImportPickerKind
 type PickerState = { kind: PickerKind; sourceId: string; query: string }
 type FuzzyProps = { fuzzy?: ImportSourceRow[]; fuzzyTarget?: string; fuzzyExpanded: boolean; fuzzyMode: CountMode; fuzzyLocked: boolean; onFuzzyMode: (mode: CountMode) => void; onFuzzyToggle: () => void }
 
@@ -227,18 +227,20 @@ function ImportPage({ page, showQueries, onRefresh, onNext, onPrevious, onError 
   const pickerMatch = pickerItem?.matchResult
   const openTrackPicker = (sourceId: string) => {
     const item = page.rows.find((entry) => entry.source.stableId === sourceId)
-    setPicker({ kind: 'track', sourceId, query: item?.matchResult?.searchTerm ?? item?.source.track ?? '' })
+    setPicker({ kind: 'track', sourceId, query: item ? trackPickerQuery(item.source) : '' })
   }
   const openAlbumPicker = () => setPicker({ kind: 'album', sourceId: page.rows[0]?.source.stableId ?? '', query: page.album })
   const searchPicker = async (query: string) => {
     if (!picker) return
-    await run(picker.kind === 'album' ? 'lastfm_import_change_album' : 'lastfm_import_change_track', { id: picker.sourceId, query })
-    setPicker({ ...picker, query })
+    const activePicker = picker
+    await run(activePicker.kind === 'album' ? 'lastfm_import_change_album' : 'lastfm_import_change_track', { id: activePicker.sourceId, query })
+    setPicker((current) => current && current.kind === activePicker.kind && current.sourceId === activePicker.sourceId ? { ...current, query } : current)
   }
   const choosePicker = async (uri: string) => {
     if (!picker) return
-    await run('lastfm_import_select_match', { id: picker.sourceId, uri })
-    setPicker(null)
+    const activePicker = picker
+    await run('lastfm_import_select_match', { id: activePicker.sourceId, uri })
+    setPicker((current) => current && current.kind === activePicker.kind && current.sourceId === activePicker.sourceId ? null : current)
   }
   const intentChange = (key: 'importContent' | 'includeHistoricalPlayCounts', checked: boolean) => {
     const next = { ...review, [key]: checked }
@@ -267,7 +269,7 @@ function ImportPage({ page, showQueries, onRefresh, onNext, onPrevious, onError 
     {review.wholeAlbum && <p className="import-exclusion-note">Exclude removes only this Last.fm source row. A track inherently included by the whole album cannot be removed from Spotify here.</p>}
     <div className="import-track-list">{page.rows.map((item) => <ImporterRow key={item.source.stableId} item={item} checked={review.checked.has(item.source.stableId)} showQuery={showQueries} onToggle={() => void persist(toggleImportRow(review, item.source.stableId), true)} onExclude={() => void run('lastfm_import_review', { id: item.source.stableId, action: item.decision.excluded ? 'undo-exclude' : 'exclude', artist: page.artist, album: page.album })} onChangeTrack={() => openTrackPicker(item.source.stableId)} {...fuzzy(item)} fuzzyExpanded={fuzzy(item).fuzzyExpanded ?? false} fuzzyMode={fuzzy(item).fuzzyMode ?? 'sum'} fuzzyLocked={fuzzy(item).fuzzyLocked ?? false} onFuzzyMode={fuzzy(item).onFuzzyMode ?? (() => {})} onFuzzyToggle={fuzzy(item).onFuzzyToggle ?? (() => {})} />)}</div>
     <footer className="import-review-footer"><span>{selectedImportCount(review)} selected · {excludedImportCount(review)} excluded · {restPendingImportCount(review)} rest pending</span><div><button type="button" disabled={busy || !selectedImportCount(review)} onClick={() => void apply(false)}>Accept Changes</button><button type="button" className="primary" disabled={busy || !selectedImportCount(review)} onClick={() => void apply(true)}>Accept &amp; Next Album</button></div></footer>
-    {picker && pickerItem && <MatchPickerDialog kind={picker.kind} query={picker.query} candidates={pickerMatch?.candidates ?? []} selectedUri={pickerMatch?.selectedUri ?? null} busy={busy} onCancel={() => setPicker(null)} onSearch={searchPicker} onChoose={choosePicker} />}
+    {picker && pickerItem && <MatchPickerDialog kind={picker.kind} query={picker.query} candidates={pickerCandidates(picker.kind, pickerMatch?.candidates ?? [])} selectedUri={pickerSelectedUri(picker.kind, picker.sourceId, pickerMatch?.selectedUri ?? null, pickerMatch?.trackMatches ?? {})} busy={busy} onCancel={() => setPicker(null)} onSearch={searchPicker} onChoose={choosePicker} />}
   </section>
 }
 

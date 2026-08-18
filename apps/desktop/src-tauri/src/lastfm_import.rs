@@ -2315,6 +2315,47 @@ fn match_result_for(
     }
 }
 
+fn preserve_match_selection(
+    mut result: MatchResult,
+    previous: Option<&MatchResult>,
+    source_id: &str,
+) -> MatchResult {
+    let Some(previous) = previous else {
+        return result;
+    };
+    result.selected_uri = previous.selected_uri.clone();
+    result.confidence = previous.confidence;
+    result.track_matches = previous.track_matches.clone();
+    let mut candidates = previous
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            previous
+                .selected_uri
+                .as_deref()
+                .is_some_and(|uri| uri == candidate.uri)
+                || previous.track_matches.get(source_id).is_some_and(|uri| {
+                    candidate
+                        .track_uris
+                        .iter()
+                        .any(|track_uri| track_uri == uri)
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for candidate in result.candidates {
+        if !candidates
+            .iter()
+            .any(|existing| existing.uri == candidate.uri)
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates.truncate(10);
+    result.candidates = candidates;
+    result
+}
+
 #[tauri::command]
 pub(crate) async fn open_lastfm_importer(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("lastfm-importer") {
@@ -2504,14 +2545,15 @@ pub(crate) async fn lastfm_import_change_track(
         .collect::<Vec<_>>();
     let mut candidates = candidates;
     classify_album_candidates_by_name(std::slice::from_ref(&row.track), &mut candidates);
+    let result = preserve_match_selection(
+        match_result_for(id.clone(), search_term, candidates, &row.track, false),
+        session.matches.get(&id),
+        &id,
+    );
     let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
-        .set_match(
-            &username,
-            &spotify_account_id,
-            match_result_for(id, search_term, candidates, &row.track, false),
-        )
+        .set_match(&username, &spotify_account_id, result)
         .await?;
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
@@ -2553,12 +2595,16 @@ pub(crate) async fn lastfm_import_change_album(
         .iter()
         .filter(|candidate| candidate.artist == row.artist && candidate.album == row.album)
         .map(|candidate_row| {
-            match_result_for(
-                candidate_row.stable_id.clone(),
-                search_term.clone(),
-                candidates.clone(),
-                &candidate_row.track,
-                false,
+            preserve_match_selection(
+                match_result_for(
+                    candidate_row.stable_id.clone(),
+                    search_term.clone(),
+                    candidates.clone(),
+                    &candidate_row.track,
+                    false,
+                ),
+                session.matches.get(&candidate_row.stable_id),
+                &candidate_row.stable_id,
             )
         })
         .collect();
@@ -4170,5 +4216,56 @@ mod tests {
                 Some(&format!("spotify:track:new-{}", row.track.to_lowercase()))
             );
         }
+    }
+
+    #[test]
+    fn picker_candidate_refresh_preserves_selection_until_explicit_choice() {
+        let old_track = "spotify:track:old".to_owned();
+        let old_album = AlbumCandidate {
+            uri: "spotify:album:old".into(),
+            name: "Old release".into(),
+            artist: "Artist".into(),
+            track_uris: vec![old_track.clone()],
+            track_names: vec!["One".into()],
+            track_artists: vec!["Artist".into()],
+            track_albums: vec!["Old release".into()],
+            relation: Some(AlbumRelation::BestMatch),
+        };
+        let previous = MatchResult {
+            source_id: "id".into(),
+            search_term: "album search".into(),
+            confidence: Some(Confidence::Exact),
+            selected_uri: Some(old_album.uri.clone()),
+            candidates: vec![old_album],
+            track_matches: BTreeMap::from([(String::from("id"), old_track.clone())]),
+        };
+        let refreshed = match_result_for(
+            "id".into(),
+            "track search".into(),
+            vec![AlbumCandidate {
+                uri: "spotify:track:new".into(),
+                name: "New result".into(),
+                artist: "Artist".into(),
+                track_uris: vec!["spotify:track:new".into()],
+                track_names: vec!["One".into()],
+                track_artists: vec!["Artist".into()],
+                track_albums: vec!["Release".into()],
+                relation: Some(AlbumRelation::BestMatch),
+            }],
+            "One",
+            false,
+        );
+        let preserved = preserve_match_selection(refreshed, Some(&previous), "id");
+
+        assert_eq!(preserved.selected_uri, previous.selected_uri);
+        assert_eq!(preserved.track_matches, previous.track_matches);
+        assert!(preserved
+            .candidates
+            .iter()
+            .any(|candidate| candidate.uri == "spotify:album:old"));
+        assert!(preserved
+            .candidates
+            .iter()
+            .any(|candidate| candidate.uri == "spotify:track:new"));
     }
 }

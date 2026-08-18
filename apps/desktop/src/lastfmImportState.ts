@@ -1,6 +1,7 @@
 export type ImportSort = 'plays' | 'artist' | 'batch' | 'lastPlayed'
 export type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
 export type CountMode = 'sum' | 'overwrite' | 'zero'
+export type ImportPickerKind = 'album' | 'track'
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
 export type QueueStatus = ReviewStatus | 'excluded'
 
@@ -148,6 +149,21 @@ export function restPendingImportCount(state: ReviewState): number {
 
 export function validImportIntent(importContent: boolean, includeHistoricalPlayCounts: boolean): boolean {
   return importContent || includeHistoricalPlayCounts
+}
+
+export function trackPickerQuery(source: Pick<ImportSourceRow, 'artist' | 'track'>): string {
+  const quote = (value: string) => value.replace(/"/g, ' ')
+  return `track:"${quote(source.track)}" artist:"${quote(source.artist)}"`
+}
+
+export function pickerCandidates<T extends { uri: string }>(kind: ImportPickerKind, candidates: T[]): T[] {
+  const prefix = `spotify:${kind}:`
+  return candidates.filter((candidate) => candidate.uri.startsWith(prefix))
+}
+
+export function pickerSelectedUri(kind: ImportPickerKind, sourceId: string, selectedUri: string | null, trackMatches: Record<string, string>): string | null {
+  if (kind === 'track') return trackMatches[sourceId] ?? (selectedUri?.startsWith('spotify:track:') ? selectedUri : null)
+  return selectedUri?.startsWith('spotify:album:') ? selectedUri : null
 }
 
 export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): number {

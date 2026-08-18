@@ -4,7 +4,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -124,6 +124,22 @@ test('Last.fm setup and download status reflect connected and active states', ()
   assert.deepEqual(downloadAction('downloading', false), { label: 'Downloading…', disabled: true })
   assert.deepEqual(downloadAction('downloading', true), { label: 'Resume download', disabled: false })
   assert.deepEqual(downloadAction('suspended', false), { label: 'Check accounts and resume', disabled: false })
+})
+
+test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {
+  const albumUri = 'spotify:album:gladiator'
+  const now = { ...importRows()[0], artist: 'The Lyndhurst Orchestra', album: 'Gladiator - Music from the Motion Picture', track: 'Now We Are Free' }
+  const albumCandidates = [{ uri: albumUri }, { uri: 'spotify:album:other-release' }]
+  const pageMatches = {
+    album: albumUri,
+    tracks: { now: 'spotify:track:now-we-are-free', honor: 'spotify:track:honor-him' },
+  }
+  const beforeCancel = structuredClone(pageMatches)
+
+  assert.equal(trackPickerQuery(now), 'track:"Now We Are Free" artist:"The Lyndhurst Orchestra"')
+  assert.deepEqual(pickerCandidates('track', albumCandidates), [])
+  assert.equal(pickerSelectedUri('track', 'now', albumUri, pageMatches.tracks), pageMatches.tracks.now)
+  assert.deepEqual(pageMatches, beforeCancel)
 })
 
 test('Spotify search uses 5 rows in All and 10 in filtered tabs', () => {
