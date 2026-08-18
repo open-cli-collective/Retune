@@ -1100,12 +1100,7 @@ fn validate_session_cursor(session: &LastFmImportSessionV2) -> Result<(), String
 }
 
 fn suspended_source_phase(session: &LastFmImportSessionV2) -> bool {
-    session.phase == ImportPhase::Suspended
-        && session.rows.is_empty()
-        && (session.total_pages.is_none()
-            || session.total_pages.is_some_and(|total_pages| {
-                session.downloaded_pages < total_pages || session.next_page != 0
-            }))
+    session.phase == ImportPhase::Suspended && session.rows.is_empty()
 }
 
 pub(crate) struct Service {
@@ -3815,7 +3810,7 @@ mod tests {
         let store = ImportSessionStore::new(dir.path());
         let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
         session.total_pages = Some(1);
-        session.next_page = 1;
+        session.next_page = 0;
         store
             .write_page(
                 &session,
@@ -3838,7 +3833,7 @@ mod tests {
         let store = ImportSessionStore::new(dir.path());
         let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
         session.total_pages = Some(1);
-        session.next_page = 1;
+        session.next_page = 0;
         session.downloaded_pages = 1;
         let manifest = RawCacheManifest {
             version: SESSION_VERSION,
@@ -3903,6 +3898,43 @@ mod tests {
         assert!(store.validate_cache(&malformed).is_err());
         store.save(&malformed).unwrap();
         assert!(store.load().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn suspended_completed_source_revalidates_cache_before_aggregation() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service.start_or_resume("user", 500, None).await.unwrap();
+        service.set_metadata(2, 2).await.unwrap();
+        for page in [2, 1] {
+            service
+                .checkpoint_page(
+                    page,
+                    &parsed_page(
+                        page,
+                        2,
+                        vec![scrobble("Artist", "Album", "Track", page as u64)],
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            service.snapshot().await.unwrap().phase,
+            ImportPhase::Aggregating
+        );
+        service.suspend_for_account_mismatch().await.unwrap();
+        let suspended = service.snapshot().await.unwrap();
+        let store = ImportSessionStore::new(dir.path());
+        fs::remove_file(store.page_path(&suspended.cache_id, 1)).unwrap();
+
+        let reloaded = Service::new(dir.path());
+        assert!(reloaded.snapshot().await.is_none());
+        reloaded.start_or_resume("user", 500, None).await.unwrap();
+        let fresh = reloaded.snapshot().await.unwrap();
+        assert_eq!(fresh.phase, ImportPhase::Downloading);
+        assert_eq!(fresh.downloaded_pages, 0);
+        assert_eq!(fresh.next_page, 1);
     }
 
     #[tokio::test]
