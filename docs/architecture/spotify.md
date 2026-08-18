@@ -100,7 +100,9 @@ explicit offset with a limit of 10. This is the Development Mode maximum; the
 UI paginates later offsets through the same `SpotifyClient` request gate, as
 required by Spotify's [current search contract][spotify-search] and [migration
 guidance][spotify-search-migration]. The desktop response exposes each result
-group as `items`, `total`, and `nextOffset`.
+group as `items`, `total`, and `nextOffset`. Type-restricted searches may omit
+the other result groups; the shared client deserializes omitted groups as empty
+pages so provider mapping remains uniform.
 
 The search view stores successful pages by offset, merges every group returned
 by a page, and deduplicates artists by Spotify ID and albums/tracks by URI.
