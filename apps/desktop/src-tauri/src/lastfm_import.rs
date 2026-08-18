@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 pub(crate) const SESSION_VERSION: u8 = 2;
 pub(crate) const LASTFM_PAGE_LIMIT: u32 = 200;
 pub(crate) const LASTFM_REVIEW_BATCH_SIZE: usize = 100;
+const LASTFM_QUEUE_PAGE_LIMIT: usize = LASTFM_REVIEW_BATCH_SIZE;
 pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
 const MAX_RAW_CACHE_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -290,11 +291,20 @@ pub(crate) struct ImportQueueItem {
     pub album: String,
     pub play_count: u64,
     pub latest: u64,
-    pub source_ids: Vec<String>,
+    pub source_count: usize,
     pub remaining: bool,
     pub album_entities: u32,
     pub track_entities: u32,
     pub status: Option<QueueStatus>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImportQueuePage {
+    pub items: Vec<ImportQueueItem>,
+    pub cursor: usize,
+    pub next_cursor: Option<usize>,
+    pub total: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1354,8 +1364,34 @@ impl Service {
             defaults.validate()?;
         }
         if let Some(session) = self.snapshot().await {
-            if suspended_source_phase(&session) && self.store.validate_cache(&session).is_err() {
-                self.invalidate_snapshot().await?;
+            if suspended_source_phase(&session) {
+                let store = self.store.clone();
+                let validation_session = session.clone();
+                let cache_valid = tauri::async_runtime::spawn_blocking(move || {
+                    store.validate_cache(&validation_session).is_ok()
+                })
+                .await
+                .map_err(|_| "Last.fm import cache validation task stopped.".to_string())?;
+                if !cache_valid {
+                    let mut current = self.session.lock().await;
+                    let same_source = current.as_ref().is_some_and(|current| {
+                        suspended_source_phase(current)
+                            && current.cache_id == session.cache_id
+                            && current.lastfm_username == session.lastfm_username
+                            && current.history_to == session.history_to
+                    });
+                    if same_source {
+                        let store = self.store.clone();
+                        let cache_id = session.cache_id.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            store.quarantine_snapshot(&cache_id)?;
+                            store.quarantine()
+                        })
+                        .await
+                        .map_err(|_| "Last.fm import quarantine task stopped.".to_string())??;
+                        *current = None;
+                    }
+                }
             }
         }
         let result = self
@@ -1755,7 +1791,7 @@ impl Service {
                         .map(|row| row.play_count)
                         .fold(0, u64::saturating_add),
                     latest: rows.iter().map(|row| row.latest).max().unwrap_or_default(),
-                    source_ids: batch.source_ids,
+                    source_count: batch.source_ids.len(),
                     remaining,
                     album_entities,
                     track_entities: track_uris.len() as u32,
@@ -1763,6 +1799,30 @@ impl Service {
                 })
             })
             .collect()
+    }
+
+    pub(crate) async fn queue_page(
+        &self,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<ImportQueuePage, String> {
+        if limit == 0 || limit > LASTFM_QUEUE_PAGE_LIMIT {
+            return Err(format!(
+                "Last.fm import queue limit must be between 1 and {LASTFM_QUEUE_PAGE_LIMIT}."
+            ));
+        }
+        let queue = self.queue().await;
+        let total = queue.len();
+        if cursor > total {
+            return Err("Last.fm import queue cursor is out of range.".into());
+        }
+        let end = cursor.saturating_add(limit).min(total);
+        Ok(ImportQueuePage {
+            items: queue.into_iter().skip(cursor).take(end - cursor).collect(),
+            cursor,
+            next_cursor: (end < total).then_some(end),
+            total,
+        })
     }
 
     pub(crate) async fn page(
@@ -2349,10 +2409,24 @@ async fn start_import(
 pub(crate) async fn resume_persisted_import(app: tauri::AppHandle) {
     let state = app.state::<crate::AppState>();
     let service = Arc::clone(&state.lastfm_import);
-    let Some((username, _history_to)) = startup_resume_plan(service.snapshot().await.as_ref())
-    else {
+    let Some(session) = service.snapshot().await else {
         return;
     };
+    let Some((username, _history_to)) = startup_resume_plan(Some(&session)) else {
+        return;
+    };
+    let live_username = if session.phase == ImportPhase::Aggregating {
+        lastfm_username(&app).await.ok()
+    } else {
+        None
+    };
+    if !startup_lastfm_identity_matches(&session, live_username.as_deref()) {
+        if service.suspend_for_account_mismatch().await.is_ok() {
+            let view = service.state().await;
+            let _ = app.emit("lastfm-import-changed", &view);
+        }
+        return;
+    }
     if service.claim_runner() {
         run_import(app, service, username).await;
     }
@@ -2384,6 +2458,14 @@ fn startup_resume_plan(session: Option<&LastFmImportSessionV2>) -> Option<(Strin
             )
         })
         .map(|session| (session.lastfm_username.clone(), session.history_to))
+}
+
+fn startup_lastfm_identity_matches(
+    session: &LastFmImportSessionV2,
+    live_username: Option<&str>,
+) -> bool {
+    session.phase != ImportPhase::Aggregating
+        || live_username == Some(session.lastfm_username.as_str())
 }
 
 async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: String) {
@@ -3336,12 +3418,29 @@ pub(crate) async fn lastfm_import_state(app: tauri::AppHandle) -> Result<ImportS
 #[tauri::command]
 pub(crate) async fn lastfm_import_queue(
     app: tauri::AppHandle,
-) -> Result<Vec<ImportQueueItem>, String> {
+    cursor: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ImportQueuePage, String> {
     let service = &app.state::<crate::AppState>().lastfm_import;
-    if !ensure_import_readable(&app, service.as_ref()).await? {
-        return Ok(Vec::new());
+    let cursor = cursor.unwrap_or_default();
+    let limit = limit.unwrap_or(LASTFM_QUEUE_PAGE_LIMIT);
+    if limit == 0 || limit > LASTFM_QUEUE_PAGE_LIMIT {
+        return Err(format!(
+            "Last.fm import queue limit must be between 1 and {LASTFM_QUEUE_PAGE_LIMIT}."
+        ));
     }
-    Ok(service.queue().await)
+    if !ensure_import_readable(&app, service.as_ref()).await? {
+        if cursor != 0 {
+            return Err("Last.fm import queue cursor is out of range.".into());
+        }
+        return Ok(ImportQueuePage {
+            items: Vec::new(),
+            cursor,
+            next_cursor: None,
+            total: 0,
+        });
+    }
+    service.queue_page(cursor, limit).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4008,11 +4107,24 @@ mod tests {
             startup_resume_plan(Some(&session)),
             Some(("fixed-user".into(), 1786804381))
         );
+        assert!(startup_lastfm_identity_matches(
+            &session,
+            Some("other-user")
+        ));
         session.phase = ImportPhase::Aggregating;
         assert_eq!(
             startup_resume_plan(Some(&session)),
             Some(("fixed-user".into(), 1786804381))
         );
+        assert!(startup_lastfm_identity_matches(
+            &session,
+            Some("fixed-user")
+        ));
+        assert!(!startup_lastfm_identity_matches(
+            &session,
+            Some("other-user")
+        ));
+        assert!(!startup_lastfm_identity_matches(&session, None));
         session.phase = ImportPhase::Review;
         assert_eq!(startup_resume_plan(Some(&session)), None);
         assert_eq!(startup_resume_plan(None), None);
@@ -4645,6 +4757,53 @@ mod tests {
         }
 
         assert_eq!(service.snapshot().await.unwrap().phase, ImportPhase::Done);
+    }
+
+    #[tokio::test]
+    async fn queue_pages_are_bounded_and_validate_cursor_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &(0..205)
+                .map(|index| scrobble("Artist", "Album", &format!("Track {index}"), index + 1))
+                .collect::<Vec<_>>(),
+        );
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+
+        let first = service.queue_page(0, 2).await.unwrap();
+        assert_eq!(first.total, 3);
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| item.source_count)
+                .collect::<Vec<_>>(),
+            [100, 100]
+        );
+        assert_eq!(first.next_cursor, Some(2));
+        let second = service
+            .queue_page(first.next_cursor.unwrap(), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|item| item.source_count)
+                .collect::<Vec<_>>(),
+            [5]
+        );
+        assert_eq!(second.next_cursor, None);
+        assert!(service.queue_page(0, 0).await.is_err());
+        assert!(service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT + 1)
+            .await
+            .is_err());
+        assert!(service.queue_page(first.total + 1, 1).await.is_err());
     }
 
     #[test]

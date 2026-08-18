@@ -22,11 +22,18 @@ export type ImportQueueItem = {
   album: string
   playCount: number
   latest: number
-  sourceIds: string[]
+  sourceCount: number
   remaining: boolean
   albumEntities: number
   trackEntities: number
   status?: QueueStatus | null
+}
+
+export type ImportQueuePage = {
+  items: ImportQueueItem[]
+  cursor: number
+  nextCursor: number | null
+  total: number
 }
 
 export type ImportSourceRow = {
@@ -187,7 +194,7 @@ export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): nu
 export function sortImportQueue(items: ImportQueueItem[], sort: ImportSort): ImportQueueItem[] {
   return [...items].sort((left, right) => {
     if (sort === 'artist') return left.artist.localeCompare(right.artist) || left.album.localeCompare(right.album) || left.page - right.page
-    if (sort === 'batch') return right.sourceIds.length - left.sourceIds.length || left.artist.localeCompare(right.artist) || left.page - right.page
+    if (sort === 'batch') return right.sourceCount - left.sourceCount || left.artist.localeCompare(right.artist) || left.page - right.page
     if (sort === 'lastPlayed') return right.latest - left.latest || left.artist.localeCompare(right.artist) || left.page - right.page
     return right.playCount - left.playCount || left.artist.localeCompare(right.artist) || left.page - right.page
   })
@@ -219,7 +226,7 @@ export function downloadAction(phase: ImportPhase | null, retryableError: { retr
   if (phase === null) return { label: 'Start import', disabled: false }
   if (phase === 'suspended') return { label: 'Check accounts and resume', disabled: false }
   if (retryableError?.retryable && (phase === 'downloading' || phase === 'aggregating')) return { label: 'Retrying automatically…', disabled: true }
-  if (phase === 'aggregating') return { label: 'Preparing review…', disabled: true }
+  if (phase === 'aggregating' && !retryableError) return { label: 'Preparing review…', disabled: true }
   if (phase === 'downloading' && !retryableError) return { label: 'Downloading…', disabled: true }
   return { label: 'Resume download', disabled: false }
 }

@@ -20,8 +20,8 @@ const importRows = (): ImportSourceRow[] => [
 ]
 
 const importQueue = (): ImportQueueItem[] => [
-  { page: 1, artist: 'Beta', album: 'Album', playCount: 3, latest: 30, sourceIds: ['a'], remaining: true, albumEntities: 1, trackEntities: 0 },
-  { page: 2, artist: 'Alpha', album: 'Album', playCount: 2, latest: 40, sourceIds: ['b', 'c'], remaining: true, albumEntities: 0, trackEntities: 2 },
+  { page: 1, artist: 'Beta', album: 'Album', playCount: 3, latest: 30, sourceCount: 1, remaining: true, albumEntities: 1, trackEntities: 0 },
+  { page: 2, artist: 'Alpha', album: 'Album', playCount: 2, latest: 40, sourceCount: 2, remaining: true, albumEntities: 0, trackEntities: 2 },
 ]
 
 test('diagnostic reports include session context through the last problem only', () => {
@@ -130,6 +130,7 @@ test('Last.fm setup and download status reflect connected and active states', ()
   assert.deepEqual(downloadAction('downloading', { retryable: false }), { label: 'Resume download', disabled: false })
   assert.deepEqual(downloadAction('suspended', null), { label: 'Check accounts and resume', disabled: false })
   assert.deepEqual(downloadAction('aggregating', null), { label: 'Preparing review…', disabled: true })
+  assert.deepEqual(downloadAction('aggregating', { retryable: false }), { label: 'Resume download', disabled: false })
   assert.deepEqual(importEmptyPageMessage('review', true), { title: 'Matching this review batch…', detail: 'Spotify is contacted only for the visible batch.' })
   assert.deepEqual(importEmptyPageMessage('review', false), { title: 'No review page selected', detail: 'Select an album from the queue.' })
   assert.deepEqual(importEmptyPageMessage('done', false), { title: 'Import complete', detail: 'All review batches are complete.' })

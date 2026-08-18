@@ -68,13 +68,17 @@ is acknowledged; then raw-page reads, sorting, and aggregation run off the
 async runtime before review is entered atomically (or Done when no rows remain)
 and the cache is best-effort deleted. A saved Downloading or Aggregating session
 is claimed and resumed once by the Tauri shell after Last.fm hydration using its
-stored username and cutoff; React only observes that work. An empty state does
-not create one.
+stored username and cutoff; Downloading remains Last.fm-only, while Aggregating
+also verifies the live Last.fm username before claiming the runner and suspends
+with redacted state on mismatch. React only observes that work. An empty state
+does not create one.
 
 Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.
 Normal albums under the cap remain one batch; larger albums and singles split
 deterministically, and command arguments must identify the requested batch and
-its source rows.
+its source rows. Queue summaries cross the IPC boundary as bounded cursor/limit
+pages with `sourceCount`, not source IDs; Accept All applies its prepared batches
+sequentially and refreshes the queue once after the bulk operation.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the
