@@ -1415,6 +1415,7 @@ impl Service {
                         .filter(|row| row.artist == row_artist && row.album == row_album)
                         .map(|row| (row.stable_id.clone(), row.track.clone()))
                         .collect::<Vec<_>>();
+                    let mut group_track_matches = BTreeMap::new();
                     for (id, track) in related {
                         let Some(result) = session.matches.get_mut(&id) else {
                             continue;
@@ -1428,6 +1429,18 @@ impl Service {
                             continue;
                         };
                         update_selected_match(result, &id, &track, &candidate);
+                        if let Some(uri) = result.track_matches.get(&id) {
+                            group_track_matches.insert(id, uri.clone());
+                        }
+                    }
+                    for row in session
+                        .rows
+                        .iter()
+                        .filter(|row| row.artist == row_artist && row.album == row_album)
+                    {
+                        if let Some(result) = session.matches.get_mut(&row.stable_id) {
+                            result.track_matches = group_track_matches.clone();
+                        }
                     }
                 } else {
                     let row_track = session
@@ -1436,7 +1449,39 @@ impl Service {
                         .find(|row| row.stable_id == source_id)
                         .map(|row| row.track.clone())
                         .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
-                    if let Some(result) = session.matches.get_mut(source_id) {
+                    let album_uri = session
+                        .matches
+                        .get(source_id)
+                        .and_then(|result| result.selected_uri.as_deref())
+                        .filter(|uri| uri.starts_with("spotify:album:"))
+                        .map(str::to_owned);
+                    if let Some(album_uri) = album_uri {
+                        let related_ids = session
+                            .rows
+                            .iter()
+                            .filter(|row| row.artist == row_artist && row.album == row_album)
+                            .map(|row| row.stable_id.clone())
+                            .collect::<BTreeSet<_>>();
+                        let mut group_track_matches = BTreeMap::new();
+                        for id in &related_ids {
+                            if let Some(result) = session.matches.get(id) {
+                                for (mapped_id, mapped_uri) in &result.track_matches {
+                                    if related_ids.contains(mapped_id) {
+                                        group_track_matches
+                                            .insert(mapped_id.clone(), mapped_uri.clone());
+                                    }
+                                }
+                            }
+                        }
+                        group_track_matches.insert(source_id.to_owned(), candidate.uri.clone());
+                        for id in related_ids {
+                            if let Some(result) = session.matches.get_mut(&id) {
+                                if result.selected_uri.as_deref() == Some(album_uri.as_str()) {
+                                    result.track_matches = group_track_matches.clone();
+                                }
+                            }
+                        }
+                    } else if let Some(result) = session.matches.get_mut(source_id) {
                         update_selected_match(result, source_id, &row_track, &candidate);
                     }
                 }
@@ -4160,6 +4205,40 @@ mod tests {
             let new_track = format!("spotify:track:new-{}", row.track.to_lowercase());
             let mut track_matches = BTreeMap::new();
             track_matches.insert(row.stable_id.clone(), old_track.clone());
+            let mut candidates = vec![
+                AlbumCandidate {
+                    uri: "spotify:album:old".into(),
+                    name: "Old release".into(),
+                    artist: "Artist".into(),
+                    track_uris: vec![old_track],
+                    track_names: vec![row.track.clone()],
+                    track_artists: vec!["Artist".into()],
+                    track_albums: vec!["Old release".into()],
+                    relation: Some(AlbumRelation::BestMatch),
+                },
+                AlbumCandidate {
+                    uri: "spotify:album:new".into(),
+                    name: "Alternate release".into(),
+                    artist: "Artist".into(),
+                    track_uris: vec![new_track.clone()],
+                    track_names: vec![row.track.clone()],
+                    track_artists: vec!["Artist".into()],
+                    track_albums: vec!["Alternate release".into()],
+                    relation: Some(AlbumRelation::BestMatch),
+                },
+            ];
+            if row.stable_id == rows[0].stable_id {
+                candidates.push(AlbumCandidate {
+                    uri: "spotify:track:rematched".into(),
+                    name: row.track.clone(),
+                    artist: "Artist".into(),
+                    track_uris: vec!["spotify:track:rematched".into()],
+                    track_names: vec![row.track.clone()],
+                    track_artists: vec!["Artist".into()],
+                    track_albums: vec!["The Classics".into()],
+                    relation: None,
+                });
+            }
             service
                 .set_match(
                     "lastfm-user",
@@ -4169,28 +4248,7 @@ mod tests {
                         search_term: "album search".into(),
                         confidence: Some(Confidence::Exact),
                         selected_uri: Some("spotify:album:old".into()),
-                        candidates: vec![
-                            AlbumCandidate {
-                                uri: "spotify:album:old".into(),
-                                name: "Old release".into(),
-                                artist: "Artist".into(),
-                                track_uris: vec![old_track],
-                                track_names: vec![row.track.clone()],
-                                track_artists: vec!["Artist".into()],
-                                track_albums: vec!["Old release".into()],
-                                relation: Some(AlbumRelation::BestMatch),
-                            },
-                            AlbumCandidate {
-                                uri: "spotify:album:new".into(),
-                                name: "Alternate release".into(),
-                                artist: "Artist".into(),
-                                track_uris: vec![new_track],
-                                track_names: vec![row.track.clone()],
-                                track_artists: vec!["Artist".into()],
-                                track_albums: vec!["Alternate release".into()],
-                                relation: Some(AlbumRelation::BestMatch),
-                            },
-                        ],
+                        candidates,
                         track_matches,
                     },
                 )
@@ -4216,6 +4274,47 @@ mod tests {
                 Some(&format!("spotify:track:new-{}", row.track.to_lowercase()))
             );
         }
+
+        let rows = service.snapshot().await.unwrap().rows;
+        let first_id = rows[0].stable_id.clone();
+        let second_id = rows[1].stable_id.clone();
+        service
+            .select_match(
+                "lastfm-user",
+                "spotify-user",
+                &first_id,
+                "spotify:track:rematched",
+            )
+            .await
+            .unwrap();
+        let session = service.snapshot().await.unwrap();
+        let first = session.matches.get(&first_id).unwrap();
+        assert_eq!(first.selected_uri.as_deref(), Some("spotify:album:new"));
+        assert_eq!(first.confidence, Some(Confidence::Exact));
+        assert_eq!(first.track_matches.len(), 2);
+        assert_eq!(
+            first.track_matches.get(&first_id).map(String::as_str),
+            Some("spotify:track:rematched")
+        );
+        assert_eq!(
+            first.track_matches.get(&second_id).map(String::as_str),
+            Some("spotify:track:new-two")
+        );
+        assert_eq!(
+            first
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == "spotify:album:new")
+                .map(|candidate| candidate.name.as_str()),
+            Some("Alternate release")
+        );
+        let sibling = session.matches.get(&second_id).unwrap();
+        assert_eq!(sibling.selected_uri.as_deref(), Some("spotify:album:new"));
+        assert_eq!(sibling.confidence, Some(Confidence::Exact));
+        assert_eq!(
+            sibling.track_matches.get(&second_id).map(String::as_str),
+            Some("spotify:track:new-two")
+        );
     }
 
     #[test]
