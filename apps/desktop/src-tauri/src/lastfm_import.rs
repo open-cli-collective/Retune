@@ -778,10 +778,18 @@ impl Service {
     }
 
     pub(crate) async fn state(&self) -> ImportStateView {
+        self.state_with_identity(None).await
+    }
+
+    pub(crate) async fn state_with_identity(
+        &self,
+        identity: Option<(String, String)>,
+    ) -> ImportStateView {
         let session = self.session.lock().await;
         match session.as_ref() {
             Some(session) if session.phase == ImportPhase::Suspended => suspended_state_view(),
-            session => state_view(session),
+            Some(session) => state_view(Some(session)),
+            None => state_view_with_identity(None, identity.as_ref()),
         }
     }
 
@@ -1448,10 +1456,21 @@ impl Service {
 }
 
 fn state_view(session: Option<&LastFmImportSessionV1>) -> ImportStateView {
+    state_view_with_identity(session, None)
+}
+
+fn state_view_with_identity(
+    session: Option<&LastFmImportSessionV1>,
+    identity: Option<&(String, String)>,
+) -> ImportStateView {
     ImportStateView {
         phase: session.map(|session| session.phase),
-        username: session.map(|session| session.lastfm_username.clone()),
-        spotify_account_id: session.map(|session| session.spotify_account_id.clone()),
+        username: session
+            .map(|session| session.lastfm_username.clone())
+            .or_else(|| identity.map(|(username, _)| username.clone())),
+        spotify_account_id: session
+            .map(|session| session.spotify_account_id.clone())
+            .or_else(|| identity.map(|(_, account_id)| account_id.clone())),
         next_page: session.map(|session| session.next_page).unwrap_or(1),
         total_pages: session.and_then(|session| session.total_pages),
         total_scrobbles: session
@@ -1470,6 +1489,7 @@ fn state_view(session: Option<&LastFmImportSessionV1>) -> ImportStateView {
             .map(|session| session.defaults.clone())
             .unwrap_or_default(),
         remaining: session
+            .filter(|session| matches!(session.phase, ImportPhase::Review | ImportPhase::Done))
             .map(LastFmImportSessionV1::remaining)
             .unwrap_or_default(),
         retryable_error: session.and_then(|session| session.retryable_error.clone()),
@@ -2317,9 +2337,16 @@ pub(crate) async fn open_lastfm_importer(app: tauri::AppHandle) -> Result<(), St
 
 #[tauri::command]
 pub(crate) async fn lastfm_import_state(app: tauri::AppHandle) -> Result<ImportStateView, String> {
-    let service = &app.state::<crate::AppState>().lastfm_import;
-    let _ = ensure_import_readable(&app, service.as_ref()).await?;
-    Ok(service.state().await)
+    let state = app.state::<crate::AppState>();
+    let service = &state.lastfm_import;
+    let identity = if service.snapshot().await.is_none() {
+        let _membership_guard = state.spotify_library_gate.lock().await;
+        connected_accounts_locked(&state).await.ok()
+    } else {
+        let _ = ensure_import_readable(&app, service.as_ref()).await?;
+        None
+    };
+    Ok(service.state_with_identity(identity).await)
 }
 
 #[tauri::command]
@@ -2870,6 +2897,25 @@ mod tests {
         assert_eq!(resolved_play_count(&[&rows[0]], CountMode::Sum), 3);
         assert_eq!(resolved_play_count(&[&rows[0]], CountMode::Overwrite), 2);
         assert_eq!(resolved_play_count(&[&rows[0]], CountMode::Zero), 0);
+    }
+
+    #[test]
+    fn setup_state_view_reports_identity_and_review_only_remaining() {
+        let identity = ("rianjs".to_owned(), "spotify-user".to_owned());
+        let setup = state_view_with_identity(None, Some(&identity));
+        assert_eq!(setup.phase, None);
+        assert_eq!(setup.username.as_deref(), Some("rianjs"));
+        assert_eq!(setup.spotify_account_id.as_deref(), Some("spotify-user"));
+        assert_eq!(setup.remaining, 0);
+
+        let mut session = LastFmImportSessionV1::new("rianjs".into(), "spotify-user".into(), 10);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[scrobble("Artist", "Album", "Track", 10)],
+        );
+        assert_eq!(state_view(Some(&session)).remaining, 0);
+        session.phase = ImportPhase::Review;
+        assert_eq!(state_view(Some(&session)).remaining, 1);
     }
 
     #[test]

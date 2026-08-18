@@ -1,4 +1,5 @@
 export type ImportSort = 'plays' | 'artist' | 'batch' | 'lastPlayed'
+export type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
 export type CountMode = 'sum' | 'overwrite' | 'zero'
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
 export type QueueStatus = ReviewStatus | 'excluded'
@@ -172,6 +173,25 @@ export function nextRemainingImportQueue(items: ImportQueueItem[], current: Impo
 
 export function importStatusLabel(status: QueueStatus): string {
   return status === 'ignored-album' ? 'ignored-album' : status === 'ignored-artist' ? 'ignored-artist' : status
+}
+
+export function importStatusText(phase: ImportPhase | null, username: string | null, nextPage: number, totalPages: number | null, matchedRows: number, matchTotal: number): string {
+  if (phase === 'downloading') return `Downloading Last.fm history · page ${nextPage}${totalPages ? ` of ${totalPages}` : ''}`
+  if (phase === 'matching') return `Matching Last.fm history · ${matchedRows.toLocaleString()} of ${matchTotal.toLocaleString()} tracks`
+  if (phase === 'suspended') return 'Import suspended for account safety'
+  if (phase === 'done') return 'Import complete'
+  return username ? 'Ready to import' : 'Connect Last.fm and Spotify to begin'
+}
+
+export function showsImportRemaining(phase: ImportPhase | null): boolean {
+  return phase === 'review' || phase === 'done'
+}
+
+export function downloadAction(phase: ImportPhase | null, hasRetryableError: boolean): { label: string; disabled: boolean } {
+  if (phase === null) return { label: 'Start import', disabled: false }
+  if (phase === 'suspended') return { label: 'Check accounts and resume', disabled: false }
+  if (phase === 'downloading' && !hasRetryableError) return { label: 'Downloading…', disabled: true }
+  return { label: 'Resume download', disabled: false }
 }
 
 export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {
