@@ -53,8 +53,8 @@ use retune_spotify::{
 };
 use serde::{Deserialize, Serialize};
 use store::{
-    BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore, OverlayStore,
-    Settings, SpotifyLibraryState, StoreError, Theme,
+    BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore,
+    LastFmScrobblingProfile, OverlayStore, Settings, SpotifyLibraryState, StoreError, Theme,
 };
 use sync_orchestrator::SyncOrchestrator;
 use tauri::{
@@ -183,6 +183,8 @@ struct ExportSettings {
     sort_desc: bool,
     #[serde(default)]
     shuffle: bool,
+    #[serde(default)]
+    lastfm_scrobbling_profile: Option<LastFmScrobblingProfile>,
 }
 
 impl ExportSettings {
@@ -203,10 +205,11 @@ impl ExportSettings {
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
             shuffle: settings.shuffle,
+            lastfm_scrobbling_profile: settings.lastfm_scrobbling_profile.clone(),
         }
     }
 
-    fn apply_to(self, settings: &mut Settings) {
+    fn apply_to(self, settings: &mut Settings) -> Result<(), String> {
         settings.theme = self.theme;
         settings.zoom = self.zoom;
         settings.zebra = self.zebra;
@@ -222,7 +225,11 @@ impl ExportSettings {
         settings.sort_column = self.sort_column;
         settings.sort_desc = self.sort_desc;
         settings.shuffle = self.shuffle;
+        if self.lastfm_scrobbling_profile.is_some() {
+            settings.lastfm_scrobbling_profile = self.lastfm_scrobbling_profile;
+        }
         settings.normalize();
+        settings.validate().map_err(|error| error.to_string())
     }
 }
 
@@ -693,6 +700,11 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
     let client_id_changed = current.spotify_client_id != settings.spotify_client_id;
     settings.spotify_sync_completed = current.spotify_sync_completed;
     settings.last_full_sync = current.last_full_sync;
+    if settings.lastfm_scrobbling {
+        if let Some(username) = state.lastfm.state().await.username {
+            reconcile_lastfm_scrobbling_profile(&mut settings, &username, unix_now());
+        }
+    }
     settings.validate().map_err(|error| error.to_string())?;
     let wants_local = settings.playback_backend == "local";
     state.playback.set_local_requested(wants_local);
@@ -722,14 +734,23 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
     Ok(())
 }
 
-pub(crate) fn set_lastfm_scrobbling(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_lastfm_scrobbling(
+    app: &tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut settings = state
+    let current = state
         .settings
         .lock()
         .expect("settings mutex poisoned")
         .clone();
+    let mut settings = current.clone();
     settings.lastfm_scrobbling = enabled;
+    if enabled {
+        if let Some(username) = state.lastfm.state().await.username {
+            reconcile_lastfm_scrobbling_profile(&mut settings, &username, unix_now());
+        }
+    }
     state
         .settings_store
         .save(&settings)
@@ -737,6 +758,45 @@ pub(crate) fn set_lastfm_scrobbling(app: &tauri::AppHandle, enabled: bool) -> Re
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     app.emit("settings-changed", settings)
         .map_err(|error| error.to_string())
+}
+
+fn reconcile_lastfm_scrobbling_profile(settings: &mut Settings, username: &str, now: u64) {
+    if username.trim().is_empty()
+        || settings
+            .lastfm_scrobbling_profile
+            .as_ref()
+            .is_some_and(|profile| profile.username == username)
+    {
+        return;
+    }
+    settings.lastfm_scrobbling_profile = Some(LastFmScrobblingProfile {
+        username: username.to_owned(),
+        started_at: now,
+    });
+}
+
+async fn history_cutoff_for_import(app: &tauri::AppHandle, username: &str) -> Result<u64, String> {
+    let state = app.state::<AppState>();
+    let current = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    let mut settings = current.clone();
+    reconcile_lastfm_scrobbling_profile(&mut settings, username, unix_now());
+    let cutoff = settings
+        .lastfm_scrobbling_profile
+        .as_ref()
+        .map(|profile| profile.started_at)
+        .ok_or_else(|| "Could not establish the Last.fm history cutoff.".to_string())?;
+    if settings != current {
+        state
+            .settings_store
+            .save(&settings)
+            .map_err(|error| error.to_string())?;
+        *state.settings.lock().expect("settings mutex poisoned") = settings;
+    }
+    Ok(cutoff)
 }
 
 async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
@@ -2081,13 +2141,16 @@ fn import_with_settings(
     }
     let mut envelope: serde_json::Value =
         serde_json::from_slice(&json).map_err(|error| error.to_string())?;
-    let settings = envelope
+    let settings: Option<ExportSettings> = envelope
         .as_object_mut()
         .and_then(|object| object.remove("settings"))
         .filter(|_| restore)
         .map(serde_json::from_value)
         .transpose()
         .map_err(|error| error.to_string())?;
+    if let Some(settings) = &settings {
+        settings.clone().apply_to(&mut Settings::default())?;
+    }
     let playlists = envelope
         .as_object_mut()
         .and_then(|object| object.remove("playlists"))
@@ -2180,7 +2243,7 @@ fn apply_export_settings(
         .lock()
         .expect("settings mutex poisoned")
         .clone();
-    export_settings.apply_to(&mut settings);
+    export_settings.apply_to(&mut settings)?;
     state
         .settings_store
         .save(&settings)
@@ -2279,6 +2342,7 @@ pub fn run() {
             lastfm_import::lastfm_import_change_track,
             lastfm_import::lastfm_import_change_album,
             lastfm_import::lastfm_import_apply,
+            lastfm_import::lastfm_import_prepare_accept_all,
             lastfm_import::lastfm_import_accept_all_page,
             diagnostics::load_diagnostics,
             diagnostics::email_diagnostics
@@ -2416,8 +2480,11 @@ pub fn run() {
             });
             lastfm.attach_app(app.handle().clone());
             let lastfm_startup = Arc::clone(&lastfm);
+            let profile_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 lastfm_startup.set_enabled(lastfm_enabled).await;
+                let _ = set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
+                lastfm_import::resume_persisted_import(profile_app.clone()).await;
             });
             let completion_app = app.handle().clone();
             let lastfm = Arc::clone(&lastfm);
@@ -3579,6 +3646,37 @@ mod tests {
     }
 
     #[test]
+    fn lastfm_profile_is_account_bound_and_survives_toggles() {
+        let mut settings = Settings::default();
+        reconcile_lastfm_scrobbling_profile(&mut settings, "first-user", 10);
+        assert_eq!(
+            settings.lastfm_scrobbling_profile,
+            Some(LastFmScrobblingProfile {
+                username: "first-user".into(),
+                started_at: 10,
+            })
+        );
+        settings.lastfm_scrobbling = false;
+        reconcile_lastfm_scrobbling_profile(&mut settings, "first-user", 20);
+        assert_eq!(
+            settings
+                .lastfm_scrobbling_profile
+                .as_ref()
+                .unwrap()
+                .started_at,
+            10
+        );
+        reconcile_lastfm_scrobbling_profile(&mut settings, "second-user", 30);
+        assert_eq!(
+            settings.lastfm_scrobbling_profile,
+            Some(LastFmScrobblingProfile {
+                username: "second-user".into(),
+                started_at: 30,
+            })
+        );
+    }
+
+    #[test]
     fn export_restore_round_trips_visual_settings_and_playlist_order() {
         let library = fixture::library();
         let playlists = playlists::PlaylistCache {
@@ -3679,6 +3777,10 @@ mod tests {
             gapless: false,
             play_threshold_percent: 100,
             lastfm_scrobbling: true,
+            lastfm_scrobbling_profile: Some(LastFmScrobblingProfile {
+                username: "exported-user".into(),
+                started_at: 1786804381,
+            }),
         };
         let plain = export_with_settings(&library, &exported, &playlists).unwrap();
         // Gzip the export ourselves so import's GzDecoder path stays covered
@@ -3695,7 +3797,7 @@ mod tests {
             spotify_sync_completed: false,
             ..Settings::default()
         };
-        visual.unwrap().apply_to(&mut restored);
+        visual.unwrap().apply_to(&mut restored).unwrap();
 
         assert_eq!(restored_library, library);
         assert_eq!(restored_playlists, Some(playlists));
@@ -3725,6 +3827,10 @@ mod tests {
         assert!(restored.auto_add_spotify_library);
         assert!(restored.auto_connect);
         assert!(!restored.spotify_sync_completed);
+        assert_eq!(
+            restored.lastfm_scrobbling_profile,
+            exported.lastfm_scrobbling_profile
+        );
     }
 
     #[test]
@@ -3737,7 +3843,7 @@ mod tests {
             alb: true,
         };
 
-        visual.apply_to(&mut settings);
+        visual.apply_to(&mut settings).unwrap();
 
         assert_eq!(
             settings.browser_panes,
@@ -3747,6 +3853,40 @@ mod tests {
                 alb: true,
             }
         );
+    }
+
+    #[test]
+    fn export_restore_rejects_invalid_lastfm_profile() {
+        for profile in [
+            LastFmScrobblingProfile {
+                username: " ".into(),
+                started_at: 1,
+            },
+            LastFmScrobblingProfile {
+                username: "user".into(),
+                started_at: 0,
+            },
+        ] {
+            let mut settings = Settings::default();
+            let mut export = ExportSettings::from_settings(&settings);
+            export.lastfm_scrobbling_profile = Some(profile);
+            assert!(export.apply_to(&mut settings).is_err());
+        }
+
+        let invalid = Settings {
+            lastfm_scrobbling_profile: Some(LastFmScrobblingProfile {
+                username: " ".into(),
+                started_at: 1,
+            }),
+            ..Settings::default()
+        };
+        let bytes = export_with_settings(
+            &fixture::library(),
+            &invalid,
+            &playlists::PlaylistCache { playlists: vec![] },
+        )
+        .unwrap();
+        assert!(import_with_settings(&bytes, true).is_err());
     }
 
     #[test]
@@ -3766,7 +3906,7 @@ mod tests {
         let visual: ExportSettings = serde_json::from_value(json).unwrap();
         let mut settings = Settings::default();
 
-        visual.apply_to(&mut settings);
+        visual.apply_to(&mut settings).unwrap();
 
         assert_eq!(
             settings.column_order,

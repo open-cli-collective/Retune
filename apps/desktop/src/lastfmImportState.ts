@@ -1,5 +1,5 @@
 export type ImportSort = 'plays' | 'artist' | 'batch' | 'lastPlayed'
-export type ImportPhase = 'downloading' | 'matching' | 'review' | 'done' | 'suspended'
+export type ImportPhase = 'downloading' | 'aggregating' | 'review' | 'done' | 'suspended'
 export type CountMode = 'sum' | 'overwrite' | 'zero'
 export type ImportPickerKind = 'album' | 'track'
 export type ImportConfidence = 'exact' | 'likely' | 'low' | null
@@ -17,15 +17,23 @@ export type ImportVariant = {
 }
 
 export type ImportQueueItem = {
+  page: number
   artist: string
   album: string
   playCount: number
   latest: number
-  sourceIds: string[]
+  sourceCount: number
   remaining: boolean
   albumEntities: number
   trackEntities: number
   status?: QueueStatus | null
+}
+
+export type ImportQueuePage = {
+  items: ImportQueueItem[]
+  cursor: number
+  nextCursor: number | null
+  total: number
 }
 
 export type ImportSourceRow = {
@@ -185,16 +193,16 @@ export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): nu
 
 export function sortImportQueue(items: ImportQueueItem[], sort: ImportSort): ImportQueueItem[] {
   return [...items].sort((left, right) => {
-    if (sort === 'artist') return left.artist.localeCompare(right.artist) || left.album.localeCompare(right.album)
-    if (sort === 'batch') return right.sourceIds.length - left.sourceIds.length || left.artist.localeCompare(right.artist)
-    if (sort === 'lastPlayed') return right.latest - left.latest || left.artist.localeCompare(right.artist)
-    return right.playCount - left.playCount || left.artist.localeCompare(right.artist)
+    if (sort === 'artist') return left.artist.localeCompare(right.artist) || left.album.localeCompare(right.album) || left.page - right.page
+    if (sort === 'batch') return right.sourceCount - left.sourceCount || left.artist.localeCompare(right.artist) || left.page - right.page
+    if (sort === 'lastPlayed') return right.latest - left.latest || left.artist.localeCompare(right.artist) || left.page - right.page
+    return right.playCount - left.playCount || left.artist.localeCompare(right.artist) || left.page - right.page
   })
 }
 
 export function nextRemainingImportQueue(items: ImportQueueItem[], current: ImportQueueItem | null, sort: ImportSort): ImportQueueItem | null {
   const ordered = sortImportQueue(items, sort)
-  const currentIndex = current ? ordered.findIndex((item) => item.artist === current.artist && item.album === current.album) : -1
+  const currentIndex = current ? ordered.findIndex((item) => item.page === current.page) : -1
   return ordered.slice(currentIndex + 1).find((item) => item.remaining) ?? ordered.slice(0, Math.max(0, currentIndex)).find((item) => item.remaining) ?? null
 }
 
@@ -202,23 +210,31 @@ export function importStatusLabel(status: QueueStatus): string {
   return status === 'ignored-album' ? 'ignored-album' : status === 'ignored-artist' ? 'ignored-artist' : status
 }
 
-export function importStatusText(phase: ImportPhase | null, username: string | null, nextPage: number, totalPages: number | null, matchedRows: number, matchTotal: number): string {
+export function importStatusText(phase: ImportPhase | null, username: string | null, nextPage: number, totalPages: number | null): string {
   if (phase === 'downloading') return `Downloading Last.fm history · page ${nextPage}${totalPages ? ` of ${totalPages}` : ''}`
-  if (phase === 'matching') return `Matching Last.fm history · ${matchedRows.toLocaleString()} of ${matchTotal.toLocaleString()} tracks`
+  if (phase === 'aggregating') return 'Preparing Last.fm review'
   if (phase === 'suspended') return 'Import suspended for account safety'
   if (phase === 'done') return 'Import complete'
-  return username ? 'Ready to import' : 'Connect Last.fm and Spotify to begin'
+  return username ? 'Ready to import' : 'Connect Last.fm to begin'
 }
 
 export function showsImportRemaining(phase: ImportPhase | null): boolean {
   return phase === 'review' || phase === 'done'
 }
 
-export function downloadAction(phase: ImportPhase | null, hasRetryableError: boolean): { label: string; disabled: boolean } {
+export function downloadAction(phase: ImportPhase | null, retryableError: { retryable: boolean } | null): { label: string; disabled: boolean } {
   if (phase === null) return { label: 'Start import', disabled: false }
   if (phase === 'suspended') return { label: 'Check accounts and resume', disabled: false }
-  if (phase === 'downloading' && !hasRetryableError) return { label: 'Downloading…', disabled: true }
+  if (retryableError?.retryable && (phase === 'downloading' || phase === 'aggregating')) return { label: 'Retrying automatically…', disabled: true }
+  if (phase === 'aggregating' && !retryableError) return { label: 'Preparing review…', disabled: true }
+  if (phase === 'downloading' && !retryableError) return { label: 'Downloading…', disabled: true }
   return { label: 'Resume download', disabled: false }
+}
+
+export function importEmptyPageMessage(phase: ImportPhase | null, pageLoading: boolean): { title: string; detail: string } {
+  if (pageLoading) return { title: 'Matching this review batch…', detail: 'Spotify is contacted only for the visible batch.' }
+  if (phase === 'done') return { title: 'Import complete', detail: 'All review batches are complete.' }
+  return { title: 'No review page selected', detail: 'Select an album from the queue.' }
 }
 
 export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {
@@ -230,8 +246,9 @@ export async function applyCurrentImportPageResponse<T>(requestGeneration: numbe
   if (isCurrentImportPageResponse(requestGeneration, currentGeneration())) apply(value)
 }
 
-export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void): Promise<void> {
+export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void, invalidate: () => void = () => {}): Promise<void> {
   const requestGeneration = ++generation.current
+  invalidate()
   select(item)
   await applyCurrentImportPageResponse(requestGeneration, () => generation.current, load(item), apply)
 }

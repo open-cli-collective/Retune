@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -357,6 +358,18 @@ pub(crate) struct ImportFetchError {
     pub account_mismatch: bool,
 }
 
+fn import_recent_tracks_params(username: &str, page: u32, to: u64) -> Vec<(String, String)> {
+    vec![
+        ("user".into(), username.into()),
+        ("page".into(), page.to_string()),
+        (
+            "limit".into(),
+            crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
+        ),
+        ("to".into(), to.to_string()),
+    ]
+}
+
 impl Failure {
     fn code(self) -> Option<u32> {
         match self {
@@ -676,6 +689,28 @@ impl Service {
         }
     }
 
+    pub(crate) async fn with_import_owner<F, Fut, T>(
+        &self,
+        username: &str,
+        operation: F,
+    ) -> Result<Option<T>, String>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<T, String>> + Send,
+        T: Send,
+    {
+        let _runtime = self.runtime.lock().await;
+        if _runtime
+            .session
+            .as_ref()
+            .map(|session| session.username.as_str())
+            != Some(username)
+        {
+            return Ok(None);
+        }
+        Ok(Some(operation().await?))
+    }
+
     pub(crate) async fn set_enabled(self: &Arc<Self>, enabled: bool) {
         let should_flush = {
             let mut runtime = self.runtime.lock().await;
@@ -907,15 +942,7 @@ impl Service {
                 account_mismatch: true,
             });
         }
-        let params = vec![
-            ("user".into(), username.into()),
-            ("page".into(), page.to_string()),
-            (
-                "limit".into(),
-                crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
-            ),
-            ("to".into(), to.to_string()),
-        ];
+        let params = import_recent_tracks_params(username, page, to);
         for attempt in 0..=RETRY_DELAYS.len() {
             match self
                 .post("user.getRecentTracks", params.clone(), None)
@@ -1547,6 +1574,10 @@ fn retry_delay(attempt: usize) -> Duration {
     RETRY_DELAYS[attempt.min(RETRY_DELAYS.len() - 1)]
 }
 
+pub(crate) fn import_retry_delay(attempt: usize) -> Duration {
+    retry_delay(attempt)
+}
+
 pub(crate) fn scrobble_threshold_ms(duration_secs: u64) -> Option<u64> {
     (duration_secs > 30).then(|| (duration_secs.saturating_mul(500)).min(240_000))
 }
@@ -1568,7 +1599,7 @@ pub(crate) async fn finish_lastfm(app: tauri::AppHandle) -> Result<LastFmState, 
     let state = app.state::<crate::AppState>();
     let result = state.lastfm.finish(&app).await?;
     state.lastfm.set_enabled(true).await;
-    crate::set_lastfm_scrobbling(&app, true)?;
+    crate::set_lastfm_scrobbling(&app, true).await?;
     Ok(result)
 }
 
@@ -1651,6 +1682,31 @@ mod tests {
         assert!(credentials_from(Some(" key "), Some(" secret ")).is_some());
     }
 
+    #[tokio::test]
+    async fn import_owner_guard_rejects_a_different_connected_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path(), true, true);
+        service.runtime.lock().await.session = Some(LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        });
+
+        assert_eq!(
+            service
+                .with_import_owner("user", || async { Ok::<_, String>(7) })
+                .await
+                .unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            service
+                .with_import_owner("other", || async { Ok::<_, String>(7) })
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn dev_session_store_round_trips_with_owner_only_permissions() {
         let directory = tempfile::tempdir().unwrap();
@@ -1700,6 +1756,19 @@ mod tests {
         assert_eq!(
             signature(&params, "SECRET"),
             "5529e8d265523c2b48a5183272fcac8b"
+        );
+    }
+
+    #[test]
+    fn recent_tracks_import_params_keep_the_fixed_cutoff_and_page_limit() {
+        assert_eq!(
+            import_recent_tracks_params("last.fm-user", 7, 1786804381),
+            vec![
+                ("user".into(), "last.fm-user".into()),
+                ("page".into(), "7".into()),
+                ("limit".into(), "200".into()),
+                ("to".into(), "1786804381".into()),
+            ]
         );
     }
 

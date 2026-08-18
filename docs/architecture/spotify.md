@@ -117,11 +117,22 @@ filtered group starts at ten. Query changes discard pages; filter changes reset
 visible counts but retain pages for the same query. A failed later page leaves
 existing rows visible and can be retried for that group.
 
-Last.fm album matching reuses the same client and request gate with official
-`album:`/`artist:` field filters and a limit of 10, then fetches each candidate's
-tracks for set-overlap classification. Matching does not hold the membership
-mutex across the history; only account checks and the final content save hold
-that gate.
+Last.fm source download and aggregation do not use Spotify or its account
+gate. Opening a visible review batch lazily matches it through this same shared
+client/request gate with official `album:`/`artist:` field filters and a limit
+of 10, then fetches candidate tracks for set-overlap classification. An
+importer-wide async lock serializes duplicate batch matches; cached revisits
+make no matching/search request and there is no adjacent prefetch. A cached
+Spotify-derived page trusts only an exact cached library identity; an inexact
+identity resolves Spotify `/me` before the page is exposed. The first
+successful match binds the session to Spotify `/me`; its final ownership check
+and durable match mutation stay under the shared membership gate, and a later
+identity mismatch suspends Spotify-derived work. Accept All is the explicit
+sequential bulk exception: it sequentially prepares every remaining batch,
+reports global unique album/track URI counts, and only then permits
+confirmation and application. Review batches are stable persisted pages capped
+at 100 source rows, so matching, fuzzy disclosures, and command source-ID
+validation never widen to an adjacent batch.
 
 ## Writes and playlists
 
@@ -137,14 +148,15 @@ detect concurrent changes, then reloads stale state. Retune does not request or
 mutate item contents for playlists the current user does not own; it may display
 their available metadata and cached counts.
 
-The Last.fm importer reuses the same membership gate and shared client. Its
-album search uses the official `album:`/`artist:` field filters with a limit of
-10, then fetches candidate album tracks for overlap classification; track
-rematching uses a direct `track:` search. Import album acceptance calls the
-same reusable album operation as the main UI and sends one album URI. Import
-track acceptance calls the reusable track operation and sends only selected
-track URIs. The generic `PUT /me/library` path is used; deprecated timestamped
-track-save endpoints are not used.
+The Last.fm importer reuses this shared client only for visible-batch matching
+and explicit content acceptance. Its album search uses the official
+`album:`/`artist:` field filters with a limit of 10, then fetches candidate album
+tracks for overlap classification; track rematching uses a direct `track:`
+search. Import album acceptance calls the same reusable album operation as the
+main UI and sends one album URI. Import track acceptance calls the reusable
+track operation and sends only selected track URIs. The generic
+`PUT /me/library` path is used; deprecated timestamped track-save endpoints are
+not used.
 
 ## Contract changes
 

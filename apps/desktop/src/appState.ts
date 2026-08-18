@@ -107,6 +107,7 @@ export const defaultSettings: Settings = {
   gapless: true,
   playThresholdPercent: 100,
   lastfmScrobbling: true,
+  lastfmScrobblingProfile: null,
 }
 
 export const initialState: State = {
@@ -128,7 +129,7 @@ export const initialState: State = {
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
   lastfm: { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null },
-  lastfmImport: { phase: null, username: null, spotifyAccountId: null, nextPage: 1, totalPages: null, totalScrobbles: 0, includedScrobbles: 0, matchedRows: 0, matchTotal: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true },
+  lastfmImport: { phase: null, username: null, spotifyAccountId: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,
