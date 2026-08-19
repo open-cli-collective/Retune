@@ -108,8 +108,10 @@ client/request gate, serializes duplicate batch requests, binds the Spotify
 account on the first match, and caches the results. Review batches are
 persisted as stable `ImportBatch` pages capped at 100 source rows; large
 artist/album groups, including singles, are split without changing the
-artist-level cascade. Commands validate the page and source IDs, and fuzzy
-disclosures stay inside the visible batch while count modes remain target-wide.
+artist-level cascade. Commands validate the page and artist/album identity; row
+actions also validate a source ID, while album-level actions can address split
+batches without one. Fuzzy disclosures stay inside the visible batch while
+count modes remain target-wide.
 Revisiting a cached batch does not call Spotify and there is no adjacent
 prefetch. Accept All is the explicit bulk exception: it sequentially prepares
 every remaining batch, shows global unique album/track URI counts, then applies

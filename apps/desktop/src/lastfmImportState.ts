@@ -4,8 +4,65 @@ export type CountMode = 'sum' | 'overwrite' | 'zero'
 export type ImportPickerKind = 'album' | 'track'
 export type ImportConfidence = 'exact' | 'likely' | 'low' | null
 export type ImportMatchRelation = 'best-match' | 'same-songs' | 'superset' | null
+export type ImportNavigationTarget = 'queue' | 'source' | 'match'
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
 export type QueueStatus = ReviewStatus | 'excluded'
+
+export type ImportShortcutContext = {
+  key: string
+  navigationTarget: ImportNavigationTarget | null
+  control: boolean
+  modal: boolean
+  altKey: boolean
+  ctrlKey: boolean
+  metaKey: boolean
+  shiftKey: boolean
+}
+
+export function canHandleImportShortcut(context: ImportShortcutContext): boolean {
+  if (!context.navigationTarget || context.control || context.modal || context.altKey || context.ctrlKey || context.metaKey) return false
+  if (!['Tab', 'ArrowUp', 'ArrowDown', 'Enter', 'Escape', ' ', 'e', 'E', 'x', 'X', 's', 'S', 'a', 'A', '?'].includes(context.key)) return false
+  return context.key === 'Tab' || context.key === '?' || !context.shiftKey
+}
+
+export function moveImportQueueIndex(current: number, itemCount: number, direction: -1 | 1): number {
+  return Math.min(Math.max(0, current + direction), Math.max(0, itemCount - 1))
+}
+
+export function moveImportNavigationRow(current: number, rowCount: number, direction: -1 | 1): number {
+  return Math.min(Math.max(0, current + direction), Math.max(0, rowCount - 1))
+}
+
+export type ImportStrongMatchCandidate = {
+  artist: string
+  relation: ImportMatchRelation
+  trackUris: string[]
+}
+
+export type ImportStrongMatchRow = {
+  excluded: boolean
+  targetUri: string | null
+  standaloneLowConfidence?: boolean
+}
+
+export type ImportStrongMatch = {
+  strong: boolean
+  extraTrackCount: number
+}
+
+export function normalizeImportMatch(value: string): string {
+  return value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
+}
+
+export function strongImportAlbumMatch(batchArtist: string, candidate: ImportStrongMatchCandidate, rows: ImportStrongMatchRow[]): ImportStrongMatch {
+  const included = rows.filter((row) => !row.excluded)
+  const albumUris = new Set(candidate.trackUris)
+  const mappedUris = included.map((row) => row.targetUri)
+  if (!included.length || (candidate.relation !== 'best-match' && candidate.relation !== 'superset') || normalizeImportMatch(batchArtist) !== normalizeImportMatch(candidate.artist) || included.some((row) => !row.targetUri || !albumUris.has(row.targetUri) || row.standaloneLowConfidence)) return { strong: false, extraTrackCount: 0 }
+  const uniqueMappedUris = new Set(mappedUris)
+  if (uniqueMappedUris.size !== mappedUris.length) return { strong: false, extraTrackCount: 0 }
+  return { strong: true, extraTrackCount: candidate.relation === 'superset' ? Math.max(0, albumUris.size - uniqueMappedUris.size) : 0 }
+}
 
 export type ImportVariant = {
   artist: string

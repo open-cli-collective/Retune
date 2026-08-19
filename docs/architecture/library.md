@@ -85,9 +85,11 @@ does not create one.
 Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.
 Normal albums under the cap remain one batch; larger albums and singles split
 deterministically, and command arguments must identify the requested batch and
-its source rows. Queue summaries cross the IPC boundary as bounded cursor/limit
-pages with `sourceCount`, not source IDs; Accept All applies its prepared batches
-sequentially and refreshes the queue once after the bulk operation.
+its artist/album identity. Row actions also require a source ID; album-level
+actions can operate without one. Queue summaries cross the IPC boundary as
+bounded cursor/limit pages with `sourceCount`, not source IDs; Accept All applies
+its prepared batches sequentially and refreshes the queue once after the bulk
+operation.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the

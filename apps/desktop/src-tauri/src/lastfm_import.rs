@@ -2013,7 +2013,7 @@ impl Service {
         username: &str,
         spotify_account_id: &str,
         batch_id: u32,
-        id: &str,
+        id: Option<&str>,
         action: &str,
         artist: &str,
         album: &str,
@@ -2026,11 +2026,14 @@ impl Service {
                 let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
                     return Err("Unknown Last.fm import review batch.".into());
                 };
-                if !batch.source_ids.iter().any(|source_id| source_id == id) {
-                    return Err("The source row does not belong to this review batch.".into());
-                }
                 match action {
                     "exclude" | "undo-exclude" => {
+                        let id = id.ok_or_else(|| {
+                            "A source row ID is required for this action.".to_string()
+                        })?;
+                        if !batch.source_ids.iter().any(|source_id| source_id == id) {
+                            return Err("The source row does not belong to this review batch.".into());
+                        }
                         exclude_row(&mut session, id, action == "exclude");
                     }
                     "ignore-album" => {
@@ -3736,7 +3739,7 @@ pub(crate) async fn lastfm_import_page(
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
     batch_id: u32,
-    id: String,
+    id: Option<String>,
     action: String,
     artist: String,
     album: String,
@@ -3751,7 +3754,7 @@ pub(crate) async fn lastfm_import_review(
             &username,
             &spotify_account_id,
             batch_id,
-            &id,
+            id.as_deref(),
             &action,
             &artist,
             &album,
@@ -6683,7 +6686,7 @@ mod tests {
                     "lastfm-user",
                     "spotify-user",
                     1,
-                    &row.stable_id,
+                    Some(row.stable_id.as_str()),
                     "exclude",
                     "A",
                     "Album",
@@ -6712,12 +6715,37 @@ mod tests {
         session.phase = ImportPhase::Review;
         service.save(session.clone()).await.unwrap();
 
+        assert!(service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                None,
+                "exclude",
+                "Artist",
+                "Album",
+            )
+            .await
+            .is_err());
+        assert!(service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some("not-in-batch"),
+                "exclude",
+                "Artist",
+                "Album",
+            )
+            .await
+            .is_err());
+
         service
             .review_action(
                 "user",
                 "spotify",
                 1,
-                &session.rows[0].stable_id,
+                None,
                 "ignore-album",
                 "Artist",
                 "Album",
@@ -6739,7 +6767,7 @@ mod tests {
                 "user",
                 "spotify",
                 2,
-                &session.rows[100].stable_id,
+                None,
                 "restore",
                 "Artist",
                 "Album",
@@ -6760,7 +6788,7 @@ mod tests {
                 "user",
                 "spotify",
                 3,
-                &session.rows[200].stable_id,
+                None,
                 "skip-album",
                 "Artist",
                 "Album",
@@ -6794,7 +6822,7 @@ mod tests {
         service.save(session).await.unwrap();
 
         assert!(service
-            .review_action("user", "spotify", 1, "id", "exclude", "Artist", "Album")
+            .review_action("user", "spotify", 1, Some("id"), "exclude", "Artist", "Album")
             .await
             .is_err());
         assert!(service

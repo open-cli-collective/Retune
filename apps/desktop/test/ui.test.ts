@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, canHandleImportShortcut, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -67,6 +67,46 @@ test('Last.fm fuzzy count modes and all queue sorts are deterministic', () => {
   assert.deepEqual(sortImportQueue(importQueue(), 'artist').map((item) => item.artist), ['Alpha', 'Beta'])
   assert.deepEqual(sortImportQueue(importQueue(), 'batch').map((item) => item.artist), ['Alpha', 'Beta'])
   assert.deepEqual(sortImportQueue(importQueue(), 'lastPlayed').map((item) => item.artist), ['Alpha', 'Beta'])
+})
+
+test('Last.fm navigation guards stay on importer targets and preserve mapping rows', () => {
+  const base = { navigationTarget: 'source' as const, control: false, modal: false, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false }
+  assert.equal(canHandleImportShortcut({ ...base, key: 'ArrowDown' }), true)
+  assert.equal(canHandleImportShortcut({ ...base, key: 'Tab', shiftKey: true }), true)
+  assert.equal(canHandleImportShortcut({ ...base, key: 'e', shiftKey: true }), false)
+  assert.equal(canHandleImportShortcut({ ...base, key: ' ', control: true }), false)
+  assert.equal(canHandleImportShortcut({ ...base, key: '?', shiftKey: true }), true)
+  assert.equal(canHandleImportShortcut({ ...base, key: 'a', modal: true }), false)
+  assert.equal(canHandleImportShortcut({ ...base, key: 'x', ctrlKey: true }), false)
+  assert.equal(moveImportQueueIndex(0, 3, -1), 0)
+  assert.equal(moveImportQueueIndex(1, 3, 1), 2)
+  assert.equal(moveImportNavigationRow(0, 3, -1), 0)
+  assert.equal(moveImportNavigationRow(1, 3, 1), 2)
+})
+
+test('Last.fm strong album match advisory accepts exact and supersets but rejects unsafe mappings', () => {
+  const exact = { artist: 'The Artist', relation: 'best-match' as const, trackUris: ['spotify:track:one', 'spotify:track:two'] }
+  assert.deepEqual(strongImportAlbumMatch('the-artist', exact, [
+    { excluded: false, targetUri: 'spotify:track:one' },
+    { excluded: false, targetUri: 'spotify:track:two' },
+  ]), { strong: true, extraTrackCount: 0 })
+  const superset = { artist: 'The Artist', relation: 'superset' as const, trackUris: [...exact.trackUris, 'spotify:track:bonus'] }
+  assert.deepEqual(strongImportAlbumMatch('THE ARTIST', superset, [
+    { excluded: false, targetUri: 'spotify:track:one' },
+    { excluded: false, targetUri: 'spotify:track:two' },
+  ]), { strong: true, extraTrackCount: 1 })
+  assert.equal(strongImportAlbumMatch('The Artist', exact, [
+    { excluded: false, targetUri: 'spotify:track:one' },
+    { excluded: false, targetUri: 'spotify:track:one' },
+  ]).strong, false)
+  assert.equal(strongImportAlbumMatch('The Artist', exact, [
+    { excluded: false, targetUri: 'spotify:track:standalone', standaloneLowConfidence: true },
+    { excluded: true, targetUri: null },
+  ]).strong, false)
+  assert.equal(strongImportAlbumMatch('The Other Artist', exact, [
+    { excluded: false, targetUri: 'spotify:track:one' },
+    { excluded: false, targetUri: 'spotify:track:two' },
+  ]).strong, false)
 })
 
 test('Last.fm content and history intents remain independent and require one choice', () => {
@@ -222,7 +262,7 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(importer, /<VirtualQueue /)
   assert.doesNotMatch(importer, /<div className="import-queue-list">\{orderedQueue\.map/)
   assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)
-  assert.match(importer, /aria-label=\{`Batch \$\{range\.start \+ index \+ 1\} of \$\{items\.length\}/)
+  assert.match(importer, /aria-label=\{`Batch \$\{absoluteIndex \+ 1\} of \$\{items\.length\}/)
   for (const theme of ['light', 'dark']) {
     const block = appCss.match(new RegExp(`:root\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))?.[1] ?? ''
     assert.match(block, /--panel:\s*#[0-9a-f]{6}/i)
@@ -232,6 +272,9 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(dialogBlock, /border: 1px solid var\(--border\)/)
   assert.match(dialogBlock, /box-shadow:/)
   assert.match(appCss, /\.modal-backdrop \{[^}]*z-index: 10;[^}]*background: rgb\(0 0 0 \/ \.38\)/s)
+  assert.match(importerCss, /\.import-queue, \.import-review \{[^}]*min-height: 0/)
+  assert.match(importerCss, /\.import-queue-list \{[^}]*overflow: auto/)
+  assert.match(importerCss, /\.import-track-list \{[^}]*overflow: auto/)
 })
 
 test('Last.fm queue selection keeps refresh stable and controls retain native button semantics', () => {
@@ -246,7 +289,7 @@ test('Last.fm queue selection keeps refresh stable and controls retain native bu
   assert.doesNotMatch(importer, /role="listbox"/)
   assert.doesNotMatch(importer, /role="option"/)
   assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)
-  assert.match(importer, /aria-label=\{`Batch \$\{range\.start \+ index \+ 1\} of \$\{items\.length\}/)
+  assert.match(importer, /aria-label=\{`Batch \$\{absoluteIndex \+ 1\} of \$\{items\.length\}/)
 })
 
 test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {
