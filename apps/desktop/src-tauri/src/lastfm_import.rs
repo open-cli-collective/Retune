@@ -2032,7 +2032,9 @@ impl Service {
                             "A source row ID is required for this action.".to_string()
                         })?;
                         if !batch.source_ids.iter().any(|source_id| source_id == id) {
-                            return Err("The source row does not belong to this review batch.".into());
+                            return Err(
+                                "The source row does not belong to this review batch.".into()
+                            );
                         }
                         exclude_row(&mut session, id, action == "exclude");
                     }
@@ -6716,15 +6718,7 @@ mod tests {
         service.save(session.clone()).await.unwrap();
 
         assert!(service
-            .review_action(
-                "user",
-                "spotify",
-                1,
-                None,
-                "exclude",
-                "Artist",
-                "Album",
-            )
+            .review_action("user", "spotify", 1, None, "exclude", "Artist", "Album",)
             .await
             .is_err());
         assert!(service
@@ -6763,15 +6757,7 @@ mod tests {
             .all(|item| item.status == Some(QueueStatus::IgnoredAlbum) && !item.remaining));
 
         service
-            .review_action(
-                "user",
-                "spotify",
-                2,
-                None,
-                "restore",
-                "Artist",
-                "Album",
-            )
+            .review_action("user", "spotify", 2, None, "restore", "Artist", "Album")
             .await
             .unwrap();
         let queue = service
@@ -6784,15 +6770,7 @@ mod tests {
             .all(|item| item.status.is_none() && item.remaining));
 
         service
-            .review_action(
-                "user",
-                "spotify",
-                3,
-                None,
-                "skip-album",
-                "Artist",
-                "Album",
-            )
+            .review_action("user", "spotify", 3, None, "skip-album", "Artist", "Album")
             .await
             .unwrap();
         let queue = service
@@ -6822,7 +6800,15 @@ mod tests {
         service.save(session).await.unwrap();
 
         assert!(service
-            .review_action("user", "spotify", 1, Some("id"), "exclude", "Artist", "Album")
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some("id"),
+                "exclude",
+                "Artist",
+                "Album"
+            )
             .await
             .is_err());
         assert!(service
