@@ -105,14 +105,20 @@ test('Last.fm A-to-B queue selection keeps the newer page when A resolves last',
   const selected: string[] = []
   const applied: string[] = []
   let visible: string | null = 'A'
-  const requestA = loadSelectedImportPage(generation, queue[0], () => responseA, (item) => selected.push(item.artist), (page) => { visible = page; applied.push(page) }, () => { visible = null })
-  const requestB = loadSelectedImportPage(generation, queue[1], () => responseB, (item) => selected.push(item.artist), (page) => { visible = page; applied.push(page) }, () => { visible = null })
+  let loading = false
+  loading = true
+  const requestA = loadSelectedImportPage(generation, queue[0], () => responseA, (item) => selected.push(item.artist), (page) => { visible = page; applied.push(page) }, () => { visible = null }, () => { loading = false })
+  loading = true
+  const requestB = loadSelectedImportPage(generation, queue[1], () => responseB, (item) => selected.push(item.artist), (page) => { visible = page; applied.push(page) }, () => { visible = null }, () => { loading = false })
+  assert.equal(visible, null)
+  resolveA('A')
+  await requestA
+  assert.equal(loading, true)
   assert.equal(visible, null)
   resolveB('B')
   await requestB
+  assert.equal(loading, false)
   assert.equal(visible, 'B')
-  resolveA('A')
-  await requestA
   assert.deepEqual(selected, ['Beta', 'Alpha'])
   assert.deepEqual(applied, ['B'])
   assert.equal(visible, 'B')

@@ -311,9 +311,13 @@ export async function applyCurrentImportPageResponse<T>(requestGeneration: numbe
   if (isCurrentImportPageResponse(requestGeneration, currentGeneration())) apply(value)
 }
 
-export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void, invalidate: () => void = () => {}): Promise<void> {
+export async function loadSelectedImportPage<T>(generation: { current: number }, item: ImportQueueItem, load: (item: ImportQueueItem) => Promise<T>, select: (item: ImportQueueItem) => void, apply: (value: T) => void, invalidate: () => void = () => {}, complete: () => void = () => {}): Promise<void> {
   const requestGeneration = ++generation.current
-  invalidate()
-  select(item)
-  await applyCurrentImportPageResponse(requestGeneration, () => generation.current, load(item), apply)
+  try {
+    invalidate()
+    select(item)
+    await applyCurrentImportPageResponse(requestGeneration, () => generation.current, load(item), apply)
+  } finally {
+    if (isCurrentImportPageResponse(requestGeneration, generation.current)) complete()
+  }
 }

@@ -402,11 +402,9 @@ export default function LastFmImporter() {
     const requestGeneration = pageRequestGeneration.current + 1
     setPageLoading(true)
     try {
-      await loadSelectedImportPage(pageRequestGeneration, item, (target) => invoke<PageView | null>('lastfm_import_page', { batchId: target.page, artist: target.artist, album: target.album }), setSelected, (nextPage) => setPage(pageWithQueuePosition(nextPage, queueSnapshot)), () => setPage(null))
+      await loadSelectedImportPage(pageRequestGeneration, item, (target) => invoke<PageView | null>('lastfm_import_page', { batchId: target.page, artist: target.artist, album: target.album }), setSelected, (nextPage) => setPage(pageWithQueuePosition(nextPage, queueSnapshot)), () => setPage(null), () => setPageLoading(false))
     } catch (reason) {
       if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setError(String(reason))
-    } finally {
-      setPageLoading(false)
     }
   }
   const nextQueueItem = (queueSnapshot = queue) => {
