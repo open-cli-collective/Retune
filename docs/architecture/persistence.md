@@ -61,23 +61,30 @@ Missing or incomplete state is unknown and does not authorize destructive
 reconciliation until a complete sync establishes the exact account state.
 
 `lastfm-import.json` is `LastFmImportSessionV2`. It stores the immutable
-`historyTo`, Last.fm username, nullable Spotify `/me` account ID, snapshot cache
-ID, descending page cursor, downloaded/total pages, totals, retryable error and
-attempt, session defaults for the two independent intents (content and
-historical play counts) plus whole-album mode, compact aggregated rows,
-decisions, stable 1-based `ImportBatch` pages capped at 100 source rows, batch
-options, match results/candidates/selected URIs, a
+`historyTo`, an optional `downloadedThrough` timestamp, Last.fm username,
+nullable Spotify `/me` account ID, snapshot cache ID, descending page cursor,
+downloaded/total pages, totals, retryable error and attempt, session defaults
+for the two independent intents (content and historical play counts) plus
+whole-album mode, compact aggregated rows, decisions, stable 1-based
+`ImportBatch` pages capped at 100 source rows, batch options, match
+results/candidates/selected URIs, a
 session-level Spotify-target-to-Sum/Overwrite/Zero map, and the session-level
 search-term display preference. Last.fm pages are written atomically as parsed
 raw-page files; the manifest is written only after the page file and is the
 authority for recovery. The manifest and every page record the exact Last.fm
 username as well as cutoff/page metadata, so punctuation-distinct accounts
 cannot share a snapshot. Unacknowledged orphan files are ignored/overwritten.
+`downloadedThrough` is serde-defaulted for older V2 JSON and remains absent
+until a valid checkpointed timestamp is available; loading an older session does
+not scan cached pages to backfill it. It advances monotonically with ordered
+page checkpoints and is exposed alongside `historyTo` to the importer UI.
 An acknowledged missing, corrupt, oversized, or metadata-mismatched page
-quarantines the entire snapshot and starts a fresh V2 session. The source
-runner retries the same probe/page after Last.fm's capped internal retry is
-exhausted, persisting state and waiting at the capped delay without advancing
-the cursor. No raw page is aggregated until the manifest is complete; review
+quarantines the entire snapshot and starts a fresh V2 session. The sequential
+metadata probe retains its existing retry helper. Concurrent page workers make
+one logical request after Last.fm's capped internal retry is exhausted and
+return structured outcomes without mutating importer state; the ordered
+coordinator persists one retry attempt and waits at the capped delay before
+re-entering from the failed cursor without advancing it. No raw page is aggregated until the manifest is complete; review
 entry and cache cleanup follow one atomic session write. Session and cache
 files use mode 0600 on Unix and a 100 MiB safety ceiling. Corrupt or unknown
 session versions are quarantined and never applied. This machine/account state

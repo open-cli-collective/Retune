@@ -74,21 +74,29 @@ The Preferences action opens a second `lastfm-importer` WebviewWindow at
 successful connection/enable timestamp for each Last.fm username; toggling
 preserves the same username's timestamp and a different username replaces it.
 The importer captures that fixed `historyTo`, probes metadata once, and fetches
-`user.getRecentTracks` at its documented 200-row limit from the oldest page
-toward page 1. It skips now-playing and undated rows, writes parsed raw pages
+`user.getRecentTracks` at its documented 200-row limit; Last.fm's page total is
+the oldest page, so Retune moves toward page 1. The metadata probe remains sequential; once the total is known,
+source work launches bounded windows of four page requests and processes their
+results in descending page order. It skips now-playing and undated rows, writes parsed raw pages
 under a snapshot-specific machine cache, discards rows at or after `historyTo`
 before caching or counting, acknowledges each page in a manifest only after
 the atomic page write, and enforces 100 MiB session/cache ceilings. The exact
-Last.fm username is recorded in both manifest and page metadata. No
+Last.fm username is recorded in both manifest and page metadata. The manifest
+and session cursor remain a contiguous descending suffix: a window failure
+keeps only its already-checkpointed prefix and restarts from the failed cursor,
+so an exit refetches at most the unfinished part of one four-page window. No
 aggregation or Spotify request occurs during source work. Once every manifest
 page is present, raw-page reads, sorting, and aggregation run off the async
 runtime; the importer then atomically enters review, or Done when no rows remain,
 before best-effort cache cleanup.
 
-The source runner persists retry state after Last.fm's internal capped retry is
-exhausted, waits at the capped delay, and retries the same probe/page in
-process while the app remains running; a failed request never advances its
-cursor. An acknowledged missing, corrupt, oversized, or metadata-mismatched
+The sequential metadata probe keeps its existing retry helper. Concurrent page
+workers make one logical request after Last.fm's internal capped retry, parse
+and classify the result without mutating importer state, and return it to the
+ordered coordinator. The coordinator persists one retry attempt for the failed
+cursor, waits at the capped delay, and retries that cursor in-process while the
+app remains running; a failed request never advances its cursor. An
+acknowledged missing, corrupt, oversized, or metadata-mismatched
 page quarantines the snapshot and starts a fresh V2 session. An unacknowledged
 page file is an ignorable orphan and can be overwritten on retry. V1 caches are
 quarantined because the fixed cutoff changes page boundaries. Relaunching with

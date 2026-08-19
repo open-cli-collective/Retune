@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../src/diagnostics.ts'
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importEmptyPageMessage, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, showsImportRemaining, skipImportAlbum, sortImportQueue, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -118,9 +119,10 @@ test('Last.fm A-to-B queue selection keeps the newer page when A resolves last',
 })
 
 test('Last.fm setup and download status reflect connected and active states', () => {
-  assert.equal(importStatusText(null, 'rianjs', 1, null), 'Ready to import')
-  assert.equal(importStatusText(null, null, 1, null), 'Connect Last.fm to begin')
-  assert.equal(importStatusText('downloading', 'rianjs', 7, 1230), 'Downloading Last.fm history · page 7 of 1230')
+  assert.equal(importStatusText(null, 'rianjs'), 'Ready to import')
+  assert.equal(importStatusText(null, null), 'Connect Last.fm to begin')
+  assert.equal(importStatusText('downloading', 'rianjs'), 'Downloading Last.fm plays')
+  assert.equal(importStatusText('aggregating', 'rianjs'), 'Preparing Last.fm review')
   assert.equal(showsImportRemaining('downloading'), false)
   assert.equal(showsImportRemaining('aggregating'), false)
   assert.equal(showsImportRemaining('review'), true)
@@ -134,6 +136,111 @@ test('Last.fm setup and download status reflect connected and active states', ()
   assert.deepEqual(importEmptyPageMessage('review', true), { title: 'Matching this review batch…', detail: 'Spotify is contacted only for the visible batch.' })
   assert.deepEqual(importEmptyPageMessage('review', false), { title: 'No review page selected', detail: 'Select an album from the queue.' })
   assert.deepEqual(importEmptyPageMessage('done', false), { title: 'Import complete', detail: 'All review batches are complete.' })
+})
+
+test('Last.fm download copy uses persisted plays, percentage, and truthful dates', () => {
+  const oldest = Math.floor(Date.UTC(2025, 6, 1) / 1000)
+  const historyEnd = Math.floor(Date.UTC(2026, 7, 1) / 1000)
+  assert.equal(importDownloadPercent(3, 4), 75)
+  assert.equal(importDownloadProgressLabel(234341, 245892, 75), '234,341 of 245,892 plays downloaded · 75%')
+  assert.equal(importHistoryBreadcrumb(null, null), 'Oldest → newest · starting with the oldest plays')
+  assert.equal(importHistoryBreadcrumb(oldest, historyEnd), 'Oldest → newest · reached July 2025 · history ends August 2026')
+
+  const resumed = importDownloadCopy({
+    phase: 'downloading',
+    processedScrobbles: 234341,
+    totalScrobbles: 245892,
+    downloadedPages: 3,
+    totalPages: 4,
+    downloadedThrough: oldest,
+    historyTo: historyEnd,
+  })
+  assert.match(resumed.progress, /plays downloaded · 75%/)
+  assert.match(resumed.breadcrumb, /reached July 2025/)
+  assert.doesNotMatch(`${resumed.detail} ${resumed.progress} ${resumed.breadcrumb}`, /pages?/i)
+})
+
+test('Last.fm download copy handles initial dates, missing dates, aggregation, and resumed status', () => {
+  const initial = importDownloadCopy({
+    phase: null,
+    processedScrobbles: 0,
+    totalScrobbles: 0,
+    downloadedPages: 0,
+    totalPages: null,
+    downloadedThrough: null,
+    historyTo: null,
+  })
+  assert.match(initial.detail, /fixed snapshot.*plays/i)
+  assert.equal(initial.breadcrumb, 'Oldest → newest · starting with the oldest plays')
+  assert.equal(importHistoryBreadcrumb(null, Math.floor(Date.UTC(2026, 7, 1) / 1000)), 'Oldest → newest · starting with the oldest plays · history ends August 2026')
+
+  const aggregating = importDownloadCopy({
+    phase: 'aggregating',
+    processedScrobbles: 245892,
+    totalScrobbles: 245892,
+    downloadedPages: 4,
+    totalPages: 4,
+    downloadedThrough: Math.floor(Date.UTC(2026, 7, 1) / 1000),
+    historyTo: Math.floor(Date.UTC(2026, 7, 1) / 1000),
+  })
+  assert.equal(aggregating.detail, 'All plays are downloaded. Retune is sorting and grouping them before review.')
+  for (const phase of ['downloading', 'aggregating', 'review', 'done', 'suspended'] as const) {
+    assert.doesNotMatch(importStatusText(phase, 'rianjs'), /pages?/i)
+  }
+})
+
+test('Last.fm queue virtualization clamps visible ranges with overscan', () => {
+  assert.deepEqual(importQueueVisibleRange(23132, 0, 300), {
+    start: 0,
+    end: 10,
+    offsetTop: 0,
+    contentHeight: 1318524,
+  })
+  assert.deepEqual(importQueueVisibleRange(23132, 57 * 1000, 300), {
+    start: 996,
+    end: 1010,
+    offsetTop: 56772,
+    contentHeight: 1318524,
+  })
+  const end = importQueueVisibleRange(23132, Number.MAX_SAFE_INTEGER, 300)
+  assert.equal(end.start, 23122)
+  assert.equal(end.end, 23132)
+  assert.equal(end.offsetTop, 23122 * 57)
+  assert.deepEqual(importQueueVisibleRange(0, 0, 300), { start: 0, end: 0, offsetTop: 0, contentHeight: 0 })
+})
+
+test('Last.fm queue rendering and importer modal styles keep large lists and surfaces bounded', () => {
+  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
+  const appCss = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8')
+  const importerCss = readFileSync(new URL('../src/lastfmImporter.css', import.meta.url), 'utf8')
+  assert.match(importer, /<VirtualQueue /)
+  assert.doesNotMatch(importer, /<div className="import-queue-list">\{orderedQueue\.map/)
+  assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)
+  assert.match(importer, /aria-label=\{`Batch \$\{range\.start \+ index \+ 1\} of \$\{items\.length\}/)
+  for (const theme of ['light', 'dark']) {
+    const block = appCss.match(new RegExp(`:root\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))?.[1] ?? ''
+    assert.match(block, /--panel:\s*#[0-9a-f]{6}/i)
+  }
+  const dialogBlock = importerCss.match(/\.import-picker-dialog, \.import-confirm-dialog \{([^}]*)\}/)?.[1] ?? ''
+  assert.match(dialogBlock, /background: var\(--panel\)/)
+  assert.match(dialogBlock, /border: 1px solid var\(--border\)/)
+  assert.match(dialogBlock, /box-shadow:/)
+  assert.match(appCss, /\.modal-backdrop \{[^}]*z-index: 10;[^}]*background: rgb\(0 0 0 \/ \.38\)/s)
+})
+
+test('Last.fm queue selection keeps refresh stable and controls retain native button semantics', () => {
+  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
+  const refreshBlock = importer.match(/const refresh = useCallback[\s\S]*?\n  useEffect\(\(\) => \{\n    void refresh\(\)/)?.[0] ?? ''
+  assert.match(importer, /const importQueuePageLimit = 1000/)
+  assert.match(importer, /const selectedPageRef = useRef<number \| undefined>\(undefined\)/)
+  assert.match(importer, /const sortRef = useRef<.*>\('plays'\)/)
+  assert.match(refreshBlock, /const refresh = useCallback\(async/)
+  assert.doesNotMatch(refreshBlock, /\}, \[selectedPage, sort\]\)/)
+  assert.match(importer, /const nextQueueItem = \(queueSnapshot = queue\) => \{[\s\S]*const orderedSnapshot = sortImportQueue\(queueSnapshot, sort\)[\s\S]*const next = nextRemainingImportQueue\(orderedSnapshot, selected, sort\)[\s\S]*if \(next\) void openQueueItem\(next, orderedSnapshot\)/)
+  assert.doesNotMatch(importer, /role="listbox"/)
+  assert.doesNotMatch(importer, /role="option"/)
+  assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)
+  assert.match(importer, /aria-label=\{`Batch \$\{range\.start \+ index \+ 1\} of \$\{items\.length\}/)
 })
 
 test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {

@@ -206,12 +206,77 @@ export function nextRemainingImportQueue(items: ImportQueueItem[], current: Impo
   return ordered.slice(currentIndex + 1).find((item) => item.remaining) ?? ordered.slice(0, Math.max(0, currentIndex)).find((item) => item.remaining) ?? null
 }
 
+export type ImportQueueVisibleRange = { start: number; end: number; offsetTop: number; contentHeight: number }
+
+export function importQueueVisibleRange(itemCount: number, scrollTop: number, viewportHeight: number, rowHeight = 57, overscan = 4): ImportQueueVisibleRange {
+  const count = Math.max(0, Math.floor(Number.isFinite(itemCount) ? itemCount : 0))
+  const height = Math.max(1, rowHeight)
+  const viewport = Math.max(0, Number.isFinite(viewportHeight) ? viewportHeight : 0)
+  const contentHeight = count * height
+  const top = Math.min(Math.max(0, Number.isFinite(scrollTop) ? scrollTop : 0), Math.max(0, contentHeight - viewport))
+  const first = Math.floor(top / height)
+  const last = Math.min(count, Math.max(first + 1, Math.ceil((top + viewport) / height)))
+  const extra = Math.max(0, Math.floor(overscan))
+  const start = Math.max(0, first - extra)
+  const end = Math.min(count, last + extra)
+  return { start, end, offsetTop: start * height, contentHeight }
+}
+
+export type ImportDownloadState = {
+  phase: ImportPhase | null
+  processedScrobbles: number
+  totalScrobbles: number
+  downloadedPages: number
+  totalPages: number | null
+  downloadedThrough: number | null
+  historyTo: number | null
+}
+
+export function importDownloadPercent(downloadedPages: number, totalPages: number | null): number {
+  return totalPages ? Math.min(100, Math.round((downloadedPages / totalPages) * 100)) : 0
+}
+
+export function importDownloadProgressLabel(processedScrobbles: number, totalScrobbles: number, percent: number): string {
+  const total = Math.max(0, totalScrobbles)
+  const processed = Math.min(total, Math.max(0, processedScrobbles))
+  return `${processed.toLocaleString()} of ${total.toLocaleString()} plays downloaded · ${percent}%`
+}
+
+export function formatImportDate(timestamp: number | null, locale?: string): string | null {
+  if (!timestamp || !Number.isFinite(timestamp)) return null
+  const date = new Date(timestamp * 1000)
+  if (Number.isNaN(date.getTime())) return null
+  return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(date)
+}
+
+export function importHistoryBreadcrumb(downloadedThrough: number | null, historyTo: number | null): string {
+  const reached = formatImportDate(downloadedThrough)
+  const historyEnd = formatImportDate(historyTo)
+  const end = historyEnd ? ` · history ends ${historyEnd}` : ''
+  return reached ? `Oldest → newest · reached ${reached}${end}` : `Oldest → newest · starting with the oldest plays${end}`
+}
+
+export function importDownloadCopy(state: ImportDownloadState): { detail: string; progress: string; breadcrumb: string } {
+  const detail = state.phase === null
+    ? 'Retune takes a fixed snapshot of your Last.fm plays and moves from oldest to newest. You can review every match before anything is applied.'
+    : state.phase === 'suspended'
+      ? 'Reconnect the saved Last.fm account before resuming this session.'
+      : state.phase === 'aggregating'
+        ? 'All plays are downloaded. Retune is sorting and grouping them before review.'
+        : 'Retune downloads your oldest plays first and moves toward your newest plays.'
+  return {
+    detail,
+    progress: importDownloadProgressLabel(state.processedScrobbles, state.totalScrobbles, importDownloadPercent(state.downloadedPages, state.totalPages)),
+    breadcrumb: importHistoryBreadcrumb(state.downloadedThrough, state.historyTo),
+  }
+}
+
 export function importStatusLabel(status: QueueStatus): string {
   return status === 'ignored-album' ? 'ignored-album' : status === 'ignored-artist' ? 'ignored-artist' : status
 }
 
-export function importStatusText(phase: ImportPhase | null, username: string | null, nextPage: number, totalPages: number | null): string {
-  if (phase === 'downloading') return `Downloading Last.fm history · page ${nextPage}${totalPages ? ` of ${totalPages}` : ''}`
+export function importStatusText(phase: ImportPhase | null, username: string | null): string {
+  if (phase === 'downloading') return 'Downloading Last.fm plays'
   if (phase === 'aggregating') return 'Preparing Last.fm review'
   if (phase === 'suspended') return 'Import suspended for account safety'
   if (phase === 'done') return 'Import complete'

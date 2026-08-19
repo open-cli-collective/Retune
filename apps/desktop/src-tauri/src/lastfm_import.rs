@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     future::Future,
     path::{Path, PathBuf},
@@ -19,7 +20,8 @@ use tokio::sync::Mutex;
 pub(crate) const SESSION_VERSION: u8 = 2;
 pub(crate) const LASTFM_PAGE_LIMIT: u32 = 200;
 pub(crate) const LASTFM_REVIEW_BATCH_SIZE: usize = 100;
-const LASTFM_QUEUE_PAGE_LIMIT: usize = LASTFM_REVIEW_BATCH_SIZE;
+const LASTFM_PAGE_WINDOW_SIZE: u32 = 4;
+const LASTFM_QUEUE_PAGE_LIMIT: usize = 1000;
 pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
 const MAX_RAW_CACHE_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -236,6 +238,8 @@ pub(crate) struct LastFmImportSessionV2 {
     pub lastfm_username: String,
     pub spotify_account_id: Option<String>,
     pub history_to: u64,
+    #[serde(default)]
+    pub downloaded_through: Option<u64>,
     pub cache_id: String,
     pub next_page: u32,
     pub total_pages: Option<u32>,
@@ -262,11 +266,14 @@ pub(crate) struct ImportStateView {
     pub phase: Option<ImportPhase>,
     pub username: Option<String>,
     pub spotify_account_id: Option<String>,
+    pub history_to: Option<u64>,
+    pub downloaded_through: Option<u64>,
     pub next_page: u32,
     pub total_pages: Option<u32>,
     pub downloaded_pages: u32,
     pub total_scrobbles: u64,
     pub included_scrobbles: u64,
+    pub processed_scrobbles: u64,
     pub defaults: ImportDefaults,
     pub remaining: usize,
     pub retryable_error: Option<RetryableError>,
@@ -362,6 +369,7 @@ impl LastFmImportSessionV2 {
             lastfm_username,
             spotify_account_id: None,
             history_to,
+            downloaded_through: None,
             cache_id,
             next_page: 1,
             total_pages: None,
@@ -461,6 +469,40 @@ impl LastFmImportSessionV2 {
                     })
                 })
                 .cloned()
+                .collect();
+        }
+        options
+    }
+
+    fn options_for_page_batch(
+        &self,
+        batch: &ImportBatch,
+        artist: &str,
+        album: &str,
+        rows: &[&SourceRow],
+    ) -> PageOptions {
+        let batch_ids = batch.source_ids.iter().collect::<BTreeSet<_>>();
+        let batch_options = self
+            .page_options
+            .get(&batch_options_key(batch.page))
+            .cloned();
+        let legacy_options = self
+            .page_options
+            .get(&format!("{artist}\u{1f}{album}"))
+            .cloned();
+        let mut options = batch_options
+            .clone()
+            .or(legacy_options.clone())
+            .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
+        if batch_options.is_some() || legacy_options.is_some() {
+            options
+                .selected_track_ids
+                .retain(|id| batch_ids.contains(id));
+        } else {
+            options.selected_track_ids = rows
+                .iter()
+                .filter(|row| is_actionable(self, &row.stable_id))
+                .map(|row| row.stable_id.clone())
                 .collect();
         }
         options
@@ -708,10 +750,19 @@ fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
 }
 
 fn review_batches(session: &LastFmImportSessionV2) -> Vec<ImportBatch> {
-    if session.batches.is_empty() || session.batches.iter().any(|batch| batch.page == 0) {
-        build_review_batches(&session.rows)
+    review_batches_for_read(session).into_owned()
+}
+
+fn review_batches_for_read(session: &LastFmImportSessionV2) -> Cow<'_, [ImportBatch]> {
+    if session.batches.is_empty()
+        || session
+            .batches
+            .iter()
+            .any(|batch| batch.page == 0 || batch.source_ids.is_empty())
+    {
+        Cow::Owned(build_review_batches(&session.rows))
     } else {
-        session.batches.clone()
+        Cow::Borrowed(&session.batches)
     }
 }
 
@@ -1078,11 +1129,23 @@ impl ImportSessionStore {
             .total_pages
             .ok_or_else(|| "The Last.fm import cache has no page total.".to_string())?;
         self.validate_manifest_metadata(&manifest, session, total_pages)?;
-        if session.next_page < total_pages {
-            for page in (session.next_page + 1)..=total_pages {
-                if !manifest.pages.contains_key(&page) {
-                    return Err("The Last.fm import cache is missing an acknowledged page.".into());
-                }
+        let acknowledged_pages = session.downloaded_pages as usize;
+        let max_pages = acknowledged_pages + usize::from(session.next_page > 0);
+        if manifest.pages.len() < acknowledged_pages || manifest.pages.len() > max_pages {
+            return Err("The Last.fm import cache has a non-contiguous page suffix.".into());
+        }
+        if let Some((&first_page, _)) = manifest.pages.first_key_value() {
+            let expected_last_page = manifest.pages.last_key_value().map(|(&page, _)| page);
+            if expected_last_page != Some(total_pages)
+                || first_page < session.next_page.max(1)
+                || manifest
+                    .pages
+                    .keys()
+                    .copied()
+                    .zip(first_page..=total_pages)
+                    .any(|(actual, expected)| actual != expected)
+            {
+                return Err("The Last.fm import cache has a non-contiguous page suffix.".into());
             }
         }
         let total_size = manifest
@@ -1542,6 +1605,19 @@ impl Service {
                 session.skipped_undated = session
                     .skipped_undated
                     .saturating_add(filtered.skipped_undated);
+                if let Some(latest) = filtered
+                    .tracks
+                    .iter()
+                    .map(|scrobble| scrobble.timestamp)
+                    .filter(|timestamp| *timestamp > 0)
+                    .max()
+                {
+                    session.downloaded_through = Some(
+                        session
+                            .downloaded_through
+                            .map_or(latest, |current| current.max(latest)),
+                    );
+                }
                 session.downloaded_pages = session.downloaded_pages.saturating_add(1);
                 session.next_page = page.saturating_sub(1);
                 if session.downloaded_pages >= total_pages {
@@ -1755,7 +1831,8 @@ impl Service {
                 "Last.fm import queue limit must be between 1 and {LASTFM_QUEUE_PAGE_LIMIT}."
             ));
         }
-        let Some(session) = self.snapshot().await else {
+        let session_guard = self.session.lock().await;
+        let Some(session) = session_guard.as_ref() else {
             return Ok(ImportQueuePage {
                 items: Vec::new(),
                 cursor,
@@ -1771,25 +1848,31 @@ impl Service {
                 total: 0,
             });
         }
-        let rows_by_id = source_row_map(&session);
-        let mut items = Vec::with_capacity(limit);
-        let mut total = 0;
-        for batch in review_batches(&session) {
-            let rows = batch_rows(&batch, &rows_by_id);
-            if rows.is_empty() {
-                continue;
-            }
-            if total >= cursor && items.len() < limit {
-                if let Some(item) = queue_item(&session, &batch, &rows) {
-                    items.push(item);
-                }
-            }
-            total += 1;
-        }
+        let batches = review_batches_for_read(session);
+        let batches = batches.as_ref();
+        let total = batches.len();
         if cursor > total {
             return Err("Last.fm import queue cursor is out of range.".into());
         }
-        let end = cursor.saturating_add(items.len()).min(total);
+        let end = cursor.saturating_add(limit).min(total);
+        let requested_batches = &batches[cursor..end];
+        let requested_ids = requested_batches
+            .iter()
+            .flat_map(|batch| batch.source_ids.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let rows_by_id = session
+            .rows
+            .iter()
+            .filter(|row| requested_ids.contains(row.stable_id.as_str()))
+            .map(|row| (row.stable_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        let items = requested_batches
+            .iter()
+            .filter_map(|batch| {
+                let rows = batch_rows(batch, &rows_by_id);
+                queue_item(session, batch, &rows)
+            })
+            .collect();
         Ok(ImportQueuePage {
             items,
             cursor,
@@ -1804,37 +1887,54 @@ impl Service {
         artist: &str,
         album: &str,
     ) -> Option<ImportPageView> {
-        let session = self.snapshot().await?;
+        let session_guard = self.session.lock().await;
+        let session = session_guard.as_ref()?;
         if session.phase == ImportPhase::Suspended {
             return None;
         }
-        let batches = review_batches(&session);
-        let batch = requested_batch(&session, batch_id, artist, album)?;
-        let rows_by_id = source_row_map(&session);
-        let rows = batch_rows(&batch, &rows_by_id);
+        let batches = review_batches_for_read(session);
+        let batch = batches.iter().find(|batch| batch.page == batch_id)?;
+        let requested_ids = batch
+            .source_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let rows_by_id = session
+            .rows
+            .iter()
+            .filter(|row| requested_ids.contains(row.stable_id.as_str()))
+            .map(|row| (row.stable_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        let rows = batch_rows(batch, &rows_by_id);
+        if rows.len() != batch.source_ids.len()
+            || rows
+                .iter()
+                .any(|row| row.artist != artist || row.album != album)
+        {
+            return None;
+        }
         let page_number = batches
             .iter()
             .position(|candidate| candidate.page == batch_id)?
             + 1;
+        let options = session.options_for_page_batch(batch, artist, album, &rows);
         let items = rows
             .iter()
             .map(|row| ImportPageItem {
                 source: (*row).clone(),
-                decision: default_decision(&session, &row.stable_id),
+                decision: default_decision(session, &row.stable_id),
                 match_result: session.matches.get(&row.stable_id).cloned(),
             })
             .collect();
-        let options = session.options_for_batch(batch.page, artist, album);
         let mut fuzzy_groups = BTreeMap::<String, Vec<SourceRow>>::new();
         for row in &rows {
-            let decision = default_decision(&session, &row.stable_id);
+            let decision = default_decision(session, &row.stable_id);
             let participates = !decision.excluded
                 && match decision.status {
                     RowStatus::Done => true,
-                    RowStatus::Pending | RowStatus::Skipped => session
-                        .options_for_batch(batch.page, artist, album)
-                        .selected_track_ids
-                        .contains(&row.stable_id),
+                    RowStatus::Pending | RowStatus::Skipped => {
+                        options.selected_track_ids.contains(&row.stable_id)
+                    }
                     RowStatus::IgnoredAlbum | RowStatus::IgnoredArtist => false,
                 };
             if !participates {
@@ -1861,12 +1961,12 @@ impl Service {
             .filter(|(target, _)| visible_targets.contains(*target))
             .map(|(target, mode)| (target.clone(), *mode))
             .collect();
-        let locked_count_modes = locked_count_modes(&session)
+        let locked_count_modes = locked_count_modes(session)
             .into_iter()
             .filter(|target| visible_targets.contains(target))
             .collect();
         Some(ImportPageView {
-            state: state_view(Some(&session)),
+            state: state_view(Some(session)),
             batch_id,
             artist: artist.to_owned(),
             album: album.to_owned(),
@@ -2168,10 +2268,20 @@ impl Service {
 }
 
 fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
+    let processed_scrobbles = session
+        .map(|session| {
+            session
+                .included_scrobbles
+                .saturating_add(session.skipped_now_playing)
+                .saturating_add(session.skipped_undated)
+        })
+        .unwrap_or_default();
     ImportStateView {
         phase: session.map(|session| session.phase),
         username: session.map(|session| session.lastfm_username.clone()),
         spotify_account_id: session.and_then(|session| session.spotify_account_id.clone()),
+        history_to: session.map(|session| session.history_to),
+        downloaded_through: session.and_then(|session| session.downloaded_through),
         next_page: session.map(|session| session.next_page).unwrap_or(1),
         total_pages: session.and_then(|session| session.total_pages),
         downloaded_pages: session
@@ -2183,6 +2293,7 @@ fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
         included_scrobbles: session
             .map(|session| session.included_scrobbles)
             .unwrap_or_default(),
+        processed_scrobbles,
         defaults: session
             .map(|session| session.defaults.clone())
             .unwrap_or_default(),
@@ -2200,11 +2311,14 @@ fn suspended_state_view() -> ImportStateView {
         phase: Some(ImportPhase::Suspended),
         username: None,
         spotify_account_id: None,
+        history_to: None,
+        downloaded_through: None,
         next_page: 1,
         total_pages: None,
         downloaded_pages: 0,
         total_scrobbles: 0,
         included_scrobbles: 0,
+        processed_scrobbles: 0,
         defaults: ImportDefaults::default(),
         remaining: 0,
         retryable_error: Some(RetryableError {
@@ -2444,6 +2558,21 @@ enum SourceRunnerStep {
     Aggregate,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourceWindowOutcome {
+    Complete(Vec<u32>),
+    Retryable,
+    Suspended,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourcePageFetchResult {
+    Success(ParsedRecentTracksPage),
+    AccountMismatch(String),
+    Retryable(String),
+    Permanent(String),
+}
+
 fn source_runner_step(session: &LastFmImportSessionV2) -> SourceRunnerStep {
     if session.total_pages.is_none() {
         SourceRunnerStep::Probe
@@ -2451,6 +2580,131 @@ fn source_runner_step(session: &LastFmImportSessionV2) -> SourceRunnerStep {
         SourceRunnerStep::Aggregate
     } else {
         SourceRunnerStep::Page(session.next_page)
+    }
+}
+
+fn source_page_window(next_page: u32, total_pages: u32) -> Vec<u32> {
+    if next_page == 0 || next_page > total_pages {
+        return Vec::new();
+    }
+    (next_page.saturating_sub(LASTFM_PAGE_WINDOW_SIZE - 1).max(1)..=next_page)
+        .rev()
+        .collect()
+}
+
+async fn download_page_window<F, Fut>(
+    service: Arc<Service>,
+    next_page: u32,
+    total_pages: u32,
+    fetch: F,
+) -> Result<SourceWindowOutcome, String>
+where
+    F: Fn(u32) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = SourcePageFetchResult> + Send + 'static,
+{
+    let pages = source_page_window(next_page, total_pages);
+    if pages.is_empty() {
+        return Err("Last.fm import page window is empty.".into());
+    }
+    let mut requests = pages
+        .iter()
+        .copied()
+        .map(|page| {
+            let fetch = fetch.clone();
+            tokio::spawn(async move { fetch(page).await })
+        })
+        .collect::<Vec<_>>();
+    let mut checkpointed = Vec::with_capacity(requests.len());
+
+    for page in pages {
+        let request = requests.remove(0);
+        let parsed = match request.await {
+            Ok(SourcePageFetchResult::Success(parsed)) => parsed,
+            Ok(failure) => {
+                for request in &requests {
+                    request.abort();
+                }
+                return match failure {
+                    SourcePageFetchResult::AccountMismatch(_) => {
+                        service.suspend_for_account_mismatch().await?;
+                        Ok(SourceWindowOutcome::Suspended)
+                    }
+                    SourcePageFetchResult::Retryable(message) => {
+                        let attempt = service
+                            .snapshot()
+                            .await
+                            .and_then(|session| session.retryable_error)
+                            .filter(|error| error.retryable)
+                            .map(|error| error.attempt.saturating_add(1))
+                            .unwrap_or(1);
+                        service
+                            .set_retryable_error(Some(RetryableError {
+                                message,
+                                attempt,
+                                retryable: true,
+                            }))
+                            .await?;
+                        Ok(SourceWindowOutcome::Retryable)
+                    }
+                    SourcePageFetchResult::Permanent(message) => {
+                        service
+                            .set_retryable_error(Some(RetryableError {
+                                message: message.clone(),
+                                attempt: 0,
+                                retryable: false,
+                            }))
+                            .await?;
+                        Err(message)
+                    }
+                    SourcePageFetchResult::Success(_) => unreachable!(),
+                };
+            }
+            Err(error) => {
+                for request in &requests {
+                    request.abort();
+                }
+                let message = format!("Last.fm page fetch task stopped: {error}");
+                service
+                    .set_retryable_error(Some(RetryableError {
+                        message: message.clone(),
+                        attempt: 0,
+                        retryable: false,
+                    }))
+                    .await?;
+                return Err(message);
+            }
+        };
+        if let Err(error) = service.checkpoint_page(page, &parsed).await {
+            for request in &requests {
+                request.abort();
+            }
+            return Err(error);
+        }
+        checkpointed.push(page);
+    }
+
+    Ok(SourceWindowOutcome::Complete(checkpointed))
+}
+
+async fn fetch_source_page(
+    lastfm: &crate::lastfm::Service,
+    username: &str,
+    page: u32,
+    history_to: u64,
+) -> SourcePageFetchResult {
+    match lastfm
+        .import_recent_tracks_page(username, page, history_to)
+        .await
+    {
+        Ok(payload) => match parse_recent_tracks_page(&payload) {
+            Ok(parsed) => SourcePageFetchResult::Success(parsed),
+            Err(message) => SourcePageFetchResult::Permanent(message),
+        },
+        Err(error) if error.account_mismatch => {
+            SourcePageFetchResult::AccountMismatch(error.message)
+        }
+        Err(error) if error.retryable => SourcePageFetchResult::Retryable(error.message),
+        Err(error) => SourcePageFetchResult::Permanent(error.message),
     }
 }
 
@@ -2526,28 +2780,43 @@ async fn run_import(app: tauri::AppHandle, service: Arc<Service>, username: Stri
                             service.aggregate_cached(Some(lastfm.as_ref())).await?;
                         }
                         SourceRunnerStep::Page(page) => {
-                            let payload = fetch_import_page_with_retry(
-                                &lastfm,
-                                &service,
-                                &username,
+                            let total_pages = session
+                                .total_pages
+                                .expect("page downloads require Last.fm metadata");
+                            let window_lastfm = Arc::clone(&lastfm);
+                            let window_username = username.clone();
+                            let history_to = session.history_to;
+                            let outcome = download_page_window(
+                                Arc::clone(&service),
                                 page,
-                                session.history_to,
+                                total_pages,
+                                move |page| {
+                                    let lastfm = Arc::clone(&window_lastfm);
+                                    let username = window_username.clone();
+                                    async move {
+                                        fetch_source_page(
+                                            lastfm.as_ref(),
+                                            &username,
+                                            page,
+                                            history_to,
+                                        )
+                                        .await
+                                    }
+                                },
                             )
                             .await?;
-                            let parsed = match parse_recent_tracks_page(&payload) {
-                                Ok(parsed) => parsed,
-                                Err(message) => {
-                                    service
-                                        .set_retryable_error(Some(RetryableError {
-                                            message: message.clone(),
-                                            attempt: 0,
-                                            retryable: false,
-                                        }))
-                                        .await?;
-                                    return Err(message);
+                            match outcome {
+                                SourceWindowOutcome::Complete(_) => {}
+                                SourceWindowOutcome::Retryable => {
+                                    let _ = emit_import_changed(&app, &service).await;
+                                    tokio::time::sleep(crate::lastfm::import_retry_delay(
+                                        usize::MAX,
+                                    ))
+                                    .await;
+                                    continue;
                                 }
-                            };
-                            service.checkpoint_page(page, &parsed).await?;
+                                SourceWindowOutcome::Suspended => break,
+                            }
                         }
                     }
                     let _ = emit_import_changed(&app, &service).await;
@@ -4166,6 +4435,258 @@ mod tests {
     }
 
     #[test]
+    fn source_page_windows_cover_full_and_tail_ranges() {
+        assert_eq!(source_page_window(12, 12), vec![12, 11, 10, 9]);
+        assert_eq!(source_page_window(3, 12), vec![3, 2, 1]);
+        assert!(source_page_window(0, 12).is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_page_window_overlaps_fetches_and_checkpoints_in_descending_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service.start_or_resume("user", 100, None).await.unwrap();
+        service.set_metadata(4, 4).await.unwrap();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let releases = Arc::new(
+            (0..5)
+                .map(|_| Arc::new(tokio::sync::Notify::new()))
+                .collect::<Vec<_>>(),
+        );
+        let fetch = {
+            let barrier = Arc::clone(&barrier);
+            let started = Arc::clone(&started);
+            let completed = Arc::clone(&completed);
+            let releases = Arc::clone(&releases);
+            move |page| {
+                let barrier = Arc::clone(&barrier);
+                let started = Arc::clone(&started);
+                let completed = Arc::clone(&completed);
+                let release = Arc::clone(&releases[page as usize]);
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait().await;
+                    release.notified().await;
+                    completed.lock().await.push(page);
+                    SourcePageFetchResult::Success(parsed_page(
+                        page,
+                        4,
+                        vec![scrobble("Artist", "Album", "Track", page as u64)],
+                    ))
+                }
+            }
+        };
+
+        let runner = tokio::spawn(download_page_window(Arc::clone(&service), 4, 4, fetch));
+        while started.load(Ordering::SeqCst) < 4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 4);
+
+        for (index, page) in [1_u32, 2, 3, 4].into_iter().enumerate() {
+            releases[page as usize].notify_one();
+            loop {
+                if completed.lock().await.len() > index {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+
+        assert_eq!(completed.lock().await.as_slice(), &[1, 2, 3, 4]);
+        assert!(matches!(
+            runner.await.unwrap().unwrap(),
+            SourceWindowOutcome::Complete(pages) if pages == vec![4, 3, 2, 1]
+        ));
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.downloaded_pages, 4);
+        assert_eq!(session.next_page, 0);
+        assert_eq!(session.phase, ImportPhase::Aggregating);
+    }
+
+    #[tokio::test]
+    async fn source_page_window_keeps_only_the_contiguous_prefix_and_resumes_at_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service.start_or_resume("user", 100, None).await.unwrap();
+        service.set_metadata(4, 4).await.unwrap();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let error = download_page_window(Arc::clone(&service), 4, 4, {
+            let barrier = Arc::clone(&barrier);
+            let requested = Arc::clone(&requested);
+            move |page| {
+                let barrier = Arc::clone(&barrier);
+                let requested = Arc::clone(&requested);
+                async move {
+                    requested.lock().await.push(page);
+                    barrier.wait().await;
+                    if page == 3 {
+                        SourcePageFetchResult::Permanent("failed page 3".into())
+                    } else {
+                        SourcePageFetchResult::Success(parsed_page(
+                            page,
+                            4,
+                            vec![scrobble("Artist", "Album", "Track", page as u64)],
+                        ))
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "failed page 3");
+        assert_eq!(
+            requested
+                .lock()
+                .await
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([1, 2, 3, 4])
+        );
+        let partial = service.snapshot().await.unwrap();
+        assert_eq!(partial.downloaded_pages, 1);
+        assert_eq!(partial.next_page, 3);
+        assert_eq!(partial.phase, ImportPhase::Downloading);
+        assert_eq!(source_runner_step(&partial), SourceRunnerStep::Page(3));
+        let manifest = service.store.read_manifest(&partial).unwrap().unwrap();
+        assert_eq!(manifest.pages.keys().copied().collect::<Vec<_>>(), vec![4]);
+
+        let resumed = download_page_window(
+            Arc::clone(&service),
+            partial.next_page,
+            4,
+            move |page| async move {
+                SourcePageFetchResult::Success(parsed_page(
+                    page,
+                    4,
+                    vec![scrobble("Artist", "Album", "Track", page as u64)],
+                ))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            resumed,
+            SourceWindowOutcome::Complete(pages) if pages == vec![3, 2, 1]
+        ));
+    }
+
+    #[tokio::test]
+    async fn source_page_window_retryable_failure_preserves_prefix_and_retry_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service.start_or_resume("user", 100, None).await.unwrap();
+        service.set_metadata(4, 4).await.unwrap();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let outcome = download_page_window(Arc::clone(&service), 4, 4, {
+            let barrier = Arc::clone(&barrier);
+            move |page| {
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    barrier.wait().await;
+                    if page == 3 {
+                        SourcePageFetchResult::Retryable("rate limited page 3".into())
+                    } else {
+                        SourcePageFetchResult::Success(parsed_page(
+                            page,
+                            4,
+                            vec![scrobble("Artist", "Album", "Track", page as u64)],
+                        ))
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, SourceWindowOutcome::Retryable));
+        let partial = service.snapshot().await.unwrap();
+        assert_eq!(partial.downloaded_pages, 1);
+        assert_eq!(partial.next_page, 3);
+        assert_eq!(source_runner_step(&partial), SourceRunnerStep::Page(3));
+        assert_eq!(source_page_window(partial.next_page, 4), vec![3, 2, 1]);
+        assert_eq!(
+            partial.retryable_error,
+            Some(RetryableError {
+                message: "rate limited page 3".into(),
+                attempt: 1,
+                retryable: true,
+            })
+        );
+        let manifest = service.store.read_manifest(&partial).unwrap().unwrap();
+        assert_eq!(manifest.pages.keys().copied().collect::<Vec<_>>(), vec![4]);
+    }
+
+    #[test]
+    fn v2_session_without_downloaded_through_loads_safely() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImportSessionStore::new(dir.path());
+        let session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 100, ImportDefaults::default());
+        let mut json = serde_json::to_value(&session).unwrap();
+        json.as_object_mut().unwrap().remove("downloadedThrough");
+        fs::write(&store.path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap().downloaded_through, None);
+    }
+
+    #[tokio::test]
+    async fn downloaded_through_advances_monotonically_and_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service.start_or_resume("user", 500, None).await.unwrap();
+        service.set_metadata(3, 3).await.unwrap();
+        service
+            .checkpoint_page(
+                3,
+                &parsed_page(3, 3, vec![scrobble("Artist", "Album", "Track", 300)]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.snapshot().await.unwrap().downloaded_through,
+            Some(300)
+        );
+        service
+            .checkpoint_page(
+                2,
+                &parsed_page(2, 3, vec![scrobble("Artist", "Album", "Track", 200)]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.snapshot().await.unwrap().downloaded_through,
+            Some(300)
+        );
+        service
+            .checkpoint_page(
+                1,
+                &parsed_page(1, 3, vec![scrobble("Artist", "Album", "Track", 400)]),
+            )
+            .await
+            .unwrap();
+        let complete = service.snapshot().await.unwrap();
+        assert_eq!(complete.downloaded_through, Some(400));
+        assert_eq!(state_view(Some(&complete)).history_to, Some(500));
+        assert_eq!(
+            Service::new(dir.path())
+                .snapshot()
+                .await
+                .unwrap()
+                .downloaded_through,
+            Some(400)
+        );
+    }
+
+    #[test]
     fn startup_resume_plan_uses_the_persisted_source_identity_only() {
         let mut session = LastFmImportSessionV2::new_with_defaults(
             "fixed-user".into(),
@@ -4873,6 +5394,72 @@ mod tests {
             .await
             .is_err());
         assert!(service.queue_page(first.total + 1, 1).await.is_err());
+    }
+
+    #[test]
+    fn page_projection_does_not_reenter_whole_session_read_helpers() {
+        let source = include_str!("lastfm_import.rs");
+        let page = source
+            .split("    pub(crate) async fn page(")
+            .nth(1)
+            .unwrap()
+            .split("    async fn update_options(")
+            .next()
+            .unwrap();
+        assert!(!page.contains("self.snapshot()"));
+        assert!(!page.contains("review_batches("));
+        assert!(!page.contains("requested_batch("));
+        assert!(!page.contains("source_row_map("));
+    }
+
+    #[tokio::test]
+    async fn large_queue_returns_bounded_slices_and_stable_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let count = 23_132_u32;
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
+        session.phase = ImportPhase::Review;
+        session.rows = (0..count)
+            .map(|index| SourceRow {
+                stable_id: format!("source-{index}"),
+                artist: format!("Artist {index}"),
+                album: format!("Album {index}"),
+                track: format!("Track {index}"),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: index as u64,
+                latest: index as u64,
+            })
+            .collect();
+        session.batches = (0..count)
+            .map(|index| ImportBatch {
+                page: index + 1,
+                source_ids: vec![format!("source-{index}")],
+            })
+            .collect();
+        *service.session.lock().await = Some(session);
+
+        let first = service.queue_page(0, 1000).await.unwrap();
+        assert_eq!(first.total, count as usize);
+        assert_eq!(first.items.len(), 1000);
+        assert_eq!(first.items.first().map(|item| item.page), Some(1));
+        assert_eq!(first.items.last().map(|item| item.page), Some(1000));
+        assert_eq!(first.next_cursor, Some(1000));
+
+        let middle = service
+            .queue_page(first.next_cursor.unwrap(), 1000)
+            .await
+            .unwrap();
+        assert_eq!(middle.items.len(), 1000);
+        assert_eq!(middle.items.first().map(|item| item.page), Some(1001));
+        assert_eq!(middle.items.last().map(|item| item.page), Some(2000));
+        assert_eq!(middle.next_cursor, Some(2000));
+
+        let tail = service.queue_page(23_000, 1000).await.unwrap();
+        assert_eq!(tail.items.len(), 132);
+        assert_eq!(tail.items.first().map(|item| item.page), Some(23_001));
+        assert_eq!(tail.items.last().map(|item| item.page), Some(23_132));
+        assert_eq!(tail.next_cursor, None);
     }
 
     #[test]

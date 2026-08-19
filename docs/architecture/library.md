@@ -55,15 +55,22 @@ restored on resume. Fuzzy disclosures are bounded to the visible persisted
 rows from other batches.
 
 The source importer is V2. It records a fixed profile-bound `historyTo`, probes
-Last.fm metadata once, downloads pages at the documented 200-row limit from
-oldest toward page 1, and stores parsed raw pages under a snapshot-specific
-machine cache. Rows at or after `historyTo` are rejected before caching or
+Last.fm metadata once, downloads pages at the documented 200-row limit; Last.fm's
+page total is oldest, so Retune moves toward page 1, and stores parsed raw pages under a snapshot-specific
+machine cache. The metadata probe remains sequential; after the total is known,
+bounded windows of four source requests are launched together and
+processed/checkpointed in descending page order. Rows at or after `historyTo` are rejected before caching or
 counting; the exact Last.fm username is recorded in the manifest and each page.
 The manifest is authoritative: an orphan page file is harmless and may be
 overwritten, while an acknowledged missing, corrupt, oversized, or
-metadata-mismatched page quarantines the whole snapshot and restarts V2. A
-retryable Last.fm failure is persisted and retried in-process at the capped
-backoff without advancing the cursor. No aggregation happens until every page
+metadata-mismatched page quarantines the whole snapshot and restarts V2. The
+manifest and session cursor remain a contiguous descending suffix; a failed
+window retains its already-checkpointed prefix, discards lower in-memory
+results, and resumes from the failed page. A process exit can therefore
+refetch only the unfinished part of one window. Concurrent workers return
+structured outcomes without mutating importer retry state; the ordered
+coordinator persists one attempt for a retryable failure, waits at the capped
+backoff, and re-enters from the failed cursor without advancing it. No aggregation happens until every page
 is acknowledged; then raw-page reads, sorting, and aggregation run off the
 async runtime before review is entered atomically (or Done when no rows remain)
 and the cache is best-effort deleted. A saved Downloading or Aggregating session

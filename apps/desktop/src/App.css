@@ -1,6 +1,6 @@
 :root[data-theme="light"] {
   --desk: #b9bcc2; --list: #fff; --alt: #edf3fe; --text: #1a1a1a; --dim: #666;
-  --border: #b7b7b7; --head1: #f0f0f0; --head2: #e2e2e2; --side1: #e6ebf2;
+  --panel: #fafafa; --border: #b7b7b7; --head1: #f0f0f0; --head2: #e2e2e2; --side1: #e6ebf2;
   --side2: #dbe2ec; --lcd1: #eef2f7; --lcd2: #e2e8f0; --control: #f4f4f4;
   --lcd-art1: #e3e7ec; --lcd-art2: #d7dce2; --lcd-art-border: #c3c9d0;
   --lcd-art-glyph: #8c96a2; --lcd-artist: #496d9d;
@@ -11,7 +11,7 @@
 
 :root[data-theme="dark"] {
   --desk: #161719; --list: #1f2124; --alt: #26282d; --text: #e9e9ec; --dim: #aaa;
-  --border: #45474c; --head1: #35373c; --head2: #2c2e32; --side1: #2c2e33;
+  --panel: #2a2c31; --border: #45474c; --head1: #35373c; --head2: #2c2e32; --side1: #2c2e33;
   --side2: #26282c; --lcd1: #33363c; --lcd2: #282a2e; --control: #35373c;
   --lcd-art1: #3d444d; --lcd-art2: #333a42; --lcd-art-border: #4a525c;
   --lcd-art-glyph: #6a727c; --lcd-artist: #a9c2e8;
