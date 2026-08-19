@@ -4173,7 +4173,7 @@ fn queue_item(
     let first = rows.first()?;
     let artist = first.artist.clone();
     let album = first.album.clone();
-    let options = session.options_for_batch(batch.page, &artist, &album);
+    let options = session.options_for_page_batch(batch, &artist, &album, rows);
     let remaining = rows.iter().any(|row| {
         let decision = default_decision(session, &row.stable_id);
         matches!(decision.status, RowStatus::Pending | RowStatus::Skipped) && !decision.excluded
@@ -5412,8 +5412,34 @@ mod tests {
         assert!(!page.contains("source_row_map("));
     }
 
+    #[test]
+    fn queue_projection_uses_bounded_page_options() {
+        let source = include_str!("lastfm_import.rs");
+        let queue_page = source
+            .split("    pub(crate) async fn queue_page(")
+            .nth(1)
+            .unwrap()
+            .split("    pub(crate) async fn page(")
+            .next()
+            .unwrap();
+        let queue_item = source
+            .split("fn queue_item(")
+            .nth(1)
+            .unwrap()
+            .split("fn queue_status(")
+            .next()
+            .unwrap();
+
+        for projection in [queue_page, queue_item] {
+            assert!(!projection.contains("options_for_batch("));
+            assert!(!projection.contains("review_batches("));
+            assert!(!projection.contains("source_row_map("));
+        }
+        assert!(queue_item.contains("options_for_page_batch("));
+    }
+
     #[tokio::test]
-    async fn large_queue_returns_bounded_slices_and_stable_cursors() {
+    async fn large_queue_follows_every_cursor_in_order_without_materializing_prior_slices() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
         let count = 23_132_u32;
@@ -5439,27 +5465,24 @@ mod tests {
             .collect();
         *service.session.lock().await = Some(session);
 
-        let first = service.queue_page(0, 1000).await.unwrap();
-        assert_eq!(first.total, count as usize);
-        assert_eq!(first.items.len(), 1000);
-        assert_eq!(first.items.first().map(|item| item.page), Some(1));
-        assert_eq!(first.items.last().map(|item| item.page), Some(1000));
-        assert_eq!(first.next_cursor, Some(1000));
+        let mut cursor = 0;
+        let mut seen_pages = Vec::with_capacity(count as usize);
+        loop {
+            let page = service.queue_page(cursor, 1000).await.unwrap();
+            assert_eq!(page.total, count as usize);
+            assert!(page.items.len() <= 1000);
+            seen_pages.extend(page.items.iter().map(|item| item.page));
+            match page.next_cursor {
+                Some(next_cursor) => {
+                    assert_eq!(next_cursor, cursor + page.items.len());
+                    cursor = next_cursor;
+                }
+                None => break,
+            }
+        }
 
-        let middle = service
-            .queue_page(first.next_cursor.unwrap(), 1000)
-            .await
-            .unwrap();
-        assert_eq!(middle.items.len(), 1000);
-        assert_eq!(middle.items.first().map(|item| item.page), Some(1001));
-        assert_eq!(middle.items.last().map(|item| item.page), Some(2000));
-        assert_eq!(middle.next_cursor, Some(2000));
-
-        let tail = service.queue_page(23_000, 1000).await.unwrap();
-        assert_eq!(tail.items.len(), 132);
-        assert_eq!(tail.items.first().map(|item| item.page), Some(23_001));
-        assert_eq!(tail.items.last().map(|item| item.page), Some(23_132));
-        assert_eq!(tail.next_cursor, None);
+        assert_eq!(seen_pages.len(), count as usize);
+        assert_eq!(seen_pages, (1..=count).collect::<Vec<_>>());
     }
 
     #[test]
