@@ -93,6 +93,21 @@ export type ImportQueuePage = {
   total: number
 }
 
+export function shouldRefreshImportEvent(acceptAllRunning: boolean, queueMutationRunning: boolean): boolean {
+  return !acceptAllRunning && !queueMutationRunning
+}
+
+export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[], highlightedPage: number | null, selectedPage: number | null, currentIndex: number): number {
+  const highlightedIndex = highlightedPage === null ? -1 : items.findIndex((item) => item.page === highlightedPage)
+  if (highlightedIndex >= 0) return highlightedIndex
+  const selectedIndex = selectedPage === null ? -1 : items.findIndex((item) => item.page === selectedPage)
+  return selectedIndex >= 0 ? selectedIndex : Math.min(Math.max(currentIndex, 0), Math.max(0, items.length - 1))
+}
+
+export function importAlbumActionAdvances(action: 'skip-album' | 'restore'): boolean {
+  return action === 'skip-album'
+}
+
 export type ImportSourceRow = {
   stableId: string
   artist: string
