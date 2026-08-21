@@ -22,7 +22,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -67,9 +67,25 @@ pub(crate) type SharedTokenStore = Arc<CachedTokenStore<Box<dyn TokenStore>>>;
 type SpotifyProvider = SpotifyClient<HttpTransport, SharedTokenStore>;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
+struct LibraryTransactionState {
+    active: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Default for LibraryTransactionState {
+    fn default() -> Self {
+        Self {
+            active: Mutex::new(false),
+            changed: Condvar::new(),
+        }
+    }
+}
+
 struct AppState {
     library: Mutex<Library>,
     store: FsOverlayStore,
+    library_write_gate: Arc<Mutex<()>>,
+    library_transaction: Arc<LibraryTransactionState>,
     spotify_library: Mutex<SpotifyLibraryState>,
     spotify_library_gate: tokio::sync::Mutex<()>,
     settings: Mutex<Settings>,
@@ -1157,9 +1173,10 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         .expect("settings mutex poisoned")
         .spotify_sync_completed;
     if first_sync {
-        let mut library = state.library.lock().expect("library mutex poisoned");
-        *library = sync::without_fixtures(&library)?;
-        drop(library);
+        mutate_library(&state, |library| {
+            *library = sync::without_fixtures(library)?;
+            Ok(())
+        })?;
         app.emit("library-changed", ())
             .map_err(|error| error.to_string())?;
     }
@@ -1168,9 +1185,13 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         let mut counts = sync_progress.lock().expect("sync progress mutex poisoned");
         let payload = counts.update(&batch);
         drop(counts);
-        let mut library = state.library.lock().expect("library mutex poisoned");
-        sync::apply_in_memory(&mut library, batch.tracks);
-        drop(library);
+        if let Err(error) = with_library_gate(&state, |library| {
+            sync::apply_in_memory(library, batch.tracks);
+            Ok(())
+        }) {
+            notify_error(app, error);
+            return;
+        }
         let _ = app.emit("library-changed", ());
         let _ = app.emit("sync-progress-count", payload);
     };
@@ -1250,15 +1271,17 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
             .lock()
             .expect("Spotify library mutex poisoned") = spotify_library.clone();
     }
-    {
-        let mut library = state.library.lock().expect("library mutex poisoned");
+    with_library_gate(&state, |library| {
         sync::apply(
-            &mut library,
+            library,
             &state.store,
             first_sync,
             tracks,
             spotify_library.as_ref(),
-        )?;
+        )
+    })?;
+    {
+        let library = state.library.lock().expect("library mutex poisoned");
         log::info!(
             "Spotify sync applied; {} library tracks",
             library.tracks().len()
@@ -1749,8 +1772,93 @@ fn save_playlists(app: &tauri::AppHandle, cache: playlists::PlaylistCache) -> Re
         .map_err(|error| error.to_string())
 }
 
+struct LibraryTransactionGuard {
+    state: Arc<LibraryTransactionState>,
+}
+
+impl Drop for LibraryTransactionGuard {
+    fn drop(&mut self) {
+        let mut active = self
+            .state
+            .active
+            .lock()
+            .expect("library transaction mutex poisoned");
+        *active = false;
+        self.state.changed.notify_all();
+    }
+}
+
+fn begin_library_transaction(state: &AppState) -> Result<LibraryTransactionGuard, String> {
+    let mut active = state
+        .library_transaction
+        .active
+        .lock()
+        .map_err(|_| "library transaction mutex poisoned".to_string())?;
+    if *active {
+        return Err("Another library transaction is already applying.".to_string());
+    }
+    *active = true;
+    drop(active);
+    Ok(LibraryTransactionGuard {
+        state: Arc::clone(&state.library_transaction),
+    })
+}
+
+fn wait_for_library_transaction(
+    state: &LibraryTransactionState,
+) -> Result<std::sync::MutexGuard<'_, bool>, String> {
+    let mut active = state
+        .active
+        .lock()
+        .map_err(|_| "library transaction mutex poisoned".to_string())?;
+    while *active {
+        active = state
+            .changed
+            .wait(active)
+            .map_err(|_| "library transaction mutex poisoned".to_string())?;
+    }
+    Ok(active)
+}
+
+fn with_library_gate<T>(
+    state: &AppState,
+    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
+) -> Result<T, String> {
+    let _transaction_state = wait_for_library_transaction(&state.library_transaction)?;
+    let _write_gate = state
+        .library_write_gate
+        .lock()
+        .expect("library write gate poisoned");
+    let mut library = state.library.lock().expect("library mutex poisoned");
+    mutation(&mut library)
+}
+
 fn mutate_library<T>(
     state: &AppState,
+    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
+) -> Result<T, String> {
+    let _transaction_state = wait_for_library_transaction(&state.library_transaction)?;
+    let write_gate = state
+        .library_write_gate
+        .lock()
+        .expect("library write gate poisoned");
+    mutate_library_locked(state, write_gate, mutation)
+}
+
+fn mutate_library_in_transaction<T>(
+    state: &AppState,
+    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
+) -> Result<T, String> {
+    let write_gate = state
+        .library_write_gate
+        .lock()
+        .expect("library write gate poisoned");
+    mutate_library_locked(state, write_gate, mutation)
+}
+
+fn mutate_library_locked<T>(
+    state: &AppState,
+    _write_gate: std::sync::MutexGuard<'_, ()>,
     mutation: impl FnOnce(&mut Library) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut current = state.library.lock().expect("library mutex poisoned");
@@ -1780,9 +1888,13 @@ fn spotify_track_match<'a>(library: &'a Library, incoming: &NewTrack) -> Option<
 fn record_play(
     store: &impl OverlayStore,
     library: &Mutex<Library>,
+    write_gate: &Mutex<()>,
+    transaction: &LibraryTransactionState,
     uri: &str,
     played_at: u64,
 ) -> Result<bool, String> {
+    let _transaction_state = wait_for_library_transaction(transaction)?;
+    let _write_gate = write_gate.lock().expect("library write gate poisoned");
     let mut current = library.lock().expect("library mutex poisoned");
     if !current.tracks().iter().any(|track| track.uri == uri) {
         return Ok(false);
@@ -1805,9 +1917,9 @@ fn run_local_import(
     paths: &[PathBuf],
 ) -> Result<localfiles::ImportSummary, String> {
     let state = app.state::<AppState>();
-    let mut library = state.library.lock().expect("library mutex poisoned");
-    let summary = localfiles::import_transaction(&state.store, &mut library, paths)?;
-    drop(library);
+    let summary = with_library_gate(&state, |library| {
+        localfiles::import_transaction(&state.store, library, paths)
+    })?;
     for failure in &summary.failed {
         log::warn!(
             "local import failed for {}: {}",
@@ -2083,10 +2195,17 @@ fn export_library(app: &tauri::AppHandle) {
             let result = (|| -> Result<(), String> {
                 let path = path.into_path().map_err(|error| error.to_string())?;
                 let state = handle.state::<AppState>();
+                let lastfm_mappings =
+                    tauri::async_runtime::block_on(state.lastfm_import.export_mappings());
                 let library = state.library.lock().expect("library mutex poisoned");
                 let settings = state.settings.lock().expect("settings mutex poisoned");
                 let playlists = state.playlists.lock().expect("playlist mutex poisoned");
-                let bytes = export_with_settings(&library, &settings, &playlists)?;
+                let bytes = export_with_settings_and_mappings(
+                    &library,
+                    &settings,
+                    &playlists,
+                    Some(&lastfm_mappings),
+                )?;
                 fs::write(path, bytes).map_err(|error| error.to_string())
             })();
             if let Err(error) = result {
@@ -2095,10 +2214,20 @@ fn export_library(app: &tauri::AppHandle) {
         });
 }
 
+#[cfg(test)]
 fn export_with_settings(
     library: &Library,
     settings: &Settings,
     playlists: &playlists::PlaylistCache,
+) -> Result<Vec<u8>, String> {
+    export_with_settings_and_mappings(library, settings, playlists, None)
+}
+
+fn export_with_settings_and_mappings(
+    library: &Library,
+    settings: &Settings,
+    playlists: &playlists::PlaylistCache,
+    lastfm_mappings: Option<&lastfm_import::PersistedLastFmMappings>,
 ) -> Result<Vec<u8>, String> {
     let mut envelope: serde_json::Value =
         serde_json::from_slice(&export_json(library)).map_err(|error| error.to_string())?;
@@ -2117,9 +2246,19 @@ fn export_with_settings(
             "playlists".into(),
             serde_json::to_value(playlists).map_err(|error| error.to_string())?,
         );
+    if let Some(lastfm_mappings) = lastfm_mappings {
+        envelope
+            .as_object_mut()
+            .expect("core export is an object")
+            .insert(
+                "lastfmMappings".into(),
+                serde_json::to_value(lastfm_mappings).map_err(|error| error.to_string())?,
+            );
+    }
     serde_json::to_vec(&envelope).map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn import_with_settings(
     bytes: &[u8],
     restore: bool,
@@ -2131,6 +2270,21 @@ fn import_with_settings(
     ),
     String,
 > {
+    import_with_settings_and_mappings(bytes, restore)
+        .map(|(library, settings, playlists, _)| (library, settings, playlists))
+}
+
+type ImportedBackup = (
+    Library,
+    Option<ExportSettings>,
+    Option<playlists::PlaylistCache>,
+    Option<lastfm_import::PersistedLastFmMappings>,
+);
+
+fn import_with_settings_and_mappings(
+    bytes: &[u8],
+    restore: bool,
+) -> Result<ImportedBackup, String> {
     let mut json = Vec::new();
     if bytes.starts_with(&[0x1f, 0x8b]) {
         GzDecoder::new(bytes)
@@ -2158,9 +2312,24 @@ fn import_with_settings(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|error| error.to_string())?;
+    let lastfm_mappings = envelope
+        .as_object_mut()
+        .and_then(|object| object.remove("lastfmMappings"))
+        .filter(|_| restore)
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    if lastfm_mappings
+        .as_ref()
+        .is_some_and(|mappings: &lastfm_import::PersistedLastFmMappings| {
+            mappings.version != lastfm_import::LASTFM_MAPPINGS_VERSION
+        })
+    {
+        return Err("The Last.fm mappings version is unsupported.".into());
+    }
     let library = import(&serde_json::to_vec(&envelope).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
-    Ok((library, settings, playlists))
+    Ok((library, settings, playlists, lastfm_mappings))
 }
 
 fn import_library(app: &tauri::AppHandle, replace: bool) {
@@ -2173,10 +2342,10 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
             let result = (|| -> Result<_, String> {
                 let path = path.into_path().map_err(|error| error.to_string())?;
                 let bytes = fs::read(path).map_err(|error| error.to_string())?;
-                import_with_settings(&bytes, replace)
+                import_with_settings_and_mappings(&bytes, replace)
             })();
             match result {
-                Ok((library, settings, playlists)) if replace => {
+                Ok((library, settings, playlists, lastfm_mappings)) if replace => {
                     let confirmed_handle = handle.clone();
                     handle
                         .dialog()
@@ -2187,11 +2356,18 @@ fn import_library(app: &tauri::AppHandle, replace: bool) {
                         ))
                         .show(move |confirmed| {
                             if confirmed {
-                                apply_import(&confirmed_handle, library, settings, playlists, true);
+                                apply_import(
+                                    &confirmed_handle,
+                                    library,
+                                    settings,
+                                    playlists,
+                                    lastfm_mappings,
+                                    true,
+                                );
                             }
                         });
                 }
-                Ok((library, _, _)) => apply_import(&handle, library, None, None, false),
+                Ok((library, _, _, _)) => apply_import(&handle, library, None, None, None, false),
                 Err(error) => notify_error(&handle, error),
             }
         });
@@ -2202,6 +2378,7 @@ fn apply_import(
     imported: Library,
     export_settings: Option<ExportSettings>,
     imported_playlists: Option<playlists::PlaylistCache>,
+    imported_lastfm_mappings: Option<lastfm_import::PersistedLastFmMappings>,
     replace: bool,
 ) {
     let state = app.state::<AppState>();
@@ -2223,6 +2400,14 @@ fn apply_import(
             }
             if let Some(playlists) = imported_playlists {
                 if let Err(error) = save_playlists(app, playlists) {
+                    notify_error(app, error);
+                    return;
+                }
+            }
+            if let Some(lastfm_mappings) = imported_lastfm_mappings {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    state.lastfm_import.restore_mappings(lastfm_mappings),
+                ) {
                     notify_error(app, error);
                     return;
                 }
@@ -2334,6 +2519,7 @@ pub fn run() {
             lastfm_import::lastfm_import_queue,
             lastfm_import::lastfm_import_page,
             lastfm_import::start_lastfm_import,
+            lastfm_import::sync_lastfm_plays,
             lastfm_import::lastfm_import_review,
             lastfm_import::lastfm_import_options,
             lastfm_import::lastfm_import_count_mode,
@@ -2456,9 +2642,12 @@ pub fn run() {
             playback.set_local_requested(settings.playback_backend == "local");
             let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
             let lastfm_enabled = settings.lastfm_scrobbling;
+            let lastfm_import_startup = Arc::clone(&lastfm_import);
             app.manage(AppState {
                 library: Mutex::new(library),
                 store,
+                library_write_gate: Arc::new(Mutex::new(())),
+                library_transaction: Arc::new(LibraryTransactionState::default()),
                 spotify_library: Mutex::new(spotify_library),
                 spotify_library_gate: tokio::sync::Mutex::new(()),
                 settings: Mutex::new(settings),
@@ -2485,6 +2674,10 @@ pub fn run() {
                 lastfm_startup.set_enabled(lastfm_enabled).await;
                 let _ = set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
                 lastfm_import::resume_persisted_import(profile_app.clone()).await;
+                let _ = lastfm_import_startup.backfill_completed_mappings().await;
+                if lastfm_startup.state().await.connected {
+                    let _ = lastfm_import::sync_lastfm_plays(profile_app.clone()).await;
+                }
             });
             let completion_app = app.handle().clone();
             let lastfm = Arc::clone(&lastfm);
@@ -2494,7 +2687,14 @@ pub fn run() {
                     let handle = completion_app.clone();
                     drop(tauri::async_runtime::spawn_blocking(move || {
                         let state = handle.state::<AppState>();
-                        match record_play(&state.store, &state.library, &uri, unix_now()) {
+                        match record_play(
+                            &state.store,
+                            &state.library,
+                            &state.library_write_gate,
+                            &state.library_transaction,
+                            &uri,
+                            unix_now(),
+                        ) {
                             Ok(true) => {
                                 if let Err(error) = handle.emit("library-changed", ()) {
                                     notify_error(&handle, error.to_string());
@@ -2646,9 +2846,27 @@ mod tests {
         library.tracks_mut()[0].play_count = 3;
         let library = Mutex::new(library);
         let store = RecordingOverlayStore::default();
+        let write_gate = Mutex::new(());
+        let transaction = LibraryTransactionState::default();
 
-        assert!(record_play(&store, &library, "spotify:track:track", 123).unwrap());
-        assert!(!record_play(&store, &library, "spotify:track:missing", 456).unwrap());
+        assert!(record_play(
+            &store,
+            &library,
+            &write_gate,
+            &transaction,
+            "spotify:track:track",
+            123,
+        )
+        .unwrap());
+        assert!(!record_play(
+            &store,
+            &library,
+            &write_gate,
+            &transaction,
+            "spotify:track:missing",
+            456,
+        )
+        .unwrap());
 
         let current = library.lock().unwrap();
         let track = current.get(id).unwrap();
@@ -2657,6 +2875,57 @@ mod tests {
         let saves = store.0.lock().unwrap();
         assert_eq!(saves.len(), 1);
         assert_eq!(saves[0], *current);
+    }
+
+    #[test]
+    fn record_play_waits_for_library_transaction_and_wakes() {
+        let mut library = Library::new();
+        let id = library.add(metadata_track(
+            "spotify:track:track",
+            "Genre",
+            "Artist",
+            "Album",
+        ));
+        let library = Arc::new(Mutex::new(library));
+        let store = Arc::new(RecordingOverlayStore::default());
+        let write_gate = Arc::new(Mutex::new(()));
+        let transaction = Arc::new(LibraryTransactionState::default());
+        *transaction.active.lock().unwrap() = true;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn({
+            let library = Arc::clone(&library);
+            let store = Arc::clone(&store);
+            let write_gate = Arc::clone(&write_gate);
+            let transaction = Arc::clone(&transaction);
+            move || {
+                started_tx.send(()).unwrap();
+                let result = record_play(
+                    store.as_ref(),
+                    library.as_ref(),
+                    write_gate.as_ref(),
+                    transaction.as_ref(),
+                    "spotify:track:track",
+                    123,
+                );
+                finished_tx.send(result).unwrap();
+            }
+        });
+        started_rx.recv().unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        {
+            let mut active = transaction.active.lock().unwrap();
+            *active = false;
+            transaction.changed.notify_all();
+        }
+        assert!(finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap());
+        worker.join().unwrap();
+
+        assert_eq!(library.lock().unwrap().get(id).unwrap().play_count, 1);
+        assert_eq!(store.0.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -3853,6 +4122,38 @@ mod tests {
                 alb: true,
             }
         );
+    }
+
+    #[test]
+    fn backup_round_trip_exports_mappings_but_not_machine_sync_state() {
+        let mappings = lastfm_import::PersistedLastFmMappings {
+            version: lastfm_import::LASTFM_MAPPINGS_VERSION,
+            lastfm_username: Some("lastfm-user".into()),
+            spotify_account_id: Some("spotify-user".into()),
+            dormant: false,
+            mappings: lastfm_import::LastFmMappings {
+                track_mappings: BTreeMap::from([(
+                    "artist\u{1f}album\u{1f}song".into(),
+                    "spotify:track:song".into(),
+                )]),
+                ..lastfm_import::LastFmMappings::default()
+            },
+        };
+        let bytes = export_with_settings_and_mappings(
+            &fixture::library(),
+            &Settings::default(),
+            &playlists::PlaylistCache::default(),
+            Some(&mappings),
+        )
+        .unwrap();
+        let exported: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(exported.get("lastfmMappings").is_some());
+        assert!(exported.get("lastfm-sync").is_none());
+
+        let (_, _, _, restored) = import_with_settings_and_mappings(&bytes, true).unwrap();
+        assert_eq!(restored, Some(mappings.clone()));
+        let (_, _, _, merged) = import_with_settings_and_mappings(&bytes, false).unwrap();
+        assert!(merged.is_none());
     }
 
     #[test]

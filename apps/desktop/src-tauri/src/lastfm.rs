@@ -34,6 +34,7 @@ const RETRY_DELAYS: &[Duration] = &[
     Duration::from_secs(60),
     Duration::from_secs(300),
 ];
+const SCROBBLE_LEDGER_VERSION: u8 = 2;
 
 #[derive(Clone)]
 struct Credentials {
@@ -176,6 +177,33 @@ struct QueueStore {
     blocker: Option<Arc<SaveBlocker>>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScrobbleLedgerV2 {
+    #[serde(default = "scrobble_ledger_version")]
+    version: u8,
+    pending: VecDeque<Scrobble>,
+    #[serde(default)]
+    accepted: Vec<crate::lastfm_import::AcceptedScrobbleReceipt>,
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+fn scrobble_ledger_version() -> u8 {
+    SCROBBLE_LEDGER_VERSION
+}
+
+impl ScrobbleLedgerV2 {
+    fn empty() -> Self {
+        Self {
+            version: SCROBBLE_LEDGER_VERSION,
+            pending: VecDeque::new(),
+            accepted: Vec::new(),
+            owner: None,
+        }
+    }
+}
+
 impl QueueStore {
     fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
@@ -185,11 +213,47 @@ impl QueueStore {
         }
     }
 
-    fn load(&self) -> Result<VecDeque<Scrobble>, String> {
-        Ok(read_json(&self.path)?.unwrap_or_default())
+    fn load_ledger_with_migration(&self) -> Result<(ScrobbleLedgerV2, bool), String> {
+        let Some(value) = read_json::<Value>(&self.path)? else {
+            return Ok((ScrobbleLedgerV2::empty(), false));
+        };
+        let (ledger, migrated) = if value.is_array() {
+            (
+                ScrobbleLedgerV2 {
+                    pending: serde_json::from_value(value)
+                        .map_err(|_| "Could not read the Last.fm scrobble queue.".to_string())?,
+                    ..ScrobbleLedgerV2::empty()
+                },
+                true,
+            )
+        } else if value.is_object() {
+            (
+                serde_json::from_value(value)
+                    .map_err(|_| "Could not read the Last.fm scrobble ledger.".to_string())?,
+                false,
+            )
+        } else {
+            return Err("Could not read the Last.fm scrobble ledger.".into());
+        };
+        if ledger.version != SCROBBLE_LEDGER_VERSION {
+            return Err("The Last.fm scrobble ledger version is unsupported.".into());
+        }
+        Ok((ledger, migrated))
     }
 
+    #[cfg(test)]
+    fn load(&self) -> Result<VecDeque<Scrobble>, String> {
+        Ok(self.load_ledger_with_migration()?.0.pending)
+    }
+
+    #[cfg(test)]
     fn save(&self, queue: &VecDeque<Scrobble>) -> Result<(), String> {
+        let mut ledger = ScrobbleLedgerV2::empty();
+        ledger.pending = queue.clone();
+        self.save_ledger(&ledger)
+    }
+
+    fn save_ledger(&self, ledger: &ScrobbleLedgerV2) -> Result<(), String> {
         #[cfg(test)]
         if let Some(blocker) = &self.blocker {
             let _ = blocker.entered.send(());
@@ -200,8 +264,8 @@ impl QueueStore {
                 .recv()
                 .expect("queue persistence blocker release is sent");
         }
-        let bytes = serde_json::to_vec(queue)
-            .map_err(|_| "Could not serialize the Last.fm scrobble queue.".to_string())?;
+        let bytes = serde_json::to_vec(ledger)
+            .map_err(|_| "Could not serialize the Last.fm scrobble ledger.".to_string())?;
         atomic_write(&self.path, &bytes, false)
     }
 }
@@ -358,7 +422,12 @@ pub(crate) struct ImportFetchError {
     pub account_mismatch: bool,
 }
 
-fn import_recent_tracks_params(username: &str, page: u32, to: u64) -> Vec<(String, String)> {
+fn import_recent_tracks_params(
+    username: &str,
+    page: u32,
+    from: u64,
+    to: u64,
+) -> Vec<(String, String)> {
     vec![
         ("user".into(), username.into()),
         ("page".into(), page.to_string()),
@@ -366,6 +435,7 @@ fn import_recent_tracks_params(username: &str, page: u32, to: u64) -> Vec<(Strin
             "limit".into(),
             crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
         ),
+        ("from".into(), from.to_string()),
         ("to".into(), to.to_string()),
     ]
 }
@@ -491,6 +561,8 @@ pub(crate) struct Service {
     pending_store: PendingTokenStore,
     queue_store: QueueStore,
     runtime: Mutex<Runtime>,
+    accepted_receipts: Mutex<Vec<crate::lastfm_import::AcceptedScrobbleReceipt>>,
+    reconciliation_io: Mutex<()>,
     queue_io: Mutex<()>,
     credential_io: Mutex<()>,
     listening: std::sync::Mutex<ListeningState>,
@@ -540,19 +612,31 @@ impl Service {
                 None
             }
         };
-        let mut queue = match queue_store.load() {
-            Ok(queue) => queue,
+        let (ledger, migrated_legacy_queue) = match queue_store.load_ledger_with_migration() {
+            Ok(result) => result,
             Err(error) => {
                 log::error!("Last.fm local persistence failed; queued scrobbles may be unavailable: {error}");
-                VecDeque::new()
+                (ScrobbleLedgerV2::empty(), false)
             }
         };
+        let ScrobbleLedgerV2 {
+            pending: mut queue,
+            accepted: mut accepted_receipts,
+            owner: ledger_owner,
+            ..
+        } = ledger;
         let mut queue_owner = queue_owner(&queue).map(ToOwned::to_owned);
+        if queue_owner.is_none() {
+            queue_owner = ledger_owner;
+        }
         if let Some(session) = session.as_ref() {
-            if !queue.is_empty() && queue_owner.as_deref() != Some(session.username.as_str()) {
-                match queue_store.save(&VecDeque::new()) {
+            if (!queue.is_empty() || !accepted_receipts.is_empty())
+                && queue_owner.as_deref() != Some(session.username.as_str())
+            {
+                match queue_store.save_ledger(&ScrobbleLedgerV2::empty()) {
                     Ok(()) => {
                         queue.clear();
+                        accepted_receipts.clear();
                         queue_owner = None;
                     }
                     Err(error) => {
@@ -562,6 +646,20 @@ impl Service {
                         );
                     }
                 }
+            }
+        }
+        if migrated_legacy_queue {
+            let migrated = ScrobbleLedgerV2 {
+                version: SCROBBLE_LEDGER_VERSION,
+                pending: queue.clone(),
+                accepted: accepted_receipts.clone(),
+                owner: queue_owner.clone(),
+            };
+            if let Err(error) = queue_store.save_ledger(&migrated) {
+                storage_problem = true;
+                log::error!(
+                    "Last.fm local persistence failed while migrating the scrobble queue: {error}"
+                );
             }
         }
         Arc::new(Self {
@@ -586,6 +684,8 @@ impl Service {
                 flushing: false,
                 queue_revision: 0,
             }),
+            accepted_receipts: Mutex::new(accepted_receipts),
+            reconciliation_io: Mutex::new(()),
             queue_io: Mutex::new(()),
             credential_io: Mutex::new(()),
             listening: std::sync::Mutex::new(ListeningState::default()),
@@ -598,10 +698,28 @@ impl Service {
     }
 
     async fn persist_queue(&self, queue: VecDeque<Scrobble>) -> Result<(), String> {
+        let accepted = self.accepted_receipts.lock().await.clone();
+        let owner = self.runtime.lock().await.queue_owner.clone();
+        self.persist_ledger(queue, accepted, owner).await
+    }
+
+    async fn persist_ledger(
+        &self,
+        pending: VecDeque<Scrobble>,
+        accepted: Vec<crate::lastfm_import::AcceptedScrobbleReceipt>,
+        owner: Option<String>,
+    ) -> Result<(), String> {
         let store = self.queue_store.clone();
-        tauri::async_runtime::spawn_blocking(move || store.save(&queue))
-            .await
-            .map_err(|_| "Last.fm queue persistence task stopped.".to_string())?
+        tauri::async_runtime::spawn_blocking(move || {
+            store.save_ledger(&ScrobbleLedgerV2 {
+                version: SCROBBLE_LEDGER_VERSION,
+                pending,
+                accepted,
+                owner,
+            })
+        })
+        .await
+        .map_err(|_| "Last.fm queue persistence task stopped.".to_string())?
     }
 
     async fn load_pending(&self) -> Result<Option<String>, String> {
@@ -689,6 +807,57 @@ impl Service {
         }
     }
 
+    pub(crate) async fn accepted_receipts(
+        &self,
+    ) -> Vec<crate::lastfm_import::AcceptedScrobbleReceipt> {
+        self.accepted_receipts.lock().await.clone()
+    }
+
+    pub(crate) async fn reconciliation_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.reconciliation_io.lock().await
+    }
+
+    pub(crate) async fn prune_accepted_receipts_locked(
+        &self,
+        consumed: &[crate::lastfm_import::AcceptedScrobbleReceipt],
+        through: Option<u64>,
+    ) -> Result<(), String> {
+        if consumed.is_empty() && through.is_none() {
+            return Ok(());
+        }
+        let _queue_io = self.queue_io.lock().await;
+        let original = self.accepted_receipts.lock().await.clone();
+        let mut next = original.clone();
+        for receipt in consumed {
+            if let Some(index) = next.iter().position(|candidate| candidate == receipt) {
+                next.remove(index);
+            }
+        }
+        if let Some(checkpoint) = through {
+            next.retain(|receipt| receipt.timestamp >= checkpoint);
+        }
+        if next == original {
+            return Ok(());
+        }
+        let (pending, owner) = {
+            let runtime = self.runtime.lock().await;
+            (runtime.queue.clone(), runtime.queue_owner.clone())
+        };
+        self.persist_ledger(pending, next.clone(), owner).await?;
+        *self.accepted_receipts.lock().await = next;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn prune_accepted_receipts(
+        &self,
+        consumed: &[crate::lastfm_import::AcceptedScrobbleReceipt],
+        through: Option<u64>,
+    ) -> Result<(), String> {
+        let _reconciliation_io = self.reconciliation_guard().await;
+        self.prune_accepted_receipts_locked(consumed, through).await
+    }
+
     pub(crate) async fn with_import_owner<F, Fut, T>(
         &self,
         username: &str,
@@ -719,6 +888,26 @@ impl Service {
         };
         if should_flush {
             Arc::clone(self).schedule_flush().await;
+        }
+    }
+
+    pub(crate) async fn settle_before_import(self: &Arc<Self>) {
+        let should_flush = {
+            let runtime = self.runtime.lock().await;
+            flush_ready(&runtime) && !runtime.flushing
+        };
+        if should_flush {
+            Arc::clone(self).schedule_flush().await;
+        }
+        loop {
+            let waiting = {
+                let runtime = self.runtime.lock().await;
+                runtime.flushing || flush_ready(&runtime)
+            };
+            if !waiting {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -760,7 +949,7 @@ impl Service {
 
     pub(crate) async fn finish(
         self: &Arc<Self>,
-        _app: &tauri::AppHandle,
+        app: &tauri::AppHandle,
     ) -> Result<LastFmState, String> {
         self.ensure_available().await?;
         let token = {
@@ -785,11 +974,28 @@ impl Service {
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "Last.fm did not return a session key.".to_string())?,
         };
+        let previous_username = self
+            .runtime
+            .lock()
+            .await
+            .session
+            .clone()
+            .map(|session| session.username);
         let _credential_io = self.credential_io.lock().await;
-        self.commit_session(session).await?;
+        self.commit_session(session.clone()).await?;
+        if previous_username.as_deref() != Some(session.username.as_str()) {
+            app.state::<crate::AppState>()
+                .lastfm_import
+                .clear_sync_state()
+                .await?;
+        }
         log::info!("Last.fm connected");
         self.emit_state().await;
         Arc::clone(self).schedule_flush().await;
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::lastfm_import::sync_lastfm_plays(app).await;
+        });
         Ok(self.state().await)
     }
 
@@ -825,6 +1031,7 @@ impl Service {
     pub(crate) async fn disconnect(&self) -> Result<LastFmState, String> {
         let empty = VecDeque::new();
         let _credential_io = self.credential_io.lock().await;
+        let _reconciliation_io = self.reconciliation_guard().await;
         {
             let _queue_io = self.queue_io.lock().await;
             let (previous, revision) = {
@@ -835,13 +1042,15 @@ impl Service {
                 runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
                 (previous, runtime.queue_revision)
             };
-            if let Err(error) = self.persist_queue(empty.clone()).await {
+            let previous_receipts = self.accepted_receipts.lock().await.clone();
+            if let Err(error) = self.persist_ledger(empty.clone(), Vec::new(), None).await {
                 let mut runtime = self.runtime.lock().await;
                 if runtime.queue_revision == revision {
                     runtime.queue = previous;
                     runtime.queue_owner = queue_owner(&runtime.queue).map(ToOwned::to_owned);
                     runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
                 }
+                *self.accepted_receipts.lock().await = previous_receipts;
                 log::error!(
                     "Last.fm local persistence failed while disconnecting; session retained"
                 );
@@ -849,6 +1058,7 @@ impl Service {
                 self.emit_state().await;
                 return Err(error);
             }
+            self.accepted_receipts.lock().await.clear();
         }
 
         let session_error = self.clear_session().await.err();
@@ -917,6 +1127,7 @@ impl Service {
         &self,
         username: &str,
         page: u32,
+        from: u64,
         to: u64,
     ) -> Result<Value, ImportFetchError> {
         if let Err(message) = self.ensure_available().await {
@@ -942,7 +1153,7 @@ impl Service {
                 account_mismatch: true,
             });
         }
-        let params = import_recent_tracks_params(username, page, to);
+        let params = import_recent_tracks_params(username, page, from, to);
         for attempt in 0..=RETRY_DELAYS.len() {
             match self
                 .post("user.getRecentTracks", params.clone(), None)
@@ -1150,14 +1361,20 @@ impl Service {
             .await
         {
             Ok(payload) => {
-                let Some(codes) = scrobble_codes(&payload, count) else {
+                let Some(results) = scrobble_results(&payload, count, Some(&batch)) else {
                     log::warn!(
                         "Last.fm returned an unusable scrobble response; preserving the queue"
                     );
                     return FlushOutcome::Retry;
                 };
+                let codes = results.iter().map(|result| result.code).collect::<Vec<_>>();
+                let new_receipts = results
+                    .iter()
+                    .filter_map(|result| result.receipt.clone())
+                    .collect::<Vec<_>>();
+                let _reconciliation_io = self.reconciliation_guard().await;
                 let _queue_io = self.queue_io.lock().await;
-                let (original, queue, removed, revision) = {
+                let (original, queue, removed, revision, owner) = {
                     let mut runtime = self.runtime.lock().await;
                     if !queue_starts_with(&runtime.queue, &batch)
                         || runtime.session.as_ref() != Some(&session)
@@ -1172,14 +1389,20 @@ impl Service {
                         runtime.queue.clone(),
                         removed,
                         runtime.queue_revision,
+                        runtime.queue_owner.clone(),
                     )
                 };
-                if let Err(error) = self.persist_queue(queue.clone()).await {
+                let original_receipts = self.accepted_receipts.lock().await.clone();
+                let mut receipts = original_receipts.clone();
+                receipts.extend(new_receipts);
+                *self.accepted_receipts.lock().await = receipts.clone();
+                if let Err(error) = self.persist_ledger(queue.clone(), receipts, owner).await {
                     let mut runtime = self.runtime.lock().await;
                     if runtime.queue_revision == revision {
                         runtime.queue = original;
                         runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
                     }
+                    *self.accepted_receipts.lock().await = original_receipts;
                     log::error!("Last.fm local persistence failed after scrobble response; queue retained: {error}");
                     return FlushOutcome::Stop;
                 }
@@ -1381,22 +1604,27 @@ impl Service {
     }
 
     async fn reconcile_queue_owner(&self, username: &str) -> Result<(), String> {
+        let _reconciliation_io = self.reconciliation_guard().await;
         let _queue_io = self.queue_io.lock().await;
-        let (revision, should_clear) = {
+        let (revision, queue_owned) = {
             let runtime = self.runtime.lock().await;
             (
                 runtime.queue_revision,
-                !runtime.queue.is_empty() && queue_owner(&runtime.queue) != Some(username),
+                runtime.queue_owner.as_deref() == Some(username),
             )
         };
-        if should_clear {
-            self.persist_queue(VecDeque::new()).await?;
+        let has_receipts = !self.accepted_receipts.lock().await.is_empty();
+        let has_queue = !self.runtime.lock().await.queue.is_empty();
+        if !queue_owned && (has_queue || has_receipts) {
+            self.persist_ledger(VecDeque::new(), Vec::new(), None)
+                .await?;
             let mut runtime = self.runtime.lock().await;
             if runtime.queue_revision == revision {
                 runtime.queue.clear();
                 runtime.queue_owner = None;
                 runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
             }
+            self.accepted_receipts.lock().await.clear();
         }
         self.runtime.lock().await.queue_owner = Some(username.to_owned());
         Ok(())
@@ -1459,6 +1687,11 @@ fn queue_starts_with(queue: &VecDeque<Scrobble>, batch: &[Scrobble]) -> bool {
     queue.len() >= batch.len() && queue.iter().zip(batch).all(|(queued, item)| queued == item)
 }
 
+struct ScrobbleResult {
+    code: u32,
+    receipt: Option<crate::lastfm_import::AcceptedScrobbleReceipt>,
+}
+
 fn apply_scrobble_results(
     queue: &mut VecDeque<Scrobble>,
     batch: &[Scrobble],
@@ -1519,7 +1752,17 @@ fn error_code(value: &Value) -> Option<u32> {
         .map(|code| code as u32)
 }
 
+#[cfg(test)]
 fn scrobble_codes(value: &Value, expected: usize) -> Option<Vec<u32>> {
+    scrobble_results(value, expected, None)
+        .map(|results| results.into_iter().map(|result| result.code).collect())
+}
+
+fn scrobble_results(
+    value: &Value,
+    expected: usize,
+    submitted: Option<&[Scrobble]>,
+) -> Option<Vec<ScrobbleResult>> {
     let root = value.get("lfm").unwrap_or(value);
     let scrobbles = root.get("scrobbles")?;
     let items = scrobbles.get("scrobble")?;
@@ -1534,11 +1777,38 @@ fn scrobble_codes(value: &Value, expected: usize) -> Option<Vec<u32>> {
     Some(
         items
             .into_iter()
-            .map(|item| {
-                item.get("ignoredMessage")
+            .enumerate()
+            .map(|(index, item)| {
+                let code = item
+                    .get("ignoredMessage")
                     .and_then(|message| message.get("code").or_else(|| message.get("@code")))
                     .and_then(|code| code.as_u64().or_else(|| code.as_str()?.parse().ok()))
-                    .unwrap_or(0) as u32
+                    .unwrap_or(0) as u32;
+                let receipt = (code == 0)
+                    .then(|| submitted.and_then(|batch| batch.get(index)))
+                    .flatten()
+                    .map(|submitted| {
+                        let corrected = crate::lastfm_import::ScrobbleMetadata {
+                            artist: response_text(&item, &["artist"])
+                                .unwrap_or_else(|| submitted.artist.clone()),
+                            album: response_text(&item, &["album"])
+                                .unwrap_or_else(|| submitted.album.clone().unwrap_or_default()),
+                            track: response_text(&item, &["track"])
+                                .unwrap_or_else(|| submitted.track.clone()),
+                        };
+                        crate::lastfm_import::AcceptedScrobbleReceipt {
+                            corrected,
+                            submitted: crate::lastfm_import::ScrobbleMetadata {
+                                artist: submitted.artist.clone(),
+                                album: submitted.album.clone().unwrap_or_default(),
+                                track: submitted.track.clone(),
+                            },
+                            timestamp: response_text(&item, &["timestamp"])
+                                .and_then(|timestamp| timestamp.parse().ok())
+                                .unwrap_or(submitted.timestamp),
+                        }
+                    });
+                ScrobbleResult { code, receipt }
             })
             .collect(),
     )
@@ -1605,7 +1875,10 @@ pub(crate) async fn finish_lastfm(app: tauri::AppHandle) -> Result<LastFmState, 
 
 #[tauri::command]
 pub(crate) async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<LastFmState, String> {
-    app.state::<crate::AppState>().lastfm.disconnect().await
+    let state = app.state::<crate::AppState>();
+    let result = state.lastfm.disconnect().await?;
+    state.lastfm_import.clear_sync_state().await?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1762,11 +2035,12 @@ mod tests {
     #[test]
     fn recent_tracks_import_params_keep_the_fixed_cutoff_and_page_limit() {
         assert_eq!(
-            import_recent_tracks_params("last.fm-user", 7, 1786804381),
+            import_recent_tracks_params("last.fm-user", 7, 0, 1786804381),
             vec![
                 ("user".into(), "last.fm-user".into()),
                 ("page".into(), "7".into()),
                 ("limit".into(), "200".into()),
+                ("from".into(), "0".into()),
                 ("to".into(), "1786804381".into()),
             ]
         );
@@ -1990,6 +2264,81 @@ mod tests {
             ]}}
         });
         assert_eq!(scrobble_codes(&response, 2), Some(vec![0, 3]));
+    }
+
+    #[test]
+    fn legacy_scrobble_array_migrates_to_v2_ledger() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(directory.path());
+        let queued = VecDeque::from([queued_scrobble(12)]);
+        fs::write(&store.path, serde_json::to_vec(&queued).unwrap()).unwrap();
+
+        let (ledger, migrated) = store.load_ledger_with_migration().unwrap();
+
+        assert!(migrated);
+        assert_eq!(ledger.pending, queued);
+        assert!(ledger.accepted.is_empty());
+        let _service = Service::new(directory.path(), true, true);
+        let persisted: Value = serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], SCROBBLE_LEDGER_VERSION);
+        assert_eq!(persisted["pending"][0]["timestamp"], 12);
+    }
+
+    #[tokio::test]
+    async fn accepted_receipts_prune_through_a_checkpoint_as_a_multiset() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path(), true, true);
+        let receipt = |timestamp| crate::lastfm_import::AcceptedScrobbleReceipt {
+            corrected: crate::lastfm_import::ScrobbleMetadata {
+                artist: "Artist".into(),
+                album: "Album".into(),
+                track: "Song".into(),
+            },
+            submitted: crate::lastfm_import::ScrobbleMetadata {
+                artist: "Artist".into(),
+                album: "Album".into(),
+                track: "Song".into(),
+            },
+            timestamp,
+        };
+        let retained = receipt(20);
+        {
+            *service.accepted_receipts.lock().await = vec![receipt(10), retained.clone()];
+            service.runtime.lock().await.queue_owner = Some("user".into());
+        }
+
+        service
+            .prune_accepted_receipts(&[], Some(20))
+            .await
+            .unwrap();
+        assert_eq!(service.accepted_receipts().await, vec![retained.clone()]);
+        service
+            .prune_accepted_receipts(&[retained], Some(21))
+            .await
+            .unwrap();
+        assert!(service.accepted_receipts().await.is_empty());
+    }
+
+    #[test]
+    fn accepted_scrobble_results_capture_corrected_and_submitted_metadata() {
+        let submitted = queued_scrobble(42);
+        let response = serde_json::json!({
+            "scrobbles": {"scrobble": [{
+                "ignoredMessage": {"code": "0"},
+                "artist": {"#text": "Corrected Artist"},
+                "album": {"#text": "Corrected Album"},
+                "track": "Corrected Song",
+                "timestamp": "43"
+            }]}
+        });
+        let results =
+            scrobble_results(&response, 1, Some(std::slice::from_ref(&submitted))).unwrap();
+        let receipt = results[0].receipt.as_ref().unwrap();
+        assert_eq!(receipt.corrected.artist, "Corrected Artist");
+        assert_eq!(receipt.corrected.album, "Corrected Album");
+        assert_eq!(receipt.corrected.track, "Corrected Song");
+        assert_eq!(receipt.submitted.artist, submitted.artist);
+        assert_eq!(receipt.timestamp, 43);
     }
 
     #[test]

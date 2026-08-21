@@ -82,6 +82,36 @@ aggregation transition and emitted state, so a connected-account change cannot
 expose the completed snapshot. React only observes that work. An empty state
 does not create one.
 
+### Last.fm incremental reconciliation
+
+The first exact sync establishes `syncedThrough=now`; it does not backfill
+older post-enable history. Launch, reconnect, and the explicit “Sync Last.fm
+plays” action each process one fixed half-open window. The query is padded for
+Last.fm’s exclusive bounds and the exact window is filtered locally. Incremental
+download reuses the historical parser, 200-row pages, four-page downloader,
+manifest/cache, retry protections, and oldest-to-newest checkpoints. It never
+calls Spotify and does not aggregate until the range is complete.
+
+Retune-origin scrobbles are represented by accepted local receipts and are
+matched as a multiset, so they are not imported again. Every other accepted
+mapped event increments its materialized Retune track additively and advances
+`last_played_at` to the newest external timestamp; the historical play-count
+threshold does not apply. An explicit track mapping wins over an album mapping.
+Unknown or unavailable targets remain in the stable importer backlog, which can
+accept later windows without blocking their download. Explicit accepted matches
+and permanent track, album, and artist ignore rules are reusable and sweep
+applicable backlog occurrences; Skip is temporary. No target is silently added
+to the library: explicit reviewed content choices use the existing Spotify save
+operations.
+
+The Tauri shell’s pure reconciliation function receives remote events, accepted
+receipts, mappings/ignore rules, and available library URIs. It returns additive
+increments, latest timestamps, unresolved events, and consumed receipts without
+filesystem, HTTP, async, Tauri, or Spotify concerns. A before/after application
+journal is persisted before the atomic library write and records checkpoint,
+backlog, and receipt effects. Recovery applies the before state, finalizes the
+after state, or exposes a typed conflict; it never guesses.
+
 Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.
 Normal albums under the cap remain one batch; larger albums and singles split
 deterministically, and command arguments must identify the requested batch and

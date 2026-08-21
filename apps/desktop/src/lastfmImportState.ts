@@ -302,6 +302,9 @@ export type ImportDownloadState = {
   totalPages: number | null
   downloadedThrough: number | null
   historyTo: number | null
+  syncing?: boolean
+  pendingReview?: number
+  syncProblem?: string | null
 }
 
 export function importDownloadPercent(downloadedPages: number, totalPages: number | null): number {
@@ -329,7 +332,11 @@ export function importHistoryBreadcrumb(downloadedThrough: number | null, histor
 }
 
 export function importDownloadCopy(state: ImportDownloadState): { detail: string; progress: string; breadcrumb: string } {
-  const detail = state.phase === null
+  const detail = state.syncing
+    ? 'Retune is downloading only the new Last.fm plays. Retune-origin scrobbles are deduplicated locally, and the visible review queue stays available while this runs.'
+    : state.syncProblem
+      ? state.syncProblem
+      : state.phase === null
     ? 'Retune takes a fixed snapshot of your Last.fm plays and moves from oldest to newest. You can review every match before anything is applied.'
     : state.phase === 'suspended'
       ? 'Reconnect the saved Last.fm account before resuming this session.'

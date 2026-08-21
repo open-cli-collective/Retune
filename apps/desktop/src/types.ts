@@ -69,6 +69,10 @@ export type LastFmImportState = {
   remaining: number
   retryableError: { message: string; attempt: number; retryable: boolean } | null
   searchTerms: boolean
+  syncing: boolean
+  lastSyncedAt: number | null
+  pendingReview: number
+  syncProblem: string | null
 }
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'

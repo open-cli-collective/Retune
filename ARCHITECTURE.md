@@ -13,7 +13,7 @@ desktop application shell
    ├── retune-spotify    OAuth, Web API, normalization
    ├── retune-audio      local-file scan, tags, decoding
    ├── playback          controller + Spotify/file backends
-   ├── lastfm_import     account-bound snapshot, lazy matching, review, and apply boundary
+   ├── lastfm_import     account-bound history, incremental reconciliation, review, and apply boundary
    └── store             app-data persistence
 ```
 
@@ -39,9 +39,9 @@ shell owns orchestration and persistence. Domain crates do not depend on Tauri.
 - The playback controller owns the canonical queue, active order, generation,
   and user-facing playback state.
 - React owns view selection, navigation, dialog state, and transient gestures.
-- `lastfm_import` owns the resumable Last.fm snapshot, raw-page cache, compact
-  source variants, lazy Spotify matching results, review decisions, and
-  account-bound application.
+- `lastfm_import` owns the resumable Last.fm snapshot and incremental ranges,
+  raw-page cache, compact source variants, reusable account-bound mappings,
+  lazy Spotify matching results, review decisions, and application journal.
   Its parsing and review helpers do not add network or filesystem concerns to
   `retune-core`.
 
@@ -145,6 +145,24 @@ claims and starts one persisted Downloading/Aggregating runner using its stored
 username and cutoff. React only observes progress and offers explicit
 first-start/manual-resume actions.
 
+Incremental reconciliation is separate from the historical baseline. The first
+activation records `syncedThrough=now`; later launches, reconnects, and the
+explicit Preferences action download only the fixed half-open range after that
+checkpoint. The query is padded for Last.fm's exclusive `from`/`to` semantics,
+then locally filtered to the exact range. It reuses the same parser, 200-row
+pages, four-page bounded downloader, raw cache, manifest, retry limits, and
+oldest-to-newest checkpointing, and performs no Spotify calls during source
+download or aggregation. Reconciliation matches accepted local-scrobble
+receipts as a multiset, applies mapped events additively with the latest
+`last_played_at`, and leaves unknown or unavailable targets in a durable,
+resumable review backlog. Accepted mappings and permanent track/album/artist
+ignore rules sweep applicable backlog occurrences; Skip remains temporary.
+There is no periodic timer. Exact application writes a before/after library
+journal, backlog/checkpoint/receipt effects, and then atomically commits the
+library boundary; recovery accepts only the recorded before or after state and
+reports a typed conflict otherwise. Mappings are portable only; checkpoints,
+receipts, active downloads, journals, and pending review remain machine-local.
+
 ## Cross-cutting rules
 
 - Provider URI is the normal deduplication identity; local files use canonical
@@ -154,6 +172,8 @@ first-start/manual-resume actions.
 - Overlay metadata is local-only. Remote content operations are explicit.
 - Spotify HTTP traffic uses one shared client/request gate and typed cooldowns.
 - Files containing application state use atomic replacement.
+- Incremental Last.fm application is journaled before the atomic library write;
+  local play changes cannot interleave with that authoritative boundary.
 - Local playback must not require Spotify authentication.
 
 ## Current constraints
