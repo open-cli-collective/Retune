@@ -93,7 +93,7 @@ struct AppState {
     sync_store: FsSyncStore,
     playlists: Mutex<playlists::PlaylistCache>,
     playlist_store: FsPlaylistStore,
-    menu_checks: MenuChecks,
+    menu_checks: Option<MenuChecks>,
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
@@ -104,6 +104,44 @@ struct AppState {
     media_keys: media_keys::MediaKeys,
     sync_orchestrator: SyncOrchestrator,
     playlist_reauth_notified: AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) fn test_app_state(
+    app_data_dir: impl AsRef<std::path::Path>,
+    library: Library,
+    spotify_library: SpotifyLibraryState,
+    lastfm: Arc<lastfm::Service>,
+    lastfm_import: Arc<lastfm_import::Service>,
+) -> AppState {
+    let app_data_dir = app_data_dir.as_ref().to_path_buf();
+    let token_store = Arc::new(CachedTokenStore::new(Box::new(store::FsTokenStore::new(
+        &app_data_dir,
+    )) as Box<dyn TokenStore>));
+    AppState {
+        library: Mutex::new(library),
+        store: FsOverlayStore::new(&app_data_dir),
+        library_write_gate: Arc::new(Mutex::new(())),
+        library_transaction: Arc::new(LibraryTransactionState::default()),
+        spotify_library: Mutex::new(spotify_library),
+        spotify_library_gate: tokio::sync::Mutex::new(()),
+        settings: Mutex::new(Settings::default()),
+        settings_store: FsSettingsStore::new(&app_data_dir),
+        sync_store: FsSyncStore::new(&app_data_dir),
+        playlists: Mutex::new(playlists::PlaylistCache::default()),
+        playlist_store: FsPlaylistStore::new(&app_data_dir),
+        menu_checks: None,
+        recovery_notice: Mutex::new(None),
+        token_store,
+        spotify: Mutex::new(None),
+        artwork_cache: Mutex::default(),
+        playback: Arc::new(Playback::default()),
+        lastfm,
+        lastfm_import,
+        media_keys: media_keys::MediaKeys::disabled(),
+        sync_orchestrator: SyncOrchestrator::default(),
+        playlist_reauth_notified: AtomicBool::new(false),
+    }
 }
 
 struct MenuChecks {
@@ -739,10 +777,11 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
         .playback
         .set_play_threshold_percent(settings.play_threshold_percent)
         .await;
-    state
-        .menu_checks
-        .sync(&settings)
-        .map_err(|error| error.to_string())?;
+    if let Some(menu_checks) = &state.menu_checks {
+        menu_checks
+            .sync(&settings)
+            .map_err(|error| error.to_string())?;
+    }
     if client_id_changed {
         *state.spotify.lock().expect("spotify mutex poisoned") =
             spotify_provider(&settings.spotify_client_id, Arc::clone(&state.token_store))?;
@@ -860,10 +899,11 @@ fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionS
 pub(crate) fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let connection = stored_connection_state(&state.token_store)?;
-    state
-        .menu_checks
-        .sync_connection(&connection)
-        .map_err(|error| error.to_string())?;
+    if let Some(menu_checks) = &state.menu_checks {
+        menu_checks
+            .sync_connection(&connection)
+            .map_err(|error| error.to_string())?;
+    }
     app.emit("connection-changed", connection)
         .map_err(|error| error.to_string())
 }
@@ -2433,10 +2473,11 @@ fn apply_export_settings(
         .settings_store
         .save(&settings)
         .map_err(|error| error.to_string())?;
-    state
-        .menu_checks
-        .sync(&settings)
-        .map_err(|error| error.to_string())?;
+    if let Some(menu_checks) = &state.menu_checks {
+        menu_checks
+            .sync(&settings)
+            .map_err(|error| error.to_string())?;
+    }
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     app.emit("settings-changed", settings.clone())
         .map_err(|error| error.to_string())?;
@@ -2655,7 +2696,7 @@ pub fn run() {
                 sync_store,
                 playlists: Mutex::new(playlists),
                 playlist_store,
-                menu_checks,
+                menu_checks: Some(menu_checks),
                 recovery_notice: Mutex::new(recovery_notice),
                 token_store,
                 spotify: Mutex::new(spotify),

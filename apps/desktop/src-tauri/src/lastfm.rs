@@ -52,10 +52,19 @@ fn credentials_from(api_key: Option<&str>, shared_secret: Option<&str>) -> Optio
 }
 
 fn built_in_credentials() -> Option<Credentials> {
-    credentials_from(
+    let credentials = credentials_from(
         option_env!("RETUNE_LASTFM_API_KEY"),
         option_env!("RETUNE_LASTFM_SHARED_SECRET"),
-    )
+    );
+    #[cfg(test)]
+    return credentials.or_else(|| {
+        Some(Credentials {
+            api_key: "test-api-key".into(),
+            shared_secret: "test-shared-secret".into(),
+        })
+    });
+    #[cfg(not(test))]
+    credentials
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
@@ -567,6 +576,11 @@ pub(crate) struct Service {
     credential_io: Mutex<()>,
     listening: std::sync::Mutex<ListeningState>,
     app: std::sync::Mutex<Option<tauri::AppHandle>>,
+    #[cfg(test)]
+    test_posts: std::sync::Mutex<Option<VecDeque<Value>>>,
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    test_requests: std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>,
 }
 
 impl Service {
@@ -690,7 +704,28 @@ impl Service {
             credential_io: Mutex::new(()),
             listening: std::sync::Mutex::new(ListeningState::default()),
             app: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_posts: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_requests: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_test_response(&self, response: Value) {
+        self.test_posts
+            .lock()
+            .expect("Last.fm test response mutex poisoned")
+            .get_or_insert_with(VecDeque::new)
+            .push_back(response);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_requests(&self) -> Vec<(String, Vec<(String, String)>)> {
+        self.test_requests
+            .lock()
+            .expect("Last.fm test request mutex poisoned")
+            .clone()
     }
 
     pub(crate) fn attach_app(&self, app: tauri::AppHandle) {
@@ -1529,6 +1564,20 @@ impl Service {
         mut params: Vec<(String, String)>,
         session_key: Option<&str>,
     ) -> Result<Value, Failure> {
+        #[cfg(test)]
+        {
+            let mut test_posts = self
+                .test_posts
+                .lock()
+                .expect("Last.fm test response mutex poisoned");
+            if let Some(test_posts) = test_posts.as_mut() {
+                self.test_requests
+                    .lock()
+                    .expect("Last.fm test request mutex poisoned")
+                    .push((method.to_owned(), params.clone()));
+                return test_posts.pop_front().ok_or(Failure::Response);
+            }
+        }
         let credentials = self.credentials.as_ref().ok_or(Failure::Api(10))?;
         params.push(("api_key".into(), credentials.api_key.clone()));
         params.push(("method".into(), method.into()));
@@ -2339,6 +2388,53 @@ mod tests {
         assert_eq!(receipt.corrected.track, "Corrected Song");
         assert_eq!(receipt.submitted.artist, submitted.artist);
         assert_eq!(receipt.timestamp, 43);
+    }
+
+    #[tokio::test]
+    async fn flush_once_persists_only_accepted_receipts_and_keeps_unflushed_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("dev-lastfm-session.json"),
+            br#"{"username":"user","key":"session"}"#,
+        )
+        .unwrap();
+        let service = Service::new(directory.path(), true, true);
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.queue = (0..51).map(queued_scrobble).collect();
+            runtime.queue_owner = Some("user".into());
+        }
+        let mut response_items = vec![
+            serde_json::json!({
+                "ignoredMessage": {"code": "0"},
+                "artist": {"#text": "Corrected Artist"},
+                "album": {"#text": "Corrected Album"},
+                "track": "Corrected Song",
+                "timestamp": "100"
+            }),
+            serde_json::json!({"ignoredMessage": {"code": "3"}}),
+        ];
+        response_items
+            .extend((2..50).map(|_| serde_json::json!({"ignoredMessage": {"code": "3"}})));
+        service.queue_test_response(serde_json::json!({
+            "lfm": {"status": "ok", "scrobbles": {"scrobble": response_items}}
+        }));
+
+        assert!(matches!(service.flush_once().await, FlushOutcome::Continue));
+
+        let (ledger, migrated) = QueueStore::new(directory.path())
+            .load_ledger_with_migration()
+            .unwrap();
+        assert!(!migrated);
+        assert_eq!(ledger.pending, VecDeque::from([queued_scrobble(50)]));
+        assert_eq!(ledger.accepted.len(), 1);
+        assert_eq!(ledger.accepted[0].corrected.artist, "Corrected Artist");
+        assert_eq!(ledger.accepted[0].corrected.album, "Corrected Album");
+        assert_eq!(ledger.accepted[0].corrected.track, "Corrected Song");
+        assert_eq!(ledger.accepted[0].submitted.artist, "Artist");
+        assert_eq!(ledger.accepted[0].submitted.album, "");
+        assert_eq!(ledger.accepted[0].submitted.track, "Song");
+        assert_eq!(service.accepted_receipts().await, ledger.accepted);
     }
 
     #[test]

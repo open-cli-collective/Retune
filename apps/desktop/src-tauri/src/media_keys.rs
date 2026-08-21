@@ -31,6 +31,11 @@ type MetadataKey = (
 );
 
 impl MediaKeys {
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
+        Self { controls: None }
+    }
+
     pub fn spawn(app: tauri::AppHandle) -> Self {
         #[cfg(target_os = "windows")]
         let hwnd = app

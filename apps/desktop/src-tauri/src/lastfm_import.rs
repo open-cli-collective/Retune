@@ -2100,7 +2100,7 @@ impl Service {
 
     async fn sweep_backlog_with_mappings(
         &self,
-        app: &tauri::AppHandle,
+        state: &crate::AppState,
         username: &str,
         spotify_account_id: &str,
     ) -> Result<(), String> {
@@ -2111,8 +2111,7 @@ impl Service {
                 .sync_backlog_into_review(username, Some(spotify_account_id))
                 .await;
         }
-        let state = app.state::<crate::AppState>();
-        let _library_transaction = crate::begin_library_transaction(&state)?;
+        let _library_transaction = crate::begin_library_transaction(state)?;
         let available = state
             .library
             .lock()
@@ -2149,7 +2148,7 @@ impl Service {
         })
         .await?;
         if !result.increments.is_empty() {
-            crate::mutate_library_in_transaction(&state, |library| {
+            crate::mutate_library_in_transaction(state, |library| {
                 apply_incremental_updates(library, &result.increments, &result.latest);
                 Ok(())
             })?;
@@ -3975,7 +3974,7 @@ async fn read_incremental_events(
 }
 
 async fn apply_completed_incremental_range(
-    app: &tauri::AppHandle,
+    state: &crate::AppState,
     service: &Service,
     username: &str,
 ) -> Result<(), String> {
@@ -3989,12 +3988,11 @@ async fn apply_completed_incremental_range(
     }
     let mut events = sync_before.backlog.clone();
     events.extend(read_incremental_events(service, username).await?);
-    let state = app.state::<crate::AppState>();
     let lastfm = Arc::clone(&state.lastfm);
     if lastfm.state().await.username.as_deref() != Some(username) {
         return Err("The Last.fm account changed during incremental reconciliation.".into());
     }
-    let cached_spotify_account = cached_spotify_account(&state);
+    let cached_spotify_account = cached_spotify_account(state);
     if sync_before
         .spotify_account_id
         .as_deref()
@@ -4011,7 +4009,7 @@ async fn apply_completed_incremental_range(
     lastfm.settle_before_import().await;
     let _receipt_guard = lastfm.reconciliation_guard().await;
     let receipts = lastfm.accepted_receipts().await;
-    let _library_transaction = crate::begin_library_transaction(&state)?;
+    let _library_transaction = crate::begin_library_transaction(state)?;
     let available = state
         .library
         .lock()
@@ -4049,7 +4047,7 @@ async fn apply_completed_incremental_range(
         })
         .await?;
     if !result.increments.is_empty() {
-        crate::mutate_library_in_transaction(&state, |library| {
+        crate::mutate_library_in_transaction(state, |library| {
             apply_incremental_updates(library, &result.increments, &result.latest);
             Ok(())
         })?;
@@ -4077,7 +4075,7 @@ async fn apply_completed_incremental_range(
 }
 
 async fn recover_pending_incremental_journal(
-    app: &tauri::AppHandle,
+    state: &crate::AppState,
     service: &Service,
 ) -> Result<(), String> {
     let _reconciliation_guard = service.reconciliation_lock.lock().await;
@@ -4090,7 +4088,6 @@ async fn recover_pending_incremental_journal(
     {
         return Err("Last.fm application journal conflicts with the saved sync state.".into());
     }
-    let state = app.state::<crate::AppState>();
     let lastfm = Arc::clone(&state.lastfm);
     if lastfm.state().await.username.as_deref() != state_before.lastfm_username.as_deref() {
         return Err("The Last.fm account changed before journal recovery.".into());
@@ -4098,13 +4095,13 @@ async fn recover_pending_incremental_journal(
     if state_before
         .spotify_account_id
         .as_deref()
-        .is_some_and(|expected| cached_spotify_account(&state).as_deref() != Some(expected))
+        .is_some_and(|expected| cached_spotify_account(state).as_deref() != Some(expected))
     {
         return Err("The Spotify account changed before journal recovery.".into());
     }
     lastfm.settle_before_import().await;
     let _receipt_guard = lastfm.reconciliation_guard().await;
-    let _library_transaction = crate::begin_library_transaction(&state)?;
+    let _library_transaction = crate::begin_library_transaction(state)?;
     let mut recovered = state
         .library
         .lock()
@@ -4113,7 +4110,7 @@ async fn recover_pending_incremental_journal(
     let outcome =
         recover_application_journal(&mut recovered, &journal).map_err(|error| error.to_string())?;
     if outcome == JournalRecovery::AppliedBefore {
-        crate::mutate_library_in_transaction(&state, |library| {
+        crate::mutate_library_in_transaction(state, |library| {
             *library = recovered.clone();
             Ok(())
         })?;
@@ -4135,16 +4132,15 @@ async fn recover_pending_incremental_journal(
 }
 
 async fn run_incremental_sync(
-    app: &tauri::AppHandle,
+    state: &crate::AppState,
     service: &Arc<Service>,
     username: &str,
 ) -> Result<(), String> {
     let now = crate::unix_now();
-    let state = app.state::<crate::AppState>();
-    let spotify_account_id = cached_spotify_account(&state);
+    let spotify_account_id = cached_spotify_account(state);
     let current = service.sync_snapshot().await;
     if current.lastfm_username.as_deref() == Some(username) {
-        recover_pending_incremental_journal(app, service).await?;
+        recover_pending_incremental_journal(state, service).await?;
     }
     if current.lastfm_username.as_deref() != Some(username) {
         let previous_cache_id = current
@@ -4204,7 +4200,7 @@ async fn run_incremental_sync(
                 .await?;
         } else {
             service
-                .sweep_backlog_with_mappings(app, username, spotify_account_id)
+                .sweep_backlog_with_mappings(state, username, spotify_account_id)
                 .await?;
         }
     } else {
@@ -4324,24 +4320,22 @@ async fn run_incremental_sync(
                 }
             }
         }
-        apply_completed_incremental_range(app, service, username).await?;
+        apply_completed_incremental_range(state, service, username).await?;
         return Ok(());
     }
 }
 
 #[tauri::command]
 pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportStateView, String> {
-    let service = Arc::clone(&app.state::<crate::AppState>().lastfm_import);
+    let state = app.state::<crate::AppState>();
+    let service = Arc::clone(&state.lastfm_import);
     let username = lastfm_username(&app).await?;
-    app.state::<crate::AppState>()
-        .lastfm
-        .settle_before_import()
-        .await;
+    state.lastfm.settle_before_import().await;
     if !service.claim_sync_runner() {
         return Ok(service.state().await);
     }
     let _ = app.emit("lastfm-import-changed", service.state().await);
-    let result = run_incremental_sync(&app, &service, &username).await;
+    let result = run_incremental_sync(&state, &service, &username).await;
     if let Err(error) = &result {
         let _ = set_sync_problem(&service, Some(error.clone())).await;
     }
@@ -4888,8 +4882,8 @@ async fn apply_page(
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     options.validate()?;
-    recover_pending_incremental_journal(app, service).await?;
     let state = app.state::<crate::AppState>();
+    recover_pending_incremental_journal(&state, service).await?;
     let membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) = assert_current_account_locked(&state, service).await?;
     let Some(session) = service.snapshot().await else {
@@ -5071,7 +5065,7 @@ async fn apply_page(
         .await?;
     drop(reconciliation_guard);
     service
-        .sweep_backlog_with_mappings(app, &username, &spotify_account_id)
+        .sweep_backlog_with_mappings(&state, &username, &spotify_account_id)
         .await?;
     Ok(view)
 }
@@ -5299,7 +5293,7 @@ pub(crate) async fn lastfm_import_review(
     ) {
         state
             .lastfm_import
-            .sweep_backlog_with_mappings(&app, &username, &spotify_account_id)
+            .sweep_backlog_with_mappings(&state, &username, &spotify_account_id)
             .await?;
     }
     drop(_membership_guard);
@@ -6158,6 +6152,321 @@ mod tests {
             },
             timestamp,
         }
+    }
+
+    fn seed_lastfm_files(directory: &Path, accepted: &[AcceptedScrobbleReceipt]) {
+        fs::write(
+            directory.join("dev-lastfm-session.json"),
+            br#"{"username":"user","key":"session"}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("lastfm-scrobbles.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "pending": [],
+                "accepted": accepted,
+                "owner": "user"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn library_with_count(play_count: u32) -> Library {
+        let mut library = Library::new();
+        library.add(retune_core::model::NewTrack {
+            uri: "spotify:track:one".into(),
+            name: "Song".into(),
+            source: SourceId::Music,
+            ..retune_core::model::NewTrack::default()
+        });
+        library.tracks_mut()[0].play_count = play_count;
+        library
+    }
+
+    fn recent_tracks_response(page: u32, total_pages: u32, entries: Value) -> Value {
+        serde_json::json!({
+            "recenttracks": {
+                "track": entries,
+                "@attr": {
+                    "page": page.to_string(),
+                    "totalPages": total_pages.to_string(),
+                    "total": "0"
+                }
+            }
+        })
+    }
+
+    fn test_app_state(
+        directory: &Path,
+        library: Library,
+        accepted: &[AcceptedScrobbleReceipt],
+    ) -> (Arc<crate::lastfm::Service>, Arc<Service>, crate::AppState) {
+        seed_lastfm_files(directory, accepted);
+        let lastfm = crate::lastfm::Service::new(directory, true, false);
+        let service = Service::new(directory);
+        let state = crate::test_app_state(
+            directory,
+            library,
+            SpotifyLibraryState::default(),
+            Arc::clone(&lastfm),
+            Arc::clone(&service),
+        );
+        (lastfm, service, state)
+    }
+
+    #[tokio::test]
+    async fn apply_completed_incremental_range_persists_and_prunes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let accepted = receipt(("Artist", "Album", "Song"), ("Artist", "Album", "Song"), 12);
+        let (lastfm, service, state) = test_app_state(
+            directory.path(),
+            library_with_count(100),
+            std::slice::from_ref(&accepted),
+        );
+        service
+            .save_mappings_for(
+                "user",
+                None,
+                LastFmMappings {
+                    track_mappings: BTreeMap::from([(
+                        source_id("Artist", "Album", "Song"),
+                        "spotify:track:one".into(),
+                    )]),
+                    ..LastFmMappings::default()
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .mutate_sync(|sync| {
+                sync.lastfm_username = Some("user".into());
+                sync.synced_through = Some(10);
+                sync.active = Some(IncrementalRange {
+                    from: 10,
+                    to: 20,
+                    query_from: 9,
+                    query_to: 21,
+                    cache_id: incremental_cache_id("user", 10, 20),
+                    next_page: 1,
+                    total_pages: Some(1),
+                    ..IncrementalRange::default()
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service
+            .checkpoint_incremental_page(
+                "user",
+                1,
+                parsed_page(
+                    1,
+                    1,
+                    vec![
+                        scrobble("Artist", "Album", "Song", 11),
+                        scrobble("Artist", "Album", "Song", 12),
+                    ],
+                ),
+            )
+            .await
+            .unwrap();
+
+        apply_completed_incremental_range(&state, &service, "user")
+            .await
+            .unwrap();
+
+        assert_eq!(state.library.lock().unwrap().tracks()[0].play_count, 101);
+        let sync = service.sync_snapshot().await;
+        assert_eq!(sync.synced_through, Some(20));
+        assert!(sync.active.is_none());
+        assert!(sync.journal.is_none());
+        assert!(sync.backlog.is_empty());
+        assert!(lastfm.accepted_receipts().await.is_empty());
+        let ledger: Value = serde_json::from_slice(
+            &fs::read(directory.path().join("lastfm-scrobbles.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(ledger["accepted"].as_array().unwrap().is_empty());
+    }
+
+    async fn recover_persisted_journal(library: Library) -> (Library, Value) {
+        let directory = tempfile::tempdir().unwrap();
+        let accepted = receipt(("Artist", "Album", "Song"), ("Artist", "Album", "Song"), 20);
+        let (lastfm, service, state) =
+            test_app_state(directory.path(), library, std::slice::from_ref(&accepted));
+        let before = library_with_count(100);
+        let mut after = before.clone();
+        apply_incremental_updates(
+            &mut after,
+            &BTreeMap::from([(String::from("spotify:track:one"), 1)]),
+            &BTreeMap::from([(String::from("spotify:track:one"), 19)]),
+        );
+        let backlog_before = vec![event("Artist", "Album", "Song", 10)];
+        service
+            .mutate_sync(|sync| {
+                sync.lastfm_username = Some("user".into());
+                sync.synced_through = Some(10);
+                sync.active = Some(IncrementalRange {
+                    from: 10,
+                    to: 20,
+                    next_page: 0,
+                    ..IncrementalRange::default()
+                });
+                sync.backlog = backlog_before.clone();
+                sync.journal = Some(LastFmApplicationJournal {
+                    before_library: before.clone(),
+                    after_library: after.clone(),
+                    checkpoint_before: Some(10),
+                    checkpoint_after: Some(20),
+                    backlog_before,
+                    backlog_after: Vec::new(),
+                    consumed_receipts: vec![accepted],
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        recover_pending_incremental_journal(&state, &service)
+            .await
+            .unwrap();
+        let sync = service.sync_snapshot().await;
+        assert_eq!(sync.synced_through, Some(20));
+        assert!(sync.active.is_none());
+        assert!(sync.journal.is_none());
+        assert!(sync.backlog.is_empty());
+        assert!(lastfm.accepted_receipts().await.is_empty());
+
+        recover_pending_incremental_journal(&state, &service)
+            .await
+            .unwrap();
+        let ledger: Value = serde_json::from_slice(
+            &fs::read(directory.path().join("lastfm-scrobbles.json")).unwrap(),
+        )
+        .unwrap();
+        let library = state.library.lock().unwrap().clone();
+        (library, ledger)
+    }
+
+    #[tokio::test]
+    async fn recover_pending_incremental_journal_applies_library_before_exactly_once() {
+        let (library, ledger) = recover_persisted_journal(library_with_count(100)).await;
+        assert_eq!(library.tracks()[0].play_count, 101);
+        assert!(ledger["accepted"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_pending_incremental_journal_finalizes_library_after_exactly_once() {
+        let mut after = library_with_count(100);
+        apply_incremental_updates(
+            &mut after,
+            &BTreeMap::from([(String::from("spotify:track:one"), 1)]),
+            &BTreeMap::from([(String::from("spotify:track:one"), 19)]),
+        );
+        let (library, ledger) = recover_persisted_journal(after).await;
+        assert_eq!(library.tracks()[0].play_count, 101);
+        assert!(ledger["accepted"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn incremental_runner_activates_at_now_then_downloads_padded_range_without_spotify() {
+        let directory = tempfile::tempdir().unwrap();
+        let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+
+        run_incremental_sync(&state, &service, "user")
+            .await
+            .unwrap();
+        let first = service.sync_snapshot().await;
+        assert!(first.synced_through.is_some());
+        assert_eq!(first.last_synced_at, first.synced_through);
+        assert!(lastfm.test_requests().is_empty());
+
+        let from = crate::unix_now().saturating_sub(100);
+        service
+            .mutate_sync(|sync| {
+                sync.synced_through = Some(from);
+                sync.last_synced_at = None;
+                sync.active = None;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let empty_page = recent_tracks_response(1, 1, serde_json::json!([]));
+        lastfm.queue_test_response(empty_page.clone());
+        lastfm.queue_test_response(empty_page);
+
+        run_incremental_sync(&state, &service, "user")
+            .await
+            .unwrap();
+
+        let requests = lastfm.test_requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|(method, _)| method == "user.getRecentTracks"));
+        for (_, params) in &requests {
+            assert_eq!(
+                params.iter().find(|(key, _)| key == "from").unwrap().1,
+                (from - 1).to_string()
+            );
+        }
+        let query_to = requests[0]
+            .1
+            .iter()
+            .find(|(key, _)| key == "to")
+            .unwrap()
+            .1
+            .parse::<u64>()
+            .unwrap();
+        assert!(requests.iter().all(|(_, params)| {
+            params.iter().find(|(key, _)| key == "to").unwrap().1 == query_to.to_string()
+        }));
+        let final_state = service.sync_snapshot().await;
+        assert_eq!(final_state.synced_through, Some(query_to - 1));
+        assert!(final_state.active.is_none());
+    }
+
+    #[tokio::test]
+    async fn restored_mappings_activate_only_for_the_exact_backup_identities() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let imported = PersistedLastFmMappings {
+            version: LASTFM_MAPPINGS_VERSION,
+            lastfm_username: Some("user".into()),
+            spotify_account_id: Some("spotify-a".into()),
+            dormant: false,
+            mappings: LastFmMappings {
+                track_mappings: BTreeMap::from([(
+                    source_id("Artist", "Album", "Song"),
+                    "spotify:track:one".into(),
+                )]),
+                ..LastFmMappings::default()
+            },
+        };
+        service.restore_mappings(imported).await.unwrap();
+
+        assert!(service
+            .mappings_for("other", Some("spotify-a"))
+            .await
+            .track_mappings
+            .is_empty());
+        assert!(service
+            .mappings_for("user", Some("spotify-b"))
+            .await
+            .track_mappings
+            .is_empty());
+        assert!(service.export_mappings().await.dormant);
+
+        let active = service.mappings_for("user", Some("spotify-a")).await;
+        let source_key = source_id("Artist", "Album", "Song");
+        assert_eq!(active.track_mappings[&source_key], "spotify:track:one");
+        assert!(!service.export_mappings().await.dormant);
+        assert_eq!(
+            service.mappings_for("user", Some("spotify-a")).await,
+            active
+        );
     }
 
     #[test]
