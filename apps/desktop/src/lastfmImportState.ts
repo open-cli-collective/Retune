@@ -33,6 +33,12 @@ export function moveImportNavigationRow(current: number, rowCount: number, direc
   return Math.min(Math.max(0, current + direction), Math.max(0, rowCount - 1))
 }
 
+export function requiredImportMatchIds(selectedIds: Iterable<string>, matchedIds: Iterable<string>, includeHistoricalPlayCounts: boolean, wholeAlbum: boolean): string[] {
+  if (!includeHistoricalPlayCounts && wholeAlbum) return []
+  const matched = new Set(matchedIds)
+  return [...selectedIds].filter((id) => !matched.has(id))
+}
+
 export type ImportStrongMatchCandidate = {
   artist: string
   relation: ImportMatchRelation
