@@ -309,6 +309,7 @@ test('Last.fm queue selection restores focus after loading and retains native bu
   assert.match(importer, /focusQueueAfterOpen\.current = focusQueue/)
   assert.match(importer, /openQueueItem\(next, activeImportQueue\(orderedSnapshot\), focusQueue\)/)
   assert.match(importer, /onOpen=\{\(item\) => void openQueueItem\(item, activeQueue, true\)\}/)
+  assert.doesNotMatch(importer, /<VirtualQueue[^>]*disabled=\{busy \|\| pageLoading\}/)
   assert.match(importer, /event\.key === 'Enter' && !busy && query\.trim\(\)[\s\S]*onSearch\(query\)/)
   assert.match(importer, /onMutation\(true\)[\s\S]*lastfm_import_apply/)
   assert.match(importer, /archiveBatch: advance/)

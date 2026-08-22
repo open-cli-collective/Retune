@@ -45,7 +45,9 @@ selected-track mode stores explicit track ratings only.
 
 Each page has two independent intents: import Spotify content and include
 historical play counts. Both default on, at least one must remain on, and
-whole-album is a separate page-level content mode defaulting off. Content-only
+whole-album is a separate page-level content mode. It defaults on only when one
+Spotify album maps every included source track one-to-one with no extra tracks;
+the user's persisted page choice then wins. Content-only
 acceptance saves membership and applies source `added_at` without changing
 plays or `last_played_at`; counts-only performs no Spotify write and updates
 only already-materialized matched Retune tracks.

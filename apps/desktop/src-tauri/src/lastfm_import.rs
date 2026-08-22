@@ -460,11 +460,12 @@ impl LastFmImportSessionV2 {
             .page_options
             .get(&format!("{artist}\u{1f}{album}"))
             .cloned();
+        let customized = batch_options.is_some() || legacy_options.is_some();
         let mut options = batch_options
             .clone()
             .or(legacy_options.clone())
             .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
-        if batch_options.is_some() || legacy_options.is_some() {
+        if customized {
             options
                 .selected_track_ids
                 .retain(|id| batch_ids.contains(id));
@@ -483,6 +484,12 @@ impl LastFmImportSessionV2 {
                 })
                 .cloned()
                 .collect();
+            let rows = batch
+                .source_ids
+                .iter()
+                .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
+                .collect::<Vec<_>>();
+            options.whole_album = options.import_content && exact_album_match_for_rows(self, &rows);
         }
         options
     }
@@ -503,11 +510,12 @@ impl LastFmImportSessionV2 {
             .page_options
             .get(&format!("{artist}\u{1f}{album}"))
             .cloned();
+        let customized = batch_options.is_some() || legacy_options.is_some();
         let mut options = batch_options
             .clone()
             .or(legacy_options.clone())
             .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
-        if batch_options.is_some() || legacy_options.is_some() {
+        if customized {
             options
                 .selected_track_ids
                 .retain(|id| batch_ids.contains(id));
@@ -517,6 +525,7 @@ impl LastFmImportSessionV2 {
                 .filter(|row| is_actionable(self, &row.stable_id))
                 .map(|row| row.stable_id.clone())
                 .collect();
+            options.whole_album = options.import_content && exact_album_match_for_rows(self, rows);
         }
         options
     }
@@ -4536,6 +4545,32 @@ async fn cached_spotify_binding_is_current(
     app: &tauri::AppHandle,
     service: &Service,
 ) -> Result<bool, String> {
+    let Some(session) = service.snapshot().await else {
+        return Ok(false);
+    };
+    let Some(expected) = session.spotify_account_id.as_deref() else {
+        return Ok(true);
+    };
+    let state = app.state::<crate::AppState>();
+    let cached = state
+        .spotify_library
+        .lock()
+        .expect("Spotify library mutex poisoned")
+        .clone();
+    match cached_spotify_identity_matches(expected, &cached) {
+        Some(true)
+            if review_phase_allowed(session.phase)
+                && lastfm_username(app).await.as_deref()
+                    == Ok(session.lastfm_username.as_str()) =>
+        {
+            return Ok(true);
+        }
+        Some(false) => {
+            service.suspend_for_account_mismatch().await?;
+            return Ok(false);
+        }
+        _ => {}
+    }
     current_spotify_binding_is_current(app, service, false).await
 }
 
@@ -4685,6 +4720,60 @@ fn best_candidate(result: &MatchResult) -> Option<&AlbumCandidate> {
             candidate.relation.is_some() || candidate.uri.starts_with("spotify:track:")
         })
         .min_by_key(|candidate| candidate_rank(candidate.relation))
+}
+
+fn exact_album_match_for_rows(session: &LastFmImportSessionV2, rows: &[&SourceRow]) -> bool {
+    let rows = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            let decision = default_decision(session, &row.stable_id);
+            is_actionable(session, &row.stable_id) && !decision.excluded
+        })
+        .collect::<Vec<_>>();
+    let Some(first) = rows.first() else {
+        return false;
+    };
+    let Some(first_match) = session.matches.get(&first.stable_id) else {
+        return false;
+    };
+    let Some(candidate) = first_match
+        .selected_uri
+        .as_deref()
+        .filter(|uri| uri.starts_with("spotify:album:"))
+        .and_then(|uri| {
+            first_match
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == uri)
+        })
+        .or_else(|| best_candidate(first_match))
+        .filter(|candidate| candidate.uri.starts_with("spotify:album:"))
+    else {
+        return false;
+    };
+    if candidate.relation != Some(AlbumRelation::BestMatch)
+        || candidate.track_uris.len() != rows.len()
+    {
+        return false;
+    }
+    let mut targets = BTreeSet::new();
+    rows.into_iter().all(|row| {
+        let Some(result) = session.matches.get(&row.stable_id) else {
+            return false;
+        };
+        let selected_album = result
+            .selected_uri
+            .as_deref()
+            .filter(|uri| uri.starts_with("spotify:album:"))
+            .or_else(|| best_candidate(result).map(|candidate| candidate.uri.as_str()));
+        let Some(target) = matched_track_uri_for_row(result, row) else {
+            return false;
+        };
+        selected_album == Some(candidate.uri.as_str())
+            && candidate.track_uris.contains(&target)
+            && targets.insert(target)
+    })
 }
 
 fn matched_track_uri_for_row(result: &MatchResult, row: &SourceRow) -> Option<String> {
@@ -8450,7 +8539,7 @@ mod tests {
         );
         let rows = vec![SourceRow {
             stable_id: "artist\u{1f}\u{1f}one".into(),
-            artist: "Artist".into(),
+            artist: "Various Artists".into(),
             album: String::new(),
             track: "One".into(),
             variants: Vec::new(),
@@ -10014,6 +10103,69 @@ mod tests {
             .unwrap()
             .items;
         assert_eq!((queue[0].album_entities, queue[0].track_entities), (0, 0));
+    }
+
+    #[test]
+    fn exact_album_match_defaults_to_whole_album_until_user_overrides_it() {
+        let mut session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 100, ImportDefaults::default());
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[
+                scrobble("Artist", "Album", "One", 1),
+                scrobble("Artist", "Album", "Two", 2),
+            ],
+        );
+        session.phase = ImportPhase::Review;
+        session.batches = vec![ImportBatch {
+            page: 1,
+            source_ids: session
+                .rows
+                .iter()
+                .map(|row| row.stable_id.clone())
+                .collect(),
+        }];
+        let candidate = AlbumCandidate {
+            uri: "spotify:album:album".into(),
+            name: "Album".into(),
+            artist: "Artist".into(),
+            track_uris: vec!["spotify:track:one".into(), "spotify:track:two".into()],
+            track_names: vec!["One".into(), "Two".into()],
+            track_artists: vec!["Artist".into(), "Artist".into()],
+            track_albums: vec!["Album".into(), "Album".into()],
+            relation: Some(AlbumRelation::BestMatch),
+        };
+        for (row, target) in session
+            .rows
+            .clone()
+            .into_iter()
+            .zip(["spotify:track:one", "spotify:track:two"])
+        {
+            session.matches.insert(
+                row.stable_id.clone(),
+                MatchResult {
+                    source_id: row.stable_id.clone(),
+                    search_term: "album".into(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some(candidate.uri.clone()),
+                    candidates: vec![candidate.clone()],
+                    track_matches: BTreeMap::from([(row.stable_id, target.into())]),
+                },
+            );
+        }
+
+        let options = session.options_for_batch(1, "Artist", "Album");
+        assert!(options.whole_album);
+
+        session.page_options.insert(
+            batch_options_key(1),
+            PageOptions {
+                whole_album: false,
+                selected_track_ids: options.selected_track_ids,
+                ..PageOptions::default()
+            },
+        );
+        assert!(!session.options_for_batch(1, "Artist", "Album").whole_album);
     }
 
     #[tokio::test]
