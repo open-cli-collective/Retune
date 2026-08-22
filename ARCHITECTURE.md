@@ -130,7 +130,10 @@ Whole-album acceptance sends one album URI to Spotify and updates
 `SavedAlbumRecord`; selected-track acceptance sends only track URIs and updates
 `saved_tracks`. Upstream membership completes before the atomic local history
 and metadata mutation, and a durable decision is marked done only after that
-mutation succeeds. The source session is bound to Last.fm first; Spotify
+mutation succeeds. The Tauri command starts this idempotent work on the Rust
+runtime and returns after validation; the importer optimistically advances, then
+reconciles from the emitted completion or restores the batch on an emitted
+failure. The source session is bound to Last.fm first; Spotify
 `/me` is nullable until the first lazy match. A later Spotify mismatch
 suspends Spotify-derived work without invalidating the source snapshot.
 The importer serializes each session mutation through durable replacement before

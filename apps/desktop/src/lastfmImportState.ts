@@ -114,6 +114,10 @@ export function activeImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
   return items.filter((item) => item.remaining)
 }
 
+export function optimisticallyArchiveImportQueue(items: ImportQueueItem[], page: number): ImportQueueItem[] {
+  return items.map((item) => item.page === page ? { ...item, remaining: false, status: 'done' } : item)
+}
+
 export function importQueueTabTarget(shiftKey: boolean): { kind: 'source' | 'match'; row: 0 } {
   return { kind: shiftKey ? 'match' : 'source', row: 0 }
 }

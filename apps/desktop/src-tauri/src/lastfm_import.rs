@@ -5581,18 +5581,43 @@ pub(crate) async fn lastfm_import_apply(
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
-    let view = apply_page(
-        &app,
-        state.lastfm_import.as_ref(),
-        batch_id,
-        (&artist, &album),
-        &selected_ids,
-        archive_batch,
-        options,
-    )
-    .await?;
-    app.emit("lastfm-import-changed", &view)
-        .map_err(|error| error.to_string())?;
+    options.validate()?;
+    let session = state
+        .lastfm_import
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    requested_batch(&session, batch_id, &artist, &album)
+        .ok_or_else(|| "Unknown Last.fm import review batch.".to_string())?;
+    let view = state_view(Some(&session));
+    let task_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let task_state = task_app.state::<crate::AppState>();
+        match apply_page(
+            &task_app,
+            task_state.lastfm_import.as_ref(),
+            batch_id,
+            (&artist, &album),
+            &selected_ids,
+            archive_batch,
+            options,
+        )
+        .await
+        {
+            Ok(view) => {
+                let _ = task_app.emit(
+                    "lastfm-import-apply-finished",
+                    serde_json::json!({ "batchId": batch_id, "view": view }),
+                );
+            }
+            Err(message) => {
+                let _ = task_app.emit(
+                    "lastfm-import-apply-finished",
+                    serde_json::json!({ "batchId": batch_id, "message": message }),
+                );
+            }
+        }
+    });
     Ok(view)
 }
 
