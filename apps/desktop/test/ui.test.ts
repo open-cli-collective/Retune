@@ -291,7 +291,7 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(importerCss, /\.import-track-list \{[^}]*overflow: auto/)
 })
 
-test('Last.fm queue selection keeps refresh stable and controls retain native button semantics', () => {
+test('Last.fm queue selection restores focus after loading and retains native button semantics', () => {
   const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
   const refreshBlock = importer.match(/const refresh = useCallback[\s\S]*?\n  useEffect\(\(\) => \{\n    void refresh\(\)/)?.[0] ?? ''
   assert.match(importer, /const importQueuePageLimit = 1000/)
@@ -301,7 +301,8 @@ test('Last.fm queue selection keeps refresh stable and controls retain native bu
   assert.doesNotMatch(refreshBlock, /\}, \[selectedPage, sort\]\)/)
   assert.match(importer, /const nextQueueItem = \(queueSnapshot = queue, focusQueue = false\)/)
   assert.match(importer, /focusQueueAfterOpen\.current = focusQueue/)
-  assert.match(importer, /openQueueItem\(next, activeImportQueue\(orderedSnapshot\)\)/)
+  assert.match(importer, /openQueueItem\(next, activeImportQueue\(orderedSnapshot\), focusQueue\)/)
+  assert.match(importer, /onOpen=\{\(item\) => void openQueueItem\(item, activeQueue, true\)\}/)
   assert.match(importer, /onMutation\(true\)[\s\S]*lastfm_import_apply/)
   assert.match(importer, /archiveBatch: advance/)
   assert.doesNotMatch(importer, /role="listbox"/)
