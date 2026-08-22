@@ -70,8 +70,8 @@ for the two independent intents (content and historical play counts) plus
 whole-album mode, compact aggregated rows, decisions, stable 1-based
 `ImportBatch` pages capped at 100 source rows, batch options, match
 results/candidates/selected URIs, a
-session-level Spotify-target-to-Sum/Overwrite/Zero map, and the session-level
-search-term display preference. Last.fm pages are written atomically as parsed
+reusable default plus frozen Spotify-target-to-Sum/Overwrite/Zero map, and the
+session-level search-term display preference. Last.fm pages are written atomically as parsed
 raw-page files; the manifest is written only after the page file and is the
 authority for recovery. The manifest and every page record the exact Last.fm
 username as well as cutoff/page metadata, so punctuation-distinct accounts
@@ -101,7 +101,8 @@ Receipts are pruned only after the corresponding reconciliation commit.
 
 `lastfm-mappings.json` is account-bound and stores explicit source-track to
 Spotify-track mappings, source-album mappings with normalized target track
-names, and permanent excluded-track, ignored-album, and ignored-artist rules.
+names, the reusable count-merge default, and permanent excluded-track,
+ignored-album, and ignored-artist rules.
 Explicit track mappings win over album mappings. Skip decisions are not stored
 there. Completed V2 historical sessions idempotently backfill accepted choices.
 Unreadable or unsupported mappings are quarantined with a timestamped sibling

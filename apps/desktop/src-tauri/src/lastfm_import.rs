@@ -37,9 +37,10 @@ pub(crate) enum ImportPhase {
     Suspended,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CountMode {
+    #[default]
     Sum,
     Overwrite,
     Zero,
@@ -260,6 +261,8 @@ pub(crate) struct LastFmImportSessionV2 {
     pub page_options: BTreeMap<String, PageOptions>,
     pub count_modes: BTreeMap<String, CountMode>,
     #[serde(default)]
+    pub default_count_mode: CountMode,
+    #[serde(default)]
     pub incremental_source_keys: BTreeMap<String, String>,
     pub search_terms: bool,
 }
@@ -395,6 +398,7 @@ impl LastFmImportSessionV2 {
             decisions: BTreeMap::new(),
             page_options: BTreeMap::new(),
             count_modes: BTreeMap::new(),
+            default_count_mode: CountMode::Sum,
             incremental_source_keys: BTreeMap::new(),
             search_terms: true,
         }
@@ -930,6 +934,8 @@ pub(crate) struct LastFmAlbumMapping {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LastFmMappings {
+    #[serde(default)]
+    pub default_count_mode: CountMode,
     pub track_mappings: BTreeMap<String, String>,
     pub album_mappings: BTreeMap<String, LastFmAlbumMapping>,
     pub excluded_tracks: BTreeSet<String>,
@@ -1970,6 +1976,11 @@ impl Service {
         }
         let username = session.lastfm_username.clone();
         let spotify_account_id = session.spotify_account_id.clone();
+        let selected_ids = session
+            .page_options
+            .values()
+            .flat_map(|options| options.selected_track_ids.iter())
+            .collect::<BTreeSet<_>>();
         let mut mappings = self
             .mappings_for(&username, spotify_account_id.as_deref())
             .await;
@@ -2000,6 +2011,9 @@ impl Service {
                 }
                 RowStatus::Done => {}
                 RowStatus::Pending | RowStatus::Skipped => continue,
+            }
+            if !selected_ids.contains(&row.stable_id) {
+                continue;
             }
             let Some(result) = session.matches.get(&row.stable_id) else {
                 continue;
@@ -2636,7 +2650,7 @@ impl Service {
         batch_id: u32,
         result: MatchResult,
     ) -> Result<(), String> {
-        self.set_matches(username, spotify_account_id, batch_id, vec![result])
+        self.set_matches(username, spotify_account_id, batch_id, vec![result], None)
             .await
     }
 
@@ -2646,6 +2660,7 @@ impl Service {
         spotify_account_id: &str,
         batch_id: u32,
         results: Vec<MatchResult>,
+        persisted_default_count_mode: Option<CountMode>,
     ) -> Result<(), String> {
         self.mutate_session(|session| {
             let Some(mut session) = session else {
@@ -2659,6 +2674,11 @@ impl Service {
                 return Err(
                     "The Last.fm import is no longer active for this account or phase.".into(),
                 );
+            }
+            if session.spotify_account_id.is_none() {
+                if let Some(mode) = persisted_default_count_mode {
+                    session.default_count_mode = mode;
+                }
             }
             let Some(batch) = review_batches(&session)
                 .into_iter()
@@ -2697,13 +2717,17 @@ impl Service {
                     .count_modes
                     .get(target_uri)
                     .copied()
-                    .unwrap_or(CountMode::Sum);
+                    .unwrap_or(session.default_count_mode);
                 if current != mode && locked_count_modes(&session).contains(target_uri) {
                     return Err(
                         "This Spotify target's play-count strategy is locked after import.".into(),
                     );
                 }
-                session.count_modes.insert(target_uri.to_owned(), mode);
+                let locked = locked_count_modes(&session);
+                session.default_count_mode = mode;
+                session
+                    .count_modes
+                    .retain(|target, _| locked.contains(target));
                 Ok((session, ()))
             },
         )
@@ -2862,11 +2886,18 @@ impl Service {
         fuzzy_groups
             .retain(|_, rows| rows.len() > 1 || rows.iter().any(|row| row.variants.len() > 1));
         let visible_targets = fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>();
-        let count_modes = session
-            .count_modes
+        let count_modes = visible_targets
             .iter()
-            .filter(|(target, _)| visible_targets.contains(*target))
-            .map(|(target, mode)| (target.clone(), *mode))
+            .map(|target| {
+                (
+                    target.clone(),
+                    session
+                        .count_modes
+                        .get(target)
+                        .copied()
+                        .unwrap_or(session.default_count_mode),
+                )
+            })
             .collect();
         let locked_count_modes = locked_count_modes(session)
             .into_iter()
@@ -3064,10 +3095,25 @@ impl Service {
                         "A selected source row does not belong to this review batch.".into(),
                     );
                 }
+                let include_historical_play_counts = options.include_historical_play_counts;
+                let selected_track_ids = options.selected_track_ids.clone();
                 session
                     .page_options
                     .insert(batch_options_key(batch_id), options);
+                let default_count_mode = session.default_count_mode;
                 for id in ids {
+                    if include_historical_play_counts && selected_track_ids.contains(id) {
+                        if let Some(target) = session
+                            .matches
+                            .get(id)
+                            .and_then(|result| matched_track_uri(result, id))
+                        {
+                            session
+                                .count_modes
+                                .entry(target)
+                                .or_insert(default_count_mode);
+                        }
+                    }
                     session.decisions.insert(
                         id.clone(),
                         RowDecision {
@@ -4565,8 +4611,18 @@ where
                 .into(),
         );
     }
+    let default_count_mode = service
+        .mappings_for(&username, Some(&spotify_account_id))
+        .await
+        .default_count_mode;
     service
-        .set_matches(&username, &spotify_account_id, batch_id, results)
+        .set_matches(
+            &username,
+            &spotify_account_id,
+            batch_id,
+            results,
+            Some(default_count_mode),
+        )
         .await?;
     Ok(service.page(batch_id, artist, album).await)
 }
@@ -4749,22 +4805,6 @@ fn membership_uris_for_import(
     )
 }
 
-fn committed_source_ids(
-    rows: &[SourceRow],
-    target_by_source: &BTreeMap<String, String>,
-    import_content: bool,
-    whole_album: bool,
-    include_historical_play_counts: bool,
-) -> Vec<String> {
-    if import_content && whole_album && !include_historical_play_counts {
-        return rows.iter().map(|row| row.stable_id.clone()).collect();
-    }
-    rows.iter()
-        .filter(|row| target_by_source.contains_key(&row.stable_id))
-        .map(|row| row.stable_id.clone())
-        .collect()
-}
-
 fn historical_count_for_target(
     session: &LastFmImportSessionV2,
     target_uri: &str,
@@ -4780,7 +4820,6 @@ fn historical_count_for_target(
     for row in &session.rows {
         let decision = default_decision(session, &row.stable_id);
         let current_page = current_ids.contains(row.stable_id.as_str());
-        let included = current_page || (decision.status == RowStatus::Done && !decision.excluded);
         let page_options = if current_page {
             current_options.clone()
         } else {
@@ -4789,6 +4828,10 @@ fn historical_count_for_target(
                 .map(|batch_id| session.options_for_batch(*batch_id, &row.artist, &row.album))
                 .unwrap_or_else(|| session.options_for(&row.artist, &row.album))
         };
+        let included = current_page
+            || (decision.status == RowStatus::Done
+                && !decision.excluded
+                && page_options.selected_track_ids.contains(&row.stable_id));
         if included
             && page_options.include_historical_play_counts
             && session
@@ -4807,7 +4850,7 @@ fn historical_count_for_target(
             .count_modes
             .get(target_uri)
             .copied()
-            .unwrap_or(CountMode::Sum),
+            .unwrap_or(session.default_count_mode),
     )
 }
 
@@ -4876,9 +4919,9 @@ async fn apply_page(
     app: &tauri::AppHandle,
     service: &Service,
     batch_id: u32,
-    artist: &str,
-    album: &str,
+    (artist, album): (&str, &str),
     selected_ids: &[String],
+    archive_batch: bool,
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     options.validate()?;
@@ -4920,6 +4963,16 @@ async fn apply_page(
                 target_by_source.insert(row.stable_id.clone(), uri);
             }
         }
+    }
+    if (options.include_historical_play_counts || !options.whole_album)
+        && rows
+            .iter()
+            .any(|row| !target_by_source.contains_key(&row.stable_id))
+    {
+        return Err(
+            "Every selected source track needs a supported Spotify match before this batch can be accepted. Change its match or uncheck it first."
+                .into(),
+        );
     }
     let mut metadata_uris = target_by_source.values().cloned().collect::<BTreeSet<_>>();
     if options.import_content && options.whole_album {
@@ -5032,13 +5085,19 @@ async fn apply_page(
             }
         })
         .collect::<Vec<_>>();
-    let committed = committed_source_ids(
-        &rows,
-        &target_by_source,
-        options.import_content,
-        options.whole_album,
-        options.include_historical_play_counts,
-    );
+    let committed = if archive_batch {
+        batch_rows(&batch, &rows_by_id)
+            .into_iter()
+            .filter(|row| {
+                let decision = default_decision(&session, &row.stable_id);
+                !decision.excluded
+                    && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
+            })
+            .map(|row| row.stable_id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        rows.iter().map(|row| row.stable_id.clone()).collect()
+    };
     let metadata_uris = metadata_uris.into_iter().collect::<Vec<_>>();
     if !updates.is_empty() || !metadata_uris.is_empty() {
         crate::mutate_library(&state, |library| {
@@ -5341,6 +5400,15 @@ pub(crate) async fn lastfm_import_count_mode(
         .lastfm_import
         .set_count_mode(&username, &spotify_account_id, &target_uri, mode)
         .await?;
+    let mut mappings = state
+        .lastfm_import
+        .mappings_for(&username, Some(&spotify_account_id))
+        .await;
+    mappings.default_count_mode = mode;
+    state
+        .lastfm_import
+        .save_mappings_for(&username, Some(&spotify_account_id), mappings)
+        .await?;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
 }
@@ -5496,7 +5564,7 @@ pub(crate) async fn lastfm_import_change_album(
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
     state
         .lastfm_import
-        .set_matches(&username, &spotify_account_id, batch_id, matches)
+        .set_matches(&username, &spotify_account_id, batch_id, matches, None)
         .await?;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await
@@ -5509,6 +5577,7 @@ pub(crate) async fn lastfm_import_apply(
     artist: String,
     album: String,
     selected_ids: Vec<String>,
+    archive_batch: bool,
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
@@ -5516,9 +5585,9 @@ pub(crate) async fn lastfm_import_apply(
         &app,
         state.lastfm_import.as_ref(),
         batch_id,
-        &artist,
-        &album,
+        (&artist, &album),
         &selected_ids,
+        archive_batch,
         options,
     )
     .await?;
@@ -5667,9 +5736,9 @@ pub(crate) async fn lastfm_import_accept_all_page(
         &app,
         state.lastfm_import.as_ref(),
         batch_id,
-        &artist,
-        &album,
+        (&artist, &album),
         &selected_ids,
+        true,
         page.options,
     )
     .await?;
@@ -5691,10 +5760,19 @@ pub(crate) fn default_decision(session: &LastFmImportSessionV2, id: &str) -> Row
 }
 
 fn locked_count_modes(session: &LastFmImportSessionV2) -> BTreeSet<String> {
+    let selected_ids = session
+        .page_options
+        .values()
+        .filter(|options| options.include_historical_play_counts)
+        .flat_map(|options| options.selected_track_ids.iter())
+        .collect::<BTreeSet<_>>();
     session
         .rows
         .iter()
-        .filter(|row| default_decision(session, &row.stable_id).status == RowStatus::Done)
+        .filter(|row| {
+            default_decision(session, &row.stable_id).status == RowStatus::Done
+                && selected_ids.contains(&row.stable_id)
+        })
         .filter_map(|row| {
             session
                 .matches
@@ -7327,6 +7405,13 @@ mod tests {
                 )]),
             },
         );
+        session.page_options.insert(
+            "accepted".into(),
+            PageOptions {
+                selected_track_ids: BTreeSet::from([row.stable_id.clone()]),
+                ..PageOptions::default()
+            },
+        );
         service.save(session).await.unwrap();
 
         service.backfill_completed_mappings().await.unwrap();
@@ -8294,7 +8379,7 @@ mod tests {
                         })
                         .collect();
                     service
-                        .set_matches("user", "spotify", batch_id, results)
+                        .set_matches("user", "spotify", batch_id, results, None)
                         .await
                 }
             }
@@ -8668,7 +8753,7 @@ mod tests {
             },
         );
         session.decisions.insert(
-            source_id,
+            source_id.clone(),
             RowDecision {
                 status: RowStatus::Done,
                 excluded: false,
@@ -8677,6 +8762,13 @@ mod tests {
         session
             .count_modes
             .insert(target.into(), CountMode::Overwrite);
+        session.page_options.insert(
+            "accepted".into(),
+            PageOptions {
+                selected_track_ids: BTreeSet::from([source_id]),
+                ..PageOptions::default()
+            },
+        );
         session.phase = ImportPhase::Review;
         service.save(session).await.unwrap();
 
@@ -8694,8 +8786,87 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn count_mode_change_updates_every_unlocked_target_and_survives_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.count_modes = BTreeMap::from([
+            ("spotify:track:first".into(), CountMode::Overwrite),
+            ("spotify:track:second".into(), CountMode::Sum),
+        ]);
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+
+        service
+            .set_count_mode("user", "spotify", "spotify:track:first", CountMode::Zero)
+            .await
+            .unwrap();
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.default_count_mode, CountMode::Zero);
+        assert!(session.count_modes.is_empty());
+
+        service
+            .save_mappings_for(
+                "user",
+                Some("spotify"),
+                LastFmMappings {
+                    default_count_mode: CountMode::Zero,
+                    ..LastFmMappings::default()
+                },
+            )
+            .await
+            .unwrap();
+        drop(service);
+        assert_eq!(
+            Service::new(dir.path())
+                .mappings_for("user", Some("spotify"))
+                .await
+                .default_count_mode,
+            CountMode::Zero
+        );
+    }
+
+    #[tokio::test]
+    async fn first_spotify_match_restores_the_reusable_count_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 10, ImportDefaults::default());
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[scrobble("Artist", "Album", "Track", 1)],
+        );
+        session.batches = build_review_batches(&session.rows);
+        session.phase = ImportPhase::Review;
+        let source_id = session.rows[0].stable_id.clone();
+        service.save(session).await.unwrap();
+
+        service
+            .set_matches(
+                "user",
+                "spotify",
+                1,
+                vec![MatchResult {
+                    source_id: source_id.clone(),
+                    search_term: String::new(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some("spotify:track:target".into()),
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::from([(source_id, "spotify:track:target".into())]),
+                }],
+                Some(CountMode::Overwrite),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.snapshot().await.unwrap().default_count_mode,
+            CountMode::Overwrite
+        );
+    }
+
     #[test]
-    fn target_count_mode_is_session_scoped_across_pages_and_persisted() {
+    fn selected_count_mode_is_session_scoped_across_pages_and_persisted() {
         let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
         aggregate_scrobbles(
             &mut session.rows,
@@ -8727,6 +8898,20 @@ mod tests {
             RowDecision {
                 status: RowStatus::Done,
                 excluded: false,
+            },
+        );
+        session.batches = build_review_batches(&session.rows);
+        let first_batch = session
+            .batches
+            .iter()
+            .find(|batch| batch.source_ids.contains(&first))
+            .unwrap()
+            .page;
+        session.page_options.insert(
+            batch_options_key(first_batch),
+            PageOptions {
+                selected_track_ids: BTreeSet::from([first.clone()]),
+                ..PageOptions::default()
             },
         );
         let current = vec![&session.rows[1]];
@@ -8950,9 +9135,12 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn whole_album_history_keeps_unmatched_source_rows_pending() {
-        let rows = vec![
+    #[tokio::test]
+    async fn accepting_a_batch_archives_unselected_source_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.rows = vec![
             SourceRow {
                 stable_id: "matched".into(),
                 artist: "Artist".into(),
@@ -8974,14 +9162,33 @@ mod tests {
                 latest: 1,
             },
         ];
-        let target_by_source = BTreeMap::from([("matched".into(), "spotify:track:one".into())]);
+        session.batches = build_review_batches(&session.rows);
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+        service
+            .commit_rows(
+                "user",
+                "spotify",
+                1,
+                &["matched".into(), "unmatched".into()],
+                "Artist",
+                "Album",
+                PageOptions {
+                    selected_track_ids: BTreeSet::from(["matched".into()]),
+                    ..PageOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.remaining(), 0);
+        assert!(session
+            .rows
+            .iter()
+            .all(|row| { default_decision(&session, &row.stable_id).status == RowStatus::Done }));
         assert_eq!(
-            committed_source_ids(&rows, &target_by_source, true, true, true),
-            vec!["matched"]
-        );
-        assert_eq!(
-            committed_source_ids(&rows, &target_by_source, true, true, false),
-            vec!["matched", "unmatched"]
+            session.page_options[&batch_options_key(1)].selected_track_ids,
+            BTreeSet::from(["matched".into()])
         );
     }
 
@@ -9521,17 +9728,13 @@ mod tests {
         count_mode.unwrap();
         let current = service.snapshot().await.unwrap();
         assert!(!current.search_terms);
-        assert_eq!(
-            current.count_modes.get("spotify:track:target"),
-            Some(&CountMode::Overwrite)
-        );
+        assert_eq!(current.default_count_mode, CountMode::Overwrite);
+        assert!(current.count_modes.is_empty());
         let resumed = Service::new(dir.path());
         let persisted = resumed.snapshot().await.unwrap();
         assert!(!persisted.search_terms);
-        assert_eq!(
-            persisted.count_modes.get("spotify:track:target"),
-            Some(&CountMode::Overwrite)
-        );
+        assert_eq!(persisted.default_count_mode, CountMode::Overwrite);
+        assert!(persisted.count_modes.is_empty());
     }
 
     #[tokio::test]
@@ -9590,6 +9793,7 @@ mod tests {
                     candidates: Vec::new(),
                     track_matches: BTreeMap::new(),
                 }],
+                None,
             )
             .await;
         assert!(result.is_err());

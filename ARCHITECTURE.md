@@ -117,10 +117,12 @@ prefetch. Accept All is the explicit bulk exception: it sequentially prepares
 every remaining batch, shows global unique album/track URI counts, then applies
 only after confirmation.
 
-Fuzzy count strategies are persisted once per Spotify track target for the
-session, while fuzzy disclosures are bounded to the visible persisted batch.
-The target-wide count decision still includes completed source rows from other
-batches. “Show Spotify search terms” is likewise one persisted session
+The Sum/Use highest/Zero choice is one reusable account-bound default applied to
+every unlocked fuzzy target and restored for later import sessions. Accepting a
+target freezes the strategy used for that target, while fuzzy disclosures remain
+bounded to the visible persisted batch. The target-wide count decision still
+includes selected, completed source rows from other batches. “Show Spotify search
+terms” is likewise one persisted session
 preference, restored when the importer resumes rather than copied into each
 page’s options.
 

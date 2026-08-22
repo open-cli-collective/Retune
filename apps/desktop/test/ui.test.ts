@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, canHandleImportShortcut, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, remainingImportCount, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -93,6 +93,9 @@ test('Last.fm queue-only review preserves focus and skip/resume page semantics',
   assert.equal(shouldRefreshImportEvent(false, true), false)
   assert.equal(importAlbumActionAdvances('skip-album'), true)
   assert.equal(importAlbumActionAdvances('restore'), false)
+  assert.deepEqual(importQueueTabTarget(false), { kind: 'source', row: 0 })
+  assert.deepEqual(importQueueTabTarget(true), { kind: 'match', row: 0 })
+  assert.deepEqual(activeImportQueue([{ ...queue[0], remaining: false, status: 'done' }, queue[1]]), [queue[1]])
 })
 
 test('Last.fm strong album match advisory accepts exact and supersets but rejects unsafe mappings', () => {
@@ -296,7 +299,11 @@ test('Last.fm queue selection keeps refresh stable and controls retain native bu
   assert.match(importer, /const sortRef = useRef<.*>\('plays'\)/)
   assert.match(refreshBlock, /const refresh = useCallback\(async/)
   assert.doesNotMatch(refreshBlock, /\}, \[selectedPage, sort\]\)/)
-  assert.match(importer, /const nextQueueItem = \(queueSnapshot = queue\) => \{[\s\S]*const orderedSnapshot = sortImportQueue\(queueSnapshot, sort\)[\s\S]*const next = nextRemainingImportQueue\(orderedSnapshot, selected, sort\)[\s\S]*if \(next\) void openQueueItem\(next, orderedSnapshot\)/)
+  assert.match(importer, /const nextQueueItem = \(queueSnapshot = queue, focusQueue = false\)/)
+  assert.match(importer, /focusQueueAfterOpen\.current = focusQueue/)
+  assert.match(importer, /openQueueItem\(next, activeImportQueue\(orderedSnapshot\)\)/)
+  assert.match(importer, /onMutation\(true\)[\s\S]*lastfm_import_apply/)
+  assert.match(importer, /archiveBatch: advance/)
   assert.doesNotMatch(importer, /role="listbox"/)
   assert.doesNotMatch(importer, /role="option"/)
   assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)

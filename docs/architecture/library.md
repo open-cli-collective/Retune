@@ -35,8 +35,9 @@ Overlay edits never mutate source-file tags or Spotify metadata.
 Last.fm import is an application-shell boundary in
 `apps/desktop/src-tauri/src/lastfm_import.rs`; `retune-core` remains a pure,
 deterministic mutation target. History is an absolute baseline: resolved source
-counts use one session-persisted Sum, highest-played spelling Overwrite, or Zero
-decision per collapsed Spotify track target, then local play count takes the maximum of current and historical
+counts use one reusable account-bound Sum, highest-played spelling Overwrite, or
+Zero default across unlocked Spotify targets. Acceptance freezes the strategy
+used by each selected target, then local play count takes the maximum of current and historical
 values. `last_played_at` takes the latest relevant scrobble and `added_at` takes
 the earliest; Zero never erases known Retune plays. Blank genre/rating options
 are no-ops. Whole-album rating is stored as an album rating, while
@@ -100,7 +101,9 @@ threshold does not apply. An explicit track mapping wins over an album mapping.
 Unknown or unavailable targets remain in the stable importer backlog, which can
 accept later windows without blocking their download. Explicit accepted matches
 and permanent track, album, and artist ignore rules are reusable and sweep
-applicable backlog occurrences; Skip is temporary. No target is silently added
+applicable backlog occurrences; Skip is temporary. Accept & Next archives a
+reviewed batch from the queue, records mappings only for selected rows, and leaves
+future occurrences of unselected rows eligible for review. No target is silently added
 to the library: explicit reviewed content choices use the existing Spotify save
 operations.
 

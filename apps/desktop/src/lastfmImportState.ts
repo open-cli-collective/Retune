@@ -104,6 +104,14 @@ export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[]
   return selectedIndex >= 0 ? selectedIndex : Math.min(Math.max(currentIndex, 0), Math.max(0, items.length - 1))
 }
 
+export function activeImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
+  return items.filter((item) => item.remaining)
+}
+
+export function importQueueTabTarget(shiftKey: boolean): { kind: 'source' | 'match'; row: 0 } {
+  return { kind: shiftKey ? 'match' : 'source', row: 0 }
+}
+
 export function importAlbumActionAdvances(action: 'skip-album' | 'restore'): boolean {
   return action === 'skip-album'
 }
