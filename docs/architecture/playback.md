@@ -31,6 +31,12 @@ shell translates those facts into provider actions. Last.fm owns its
 `scrobble_threshold_ms` eligibility, provider state, timestamps, and queueing;
 the playback reducer has no Last.fm dependency or scrobble policy.
 
+Incremental Last.fm reconciliation does not reuse that local eligibility
+threshold. Accepted local scrobbles are recorded as receipts and deduplicated;
+every accepted external scrobble in the exact sync window is already a
+represented play and is applied additively after mapping. Playback remains
+usable while signed out of Last.fm or Spotify.
+
 ## Backends
 
 - Built-in Spotify uses librespot with the stored reusable playback credential,
