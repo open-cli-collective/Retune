@@ -9863,10 +9863,7 @@ mod tests {
         .await
         .unwrap();
         assert!(first.is_some());
-        assert_eq!(
-            search_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             searched.lock().unwrap().as_slice(),
             &[String::from("Legacy")]
@@ -9893,10 +9890,7 @@ mod tests {
         .await
         .unwrap();
         assert!(second.is_some());
-        assert_eq!(
-            search_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             searched.lock().unwrap().as_slice(),
             &[String::from("Legacy")]
@@ -10117,14 +10111,14 @@ mod tests {
                         "id": "album",
                         "uri": "spotify:album:album",
                         "name": "Singles",
-                        "artists": [{"id": "artist", "name": "Artist"}],
+                        "artists": [],
                         "release_date": "2024",
                         "total_tracks": 1,
                         "tracks": {
                             "items": [{
                                 "uri": "spotify:track:one",
                                 "name": "One",
-                                "artists": [{"id": "artist", "name": "Artist"}]
+                                "artists": []
                             }],
                             "next": null,
                             "total": 1
@@ -10155,12 +10149,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].search_term, album_search_term("Artist", "Singles"));
-        assert_eq!(matches[0].candidates.len(), 1);
         assert_eq!(
-            matches[0].candidates[0].uri,
-            "spotify:album:album"
+            matches[0].search_term,
+            album_search_term("Artist", "Singles")
         );
+        assert_eq!(matches[0].candidates.len(), 1);
+        assert_eq!(matches[0].candidates[0].uri, "spotify:album:album");
         assert_eq!(
             matches[0].candidates[0].relation,
             Some(AlbumRelation::BestMatch)
@@ -10169,7 +10163,9 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].url.contains("type=album"));
         assert!(requests[1].url.contains("/albums/album"));
-        assert!(requests.iter().all(|request| !request.url.contains("type=track")));
+        assert!(requests
+            .iter()
+            .all(|request| !request.url.contains("type=track")));
     }
 
     #[test]
@@ -10843,7 +10839,7 @@ mod tests {
             &LastFmMappings::default(),
         );
         assert!(result.track_matches.is_empty());
-        assert_eq!(result.candidates[0].in_library, true);
+        assert!(result.candidates[0].in_library);
     }
 
     #[test]
