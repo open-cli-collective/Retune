@@ -9567,7 +9567,7 @@ mod tests {
             .split("fn historical_counts_for_targets(")
             .nth(1)
             .unwrap()
-            .split("#[cfg(test)]\nfn historical_count_for_target(")
+            .split("fn historical_count_for_target(")
             .next()
             .unwrap();
         assert!(!counts.contains("options_for_batch("));
