@@ -112,7 +112,7 @@ export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[]
 }
 
 export function activeImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
-  return items.filter((item) => item.remaining)
+  return items.filter((item) => item.remaining || item.status === 'failed')
 }
 
 export function importQueueTabTarget(shiftKey: boolean): { kind: 'source' | 'match'; row: 0 } {

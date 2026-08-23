@@ -98,6 +98,7 @@ test('Last.fm queue-only review preserves focus and skip/resume page semantics',
   assert.deepEqual(importQueueTabTarget(false), { kind: 'source', row: 0 })
   assert.deepEqual(importQueueTabTarget(true), { kind: 'match', row: 0 })
   assert.deepEqual(activeImportQueue([{ ...queue[0], remaining: false, status: 'done' }, queue[1]]), [queue[1]])
+  assert.deepEqual(activeImportQueue([{ ...queue[0], remaining: false, status: 'failed' }]), [{ ...queue[0], remaining: false, status: 'failed' }])
 })
 
 test('Last.fm acknowledged apply projects the next queue choice before authoritative refresh', () => {
@@ -305,6 +306,7 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
 
 test('Last.fm queue selection restores focus after loading and retains native button semantics', () => {
   const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
+  const importState = readFileSync(new URL('../src/lastfmImportState.ts', import.meta.url), 'utf8')
   const refreshBlock = importer.match(/const refresh = useCallback[\s\S]*?\n  useEffect\(\(\) => \{\n    void refresh\(\)/)?.[0] ?? ''
   assert.match(importer, /const importQueuePageLimit = 1000/)
   assert.match(importer, /const selectedPageRef = useRef<number \| undefined>\(undefined\)/)
@@ -325,8 +327,11 @@ test('Last.fm queue selection restores focus after loading and retains native bu
   assert.match(importer, /const refreshQueueOnly = async \(strict = false\)/)
   assert.match(importer, /requestGeneration !== queueRefreshGeneration\.current/)
   assert.match(importer, /lastfm-import-apply-finished/)
+  assert.match(importer, /lastfm_import_retry_apply/)
+  assert.match(importer, /Retry Apply/)
   assert.match(importer, /if \(event\.payload\.message\) \{[\s\S]*refreshQueueOnly\(\)[\s\S]*else if \(!advancingApply\.current/)
   assert.match(importer, /state\.applyingAll \? <section className="import-empty">/)
+  assert.match(importState, /item\.remaining \|\| item\.status === 'failed'/)
   assert.doesNotMatch(importer, /role="listbox"/)
   assert.doesNotMatch(importer, /role="option"/)
   assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)

@@ -2569,6 +2569,7 @@ pub fn run() {
             lastfm_import::lastfm_import_change_track,
             lastfm_import::lastfm_import_change_album,
             lastfm_import::lastfm_import_apply,
+            lastfm_import::lastfm_import_retry_apply,
             lastfm_import::lastfm_import_prepare_accept_all,
             lastfm_import::lastfm_import_accept_all,
             diagnostics::load_diagnostics,

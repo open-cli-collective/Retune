@@ -404,9 +404,9 @@ pub(crate) struct AlbumSaveResult {
 /// Saves one album entity upstream and mirrors its content locally. The
 /// caller holds `spotify_library_gate`; replaying this operation is safe
 /// because Spotify's library PUT is idempotent and local upsert deduplicates.
-pub(crate) async fn save_album_operation(
+pub(crate) async fn save_album_operation<T: Transport, S: TokenStore>(
     state: &AppState,
-    provider: &SpotifyProvider,
+    provider: &SpotifyClient<T, S>,
     uri: &str,
     name: &str,
     artist: &str,
@@ -535,9 +535,9 @@ pub(super) async fn add_spotify_tracks(
 
 /// Saves only track entities upstream and mirrors those tracks locally. The
 /// caller holds `spotify_library_gate`; no album URI is synthesized here.
-pub(crate) async fn save_tracks_operation(
+pub(crate) async fn save_tracks_operation<T: Transport, S: TokenStore>(
     state: &AppState,
-    provider: &SpotifyProvider,
+    provider: &SpotifyClient<T, S>,
     uris: Vec<String>,
     added_at: u64,
 ) -> Result<Vec<u64>, String> {

@@ -124,7 +124,9 @@ its artist/album identity. Row actions also require a source ID; album-level
 actions can operate without one. Queue summaries cross the IPC boundary as
 bounded cursor/limit pages with `sourceCount`, not source IDs. Queued and
 running apply jobs are omitted from the active projection; failed jobs reappear
-with their frozen choices and an actionable error. Accept All persists one
+with their frozen choices and an explicit retry action. A failed Accept All job
+parks its cursor until that frozen job succeeds, then resumes from its saved
+bulk index. Accept All persists one
 compact cursor and advances one durable apply job at a time; review choices are
 locked while that cursor is active, including after restart.
 
