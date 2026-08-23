@@ -1377,6 +1377,9 @@ fn build_apply_plan(
             }
         }
     }
+    let historical_counts = options
+        .include_historical_play_counts
+        .then(|| historical_counts_for_targets(session, &by_target));
     let updates = by_target
         .iter()
         .map(|(uri, rows)| {
@@ -1384,9 +1387,9 @@ fn build_apply_plan(
             let (earliest, latest) = resolved_timestamps(&refs).unwrap_or_default();
             HistoryUpdate {
                 uri: uri.clone(),
-                play_count: options
-                    .include_historical_play_counts
-                    .then(|| historical_count_for_target(session, uri, rows, &options)),
+                play_count: historical_counts
+                    .as_ref()
+                    .and_then(|counts| counts.get(uri).copied()),
                 earliest: (earliest > 0).then_some(earliest),
                 latest: options.include_historical_play_counts.then_some(latest),
             }
@@ -5512,53 +5515,73 @@ fn membership_uris_for_import(
     )
 }
 
+fn historical_counts_for_targets(
+    session: &LastFmImportSessionV2,
+    current_by_target: &BTreeMap<String, Vec<&SourceRow>>,
+) -> BTreeMap<String, u64> {
+    let current_ids = current_by_target
+        .values()
+        .flat_map(|rows| rows.iter().map(|row| row.stable_id.as_str()))
+        .collect::<BTreeSet<_>>();
+    let source_batches = source_batch_map(session);
+    let mut relevant = BTreeMap::<String, Vec<&SourceRow>>::new();
+    for row in &session.rows {
+        let decision = default_decision(session, &row.stable_id);
+        let included = current_ids.contains(row.stable_id.as_str())
+            || (decision.status == RowStatus::Done
+                && !decision.excluded
+                && source_batches
+                    .get(row.stable_id.as_str())
+                    .and_then(|batch_id| session.page_options.get(&batch_options_key(*batch_id)))
+                    .or_else(|| {
+                        session
+                            .page_options
+                            .get(&format!("{}\u{1f}{}", row.artist, row.album))
+                    })
+                    .is_some_and(|options| {
+                        options.include_historical_play_counts
+                            && options.selected_track_ids.contains(&row.stable_id)
+                    }));
+        if !included {
+            continue;
+        }
+        let Some(target) = session
+            .matches
+            .get(&row.stable_id)
+            .and_then(|result| matched_track_uri_for_row(result, row))
+        else {
+            continue;
+        };
+        if current_by_target.contains_key(&target) {
+            relevant.entry(target).or_default().push(row);
+        }
+    }
+    current_by_target
+        .keys()
+        .map(|target| {
+            let count = resolved_play_count(
+                relevant.get(target).map(Vec::as_slice).unwrap_or_default(),
+                session
+                    .count_modes
+                    .get(target)
+                    .copied()
+                    .unwrap_or(session.default_count_mode),
+            );
+            (target.clone(), count)
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn historical_count_for_target(
     session: &LastFmImportSessionV2,
     target_uri: &str,
     current_rows: &[&SourceRow],
-    current_options: &PageOptions,
 ) -> u64 {
-    let current_ids = current_rows
-        .iter()
-        .map(|row| row.stable_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let source_batches = source_batch_map(session);
-    let mut relevant = Vec::new();
-    for row in &session.rows {
-        let decision = default_decision(session, &row.stable_id);
-        let current_page = current_ids.contains(row.stable_id.as_str());
-        let page_options = if current_page {
-            current_options.clone()
-        } else {
-            source_batches
-                .get(row.stable_id.as_str())
-                .map(|batch_id| session.options_for_batch(*batch_id, &row.artist, &row.album))
-                .unwrap_or_else(|| session.options_for(&row.artist, &row.album))
-        };
-        let included = current_page
-            || (decision.status == RowStatus::Done
-                && !decision.excluded
-                && page_options.selected_track_ids.contains(&row.stable_id));
-        if included
-            && page_options.include_historical_play_counts
-            && session
-                .matches
-                .get(&row.stable_id)
-                .and_then(|result| matched_track_uri_for_row(result, row))
-                .as_deref()
-                == Some(target_uri)
-        {
-            relevant.push(row);
-        }
-    }
-    resolved_play_count(
-        &relevant,
-        session
-            .count_modes
-            .get(target_uri)
-            .copied()
-            .unwrap_or(session.default_count_mode),
-    )
+    historical_counts_for_targets(
+        session,
+        &BTreeMap::from([(target_uri.to_owned(), current_rows.to_vec())]),
+    )[target_uri]
 }
 
 fn update_selected_match(
@@ -9104,6 +9127,21 @@ mod tests {
         assert!(queue_item.contains("options_for_page_batch("));
     }
 
+    #[test]
+    fn apply_plan_counts_history_without_rebuilding_review_batches_per_track() {
+        let source = include_str!("lastfm_import.rs");
+        let counts = source
+            .split("fn historical_counts_for_targets(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]\nfn historical_count_for_target(")
+            .next()
+            .unwrap();
+        assert!(!counts.contains("options_for_batch("));
+        assert!(!counts.contains("review_batches("));
+        assert_eq!(counts.matches("for row in &session.rows").count(), 1);
+    }
+
     #[tokio::test]
     async fn large_queue_follows_every_cursor_in_order_without_materializing_prior_slices() {
         let dir = tempfile::tempdir().unwrap();
@@ -9973,22 +10011,13 @@ mod tests {
         );
         let current = vec![&session.rows[1]];
         session.count_modes.insert(target.into(), CountMode::Sum);
-        assert_eq!(
-            historical_count_for_target(&session, target, &current, &PageOptions::default()),
-            4
-        );
+        assert_eq!(historical_count_for_target(&session, target, &current), 4);
         session
             .count_modes
             .insert(target.into(), CountMode::Overwrite);
-        assert_eq!(
-            historical_count_for_target(&session, target, &current, &PageOptions::default()),
-            2
-        );
+        assert_eq!(historical_count_for_target(&session, target, &current), 2);
         session.count_modes.insert(target.into(), CountMode::Zero);
-        assert_eq!(
-            historical_count_for_target(&session, target, &current, &PageOptions::default()),
-            0
-        );
+        assert_eq!(historical_count_for_target(&session, target, &current), 0);
 
         let dir = tempfile::tempdir().unwrap();
         let store = ImportSessionStore::new(dir.path());
@@ -10082,21 +10111,11 @@ mod tests {
             .count_modes
             .insert("spotify:track:two".into(), CountMode::Zero);
         assert_eq!(
-            historical_count_for_target(
-                &session,
-                "spotify:track:one",
-                &[&session.rows[0]],
-                &PageOptions::default()
-            ),
+            historical_count_for_target(&session, "spotify:track:one", &[&session.rows[0]]),
             2
         );
         assert_eq!(
-            historical_count_for_target(
-                &session,
-                "spotify:track:two",
-                &[&session.rows[1]],
-                &PageOptions::default()
-            ),
+            historical_count_for_target(&session, "spotify:track:two", &[&session.rows[1]]),
             0
         );
     }
