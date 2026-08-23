@@ -71,7 +71,10 @@ whole-album mode, compact aggregated rows, decisions, stable 1-based
 `ImportBatch` pages capped at 100 source rows, batch options, match
 results/candidates/selected URIs, a
 reusable default plus frozen Spotify-target-to-Sum/Overwrite/Zero map, and the
-session-level search-term display preference. Last.fm pages are written atomically as parsed
+session-level search-term display preference. Match candidates include the
+backward-compatible serde-defaulted `inLibrary` projection (`false` for older
+sessions); it is cache-derived membership UI state, not a new acceptance or
+mapping decision. Last.fm pages are written atomically as parsed
 raw-page files; the manifest is written only after the page file and is the
 authority for recovery. The manifest and every page record the exact Last.fm
 username as well as cutoff/page metadata, so punctuation-distinct accounts

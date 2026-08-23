@@ -304,6 +304,23 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(importerCss, /\.import-match-cell\.needs-action \{[^}]*box-shadow: inset 4px 0 #a64b00/)
 })
 
+test('Last.fm collection review explains individual matching and keeps release UI scoped', () => {
+  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
+  const importerCss = readFileSync(new URL('../src/lastfmImporter.css', import.meta.url), 'utf8')
+  assert.match(importer, /Last\.fm supplied no album metadata\. Tracks are matched individually\./)
+  assert.match(importer, /automatically selected/)
+  assert.match(importer, /suggested/)
+  assert.match(importer, /need review/)
+  assert.match(importer, /Use This Track/)
+  assert.match(importer, /ALREADY IN YOUR LIBRARY/)
+  assert.match(importer, /collection && !collectionAlbumReady/)
+  assert.match(importer, /const collection = page\.album === ''/)
+  assert.match(importer, /collection \? collectionSuggestion\(item\) : null/)
+  assert.match(importerCss, /\.import-library-badge/)
+  assert.match(importerCss, /\.import-suggestion-label/)
+  assert.match(importer, /collection && trackConfidence === 'exact'/)
+})
+
 test('Last.fm queue selection restores focus after loading and retains native button semantics', () => {
   const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
   const importState = readFileSync(new URL('../src/lastfmImportState.ts', import.meta.url), 'utf8')

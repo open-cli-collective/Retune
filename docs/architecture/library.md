@@ -55,7 +55,16 @@ only already-materialized matched Retune tracks.
 The importer’s “Show Spotify search terms” preference is session-level and is
 restored on resume. Fuzzy disclosures are bounded to the visible persisted
 `ImportBatch`; the target-wide count decision still includes completed source
-rows from other batches.
+rows from other batches. Last.fm rows with an empty source album are collection
+rows, displayed as `Singles`, and are matched one track at a time. Ratification
+prefers accepted mappings and manual choices, then uniquely exact normalized
+title/primary-artist candidates already in the Retune library or exact saved
+Spotify track/album membership, then uniquely exact candidates without
+ownership. Same-artist near matches are suggestions only; equal-ranked editions
+and wrong artists remain unresolved. Cached collection matches rerank from
+current membership without Spotify requests, while legacy album-shaped search
+terms refetch only the incompatible rows. A non-empty source album literally
+named `Singles` remains release-shaped.
 
 The source importer is V2. It records a fixed profile-bound `historyTo`, probes
 Last.fm metadata once, downloads pages at the documented 200-row limit; Last.fm's
@@ -132,7 +141,10 @@ locked while that cursor is active, including after restart.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the
-first match, and caches the result; reopening it makes no API call. Accept All
+first match, and caches the result. Correctly cached collection batches reopen
+without an API call; only legacy empty-album rows with album-shaped cached
+search terms refetch. Whole-album import stays disabled for a collection until
+one coherent release is explicitly chosen. Accept All
 is the only bulk exception and prepares remaining batches sequentially before
 showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
 source-history decisions and can be undone before acceptance; they never remove

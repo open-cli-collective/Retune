@@ -105,7 +105,18 @@ an empty state never creates a session implicitly.
 
 Opening a visible review batch lazily searches through the shared Spotify
 client/request gate, serializes duplicate batch requests, binds the Spotify
-account on the first match, and caches the results. Review batches are
+account on the first match, and caches the results. Empty-album rows are
+collection-shaped (`Singles` is only a display label): each source track is
+searched once and ratified conservatively. Accepted mappings and explicit
+choices win; otherwise one normalized title + primary-artist candidate already
+in Retune or exact saved Spotify membership wins, then one exact candidate
+without ownership. Same-artist near matches remain suggestions, equal-ranked
+editions stay unresolved, and wrong artists never auto-select. Cached
+collection candidates are reranked against current membership without a
+request; legacy empty-album entries carrying an album search term refetch only
+those rows. Each candidate exposes the backward-compatible `inLibrary` UI
+projection. A literal non-empty album named `Singles` remains release-shaped.
+Review batches are
 persisted as stable `ImportBatch` pages capped at 100 source rows; large
 artist/album groups, including singles, are split without changing the
 artist-level cascade. Commands validate the page and artist/album identity; row
