@@ -4,6 +4,7 @@ use std::{
     fs,
     future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -289,6 +290,7 @@ pub(crate) struct ImportStateView {
     pub last_synced_at: Option<u64>,
     pub pending_review: usize,
     pub sync_problem: Option<String>,
+    pub applying_all: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -299,6 +301,7 @@ pub(crate) enum QueueStatus {
     IgnoredAlbum,
     IgnoredArtist,
     Excluded,
+    Failed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -314,6 +317,7 @@ pub(crate) struct ImportQueueItem {
     pub album_entities: u32,
     pub track_entities: u32,
     pub status: Option<QueueStatus>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -884,6 +888,86 @@ fn requested_batch(
     })
 }
 
+fn apply_plan_to_effective_session(session: &mut LastFmImportSessionV2, plan: &ApplyPlan) {
+    if plan.session_id != session.cache_id {
+        return;
+    }
+    session
+        .page_options
+        .insert(batch_options_key(plan.batch_id), plan.options.clone());
+    let default_count_mode = session.default_count_mode;
+    for id in &plan.committed_ids {
+        session.decisions.insert(
+            id.clone(),
+            RowDecision {
+                status: RowStatus::Done,
+                excluded: false,
+            },
+        );
+    }
+    for update in &plan.updates {
+        if update.play_count.is_some() {
+            session
+                .count_modes
+                .entry(update.uri.clone())
+                .or_insert(default_count_mode);
+        }
+    }
+}
+
+fn effective_apply_session(
+    session: &LastFmImportSessionV2,
+    queued_jobs: &[ReviewApplyJob],
+) -> LastFmImportSessionV2 {
+    let mut effective = session.clone();
+    for job in queued_jobs.iter().filter(|job| {
+        matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
+            && job.plan.session_id == session.cache_id
+    }) {
+        apply_plan_to_effective_session(&mut effective, &job.plan);
+    }
+    effective
+}
+
+fn effective_apply_session_for_job(
+    session: &LastFmImportSessionV2,
+    queued_jobs: &[ReviewApplyJob],
+    job_id: &str,
+) -> LastFmImportSessionV2 {
+    let prefix = queued_jobs
+        .iter()
+        .position(|job| job.id == job_id && job.status == ApplyJobStatus::Failed)
+        .map(|index| &queued_jobs[..index])
+        .unwrap_or(queued_jobs);
+    effective_apply_session(session, prefix)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retry_plan_matches_request(
+    plan: &ApplyPlan,
+    spotify_account_id: &str,
+    batch_id: u32,
+    artist: &str,
+    album: &str,
+    selected_ids: &[String],
+    archive_batch: bool,
+    options: &PageOptions,
+) -> bool {
+    let selected = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let committed = plan.committed_ids.iter().cloned().collect::<BTreeSet<_>>();
+    plan.spotify_account_id == spotify_account_id
+        && plan.batch_id == batch_id
+        && plan.artist == artist
+        && plan.album == album
+        && plan.archive_batch == archive_batch
+        && plan.options == *options
+        && if archive_batch {
+            selected.is_subset(&committed)
+        } else {
+            selected == committed
+        }
+}
+
 pub(crate) fn resolved_play_count(rows: &[&SourceRow], mode: CountMode) -> u64 {
     match mode {
         CountMode::Sum => rows
@@ -1079,7 +1163,8 @@ pub(crate) fn classify_album_candidates(
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct HistoryUpdate {
     pub uri: String,
     pub play_count: Option<u64>,
@@ -1185,6 +1270,177 @@ pub(crate) fn apply_metadata(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_apply_plan(
+    session: &LastFmImportSessionV2,
+    spotify_account_id: &str,
+    batch_id: u32,
+    artist: &str,
+    album: &str,
+    selected_ids: &[String],
+    archive_batch: bool,
+    options: PageOptions,
+) -> Result<ApplyPlan, String> {
+    options.validate()?;
+    if session
+        .spotify_account_id
+        .as_deref()
+        .is_some_and(|bound| bound != spotify_account_id)
+    {
+        return Err("The Last.fm review belongs to another Spotify account.".into());
+    }
+    let Some(batch) = requested_batch(session, batch_id, artist, album) else {
+        return Err("Unknown Last.fm import review batch.".into());
+    };
+    let selected = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if selected_ids
+        .iter()
+        .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
+    {
+        return Err("A selected source row does not belong to this review batch.".into());
+    }
+    let rows_by_id = source_row_map(session);
+    let rows = batch_rows(&batch, &rows_by_id)
+        .into_iter()
+        .filter(|row| selected.contains(&row.stable_id))
+        .filter(|row| is_actionable(session, &row.stable_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Err("Select at least one actionable source row before accepting.".into());
+    }
+
+    let mut target_by_source = BTreeMap::<String, String>::new();
+    for row in &rows {
+        if let Some(result) = session.matches.get(&row.stable_id) {
+            if let Some(uri) = matched_track_uri_for_row(result, row) {
+                target_by_source.insert(row.stable_id.clone(), uri);
+            }
+        }
+    }
+    if (options.include_historical_play_counts || !options.whole_album)
+        && rows
+            .iter()
+            .any(|row| !target_by_source.contains_key(&row.stable_id))
+    {
+        return Err(
+            "Every selected source track needs a supported Spotify match before this batch can be accepted. Change its match or uncheck it first."
+                .into(),
+        );
+    }
+
+    let mut metadata_uris = target_by_source.values().cloned().collect::<BTreeSet<_>>();
+    let membership = if options.import_content && options.whole_album {
+        let (result, album_uri) = rows
+            .iter()
+            .filter_map(|row| session.matches.get(&row.stable_id))
+            .filter_map(|result| Some((result, result.selected_uri.as_deref()?)))
+            .find(|(_, uri)| uri.starts_with("spotify:album:"))
+            .ok_or_else(|| {
+                "Choose a supported Spotify album match before accepting.".to_string()
+            })?;
+        let album_uri = membership_uris_for_import(true, true, Some(album_uri), &[])
+            .and_then(|uris| uris.into_iter().next())
+            .ok_or_else(|| "Expected a Spotify album URI for the import.".to_string())?;
+        if let Some(candidate) = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.uri == album_uri)
+        {
+            metadata_uris.extend(candidate.track_uris.iter().cloned());
+        }
+        ApplyMembership::Album {
+            uri: album_uri,
+            name: album.to_owned(),
+            artist: artist.to_owned(),
+        }
+    } else if options.import_content {
+        let requested = target_by_source.values().cloned().collect::<BTreeSet<_>>();
+        ApplyMembership::Tracks(
+            membership_uris_for_import(
+                true,
+                false,
+                None,
+                &requested.iter().cloned().collect::<Vec<_>>(),
+            )
+            .unwrap_or_default(),
+        )
+    } else {
+        ApplyMembership::None
+    };
+
+    let mut by_target = BTreeMap::<String, Vec<&SourceRow>>::new();
+    for row in &rows {
+        if !session.incremental_source_keys.contains_key(&row.stable_id) {
+            if let Some(uri) = target_by_source.get(&row.stable_id) {
+                by_target.entry(uri.clone()).or_default().push(row);
+            }
+        }
+    }
+    let updates = by_target
+        .iter()
+        .map(|(uri, rows)| {
+            let refs = rows.to_vec();
+            let (earliest, latest) = resolved_timestamps(&refs).unwrap_or_default();
+            HistoryUpdate {
+                uri: uri.clone(),
+                play_count: options
+                    .include_historical_play_counts
+                    .then(|| historical_count_for_target(session, uri, rows, &options)),
+                earliest: (earliest > 0).then_some(earliest),
+                latest: options.include_historical_play_counts.then_some(latest),
+            }
+        })
+        .collect::<Vec<_>>();
+    let committed_ids = if archive_batch {
+        batch_rows(&batch, &rows_by_id)
+            .into_iter()
+            .filter(|row| is_actionable(session, &row.stable_id))
+            .map(|row| row.stable_id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        rows.iter().map(|row| row.stable_id.clone()).collect()
+    };
+    let mappings = rows
+        .iter()
+        .filter_map(|row| {
+            let target_uri = target_by_source.get(&row.stable_id)?.clone();
+            let result = session.matches.get(&row.stable_id);
+            Some(ApplyMapping {
+                source_key: session
+                    .incremental_source_keys
+                    .get(&row.stable_id)
+                    .cloned()
+                    .unwrap_or_else(|| row.stable_id.clone()),
+                artist: row.artist.clone(),
+                album: row.album.clone(),
+                track: row.track.clone(),
+                target_uri,
+                album_uri: result
+                    .and_then(|result| result.selected_uri.as_deref())
+                    .filter(|uri| uri.starts_with("spotify:album:"))
+                    .map(ToOwned::to_owned),
+            })
+        })
+        .collect();
+
+    Ok(ApplyPlan {
+        session_id: session.cache_id.clone(),
+        lastfm_username: session.lastfm_username.clone(),
+        spotify_account_id: spotify_account_id.to_owned(),
+        batch_id,
+        artist: artist.to_owned(),
+        album: album.to_owned(),
+        committed_ids,
+        archive_batch,
+        options,
+        membership,
+        updates,
+        metadata_uris: metadata_uris.into_iter().collect(),
+        mappings,
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct ImportSessionStore {
     path: PathBuf,
@@ -1225,6 +1481,93 @@ struct IncrementalRange {
     total_scrobbles: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ApplyJobStatus {
+    #[default]
+    Queued,
+    Running,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ApplyJobStage {
+    #[default]
+    Upstream,
+    Local,
+    Mappings,
+    Decision,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ApplyMembership {
+    None,
+    Album {
+        uri: String,
+        name: String,
+        artist: String,
+    },
+    Tracks(Vec<String>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyMapping {
+    source_key: String,
+    artist: String,
+    album: String,
+    track: String,
+    target_uri: String,
+    album_uri: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyPlan {
+    session_id: String,
+    lastfm_username: String,
+    spotify_account_id: String,
+    batch_id: u32,
+    artist: String,
+    album: String,
+    committed_ids: Vec<String>,
+    #[serde(default)]
+    archive_batch: bool,
+    options: PageOptions,
+    membership: ApplyMembership,
+    updates: Vec<HistoryUpdate>,
+    metadata_uris: Vec<String>,
+    mappings: Vec<ApplyMapping>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewApplyJob {
+    id: String,
+    plan: ApplyPlan,
+    #[serde(default)]
+    status: ApplyJobStatus,
+    #[serde(default)]
+    stage: ApplyJobStage,
+    #[serde(default)]
+    attempt: u32,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    bulk_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptAllCursor {
+    session_id: String,
+    lastfm_username: String,
+    spotify_account_id: String,
+    next_batch_index: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LastFmSyncState {
@@ -1237,6 +1580,10 @@ struct LastFmSyncState {
     backlog: Vec<ExternalScrobble>,
     sync_problem: Option<String>,
     journal: Option<LastFmApplicationJournal>,
+    #[serde(default)]
+    apply_queue: Vec<ReviewApplyJob>,
+    #[serde(default)]
+    accept_all: Option<AcceptAllCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1783,6 +2130,7 @@ pub(crate) struct Service {
     reconciliation_lock: Mutex<()>,
     lazy_match_lock: Mutex<()>,
     running: AtomicBool,
+    apply_running: AtomicBool,
     sync_running: AtomicBool,
 }
 
@@ -1839,6 +2187,7 @@ impl Service {
             reconciliation_lock: Mutex::new(()),
             lazy_match_lock: Mutex::new(()),
             running: AtomicBool::new(false),
+            apply_running: AtomicBool::new(false),
             sync_running: AtomicBool::new(false),
         })
     }
@@ -1851,15 +2200,27 @@ impl Service {
             None => state_view(None),
         };
         let sync = self.sync_state.lock().await;
+        if let Some(session) = session.as_ref() {
+            if matches!(session.phase, ImportPhase::Review | ImportPhase::Done) {
+                view.remaining = remaining_with_apply_queue(session, &sync.apply_queue);
+            }
+        }
         view.syncing = self.sync_running.load(Ordering::Acquire);
         view.last_synced_at = sync.last_synced_at;
         view.pending_review = sync.backlog.len();
         view.sync_problem = sync.sync_problem.clone();
+        view.applying_all = sync.accept_all.is_some();
         view
     }
 
     async fn snapshot(&self) -> Option<LastFmImportSessionV2> {
         self.session.lock().await.clone()
+    }
+
+    async fn snapshot_with_sync(&self) -> (Option<LastFmImportSessionV2>, LastFmSyncState) {
+        let session_guard = self.session.lock().await;
+        let sync = self.sync_state.lock().await.clone();
+        (session_guard.clone(), sync)
     }
 
     async fn sync_snapshot(&self) -> LastFmSyncState {
@@ -1884,6 +2245,174 @@ impl Service {
         self.persist_sync(next.clone()).await?;
         *current = next;
         Ok(result)
+    }
+
+    async fn enqueue_apply_plan(
+        &self,
+        plan: ApplyPlan,
+        bulk_index: Option<usize>,
+    ) -> Result<ImportStateView, String> {
+        let job_id = format!("{}:{}", plan.session_id, plan.batch_id);
+        log::info!(
+            target: "lastfm_import",
+            "apply enqueue job={} batch={} account={}",
+            job_id,
+            plan.batch_id,
+            plan.spotify_account_id
+        );
+        self.mutate_sync(|state| {
+            let failed = state
+                .apply_queue
+                .iter()
+                .find(|job| job.id == job_id && job.status == ApplyJobStatus::Failed)
+                .cloned();
+            if let Some(failed) = &failed {
+                if failed.plan != plan {
+                    return Err(
+                        "Apply choices are frozen; retry the failed batch with the same choices."
+                            .into(),
+                    );
+                }
+            } else if state
+                .apply_queue
+                .iter()
+                .any(|job| job.status == ApplyJobStatus::Failed && job.id != job_id)
+            {
+                return Err(
+                    "Retry the failed Last.fm apply batch before queuing another batch.".into(),
+                );
+            }
+            if state.accept_all.is_some() && bulk_index.is_none() && failed.is_none() {
+                return Err("Accept All is already applying this Last.fm review.".into());
+            }
+            if state.apply_queue.iter().any(|job| {
+                job.id == job_id
+                    && matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
+            }) {
+                return Err("This Last.fm review batch is already queued for application.".into());
+            }
+            if let Some(job) = state.apply_queue.iter_mut().find(|job| job.id == job_id) {
+                let failed = failed.expect("the queued/running duplicate was rejected above");
+                job.plan = failed.plan;
+                job.status = ApplyJobStatus::Queued;
+                job.error = None;
+                job.bulk_index = failed.bulk_index.or(bulk_index);
+            } else {
+                state.apply_queue.push(ReviewApplyJob {
+                    id: job_id,
+                    plan,
+                    status: ApplyJobStatus::Queued,
+                    stage: ApplyJobStage::Upstream,
+                    attempt: 0,
+                    error: None,
+                    bulk_index,
+                });
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(self.state().await)
+    }
+
+    async fn next_apply_job(&self) -> Option<ReviewApplyJob> {
+        let queue = self.sync_snapshot().await.apply_queue;
+        for job in queue {
+            if job.status == ApplyJobStatus::Failed {
+                return None;
+            }
+            if matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running) {
+                return Some(job);
+            }
+        }
+        None
+    }
+
+    async fn claim_apply_job(&self, id: &str) -> Result<Option<ReviewApplyJob>, String> {
+        self.mutate_sync(|state| {
+            let Some(job) = state.apply_queue.iter_mut().find(|job| job.id == id) else {
+                return Ok(None);
+            };
+            if !matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running) {
+                return Ok(None);
+            }
+            job.status = ApplyJobStatus::Running;
+            job.attempt = job.attempt.saturating_add(1);
+            job.error = None;
+            log::info!(
+                target: "lastfm_import",
+                "apply claim job={} attempt={} stage={:?}",
+                job.id,
+                job.attempt,
+                job.stage
+            );
+            Ok(Some(job.clone()))
+        })
+        .await
+    }
+
+    async fn mark_apply_stage(&self, id: &str, stage: ApplyJobStage) -> Result<(), String> {
+        self.mutate_sync(|state| {
+            let Some(job) = state.apply_queue.iter_mut().find(|job| job.id == id) else {
+                return Err("Last.fm apply job disappeared before its stage checkpoint.".into());
+            };
+            if job.status != ApplyJobStatus::Running {
+                return Err("Last.fm apply job is no longer running.".into());
+            }
+            job.stage = stage;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn fail_apply_job(&self, id: &str, message: String) -> Result<(), String> {
+        log::warn!(target: "lastfm_import", "apply failure job={} message={}", id, message);
+        self.mutate_sync(|state| {
+            let bulk_index = state
+                .apply_queue
+                .iter()
+                .find(|job| job.id == id)
+                .and_then(|job| job.bulk_index);
+            if let Some(job) = state.apply_queue.iter_mut().find(|job| job.id == id) {
+                job.status = ApplyJobStatus::Failed;
+                job.error = Some(message.clone());
+            }
+            if let (Some(bulk_index), Some(cursor)) = (bulk_index, state.accept_all.as_mut()) {
+                if cursor.next_batch_index > bulk_index {
+                    cursor.next_batch_index = bulk_index;
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn remove_apply_job(&self, id: &str) -> Result<Option<ReviewApplyJob>, String> {
+        self.mutate_sync(|state| {
+            let index = state.apply_queue.iter().position(|job| job.id == id);
+            let Some(index) = index else {
+                return Ok(None);
+            };
+            let job = state.apply_queue.remove(index);
+            if let Some(bulk_index) = job.bulk_index {
+                if let Some(cursor) = state.accept_all.as_mut() {
+                    if cursor.session_id == job.plan.session_id
+                        && cursor.next_batch_index <= bulk_index
+                    {
+                        cursor.next_batch_index = bulk_index.saturating_add(1);
+                    }
+                }
+            }
+            Ok(Some(job))
+        })
+        .await
+    }
+
+    fn claim_apply_runner(&self) -> bool {
+        !self.apply_running.swap(true, Ordering::AcqRel)
+    }
+
+    fn release_apply_runner(&self) {
+        self.apply_running.store(false, Ordering::Release);
     }
 
     async fn mappings_for(
@@ -2788,8 +3317,21 @@ impl Service {
                 total: 0,
             });
         }
-        let batches = review_batches_for_read(session);
-        let batches = batches.as_ref();
+        let sync = self.sync_snapshot().await;
+        let hidden = sync
+            .apply_queue
+            .iter()
+            .filter(|job| {
+                job.plan.session_id == session.cache_id
+                    && matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
+            })
+            .map(|job| job.plan.batch_id)
+            .collect::<BTreeSet<_>>();
+        let batches = review_batches_for_read(session)
+            .iter()
+            .filter(|batch| !hidden.contains(&batch.page))
+            .cloned()
+            .collect::<Vec<_>>();
         let total = batches.len();
         if cursor > total {
             return Err("Last.fm import queue cursor is out of range.".into());
@@ -2810,7 +3352,7 @@ impl Service {
             .iter()
             .filter_map(|batch| {
                 let rows = batch_rows(batch, &rows_by_id);
-                queue_item(session, batch, &rows)
+                queue_item(session, batch, &rows, &sync.apply_queue)
             })
             .collect();
         Ok(ImportQueuePage {
@@ -2832,7 +3374,21 @@ impl Service {
         if session.phase == ImportPhase::Suspended {
             return None;
         }
-        let batches = review_batches_for_read(session);
+        let sync = self.sync_snapshot().await;
+        let hidden = sync
+            .apply_queue
+            .iter()
+            .filter(|job| {
+                job.plan.session_id == session.cache_id
+                    && matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
+            })
+            .map(|job| job.plan.batch_id)
+            .collect::<BTreeSet<_>>();
+        let batches = review_batches_for_read(session)
+            .iter()
+            .filter(|batch| !hidden.contains(&batch.page))
+            .cloned()
+            .collect::<Vec<_>>();
         let batch = batches.iter().find(|batch| batch.page == batch_id)?;
         let requested_ids = batch
             .source_ids
@@ -3078,6 +3634,7 @@ impl Service {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     async fn commit_rows(
         &self,
         username: &str,
@@ -3317,7 +3874,31 @@ fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
         last_synced_at: None,
         pending_review: 0,
         sync_problem: None,
+        applying_all: false,
     }
+}
+
+fn remaining_with_apply_queue(
+    session: &LastFmImportSessionV2,
+    apply_queue: &[ReviewApplyJob],
+) -> usize {
+    let archived = apply_queue
+        .iter()
+        .filter(|job| {
+            job.plan.session_id == session.cache_id
+                && matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
+        })
+        .flat_map(|job| job.plan.committed_ids.iter())
+        .collect::<BTreeSet<_>>();
+    session
+        .rows
+        .iter()
+        .filter(|row| !archived.contains(&row.stable_id))
+        .filter(|row| {
+            let decision = default_decision(session, &row.stable_id);
+            matches!(decision.status, RowStatus::Pending | RowStatus::Skipped) && !decision.excluded
+        })
+        .count()
 }
 
 fn suspended_state_view() -> ImportStateView {
@@ -3345,6 +3926,7 @@ fn suspended_state_view() -> ImportStateView {
         last_synced_at: None,
         pending_review: 0,
         sync_problem: None,
+        applying_all: false,
     }
 }
 
@@ -4385,6 +4967,11 @@ pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportSta
     let state = app.state::<crate::AppState>();
     let service = Arc::clone(&state.lastfm_import);
     let username = lastfm_username(&app).await?;
+    if service.next_apply_job().await.is_some()
+        || service.sync_snapshot().await.accept_all.is_some()
+    {
+        start_apply_worker(app.clone(), Arc::clone(&service));
+    }
     state.lastfm.settle_before_import().await;
     if !service.claim_sync_runner() {
         return Ok(service.state().await);
@@ -4973,37 +5560,6 @@ fn update_selected_match(
     }
 }
 
-fn promote_mapping(
-    mappings: &mut LastFmMappings,
-    session: &LastFmImportSessionV2,
-    row: &SourceRow,
-    result: Option<&MatchResult>,
-    target_uri: &str,
-) {
-    let source_key = session
-        .incremental_source_keys
-        .get(&row.stable_id)
-        .cloned()
-        .unwrap_or_else(|| row.stable_id.clone());
-    mappings
-        .track_mappings
-        .insert(source_key, target_uri.to_owned());
-    let Some(album_uri) = result
-        .and_then(|result| result.selected_uri.as_deref())
-        .filter(|uri| uri.starts_with("spotify:album:"))
-    else {
-        return;
-    };
-    let album = mappings
-        .album_mappings
-        .entry(source_album_key(&row.artist, &row.album))
-        .or_default();
-    album.spotify_album_uri = album_uri.to_owned();
-    album
-        .track_uris_by_name
-        .insert(normalize_for_match(&row.track), target_uri.to_owned());
-}
-
 async fn apply_page(
     app: &tauri::AppHandle,
     service: &Service,
@@ -5013,209 +5569,360 @@ async fn apply_page(
     archive_batch: bool,
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
-    options.validate()?;
     let state = app.state::<crate::AppState>();
-    recover_pending_incremental_journal(&state, service).await?;
-    let membership_guard = state.spotify_library_gate.lock().await;
-    let (username, spotify_account_id) = assert_current_account_locked(&state, service).await?;
-    let Some(session) = service.snapshot().await else {
+    let (session, sync) = service.snapshot_with_sync().await;
+    let Some(session) = session else {
         return Err("No Last.fm import session is active.".into());
     };
-    let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
-        return Err("Unknown Last.fm import review batch.".into());
-    };
-    let selected = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
-    if selected_ids
+    let job_id = format!("{}:{batch_id}", session.cache_id);
+    let effective_session = effective_apply_session_for_job(&session, &sync.apply_queue, &job_id);
+    let spotify_account_id = session
+        .spotify_account_id
+        .clone()
+        .ok_or_else(|| "Choose a supported Spotify match before accepting.".to_string())?;
+    let plan = if let Some(failed) = sync
+        .apply_queue
         .iter()
-        .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
+        .find(|job| job.id == job_id && job.status == ApplyJobStatus::Failed)
     {
-        return Err("A selected source row does not belong to this review batch.".into());
-    }
-    let rows_by_id = source_row_map(&session);
-    let rows = batch_rows(&batch, &rows_by_id)
-        .into_iter()
-        .filter(|row| selected.contains(&row.stable_id))
-        .filter(|row| {
-            let decision = default_decision(&session, &row.stable_id);
-            !decision.excluded && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return Ok(state_view(Some(&session)));
-    }
-
-    let mut target_by_source = BTreeMap::<String, String>::new();
-    for row in &rows {
-        if let Some(result) = session.matches.get(&row.stable_id) {
-            if let Some(uri) = matched_track_uri_for_row(result, row) {
-                target_by_source.insert(row.stable_id.clone(), uri);
-            }
-        }
-    }
-    if (options.include_historical_play_counts || !options.whole_album)
-        && rows
-            .iter()
-            .any(|row| !target_by_source.contains_key(&row.stable_id))
-    {
-        return Err(
-            "Every selected source track needs a supported Spotify match before this batch can be accepted. Change its match or uncheck it first."
-                .into(),
-        );
-    }
-    let mut metadata_uris = target_by_source.values().cloned().collect::<BTreeSet<_>>();
-    if options.import_content && options.whole_album {
-        let album_uri = rows
-            .iter()
-            .filter_map(|row| session.matches.get(&row.stable_id))
-            .filter_map(|result| result.selected_uri.as_deref())
-            .find(|uri| uri.starts_with("spotify:album:"))
-            .ok_or_else(|| {
-                "Choose a supported Spotify album match before accepting.".to_string()
-            })?;
-        let album_uri = membership_uris_for_import(true, true, Some(album_uri), &[])
-            .and_then(|uris| uris.into_iter().next())
-            .ok_or_else(|| "Expected a Spotify album URI for the import.".to_string())?;
-        let provider = crate::provider_from(&state)?;
-        let saved = crate::spotify_commands::save_album_operation(
-            &state,
-            provider.as_ref(),
-            &album_uri,
-            album,
+        if !retry_plan_matches_request(
+            &failed.plan,
+            &spotify_account_id,
+            batch_id,
             artist,
-            crate::unix_now(),
-        )
-        .await?;
-        if saved.album_uri != album_uri {
-            return Err("Spotify returned a different album than the selected match.".into());
+            album,
+            selected_ids,
+            archive_batch,
+            &options,
+        ) {
+            return Err(
+                "Apply choices are frozen; retry the failed batch with the same choices.".into(),
+            );
         }
-        metadata_uris = saved.track_uris.iter().cloned().collect();
-    } else if options.import_content {
-        let requested = target_by_source.values().cloned().collect::<BTreeSet<_>>();
-        if !requested.is_empty() {
-            let requested = membership_uris_for_import(
-                true,
-                false,
-                None,
-                &requested.iter().cloned().collect::<Vec<_>>(),
-            )
-            .unwrap_or_default();
-            let provider = crate::provider_from(&state)?;
-            crate::spotify_commands::save_tracks_operation(
-                &state,
-                provider.as_ref(),
-                requested,
-                crate::unix_now(),
-            )
-            .await?;
-        }
-    }
-
-    let (checked_username, checked_spotify_account_id) =
-        assert_current_account_locked(&state, service).await?;
-    if checked_username != username || checked_spotify_account_id != spotify_account_id {
-        return Err(
-            "The connected account changed while saving Spotify content; retry this review batch."
-                .into(),
-        );
-    }
-    let reconciliation_guard = service.reconciliation_lock.lock().await;
-    let Some(current_session) = service.snapshot().await else {
-        return Err("Last.fm import session ended while saving Spotify content.".into());
+        failed.plan.clone()
+    } else {
+        build_apply_plan(
+            &effective_session,
+            &spotify_account_id,
+            batch_id,
+            artist,
+            album,
+            selected_ids,
+            archive_batch,
+            options,
+        )?
     };
-    if current_session != session {
-        return Err(
-            "Last.fm review changed while saving Spotify content; retry this review batch.".into(),
-        );
-    }
-    drop(membership_guard);
+    let view = service.enqueue_apply_plan(plan, None).await?;
+    start_apply_worker(app.clone(), Arc::clone(&state.lastfm_import));
+    log::info!(
+        target: "lastfm_import",
+        "apply enqueued batch={} user={}",
+        batch_id,
+        session.lastfm_username
+    );
+    Ok(view)
+}
 
-    let original_mappings = service
-        .mappings_for(&username, Some(&spotify_account_id))
-        .await;
-    let mut mappings = original_mappings.clone();
-    for row in &rows {
-        if let Some(uri) = target_by_source.get(&row.stable_id) {
-            promote_mapping(
-                &mut mappings,
-                &session,
-                row,
-                session.matches.get(&row.stable_id),
-                uri,
+async fn commit_apply_plan(service: &Service, plan: &ApplyPlan) -> Result<(), String> {
+    service
+        .mutate_session(|current| {
+            let Some(mut session) = current else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.cache_id != plan.session_id
+                || session.lastfm_username != plan.lastfm_username
+                || session
+                    .spotify_account_id
+                    .as_deref()
+                    .is_some_and(|account| account != plan.spotify_account_id)
+                || !review_phase_allowed(session.phase)
+            {
+                return Err("The Last.fm import changed before its apply job completed.".into());
+            }
+            session.spotify_account_id = Some(plan.spotify_account_id.clone());
+            session
+                .page_options
+                .insert(batch_options_key(plan.batch_id), plan.options.clone());
+            let default_count_mode = session.default_count_mode;
+            for id in &plan.committed_ids {
+                if plan.options.include_historical_play_counts
+                    && plan.options.selected_track_ids.contains(id)
+                {
+                    if let Some(target) = session
+                        .matches
+                        .get(id)
+                        .and_then(|result| matched_track_uri(result, id))
+                    {
+                        session
+                            .count_modes
+                            .entry(target)
+                            .or_insert(default_count_mode);
+                    }
+                }
+                session.decisions.insert(
+                    id.clone(),
+                    RowDecision {
+                        status: RowStatus::Done,
+                        excluded: false,
+                    },
+                );
+            }
+            update_review_phase(&mut session);
+            Ok((Some(session), ()))
+        })
+        .await
+}
+
+fn apply_frozen_mappings(mappings: &mut LastFmMappings, plan: &ApplyPlan) {
+    for mapping in &plan.mappings {
+        mappings
+            .track_mappings
+            .insert(mapping.source_key.clone(), mapping.target_uri.clone());
+        if let Some(album_uri) = mapping.album_uri.as_deref() {
+            let album = mappings
+                .album_mappings
+                .entry(source_album_key(&mapping.artist, &mapping.album))
+                .or_default();
+            album.spotify_album_uri = album_uri.to_owned();
+            album.track_uris_by_name.insert(
+                normalize_for_match(&mapping.track),
+                mapping.target_uri.clone(),
             );
         }
     }
-    if mappings != original_mappings {
-        service
-            .save_mappings_for(&username, Some(&spotify_account_id), mappings)
-            .await?;
-    }
+}
 
-    let mut by_target = BTreeMap::<String, Vec<&SourceRow>>::new();
-    for row in &rows {
-        if !session.incremental_source_keys.contains_key(&row.stable_id) {
-            if let Some(uri) = target_by_source.get(&row.stable_id) {
-                by_target.entry(uri.clone()).or_default().push(row);
-            }
+async fn assert_apply_account_locked(
+    state: &crate::AppState,
+    service: &Service,
+    plan: &ApplyPlan,
+) -> Result<(), String> {
+    let (username, account) = assert_current_account_locked(state, service).await?;
+    if username != plan.lastfm_username || account != plan.spotify_account_id {
+        return Err("The connected account changed while applying this review batch.".into());
+    }
+    Ok(())
+}
+
+type ApplyEffectFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+async fn execute_apply_job<F>(
+    service: &Service,
+    job: &ReviewApplyJob,
+    mut effect: F,
+) -> Result<(), String>
+where
+    F: FnMut(ApplyJobStage, ApplyPlan) -> ApplyEffectFuture,
+{
+    for (stage, next_stage) in [
+        (ApplyJobStage::Upstream, ApplyJobStage::Local),
+        (ApplyJobStage::Local, ApplyJobStage::Mappings),
+        (ApplyJobStage::Mappings, ApplyJobStage::Decision),
+        (ApplyJobStage::Decision, ApplyJobStage::Decision),
+    ] {
+        if job.stage > stage {
+            continue;
+        }
+        effect(stage, job.plan.clone()).await?;
+        if stage == ApplyJobStage::Decision {
+            service.remove_apply_job(&job.id).await?;
+        } else {
+            service.mark_apply_stage(&job.id, next_stage).await?;
         }
     }
-    let updates = by_target
-        .iter()
-        .map(|(uri, rows)| {
-            let refs = rows.to_vec();
-            let (earliest, latest) = resolved_timestamps(&refs).unwrap_or_default();
-            HistoryUpdate {
-                uri: uri.clone(),
-                play_count: options
-                    .include_historical_play_counts
-                    .then(|| historical_count_for_target(&session, uri, rows, &options)),
-                earliest: (earliest > 0).then_some(earliest),
-                latest: options.include_historical_play_counts.then_some(latest),
+    Ok(())
+}
+
+async fn run_apply_effect(
+    app: &tauri::AppHandle,
+    service: Arc<Service>,
+    stage: ApplyJobStage,
+    plan: ApplyPlan,
+) -> Result<(), String> {
+    let state = app.state::<crate::AppState>();
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    match stage {
+        ApplyJobStage::Upstream => {
+            let (username, account) = assert_current_account_locked(&state, &service).await?;
+            if username != plan.lastfm_username || account != plan.spotify_account_id {
+                return Err(
+                    "The connected account changed before Spotify membership was applied.".into(),
+                );
             }
-        })
-        .collect::<Vec<_>>();
-    let committed = if archive_batch {
-        batch_rows(&batch, &rows_by_id)
-            .into_iter()
-            .filter(|row| {
-                let decision = default_decision(&session, &row.stable_id);
-                !decision.excluded
-                    && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
-            })
-            .map(|row| row.stable_id.clone())
-            .collect::<Vec<_>>()
-    } else {
-        rows.iter().map(|row| row.stable_id.clone()).collect()
-    };
-    let metadata_uris = metadata_uris.into_iter().collect::<Vec<_>>();
-    if !updates.is_empty() || !metadata_uris.is_empty() {
-        crate::mutate_library(&state, |library| {
-            apply_history_updates(library, &updates);
-            apply_metadata(
-                library,
-                &metadata_uris,
-                options.whole_album,
-                options.genre.as_deref(),
-                options.rating,
-            )
-        })?;
+            let provider = crate::provider_from(&state)?;
+            match &plan.membership {
+                ApplyMembership::None => {}
+                ApplyMembership::Album { uri, name, artist } => {
+                    let saved = crate::spotify_commands::save_album_operation(
+                        &state,
+                        provider.as_ref(),
+                        uri,
+                        name,
+                        artist,
+                        crate::unix_now(),
+                    )
+                    .await?;
+                    if saved.album_uri != *uri {
+                        return Err(
+                            "Spotify returned a different album than the selected match.".into(),
+                        );
+                    }
+                }
+                ApplyMembership::Tracks(uris) => {
+                    crate::spotify_commands::save_tracks_operation(
+                        &state,
+                        provider.as_ref(),
+                        uris.clone(),
+                        crate::unix_now(),
+                    )
+                    .await?;
+                }
+            }
+            log::info!(target: "lastfm_import", "apply upstream complete batch={}", plan.batch_id);
+        }
+        ApplyJobStage::Local => {
+            assert_apply_account_locked(&state, &service, &plan).await?;
+            if !plan.updates.is_empty() || !plan.metadata_uris.is_empty() {
+                crate::mutate_library(&state, |library| {
+                    apply_history_updates(library, &plan.updates);
+                    apply_metadata(
+                        library,
+                        &plan.metadata_uris,
+                        plan.options.whole_album,
+                        plan.options.genre.as_deref(),
+                        plan.options.rating,
+                    )
+                })?;
+                app.emit("library-changed", ())
+                    .map_err(|error| error.to_string())?;
+            }
+            log::info!(target: "lastfm_import", "apply local complete batch={}", plan.batch_id);
+        }
+        ApplyJobStage::Mappings => {
+            assert_apply_account_locked(&state, &service, &plan).await?;
+            let mappings = service
+                .mappings_for(&plan.lastfm_username, Some(&plan.spotify_account_id))
+                .await;
+            let before = mappings.clone();
+            let mut mappings = mappings;
+            apply_frozen_mappings(&mut mappings, &plan);
+            if mappings != before {
+                service
+                    .save_mappings_for(
+                        &plan.lastfm_username,
+                        Some(&plan.spotify_account_id),
+                        mappings,
+                    )
+                    .await?;
+            }
+            log::info!(target: "lastfm_import", "apply mappings complete batch={}", plan.batch_id);
+        }
+        ApplyJobStage::Decision => {
+            assert_apply_account_locked(&state, &service, &plan).await?;
+            commit_apply_plan(&service, &plan).await?;
+            log::info!(target: "lastfm_import", "apply decision complete batch={}", plan.batch_id);
+        }
     }
-    let view = service
-        .commit_rows(
-            &username,
-            &spotify_account_id,
-            batch_id,
-            &committed,
-            artist,
-            album,
-            options,
-        )
-        .await?;
-    drop(reconciliation_guard);
-    service
-        .sweep_backlog_with_mappings(&state, &username, &spotify_account_id)
-        .await?;
-    Ok(view)
+    Ok(())
+}
+
+async fn run_apply_job(
+    app: &tauri::AppHandle,
+    service: Arc<Service>,
+    job: &ReviewApplyJob,
+) -> Result<(), String> {
+    let state = app.state::<crate::AppState>();
+    recover_pending_incremental_journal(&state, &service).await?;
+    if job.plan.session_id.is_empty() {
+        return Err("Last.fm apply job has no session identity.".into());
+    }
+    let worker_app = app.clone();
+    let worker_service = Arc::clone(&service);
+    execute_apply_job(&service, job, move |stage, plan| {
+        let app = worker_app.clone();
+        let service = Arc::clone(&worker_service);
+        Box::pin(async move { run_apply_effect(&app, service, stage, plan).await })
+    })
+    .await?;
+    log::info!(target: "lastfm_import", "apply complete job={}", job.id);
+    app.emit(
+        "lastfm-import-apply-finished",
+        serde_json::json!({ "batchId": job.plan.batch_id, "ok": true }),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn start_apply_worker(app: tauri::AppHandle, service: Arc<Service>) {
+    if !service.claim_apply_runner() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut restart_worker = true;
+        loop {
+            let next = match service.next_apply_job().await {
+                Some(next) => next,
+                None => match enqueue_next_accept_all_job(&service).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(error) => {
+                        log::warn!(target: "lastfm_import", "accept-all resume failed: {error}");
+                        restart_worker = false;
+                        break;
+                    }
+                },
+            };
+            let job = match service.claim_apply_job(&next.id).await {
+                Ok(Some(job)) => job,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::error!(target: "lastfm_import", "apply claim failed: {error}");
+                    restart_worker = false;
+                    break;
+                }
+            };
+            if let Err(error) = run_apply_job(&app, Arc::clone(&service), &job).await {
+                let _ = service.fail_apply_job(&job.id, error.clone()).await;
+                let _ = app.emit(
+                    "lastfm-import-apply-finished",
+                    serde_json::json!({ "batchId": job.plan.batch_id, "message": error }),
+                );
+                restart_worker = false;
+                break;
+            }
+        }
+        service.release_apply_runner();
+        if restart_worker && apply_work_pending(&service).await {
+            start_apply_worker(app.clone(), Arc::clone(&service));
+        } else {
+            let _ = emit_import_changed(&app, &service).await;
+        }
+    });
+}
+
+async fn apply_work_pending(service: &Service) -> bool {
+    let sync = service.sync_snapshot().await;
+    service.next_apply_job().await.is_some()
+        || (sync
+            .apply_queue
+            .iter()
+            .all(|job| job.status != ApplyJobStatus::Failed)
+            && sync.accept_all.is_some())
+}
+
+pub(crate) async fn resume_persisted_apply(app: tauri::AppHandle) {
+    let service = Arc::clone(&app.state::<crate::AppState>().lastfm_import);
+    let next_job = service.next_apply_job().await;
+    let accept_all = service.sync_snapshot().await.accept_all;
+    if apply_work_pending(&service).await {
+        log::info!(
+            target: "lastfm_import",
+            "apply resume queued_job={} accept_all={}",
+            next_job.as_ref().map(|job| job.id.as_str()).unwrap_or("none"),
+            accept_all.is_some()
+        );
+        start_apply_worker(app, service);
+    }
 }
 
 async fn album_candidates<
@@ -5410,6 +6117,13 @@ pub(crate) async fn lastfm_import_page(
     lazy_match_page(&app, service.as_ref(), batch_id, &artist, &album).await
 }
 
+async fn ensure_review_mutable(service: &Service) -> Result<(), String> {
+    if service.sync_snapshot().await.accept_all.is_some() {
+        return Err("Accept All is applying the confirmed review; wait for it to finish before changing choices.".into());
+    }
+    Ok(())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
@@ -5420,6 +6134,7 @@ pub(crate) async fn lastfm_import_review(
     album: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    ensure_review_mutable(state.lastfm_import.as_ref()).await?;
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
@@ -5457,6 +6172,7 @@ pub(crate) async fn lastfm_import_options(
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    ensure_review_mutable(state.lastfm_import.as_ref()).await?;
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
@@ -5482,6 +6198,7 @@ pub(crate) async fn lastfm_import_count_mode(
     mode: CountMode,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    ensure_review_mutable(state.lastfm_import.as_ref()).await?;
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
@@ -5527,6 +6244,7 @@ pub(crate) async fn lastfm_import_select_match(
     uri: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    ensure_review_mutable(state.lastfm_import.as_ref()).await?;
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
@@ -5546,6 +6264,7 @@ pub(crate) async fn lastfm_import_change_track(
     query: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    ensure_review_mutable(state.lastfm_import.as_ref()).await?;
     let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
     let session = state
         .lastfm_import
@@ -5607,6 +6326,7 @@ pub(crate) async fn lastfm_import_change_album(
     query: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
+    ensure_review_mutable(state.lastfm_import.as_ref()).await?;
     let _ = assert_current_account(&app, state.lastfm_import.as_ref()).await?;
     let session = state
         .lastfm_import
@@ -5670,43 +6390,18 @@ pub(crate) async fn lastfm_import_apply(
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
-    options.validate()?;
-    let session = state
-        .lastfm_import
-        .snapshot()
-        .await
-        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    requested_batch(&session, batch_id, &artist, &album)
-        .ok_or_else(|| "Unknown Last.fm import review batch.".to_string())?;
-    let view = state_view(Some(&session));
-    let task_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let task_state = task_app.state::<crate::AppState>();
-        match apply_page(
-            &task_app,
-            task_state.lastfm_import.as_ref(),
-            batch_id,
-            (&artist, &album),
-            &selected_ids,
-            archive_batch,
-            options,
-        )
-        .await
-        {
-            Ok(view) => {
-                let _ = task_app.emit(
-                    "lastfm-import-apply-finished",
-                    serde_json::json!({ "batchId": batch_id, "view": view }),
-                );
-            }
-            Err(message) => {
-                let _ = task_app.emit(
-                    "lastfm-import-apply-finished",
-                    serde_json::json!({ "batchId": batch_id, "message": message }),
-                );
-            }
-        }
-    });
+    let view = apply_page(
+        &app,
+        state.lastfm_import.as_ref(),
+        batch_id,
+        (&artist, &album),
+        &selected_ids,
+        archive_batch,
+        options,
+    )
+    .await?;
+    app.emit("lastfm-import-changed", &view)
+        .map_err(|error| error.to_string())?;
     Ok(view)
 }
 
@@ -5760,25 +6455,19 @@ where
     })
 }
 
-#[tauri::command(rename_all = "camelCase")]
-pub(crate) async fn lastfm_import_accept_all_page(
-    app: tauri::AppHandle,
+async fn select_best_matches_for_batch(
+    service: &Service,
+    username: &str,
+    spotify_account_id: &str,
     batch_id: u32,
-    artist: String,
-    album: String,
-) -> Result<ImportStateView, String> {
-    let state = app.state::<crate::AppState>();
-    let _membership_guard = state.spotify_library_gate.lock().await;
-    let (username, spotify_account_id) =
-        assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
-    let Some(page) = state.lastfm_import.page(batch_id, &artist, &album).await else {
-        return Ok(state.lastfm_import.state().await);
+    artist: &str,
+    album: &str,
+) -> Result<(), String> {
+    let Some(page) = service.page(batch_id, artist, album).await else {
+        return Err("Unknown Last.fm import review batch.".into());
     };
-    if page.rows.iter().any(|item| item.match_result.is_none()) {
-        return Err("Prepare Accept All before applying its confirmed batches.".into());
-    }
     let mut selected_album_uris = BTreeSet::new();
-    for item in &page.rows {
+    for item in page.rows {
         if !page
             .options
             .selected_track_ids
@@ -5791,71 +6480,223 @@ pub(crate) async fn lastfm_import_accept_all_page(
         {
             continue;
         }
-        let Some(result) = &item.match_result else {
+        let Some(result) = item.match_result else {
             continue;
         };
         if result.selected_uri.is_some() {
             continue;
         }
-        let Some(candidate) = best_candidate(result) else {
+        let Some(candidate) = best_candidate(&result) else {
             continue;
         };
-        if candidate.uri.starts_with("spotify:album:") {
-            if selected_album_uris.insert(candidate.uri.clone()) {
-                state
-                    .lastfm_import
-                    .select_match(
-                        &username,
-                        &spotify_account_id,
-                        batch_id,
-                        &item.source.stable_id,
-                        &candidate.uri,
-                    )
-                    .await?;
-            }
-        } else {
-            state
-                .lastfm_import
-                .select_match(
-                    &username,
-                    &spotify_account_id,
-                    batch_id,
-                    &item.source.stable_id,
-                    &candidate.uri,
-                )
-                .await?;
+        if candidate.uri.starts_with("spotify:album:")
+            && !selected_album_uris.insert(candidate.uri.clone())
+        {
+            continue;
         }
+        service
+            .select_match(
+                username,
+                spotify_account_id,
+                batch_id,
+                &item.source.stable_id,
+                &candidate.uri,
+            )
+            .await?;
     }
-    drop(_membership_guard);
-    let Some(page) = state.lastfm_import.page(batch_id, &artist, &album).await else {
-        return Ok(state.lastfm_import.state().await);
-    };
-    let selected_ids = page
-        .options
-        .selected_track_ids
-        .iter()
-        .filter(|id| {
-            page.rows.iter().any(|item| {
-                &item.source.stable_id == *id
-                    && !item.decision.excluded
-                    && matches!(
-                        item.decision.status,
-                        RowStatus::Pending | RowStatus::Skipped
-                    )
+    Ok(())
+}
+
+async fn enqueue_next_accept_all_job(service: &Service) -> Result<bool, String> {
+    loop {
+        let sync = service.sync_snapshot().await;
+        let Some(cursor) = sync.accept_all.clone() else {
+            return Ok(false);
+        };
+        if sync
+            .apply_queue
+            .iter()
+            .any(|job| job.status == ApplyJobStatus::Failed)
+        {
+            return Ok(false);
+        }
+        if sync
+            .apply_queue
+            .iter()
+            .any(|job| matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running))
+        {
+            return Ok(true);
+        }
+        let username = cursor.lastfm_username.clone();
+        let spotify_account_id = cursor.spotify_account_id.clone();
+        let Some(session) = service.snapshot().await else {
+            return Err("No Last.fm import session is active.".into());
+        };
+        if session.cache_id != cursor.session_id
+            || session.lastfm_username != cursor.lastfm_username
+            || session.spotify_account_id.as_deref() != Some(cursor.spotify_account_id.as_str())
+        {
+            return Err("The Last.fm review changed while Accept All was queued.".into());
+        }
+        let batches = review_batches_for_read(&session);
+        let Some(batch) = batches.get(cursor.next_batch_index).cloned() else {
+            service
+                .mutate_sync(|state| {
+                    if state.accept_all.as_ref() == Some(&cursor) {
+                        state.accept_all = None;
+                    }
+                    Ok(())
+                })
+                .await?;
+            return Ok(false);
+        };
+        if sync.apply_queue.iter().any(|job| {
+            job.plan.session_id == cursor.session_id
+                && job.plan.batch_id == batch.page
+                && job.status == ApplyJobStatus::Failed
+        }) {
+            return Ok(false);
+        }
+        let rows_by_id = source_row_map(&session);
+        let rows = batch_rows(&batch, &rows_by_id);
+        let Some(first) = rows.first() else {
+            let next = cursor.next_batch_index.saturating_add(1);
+            service
+                .mutate_sync(|state| {
+                    if let Some(cursor) = state.accept_all.as_mut() {
+                        cursor.next_batch_index = next;
+                    }
+                    Ok(())
+                })
+                .await?;
+            continue;
+        };
+        let artist = first.artist.clone();
+        let album = first.album.clone();
+        if rows
+            .iter()
+            .all(|row| !is_actionable(&session, &row.stable_id))
+        {
+            let next = cursor.next_batch_index.saturating_add(1);
+            service
+                .mutate_sync(|state| {
+                    if let Some(cursor) = state.accept_all.as_mut() {
+                        cursor.next_batch_index = next;
+                    }
+                    Ok(())
+                })
+                .await?;
+            continue;
+        }
+        select_best_matches_for_batch(
+            service,
+            &username,
+            &spotify_account_id,
+            batch.page,
+            &artist,
+            &album,
+        )
+        .await?;
+        let session = service
+            .snapshot()
+            .await
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+        let options = session.options_for_page_batch(&batch, &artist, &album, &rows);
+        let selected_ids = options
+            .selected_track_ids
+            .iter()
+            .filter(|id| is_actionable(&session, id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected_ids.is_empty() {
+            let next = cursor.next_batch_index.saturating_add(1);
+            service
+                .mutate_sync(|state| {
+                    if let Some(cursor) = state.accept_all.as_mut() {
+                        cursor.next_batch_index = next;
+                    }
+                    Ok(())
+                })
+                .await?;
+            continue;
+        }
+        let plan = build_apply_plan(
+            &session,
+            &spotify_account_id,
+            batch.page,
+            &artist,
+            &album,
+            &selected_ids,
+            true,
+            options,
+        )?;
+        let next = cursor.next_batch_index.saturating_add(1);
+        let id = format!("{}:{}", plan.session_id, plan.batch_id);
+        service
+            .mutate_sync(|state| {
+                if state.accept_all.as_ref() != Some(&cursor) {
+                    return Err("Accept All changed before its next batch was queued.".into());
+                }
+                if state.apply_queue.iter().any(|job| {
+                    matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
+                }) {
+                    return Ok(());
+                }
+                state
+                    .accept_all
+                    .as_mut()
+                    .expect("cursor was checked")
+                    .next_batch_index = next;
+                state.apply_queue.retain(|job| job.id != id);
+                state.apply_queue.push(ReviewApplyJob {
+                    id,
+                    plan,
+                    status: ApplyJobStatus::Queued,
+                    stage: ApplyJobStage::Upstream,
+                    attempt: 0,
+                    error: None,
+                    bulk_index: Some(cursor.next_batch_index),
+                });
+                Ok(())
             })
+            .await?;
+        log::info!(target: "lastfm_import", "accept-all queued batch={}", batch.page);
+        return Ok(true);
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn lastfm_import_accept_all(
+    app: tauri::AppHandle,
+) -> Result<ImportStateView, String> {
+    let state = app.state::<crate::AppState>();
+    let service = state.lastfm_import.as_ref();
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    let username = session.lastfm_username.clone();
+    let spotify_account_id = session
+        .spotify_account_id
+        .clone()
+        .ok_or_else(|| "Prepare Spotify matches before accepting all imports.".to_string())?;
+    let current = service.sync_snapshot().await.accept_all;
+    if current.is_some() {
+        return Err("Accept All is already applying this Last.fm review.".into());
+    }
+    service
+        .mutate_sync(|sync| {
+            sync.accept_all = Some(AcceptAllCursor {
+                session_id: session.cache_id.clone(),
+                lastfm_username: username.clone(),
+                spotify_account_id: spotify_account_id.clone(),
+                next_batch_index: 0,
+            });
+            Ok(())
         })
-        .cloned()
-        .collect::<Vec<_>>();
-    let view = apply_page(
-        &app,
-        state.lastfm_import.as_ref(),
-        batch_id,
-        (&artist, &album),
-        &selected_ids,
-        true,
-        page.options,
-    )
-    .await?;
+        .await?;
+    start_apply_worker(app.clone(), Arc::clone(&state.lastfm_import));
+    let view = service.state().await;
     app.emit("lastfm-import-changed", &view)
         .map_err(|error| error.to_string())?;
     Ok(view)
@@ -5900,6 +6741,7 @@ fn queue_item(
     session: &LastFmImportSessionV2,
     batch: &ImportBatch,
     rows: &[&SourceRow],
+    apply_queue: &[ReviewApplyJob],
 ) -> Option<ImportQueueItem> {
     let first = rows.first()?;
     let artist = first.artist.clone();
@@ -5942,6 +6784,11 @@ fn queue_item(
             }
         }
     }
+    let failed = apply_queue.iter().find(|job| {
+        job.plan.session_id == session.cache_id
+            && job.plan.batch_id == batch.page
+            && job.status == ApplyJobStatus::Failed
+    });
     Some(ImportQueueItem {
         page: batch.page,
         artist,
@@ -5955,7 +6802,10 @@ fn queue_item(
         remaining,
         album_entities,
         track_entities: track_uris.len() as u32,
-        status: queue_status(session, rows),
+        status: failed
+            .map(|_| QueueStatus::Failed)
+            .or_else(|| queue_status(session, rows)),
+        error: failed.and_then(|job| job.error.clone()),
     })
 }
 
@@ -9200,6 +10050,29 @@ mod tests {
     }
 
     #[test]
+    fn history_reapply_populates_a_track_materialized_by_content_import() {
+        let mut library = Library::new();
+        let updates = [HistoryUpdate {
+            uri: "spotify:track:new".into(),
+            play_count: Some(42),
+            earliest: Some(10),
+            latest: Some(100),
+        }];
+        apply_history_updates(&mut library, &updates);
+        let id = library.add(retune_core::model::NewTrack {
+            uri: "spotify:track:new".into(),
+            ..Default::default()
+        });
+        apply_history_updates(&mut library, &updates);
+        apply_history_updates(&mut library, &updates);
+        let track = library.get(id).unwrap();
+        assert_eq!(
+            (track.play_count, track.last_played_at, track.added_at),
+            (42, Some(100), Some(10))
+        );
+    }
+
+    #[test]
     fn content_and_history_intents_are_independent_but_not_both_empty() {
         let defaults = ImportDefaults::default();
         assert_eq!(
@@ -10156,6 +11029,29 @@ mod tests {
 
         let options = session.options_for_batch(1, "Artist", "Album");
         assert!(options.whole_album);
+        let plan = build_apply_plan(
+            &session,
+            "spotify-user",
+            1,
+            "Artist",
+            "Album",
+            &options
+                .selected_track_ids
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            true,
+            options.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            plan.membership,
+            ApplyMembership::Album { ref uri, .. } if uri == "spotify:album:album"
+        ));
+        assert!(matches!(
+            plan.metadata_uris.as_slice(),
+            [first, second] if first == "spotify:track:one" && second == "spotify:track:two"
+        ));
 
         session.page_options.insert(
             batch_options_key(1),
@@ -10357,5 +11253,1056 @@ mod tests {
             .candidates
             .iter()
             .any(|candidate| candidate.uri == "spotify:track:new"));
+    }
+
+    fn apply_test_plan_for(
+        session: &LastFmImportSessionV2,
+        batch_id: u32,
+        source_id: &str,
+        track_uri: &str,
+    ) -> ApplyPlan {
+        ApplyPlan {
+            session_id: session.cache_id.clone(),
+            lastfm_username: session.lastfm_username.clone(),
+            spotify_account_id: "spotify-user".into(),
+            batch_id,
+            artist: "Artist".into(),
+            album: "Album".into(),
+            committed_ids: vec![source_id.into()],
+            archive_batch: false,
+            options: PageOptions::default(),
+            membership: ApplyMembership::None,
+            updates: vec![HistoryUpdate {
+                uri: track_uri.into(),
+                play_count: Some(3),
+                earliest: Some(10),
+                latest: Some(20),
+            }],
+            metadata_uris: Vec::new(),
+            mappings: Vec::new(),
+        }
+    }
+
+    fn apply_test_plan(session: &LastFmImportSessionV2) -> ApplyPlan {
+        apply_test_plan_for(session, 1, "source", "spotify:track:one")
+    }
+
+    fn apply_test_session() -> LastFmImportSessionV2 {
+        let mut session =
+            LastFmImportSessionV2::new("lastfm-user".into(), "spotify-user".into(), 100);
+        session.phase = ImportPhase::Review;
+        session.rows = vec![SourceRow {
+            stable_id: "source".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            track: "Song".into(),
+            variants: vec![SourceVariant {
+                artist: "Artist".into(),
+                album: "Album".into(),
+                track: "Song".into(),
+                play_count: 3,
+                earliest: 10,
+                latest: 20,
+            }],
+            play_count: 3,
+            earliest: 10,
+            latest: 20,
+        }];
+        session.batches = vec![ImportBatch {
+            page: 1,
+            source_ids: vec!["source".into()],
+        }];
+        session
+    }
+
+    fn apply_test_session_with_two_batches() -> LastFmImportSessionV2 {
+        let mut session = apply_test_session();
+        session.rows.push(SourceRow {
+            stable_id: "source-two".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            track: "Song two".into(),
+            variants: vec![SourceVariant {
+                artist: "Artist".into(),
+                album: "Album".into(),
+                track: "Song two".into(),
+                play_count: 2,
+                earliest: 11,
+                latest: 21,
+            }],
+            play_count: 2,
+            earliest: 11,
+            latest: 21,
+        });
+        session.batches.push(ImportBatch {
+            page: 2,
+            source_ids: vec!["source-two".into()],
+        });
+        session
+    }
+
+    #[tokio::test]
+    async fn enqueue_persists_frozen_apply_job_before_returning() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let plan = apply_test_plan(&session);
+
+        service
+            .enqueue_apply_plan(plan.clone(), None)
+            .await
+            .unwrap();
+
+        let persisted = IncrementalStore::new(directory.path()).load().unwrap();
+        assert_eq!(persisted.apply_queue.len(), 1);
+        assert_eq!(persisted.apply_queue[0].plan, plan);
+        assert_eq!(persisted.apply_queue[0].status, ApplyJobStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn enqueue_does_not_recover_or_mutate_an_incremental_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        service
+            .mutate_sync(|sync| {
+                sync.journal = Some(LastFmApplicationJournal {
+                    before_library: Library::new(),
+                    after_library: Library::new(),
+                    checkpoint_before: None,
+                    checkpoint_after: None,
+                    backlog_before: Vec::new(),
+                    backlog_after: Vec::new(),
+                    consumed_receipts: Vec::new(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service
+            .enqueue_apply_plan(apply_test_plan(&session), None)
+            .await
+            .unwrap();
+        assert!(service.sync_snapshot().await.journal.is_some());
+    }
+
+    #[tokio::test]
+    async fn queued_batches_are_hidden_but_failed_batches_reappear_with_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let plan = apply_test_plan(&session);
+        service
+            .enqueue_apply_plan(plan.clone(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(service.queue_page(0, 10).await.unwrap().total, 0);
+        service
+            .fail_apply_job(&format!("{}:1", session.cache_id), "try again".into())
+            .await
+            .unwrap();
+        let queue = service.queue_page(0, 10).await.unwrap();
+        assert_eq!(queue.total, 1);
+        assert_eq!(queue.items[0].status, Some(QueueStatus::Failed));
+        assert_eq!(queue.items[0].error.as_deref(), Some("try again"));
+        assert_eq!(
+            service
+                .snapshot()
+                .await
+                .unwrap()
+                .decisions
+                .get("source")
+                .cloned()
+                .unwrap_or_default(),
+            RowDecision::default()
+        );
+        service
+            .mutate_sync(|sync| {
+                sync.accept_all = Some(AcceptAllCursor {
+                    session_id: session.cache_id.clone(),
+                    lastfm_username: session.lastfm_username.clone(),
+                    spotify_account_id: "spotify-user".into(),
+                    next_batch_index: 1,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service.enqueue_apply_plan(plan, None).await.unwrap();
+        assert_eq!(
+            service
+                .sync_snapshot()
+                .await
+                .apply_queue
+                .first()
+                .map(|job| job.status),
+            Some(ApplyJobStatus::Queued)
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_committed_rows_leave_remaining_until_they_are_failed_or_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let plan = apply_test_plan(&session);
+        service.enqueue_apply_plan(plan, None).await.unwrap();
+
+        assert_eq!(service.state().await.remaining, 0);
+        service
+            .fail_apply_job(&format!("{}:1", session.cache_id), "retry".into())
+            .await
+            .unwrap();
+        assert_eq!(service.state().await.remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_failures_preserve_an_unrelated_incremental_problem() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        service
+            .mutate_sync(|sync| {
+                sync.sync_problem = Some("incremental download is paused".into());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service
+            .enqueue_apply_plan(apply_test_plan(&session), None)
+            .await
+            .unwrap();
+        service
+            .fail_apply_job(&format!("{}:1", session.cache_id), "apply failed".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.sync_snapshot().await.sync_problem.as_deref(),
+            Some("incremental download is paused")
+        );
+        service
+            .remove_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.sync_snapshot().await.sync_problem.as_deref(),
+            Some("incremental download is paused")
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_all_cursor_checkpoints_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let cursor = AcceptAllCursor {
+            session_id: session.cache_id.clone(),
+            lastfm_username: session.lastfm_username.clone(),
+            spotify_account_id: "spotify-user".into(),
+            next_batch_index: 4,
+        };
+        service
+            .mutate_sync(|sync| {
+                sync.accept_all = Some(cursor.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resumed = Service::new(directory.path());
+        assert_eq!(resumed.sync_snapshot().await.accept_all, Some(cursor));
+        assert!(resumed.state().await.applying_all);
+        assert!(ensure_review_mutable(&resumed).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_bulk_apply_rewinds_and_retry_advances_its_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let cursor = AcceptAllCursor {
+            session_id: session.cache_id.clone(),
+            lastfm_username: session.lastfm_username.clone(),
+            spotify_account_id: "spotify-user".into(),
+            next_batch_index: 3,
+        };
+        service
+            .mutate_sync(|sync| {
+                sync.accept_all = Some(cursor);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let plan = apply_test_plan(&session);
+        service
+            .enqueue_apply_plan(plan.clone(), Some(2))
+            .await
+            .unwrap();
+        service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+        service
+            .fail_apply_job(&format!("{}:1", session.cache_id), "retry".into())
+            .await
+            .unwrap();
+        assert!(!apply_work_pending(&service).await);
+        assert_eq!(
+            service
+                .sync_snapshot()
+                .await
+                .accept_all
+                .unwrap()
+                .next_batch_index,
+            2
+        );
+
+        service.enqueue_apply_plan(plan, None).await.unwrap();
+        let retried = service.next_apply_job().await.unwrap();
+        assert_eq!(retried.bulk_index, Some(2));
+        service.remove_apply_job(&retried.id).await.unwrap();
+        assert_eq!(
+            service
+                .sync_snapshot()
+                .await
+                .accept_all
+                .unwrap()
+                .next_batch_index,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_apply_retry_keeps_frozen_plan_and_queue_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session_with_two_batches();
+        service.save(session.clone()).await.unwrap();
+        let first = apply_test_plan_for(&session, 1, "source", "spotify:track:one");
+        let second = apply_test_plan_for(&session, 2, "source-two", "spotify:track:two");
+        service
+            .enqueue_apply_plan(first.clone(), None)
+            .await
+            .unwrap();
+        service.enqueue_apply_plan(second, None).await.unwrap();
+        service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap();
+        service
+            .fail_apply_job(&format!("{}:1", session.cache_id), "retry".into())
+            .await
+            .unwrap();
+        assert!(service.next_apply_job().await.is_none());
+        assert!(service
+            .enqueue_apply_plan(
+                apply_test_plan_for(&session, 3, "source-two", "spotify:track:two"),
+                None,
+            )
+            .await
+            .is_err());
+        let mut changed = first.clone();
+        changed.artist = "Changed".into();
+        assert!(service.enqueue_apply_plan(changed, None).await.is_err());
+        service
+            .enqueue_apply_plan(first.clone(), None)
+            .await
+            .unwrap();
+        let queue = service.sync_snapshot().await.apply_queue;
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].plan, first);
+        assert_eq!(queue[0].status, ApplyJobStatus::Queued);
+        assert_eq!(queue[1].plan.batch_id, 2);
+    }
+
+    #[tokio::test]
+    async fn a_blocked_worker_does_not_block_enqueue_or_next_batch_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session_with_two_batches();
+        service.save(session.clone()).await.unwrap();
+        let first = apply_test_plan_for(&session, 1, "source", "spotify:track:one");
+        let second = apply_test_plan_for(&session, 2, "source-two", "spotify:track:two");
+        service.enqueue_apply_plan(first, None).await.unwrap();
+        let first_job_id = format!("{}:1", session.cache_id);
+
+        let (claimed_sender, claimed_receiver) = tokio::sync::oneshot::channel();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_service = Arc::clone(&service);
+        let worker = tokio::spawn(async move {
+            let claimed = worker_service
+                .claim_apply_job(&first_job_id)
+                .await
+                .unwrap()
+                .is_some();
+            claimed_sender.send(claimed).unwrap();
+            worker_barrier.wait().await;
+        });
+        assert!(claimed_receiver.await.unwrap());
+
+        let next_batch = service.queue_page(0, 10).await.unwrap();
+        assert_eq!(next_batch.total, 1);
+        assert_eq!(next_batch.items[0].page, 2);
+        service.enqueue_apply_plan(second, None).await.unwrap();
+        assert_eq!(service.sync_snapshot().await.apply_queue.len(), 2);
+
+        barrier.wait().await;
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_effect_executor_runs_serial_stages_and_removes_after_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        service
+            .enqueue_apply_plan(apply_test_plan(&session), None)
+            .await
+            .unwrap();
+        let job = service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_by_effect = Arc::clone(&seen);
+        let service_by_effect = Arc::clone(&service);
+        execute_apply_job(&service, &job, move |stage, _plan| {
+            let seen = Arc::clone(&seen_by_effect);
+            let service = Arc::clone(&service_by_effect);
+            Box::pin(async move {
+                seen.lock().await.push(stage);
+                if stage == ApplyJobStage::Decision {
+                    assert_eq!(service.sync_snapshot().await.apply_queue.len(), 1);
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *seen.lock().await,
+            vec![
+                ApplyJobStage::Upstream,
+                ApplyJobStage::Local,
+                ApplyJobStage::Mappings,
+                ApplyJobStage::Decision,
+            ]
+        );
+        assert!(service.sync_snapshot().await.apply_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocked_apply_effect_does_not_block_a_second_enqueue_or_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session_with_two_batches();
+        service.save(session.clone()).await.unwrap();
+        service
+            .enqueue_apply_plan(
+                apply_test_plan_for(&session, 1, "source", "spotify:track:one"),
+                None,
+            )
+            .await
+            .unwrap();
+        let first = service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let started = Arc::new(Mutex::new(Some(started_tx)));
+        let release = Arc::new(Mutex::new(Some(release_rx)));
+        let effect = tokio::spawn({
+            let service = Arc::clone(&service);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                execute_apply_job(&service, &first, move |stage, _plan| {
+                    let started = Arc::clone(&started);
+                    let release = Arc::clone(&release);
+                    Box::pin(async move {
+                        if stage == ApplyJobStage::Upstream {
+                            if let Some(sender) = started.lock().await.take() {
+                                sender.send(()).unwrap();
+                            }
+                            let receiver = release.lock().await.take();
+                            if let Some(receiver) = receiver {
+                                receiver.await.unwrap();
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+            }
+        });
+        started_rx.await.unwrap();
+        let second = apply_test_plan_for(&session, 2, "source-two", "spotify:track:two");
+        service.enqueue_apply_plan(second, None).await.unwrap();
+        assert_eq!(service.state().await.remaining, 0);
+        assert_eq!(service.sync_snapshot().await.apply_queue.len(), 2);
+        assert_eq!(service.next_apply_job().await.unwrap().plan.batch_id, 1);
+        release_tx.send(()).unwrap();
+        effect.await.unwrap().unwrap();
+        assert_eq!(service.next_apply_job().await.unwrap().plan.batch_id, 2);
+    }
+
+    #[tokio::test]
+    async fn apply_worker_rechecks_after_release_when_enqueue_races_empty_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        assert!(service.claim_apply_runner());
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let worker_service = Arc::clone(&service);
+        let worker = tokio::spawn(async move {
+            assert!(!apply_work_pending(&worker_service).await);
+            observed_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            worker_service.release_apply_runner();
+            assert!(apply_work_pending(&worker_service).await);
+            assert!(worker_service.claim_apply_runner());
+        });
+        observed_rx.await.unwrap();
+        service
+            .enqueue_apply_plan(apply_test_plan(&session), None)
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn each_failed_apply_stage_retries_from_its_persisted_checkpoint() {
+        for failed_stage in [
+            ApplyJobStage::Upstream,
+            ApplyJobStage::Local,
+            ApplyJobStage::Mappings,
+            ApplyJobStage::Decision,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let service = Service::new(directory.path());
+            let session = apply_test_session();
+            service.save(session.clone()).await.unwrap();
+            let plan = apply_test_plan(&session);
+            service
+                .enqueue_apply_plan(plan.clone(), None)
+                .await
+                .unwrap();
+            let job = service
+                .claim_apply_job(&format!("{}:1", session.cache_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let seen_by_effect = Arc::clone(&seen);
+            let failure = failed_stage;
+            let result = execute_apply_job(&service, &job, move |stage, _plan| {
+                let seen = Arc::clone(&seen_by_effect);
+                Box::pin(async move {
+                    seen.lock().await.push(stage);
+                    if stage == failure {
+                        Err(format!("failed at {stage:?}"))
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+            .await;
+            assert!(result.is_err());
+            service
+                .fail_apply_job(&job.id, result.unwrap_err())
+                .await
+                .unwrap();
+            service.enqueue_apply_plan(plan, None).await.unwrap();
+            let retried = service.claim_apply_job(&job.id).await.unwrap().unwrap();
+            assert_eq!(retried.stage, failed_stage);
+            let resumed = Arc::new(Mutex::new(Vec::new()));
+            let resumed_by_effect = Arc::clone(&resumed);
+            execute_apply_job(&service, &retried, move |stage, _plan| {
+                let resumed = Arc::clone(&resumed_by_effect);
+                Box::pin(async move {
+                    resumed.lock().await.push(stage);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                *resumed.lock().await,
+                [
+                    ApplyJobStage::Upstream,
+                    ApplyJobStage::Local,
+                    ApplyJobStage::Mappings,
+                    ApplyJobStage::Decision,
+                ][failed_stage as usize..]
+                    .to_vec()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restarting_a_running_job_resumes_before_a_queued_job() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session_with_two_batches();
+        service.save(session.clone()).await.unwrap();
+        service
+            .enqueue_apply_plan(
+                apply_test_plan_for(&session, 1, "source", "spotify:track:one"),
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .enqueue_apply_plan(
+                apply_test_plan_for(&session, 2, "source-two", "spotify:track:two"),
+                None,
+            )
+            .await
+            .unwrap();
+        let first_id = format!("{}:1", session.cache_id);
+        service.claim_apply_job(&first_id).await.unwrap().unwrap();
+        service
+            .mark_apply_stage(&first_id, ApplyJobStage::Mappings)
+            .await
+            .unwrap();
+        let restarted = Service::new(directory.path());
+        let first = restarted.next_apply_job().await.unwrap();
+        assert_eq!(first.status, ApplyJobStatus::Running);
+        assert_eq!(first.stage, ApplyJobStage::Mappings);
+        execute_apply_job(&restarted, &first, |_stage, _plan| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+        .unwrap();
+        let second = restarted.next_apply_job().await.unwrap();
+        assert_eq!(second.plan.batch_id, 2);
+    }
+
+    #[tokio::test]
+    async fn whole_album_apply_executor_has_one_album_effect_and_no_track_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let mut plan = apply_test_plan(&session);
+        plan.membership = ApplyMembership::Album {
+            uri: "spotify:album:one".into(),
+            name: "Album".into(),
+            artist: "Artist".into(),
+        };
+        plan.options.whole_album = true;
+        service.enqueue_apply_plan(plan, None).await.unwrap();
+        let job = service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let album_saves = Arc::new(Mutex::new(0_u32));
+        let track_saves = Arc::new(Mutex::new(0_u32));
+        let albums = Arc::clone(&album_saves);
+        let tracks = Arc::clone(&track_saves);
+        execute_apply_job(&service, &job, move |stage, plan| {
+            let albums = Arc::clone(&albums);
+            let tracks = Arc::clone(&tracks);
+            Box::pin(async move {
+                if stage == ApplyJobStage::Upstream {
+                    match plan.membership {
+                        ApplyMembership::Album { .. } => *albums.lock().await += 1,
+                        ApplyMembership::Tracks(_) => *tracks.lock().await += 1,
+                        ApplyMembership::None => {}
+                    }
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(*album_saves.lock().await, 1);
+        assert_eq!(*track_saves.lock().await, 0);
+    }
+
+    #[tokio::test]
+    async fn account_mismatch_stops_the_apply_executor_before_any_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        service
+            .enqueue_apply_plan(apply_test_plan(&session), None)
+            .await
+            .unwrap();
+        let job = service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let effects_by_executor = Arc::clone(&effects);
+        let result = execute_apply_job(&service, &job, move |stage, plan| {
+            let effects = Arc::clone(&effects_by_executor);
+            Box::pin(async move {
+                if plan.spotify_account_id != "different-account" {
+                    return Err(
+                        "The connected account changed while applying this review batch.".into(),
+                    );
+                }
+                effects.lock().await.push(stage);
+                Ok(())
+            })
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(effects.lock().await.is_empty());
+        service
+            .fail_apply_job(&job.id, result.unwrap_err())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.queue_page(0, 10).await.unwrap().items[0].status,
+            Some(QueueStatus::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn later_queued_plan_uses_prior_queued_history_for_sum_and_highest_modes() {
+        for (mode, expected) in [(CountMode::Sum, 5), (CountMode::Overwrite, 3)] {
+            let directory = tempfile::tempdir().unwrap();
+            let service = Service::new(directory.path());
+            let mut session = apply_test_session_with_two_batches();
+            session.default_count_mode = mode;
+            for (id, track) in [("source", "Song"), ("source-two", "Song two")] {
+                session.matches.insert(
+                    id.into(),
+                    MatchResult {
+                        source_id: id.into(),
+                        search_term: track.into(),
+                        confidence: Some(Confidence::Exact),
+                        selected_uri: Some("spotify:track:shared".into()),
+                        candidates: Vec::new(),
+                        track_matches: BTreeMap::from([(id.into(), "spotify:track:shared".into())]),
+                    },
+                );
+            }
+            service.save(session.clone()).await.unwrap();
+            let first_options = PageOptions {
+                selected_track_ids: BTreeSet::from(["source".into()]),
+                ..PageOptions::default()
+            };
+            let first = build_apply_plan(
+                &session,
+                "spotify-user",
+                1,
+                "Artist",
+                "Album",
+                &["source".into()],
+                false,
+                first_options,
+            )
+            .unwrap();
+            service.enqueue_apply_plan(first, None).await.unwrap();
+            let (_, sync) = service.snapshot_with_sync().await;
+            let effective = effective_apply_session(&session, &sync.apply_queue);
+            let second_options = PageOptions {
+                selected_track_ids: BTreeSet::from(["source-two".into()]),
+                ..PageOptions::default()
+            };
+            let second = build_apply_plan(
+                &effective,
+                "spotify-user",
+                2,
+                "Artist",
+                "Album",
+                &["source-two".into()],
+                false,
+                second_options,
+            )
+            .unwrap();
+            assert_eq!(second.updates[0].play_count, Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_predecessor_retry_ignores_later_queued_shared_target_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let mut session = apply_test_session_with_two_batches();
+        for (id, track) in [("source", "Song"), ("source-two", "Song two")] {
+            session.matches.insert(
+                id.into(),
+                MatchResult {
+                    source_id: id.into(),
+                    search_term: track.into(),
+                    confidence: Some(Confidence::Exact),
+                    selected_uri: Some("spotify:track:shared".into()),
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::from([(id.into(), "spotify:track:shared".into())]),
+                },
+            );
+        }
+        service.save(session.clone()).await.unwrap();
+        let first_options = PageOptions {
+            selected_track_ids: BTreeSet::from(["source".into()]),
+            ..PageOptions::default()
+        };
+        let first = build_apply_plan(
+            &session,
+            "spotify-user",
+            1,
+            "Artist",
+            "Album",
+            &["source".into()],
+            false,
+            first_options,
+        )
+        .unwrap();
+        service
+            .enqueue_apply_plan(first.clone(), None)
+            .await
+            .unwrap();
+        let (_, sync) = service.snapshot_with_sync().await;
+        let second_session = effective_apply_session(&session, &sync.apply_queue);
+        let second = build_apply_plan(
+            &second_session,
+            "spotify-user",
+            2,
+            "Artist",
+            "Album",
+            &["source-two".into()],
+            false,
+            PageOptions {
+                selected_track_ids: BTreeSet::from(["source-two".into()]),
+                ..PageOptions::default()
+            },
+        )
+        .unwrap();
+        service.enqueue_apply_plan(second, None).await.unwrap();
+        service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap();
+        service
+            .fail_apply_job(&format!("{}:1", session.cache_id), "retry".into())
+            .await
+            .unwrap();
+        let (_, sync) = service.snapshot_with_sync().await;
+        let retry_session = effective_apply_session_for_job(
+            &session,
+            &sync.apply_queue,
+            &format!("{}:1", session.cache_id),
+        );
+        let retry = build_apply_plan(
+            &retry_session,
+            "spotify-user",
+            1,
+            "Artist",
+            "Album",
+            &["source".into()],
+            false,
+            PageOptions {
+                selected_track_ids: BTreeSet::from(["source".into()]),
+                ..PageOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(retry, first);
+    }
+
+    #[tokio::test]
+    async fn apply_jobs_are_claimed_and_drained_in_persisted_queue_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session_with_two_batches();
+        service.save(session.clone()).await.unwrap();
+        let first = apply_test_plan_for(&session, 1, "source", "spotify:track:one");
+        let second = apply_test_plan_for(&session, 2, "source-two", "spotify:track:two");
+        service.enqueue_apply_plan(first, None).await.unwrap();
+        service.enqueue_apply_plan(second, None).await.unwrap();
+
+        assert_eq!(service.next_apply_job().await.unwrap().plan.batch_id, 1);
+        let claimed = service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.status, ApplyJobStatus::Running);
+        assert_eq!(service.next_apply_job().await.unwrap().plan.batch_id, 1);
+
+        service
+            .remove_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap();
+        assert_eq!(service.next_apply_job().await.unwrap().plan.batch_id, 2);
+    }
+
+    #[tokio::test]
+    async fn a_running_job_is_restartable_and_failure_at_each_stage_is_retryable() {
+        for stage in [
+            ApplyJobStage::Upstream,
+            ApplyJobStage::Local,
+            ApplyJobStage::Mappings,
+            ApplyJobStage::Decision,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let service = Service::new(directory.path());
+            let session = apply_test_session();
+            service.save(session.clone()).await.unwrap();
+            let plan = apply_test_plan(&session);
+            service
+                .enqueue_apply_plan(plan.clone(), None)
+                .await
+                .unwrap();
+            service
+                .claim_apply_job(&format!("{}:1", session.cache_id))
+                .await
+                .unwrap()
+                .unwrap();
+            service
+                .mark_apply_stage(&format!("{}:1", session.cache_id), stage)
+                .await
+                .unwrap();
+
+            let resumed = Service::new(directory.path());
+            let running = resumed.next_apply_job().await.unwrap();
+            assert_eq!(running.status, ApplyJobStatus::Running);
+            assert_eq!(running.stage, stage);
+            let frozen_plan = running.plan.clone();
+
+            resumed
+                .fail_apply_job(&running.id, format!("failed at {stage:?}"))
+                .await
+                .unwrap();
+            let queue = resumed.queue_page(0, 10).await.unwrap();
+            assert_eq!(queue.items[0].status, Some(QueueStatus::Failed));
+            assert_eq!(queue.items[0].error, Some(format!("failed at {stage:?}")));
+
+            resumed.enqueue_apply_plan(plan, None).await.unwrap();
+            let retried = resumed
+                .sync_snapshot()
+                .await
+                .apply_queue
+                .into_iter()
+                .find(|job| job.plan.batch_id == 1)
+                .unwrap();
+            assert_eq!(retried.status, ApplyJobStatus::Queued);
+            assert_eq!(retried.stage, stage);
+            assert_eq!(retried.plan, frozen_plan);
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_commit_keeps_the_job_until_the_final_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let plan = apply_test_plan(&session);
+        service
+            .enqueue_apply_plan(plan.clone(), None)
+            .await
+            .unwrap();
+        service
+            .claim_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap()
+            .unwrap();
+
+        commit_apply_plan(&service, &plan).await.unwrap();
+        assert_eq!(
+            default_decision(&service.snapshot().await.unwrap(), "source").status,
+            RowStatus::Done
+        );
+        assert_eq!(service.sync_snapshot().await.apply_queue.len(), 1);
+
+        service
+            .remove_apply_job(&format!("{}:1", session.cache_id))
+            .await
+            .unwrap();
+        assert!(service.sync_snapshot().await.apply_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_decision_retry_reuses_the_frozen_plan_after_session_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = apply_test_session();
+        service.save(session.clone()).await.unwrap();
+        let plan = apply_test_plan(&session);
+        service
+            .enqueue_apply_plan(plan.clone(), None)
+            .await
+            .unwrap();
+        let job_id = format!("{}:1", session.cache_id);
+        service.claim_apply_job(&job_id).await.unwrap().unwrap();
+        commit_apply_plan(&service, &plan).await.unwrap();
+        service
+            .fail_apply_job(&job_id, "remove failed".into())
+            .await
+            .unwrap();
+        let failed = service
+            .sync_snapshot()
+            .await
+            .apply_queue
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert!(retry_plan_matches_request(
+            &failed.plan,
+            "spotify-user",
+            1,
+            "Artist",
+            "Album",
+            &["source".into()],
+            false,
+            &PageOptions::default(),
+        ));
+        service
+            .enqueue_apply_plan(failed.plan.clone(), None)
+            .await
+            .unwrap();
+        let retried = service.next_apply_job().await.unwrap();
+        assert_eq!(retried.stage, failed.stage);
+        let retried = service.claim_apply_job(&retried.id).await.unwrap().unwrap();
+        execute_apply_job(&service, &retried, |_stage, _plan| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+        .unwrap();
+        assert!(service.sync_snapshot().await.apply_queue.is_empty());
+    }
+
+    #[test]
+    fn legacy_sync_state_without_apply_fields_loads_an_empty_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lastfm-sync.json");
+        let state = LastFmSyncState {
+            version: LASTFM_SYNC_VERSION,
+            ..LastFmSyncState::default()
+        };
+        let mut value = serde_json::to_value(state).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("applyQueue");
+        object.remove("acceptAll");
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = IncrementalStore::new(directory.path()).load().unwrap();
+        assert!(loaded.apply_queue.is_empty());
+        assert!(loaded.accept_all.is_none());
     }
 }

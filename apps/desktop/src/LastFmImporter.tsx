@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, LastFmImportState, Settings } from './types.ts'
-import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, downloadAction, excludedImportCount, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, optimisticallyArchiveImportQueue, pickerCandidates, pickerSelectedUri, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, downloadAction, excludedImportCount, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportStateView = LastFmImportState
@@ -20,7 +20,7 @@ type ShortcutStatus = (message: string) => void
 const IMPORT_NAV_KEYS = 'ArrowUp ArrowDown Tab Shift+Tab Enter E Space X S A Escape ?'
 
 const emptyDefaults: LastFmImportDefaults = { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }
-const emptyState: ImportStateView = { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: emptyDefaults, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: null }
+const emptyState: ImportStateView = { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: emptyDefaults, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: null, applyingAll: false }
 const importQueuePageLimit = 1000
 
 async function loadImportQueue(): Promise<ImportQueueItem[]> {
@@ -228,9 +228,10 @@ function ImporterRow({ item, rowNumber, checked, needsMatch, fuzzy, fuzzyTarget,
   </article>
 }
 
-function ImportPage({ page, showQueries, onRefresh, onNext, onApplyStarted, onPrevious, onError, onTabToQueue, onShortcuts, onStatus, onMutation }: { page: PageView; showQueries: boolean; onRefresh: () => Promise<ImportQueueItem[]>; onNext: (queue?: ImportQueueItem[], focusQueue?: boolean) => void; onApplyStarted: (batchId: number) => void; onPrevious: () => void; onError: (error: unknown) => void; onTabToQueue: () => boolean; onShortcuts: () => void; onStatus: ShortcutStatus; onMutation: (running: boolean) => void }) {
+function ImportPage({ page, showQueries, onRefresh, onNext, onApplied, onPrevious, onError, onTabToQueue, onShortcuts, onStatus, onMutation }: { page: PageView; showQueries: boolean; onRefresh: (strict?: boolean) => Promise<ImportQueueItem[]>; onNext: (queue?: ImportQueueItem[], focusQueue?: boolean) => void; onApplied: () => Promise<void>; onPrevious: () => void; onError: (error: unknown) => void; onTabToQueue: () => boolean; onShortcuts: () => void; onStatus: ShortcutStatus; onMutation: (running: boolean) => void }) {
   const [review, setReview] = useState<ReviewState>(() => reviewForPage(page))
   const [busy, setBusy] = useState(false)
+  const [applyState, setApplyState] = useState<'ready' | 'enqueueing' | 'loading' | 'error'>('ready')
   const [picker, setPicker] = useState<PickerState | null>(null)
   const [expandedFuzzy, setExpandedFuzzy] = useState<Set<string>>(new Set())
   const [pageError, setPageError] = useState<string>()
@@ -277,10 +278,12 @@ function ImportPage({ page, showQueries, onRefresh, onNext, onApplyStarted, onPr
     onMutation(true)
     try {
       setPageError(undefined)
+      setApplyState('enqueueing')
       await invoke('lastfm_import_apply', { batchId: page.batchId, artist: page.artist, album: page.album, selectedIds: [...review.checked], archiveBatch: advance, options: pageOptions(review) })
-      if (advance) onApplyStarted(page.batchId)
-      else onStatus('Applying changes in the background…')
-    } catch (error) { setPageError(String(error)); onError(error) } finally { onMutation(false); setBusy(false) }
+      if (advance) setApplyState('loading')
+      if (advance) await onApplied()
+      else { await onRefresh(true); setApplyState('ready') }
+    } catch (error) { setApplyState('error'); setPageError(String(error)); onError(error) } finally { onMutation(false); setBusy(false) }
   }
   const fuzzyFor = (item: PageItem): { target: string; group: ImportSourceRow[] } | undefined => {
     const target = item.matchResult?.trackMatches[item.source.stableId]
@@ -417,7 +420,7 @@ function ImportPage({ page, showQueries, onRefresh, onNext, onApplyStarted, onPr
   const matchedIds = page.rows.filter((item) => matchedTrack(item)).map((item) => item.source.stableId)
   const requiredMatchIds = requiredImportMatchIds(selectedActionableIds, matchedIds, review.includeHistoricalPlayCounts, review.wholeAlbum)
   const requiredMatches = new Set(requiredMatchIds)
-  return <section className="import-review" aria-labelledby="import-review-title" onKeyDown={handleNavigationKeyDown}>
+  return <section className="import-review" aria-labelledby="import-review-title" aria-busy={applyState === 'enqueueing' || applyState === 'loading'} onKeyDown={handleNavigationKeyDown}>
     <header className="import-review-header"><div><p className="eyebrow">{page.artist}</p><h2 id="import-review-title">{page.album || 'Singles'}</h2><p className="import-page-meta">{page.rows.length} source tracks · {page.rows.reduce((total, item) => total + item.source.playCount, 0).toLocaleString()} plays</p></div><div className="import-page-actions"><button type="button" disabled={busy || page.pageNumber <= 1} aria-label="Previous batch" onClick={onPrevious}>‹</button><span>Batch {page.pageNumber} of {page.pageCount}</span><button type="button" disabled={busy || page.pageNumber >= page.pageCount} aria-label="Next batch" onClick={() => onNext()}>›</button><button type="button" disabled={busy} onClick={openAlbumPicker}>Change Album…</button><button type="button" disabled={busy} onClick={() => void toggleAlbumSkip()}>{canResumeAlbum ? 'Resume Album' : 'Skip Album'}</button><button type="button" disabled={busy} onClick={() => void run('lastfm_import_review', { batchId: page.batchId, action: 'ignore-album', artist: page.artist, album: page.album }).then(onNext)}>Ignore Album</button><button type="button" disabled={busy} onClick={() => void run('lastfm_import_review', { batchId: page.batchId, action: 'ignore-artist', artist: page.artist, album: page.album }).then(onNext)}>Ignore Artist</button></div></header>
     <div className="import-album-strip"><div className="import-nav-target" data-import-nav="source" data-import-row="0" tabIndex={0} aria-label="Last.fm album source" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>WHAT I’M IMPORTING</p><strong>{page.album || 'Singles'}</strong><small>{page.artist} · {page.rows.length} source tracks</small></div><div className="import-nav-target" data-import-nav="match" data-import-row="0" tabIndex={0} aria-label="Spotify album match" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>SPOTIFY MATCH</p><strong>{selectedAlbumName}</strong><small>{selectedAlbumCandidate ? relationLabel(selectedAlbumCandidate.relation) : 'No release selected'}</small>{albumAdvisory.strong && <span className="import-strong-match" role="status">STRONG MATCH{albumAdvisory.extraTrackCount ? ` · ${albumAdvisory.extraTrackCount} extra Spotify track${albumAdvisory.extraTrackCount === 1 ? '' : 's'}` : ''}</span>}<button type="button" disabled={busy} onClick={openAlbumPicker}>Change Album…</button></div></div>
     <div className="import-options" role="group" aria-label="Import options"><label><input type="checkbox" aria-label="Import tracks and albums found in history" checked={review.importContent} disabled={busy || (!review.includeHistoricalPlayCounts && review.importContent)} onChange={(event) => intentChange('importContent', event.target.checked)} /> Import tracks and albums found in history</label><label><input type="checkbox" aria-label="Include historical play counts" checked={review.includeHistoricalPlayCounts} disabled={busy || (!review.importContent && review.includeHistoricalPlayCounts)} onChange={(event) => intentChange('includeHistoricalPlayCounts', event.target.checked)} /> Include historical play counts</label><label><input type="checkbox" aria-label="Import whole album" checked={review.wholeAlbum} disabled={busy || !review.importContent} onChange={(event) => void persist({ ...review, wholeAlbum: event.target.checked }, true)} /> Import whole album</label><label>Genre <input aria-label="Import genre" value={review.genre} onChange={(event) => void persist({ ...review, genre: event.target.value })} placeholder="No change" /></label><label>Rating <select aria-label="Import rating" value={review.rating ?? ''} onChange={(event) => void persist({ ...review, rating: event.target.value ? Number(event.target.value) : null })}><option value="">No change</option>{[1, 2, 3, 4, 5].map((rating) => <option key={rating} value={rating}>{'★'.repeat(rating)}</option>)}</select></label></div>
@@ -545,7 +548,7 @@ function VirtualQueue({ items, selectedPage, disabled, onOpen, onSkip, onTab, on
   return <div ref={list} className="import-queue-list" aria-label="Import queue">
     <div className="import-queue-canvas" style={{ height: range.contentHeight }}>
       <div className="import-queue-window" style={{ transform: `translateY(${range.offsetTop}px)` }}>
-        {items.slice(range.start, range.end).map((item, index) => { const absoluteIndex = range.start + index; return <button type="button" data-import-nav="queue" data-queue-index={absoluteIndex} data-highlighted={highlightedIndex === absoluteIndex ? 'true' : undefined} aria-current={selectedPage === item.page ? 'true' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Tab Shift+Tab Enter S ?" tabIndex={highlightedIndex === absoluteIndex ? 0 : -1} aria-label={`Batch ${absoluteIndex + 1} of ${items.length}: ${item.album || 'Singles'} by ${item.artist}, ${item.playCount.toLocaleString()} plays`} disabled={disabled} className={`import-queue-row${selectedPage === item.page ? ' selected' : ''}${highlightedIndex === absoluteIndex ? ' highlighted' : ''}`} key={item.page} onFocus={() => { highlightedPageRef.current = item.page; setHighlightedIndex((current) => current === absoluteIndex ? current : absoluteIndex) }} onKeyDown={(event) => handleKeyDown(event, item, absoluteIndex)} onClick={() => { highlightedPageRef.current = item.page; setHighlightedIndex(absoluteIndex); onOpen(item) }}><span className={`import-status-dot ${item.status ?? 'pending'}`} aria-label={item.status ?? 'pending'}>{item.status === 'done' ? '✓' : item.status === 'skipped' ? '–' : item.status === 'excluded' || item.status?.startsWith('ignored') ? '⊘' : '•'}</span><span className="import-queue-copy"><strong>{item.album || 'Singles'}</strong><small>{item.artist} · {item.sourceCount} tracks</small></span><span className="import-queue-count">{item.playCount.toLocaleString()}<small>plays</small></span></button> })}
+        {items.slice(range.start, range.end).map((item, index) => { const absoluteIndex = range.start + index; return <button type="button" data-import-nav="queue" data-queue-index={absoluteIndex} data-highlighted={highlightedIndex === absoluteIndex ? 'true' : undefined} aria-current={selectedPage === item.page ? 'true' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Tab Shift+Tab Enter S ?" tabIndex={highlightedIndex === absoluteIndex ? 0 : -1} aria-label={`Batch ${absoluteIndex + 1} of ${items.length}: ${item.album || 'Singles'} by ${item.artist}, ${item.playCount.toLocaleString()} plays`} disabled={disabled} className={`import-queue-row${selectedPage === item.page ? ' selected' : ''}${highlightedIndex === absoluteIndex ? ' highlighted' : ''}`} key={item.page} onFocus={() => { highlightedPageRef.current = item.page; setHighlightedIndex((current) => current === absoluteIndex ? current : absoluteIndex) }} onKeyDown={(event) => handleKeyDown(event, item, absoluteIndex)} onClick={() => { highlightedPageRef.current = item.page; setHighlightedIndex(absoluteIndex); onOpen(item) }}><span className={`import-status-dot ${item.status ?? 'pending'}`} aria-label={item.status ?? 'pending'} title={item.error ?? undefined}>{item.status === 'done' ? '✓' : item.status === 'skipped' ? '–' : item.status === 'failed' ? '!' : item.status === 'excluded' || item.status?.startsWith('ignored') ? '⊘' : '•'}</span><span className="import-queue-copy"><strong>{item.album || 'Singles'}</strong><small>{item.error ? `Apply failed: ${item.error}` : `${item.artist} · ${item.sourceCount} tracks`}</small></span><span className="import-queue-count">{item.playCount.toLocaleString()}<small>plays</small></span></button> })}
       </div>
     </div>
   </div>
@@ -567,9 +570,11 @@ export default function LastFmImporter() {
   const [shortcutStatus, setShortcutStatus] = useState('')
   const [pendingDefaults, setPendingDefaults] = useState<LastFmImportDefaults>(emptyDefaults)
   const pageRequestGeneration = useRef(0)
+  const queueRefreshGeneration = useRef(0)
   const acceptAllRunning = useRef(false)
   const queueMutationRunning = useRef(false)
   const focusQueueAfterOpen = useRef(false)
+  const advancingApply = useRef(false)
   const orderedQueue = useMemo(() => sortImportQueue(queue, sort), [queue, sort])
   const activeQueue = useMemo(() => activeImportQueue(orderedQueue), [orderedQueue])
   const queueSummary = useMemo(() => {
@@ -588,12 +593,13 @@ export default function LastFmImporter() {
   selectedPageRef.current = selectedPage
   const sortRef = useRef<'plays' | 'artist' | 'batch' | 'lastPlayed'>('plays')
   sortRef.current = sort
-  const refresh = useCallback(async (): Promise<ImportQueueItem[]> => {
+  const refresh = useCallback(async (strict = false): Promise<ImportQueueItem[]> => {
     const requestGeneration = ++pageRequestGeneration.current
     const currentSelectedPage = selectedPageRef.current
     const currentSort = sortRef.current
     try {
       const [nextState, nextQueue] = await Promise.all([invoke<ImportStateView>('lastfm_import_state'), loadImportQueue()])
+      if (!isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) return nextQueue
       setState(nextState)
       setShowQueries(nextState.searchTerms)
       setQueue(nextQueue)
@@ -613,6 +619,7 @@ export default function LastFmImporter() {
       return nextQueue
     } catch (reason) {
       if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) setError(String(reason))
+      if (strict && isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) throw reason
       return []
     }
   }, [])
@@ -627,13 +634,22 @@ export default function LastFmImporter() {
     const target = importQueueTabTarget(shiftKey)
     return focusImporterTarget(target.kind, target.row)
   }
-  const refreshQueueOnly = async () => {
-    const [nextState, nextQueue] = await Promise.all([invoke<ImportStateView>('lastfm_import_state'), loadImportQueue()])
-    setState(nextState)
-    setShowQueries(nextState.searchTerms)
-    setQueue(nextQueue)
-    setPendingDefaults(nextState.defaults)
-    return nextQueue
+  const refreshQueueOnly = async (strict = false): Promise<ImportQueueItem[]> => {
+    const requestGeneration = ++queueRefreshGeneration.current
+    try {
+      const [nextState, nextQueue] = await Promise.all([invoke<ImportStateView>('lastfm_import_state'), loadImportQueue()])
+      if (requestGeneration !== queueRefreshGeneration.current) return nextQueue
+      setState(nextState)
+      setShowQueries(nextState.searchTerms)
+      setQueue(nextQueue)
+      setPendingDefaults(nextState.defaults)
+      return nextQueue
+    } catch (reason) {
+      if (requestGeneration !== queueRefreshGeneration.current) return []
+      setError(String(reason))
+      if (strict) throw reason
+      return []
+    }
   }
   const skipQueueItem = async (item: ImportQueueItem) => {
     if (!item.remaining) {
@@ -657,7 +673,14 @@ export default function LastFmImporter() {
   useEffect(() => {
     void refresh()
     const subscription = listen<ImportStateView>('lastfm-import-changed', () => { if (shouldRefreshImportEvent(acceptAllRunning.current, queueMutationRunning.current)) void refresh() })
-    const completions = listen<{ message?: string }>('lastfm-import-apply-finished', (event) => { setError(event.payload.message); void refresh() })
+    const completions = listen<{ batchId?: number; message?: string }>('lastfm-import-apply-finished', (event) => {
+      if (event.payload.message) {
+        setError(event.payload.message)
+        void refreshQueueOnly()
+      } else if (!advancingApply.current && event.payload.batchId === selectedPageRef.current) {
+        void refresh()
+      }
+    })
     return () => { void subscription.then((stop) => stop()); void completions.then((stop) => stop()) }
   }, [refresh])
   useEffect(() => { setPage((current) => pageWithQueuePosition(current, activeQueue)) }, [activeQueue])
@@ -705,13 +728,28 @@ export default function LastFmImporter() {
     }
     else { setSelected(null); setPage(null); void refresh() }
   }
-  const applyStarted = (batchId: number) => {
-    const optimisticQueue = optimisticallyArchiveImportQueue(queue, batchId)
-    setQueue(optimisticQueue)
-    const current = queue.find((item) => item.page === batchId) ?? selected
-    const next = nextRemainingImportQueue(optimisticQueue, current, sort)
-    if (next) void openQueueItem(next, activeImportQueue(sortImportQueue(optimisticQueue, sort)), true)
-    else { setSelected(null); setPage(null) }
+  const appliedAndAdvance = async () => {
+    focusQueueAfterOpen.current = true
+    advancingApply.current = true
+    const appliedPage = selected?.page
+    if (appliedPage === undefined) {
+      advancingApply.current = false
+      return
+    }
+    const projection = projectAcknowledgedImportApply(queue, appliedPage, sort)
+    setQueue(projection.queue)
+    setSelected(null)
+    setPage(null)
+    try {
+      if (projection.next) {
+        await openQueueItem(projection.next, activeImportQueue(sortImportQueue(projection.queue, sort)), true)
+      } else {
+        focusQueueAfterOpen.current = false
+      }
+    } finally {
+      advancingApply.current = false
+    }
+    void refreshQueueOnly(true).catch(() => {})
   }
   const previousQueueItem = () => {
     const index = selected ? orderedQueue.findIndex((item) => item.page === selected.page) : orderedQueue.length
@@ -721,10 +759,11 @@ export default function LastFmImporter() {
   const acceptAll = async () => {
     setBusy(true); setError(undefined); acceptAllRunning.current = true
     try {
-      for (const item of orderedQueue.filter((entry) => entry.remaining)) await invoke('lastfm_import_accept_all_page', { batchId: item.page, artist: item.artist, album: item.album })
-      await refresh()
+      const nextState = await invoke<ImportStateView>('lastfm_import_accept_all')
+      setState(nextState)
       setAcceptAllOpen(false)
       setAcceptAllSummary(null)
+      void refreshQueueOnly()
     } catch (reason) { setError(String(reason)) } finally { acceptAllRunning.current = false; setBusy(false) }
   }
   const prepareAcceptAll = async () => {
@@ -744,9 +783,9 @@ export default function LastFmImporter() {
   const reviewReady = state.phase === 'review' || state.phase === 'done'
   const emptyPage = importEmptyPageMessage(state.phase, pageLoading)
   return <main className="lastfm-importer" aria-label="Last.fm importer">
-    <header className="import-toolbar"><div><p className="eyebrow">LAST.FM HISTORY</p><h1>Last.fm importer</h1><p className="import-status" aria-live="polite">{state.syncing ? 'Syncing new Last.fm plays' : importStatusText(state.phase, state.username)}{showsImportRemaining(state.phase) && state.remaining ? ` · ${state.remaining.toLocaleString()} left` : ''}{state.pendingReview && !state.remaining ? ` · ${state.pendingReview.toLocaleString()} pending review` : ''}</p></div><div className="import-toolbar-actions"><a href="https://www.last.fm/" target="_blank" rel="noreferrer">Powered by Last.fm</a><button type="button" aria-keyshortcuts="?" disabled={acceptAllOpen} onClick={() => setShortcutsOpen(true)}>Keyboard shortcuts (?)</button>{reviewReady && <><span className="import-sort-label">Sort</span><div className="import-sort-control" role="group" aria-label="Queue sort">{([['plays', 'Most played'], ['artist', 'Artist A–Z'], ['batch', 'Batch size'], ['lastPlayed', 'Last played']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={sort === value} className={sort === value ? 'active' : ''} onClick={() => setSort(value)}>{label}</button>)}</div><label className="import-query-toggle"><input type="checkbox" aria-label="Show Spotify search terms" checked={showQueries} disabled={busy} onChange={(event) => void setSearchTerms(event.target.checked)} /> Show Spotify search terms</label><button type="button" disabled={busy || !state.remaining} onClick={() => void prepareAcceptAll()}>Accept All Imports…</button></>}</div></header>
+    <header className="import-toolbar"><div><p className="eyebrow">LAST.FM HISTORY</p><h1>Last.fm importer</h1><p className="import-status" aria-live="polite">{state.applyingAll ? 'Applying confirmed Last.fm imports' : state.syncing ? 'Syncing new Last.fm plays' : importStatusText(state.phase, state.username)}{showsImportRemaining(state.phase) && state.remaining ? ` · ${state.remaining.toLocaleString()} left` : ''}{state.pendingReview && !state.remaining ? ` · ${state.pendingReview.toLocaleString()} pending review` : ''}</p></div><div className="import-toolbar-actions"><a href="https://www.last.fm/" target="_blank" rel="noreferrer">Powered by Last.fm</a><button type="button" aria-keyshortcuts="?" disabled={acceptAllOpen} onClick={() => setShortcutsOpen(true)}>Keyboard shortcuts (?)</button>{reviewReady && <><span className="import-sort-label">Sort</span><div className="import-sort-control" role="group" aria-label="Queue sort">{([['plays', 'Most played'], ['artist', 'Artist A–Z'], ['batch', 'Batch size'], ['lastPlayed', 'Last played']] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={sort === value} className={sort === value ? 'active' : ''} onClick={() => setSort(value)}>{label}</button>)}</div><label className="import-query-toggle"><input type="checkbox" aria-label="Show Spotify search terms" checked={showQueries} disabled={busy} onChange={(event) => void setSearchTerms(event.target.checked)} /> Show Spotify search terms</label><button type="button" disabled={busy || state.applyingAll || !state.remaining} onClick={() => void prepareAcceptAll()}>Accept All Imports…</button></>}</div></header>
     {error && <div className="import-error" role="alert">{error}</div>}
-    {state.phase === 'downloading' || state.phase === 'aggregating' || state.phase === null || state.phase === 'suspended' ? <DownloadPane state={state} defaults={pendingDefaults} busy={busy} onDefaults={setPendingDefaults} onStart={() => void start()} /> : <div className="import-workspace" aria-busy={pageLoading}><aside className="import-queue" aria-label="Import queue"><div className="import-queue-header"><div><h2>Import queue</h2><small>{queueSummary.remaining} batches · {queueSummary.plays.toLocaleString()} plays</small></div><span>{queueSummary.remaining} left</span></div><VirtualQueue items={activeQueue} selectedPage={selected?.page ?? null} disabled={busy} onOpen={(item) => void openQueueItem(item, activeQueue, true)} onSkip={(item) => void skipQueueItem(item)} onTab={focusMappingFromQueue} onShortcuts={() => setShortcutsOpen(true)} /><div className="import-queue-progress"><progress max={queue.length || 1} value={queueSummary.reviewed} aria-label="Reviewed queue progress" /><span>Reviewed {queueSummary.reviewed} of {queue.length} batches</span></div></aside>{page ? <ImportPage page={page} showQueries={showQueries} onRefresh={refresh} onNext={nextQueueItem} onApplyStarted={applyStarted} onPrevious={previousQueueItem} onError={(reason) => setError(String(reason))} onTabToQueue={focusQueueTarget} onShortcuts={() => setShortcutsOpen(true)} onStatus={setShortcutStatus} onMutation={(running) => { queueMutationRunning.current = running }} /> : <section className="import-empty"><strong>{emptyPage.title}</strong><span>{emptyPage.detail}</span></section>}</div>}
+    {state.phase === 'downloading' || state.phase === 'aggregating' || state.phase === null || state.phase === 'suspended' ? <DownloadPane state={state} defaults={pendingDefaults} busy={busy} onDefaults={setPendingDefaults} onStart={() => void start()} /> : <div className="import-workspace" aria-busy={pageLoading || state.applyingAll}><aside className="import-queue" aria-label="Import queue"><div className="import-queue-header"><div><h2>Import queue</h2><small>{queueSummary.remaining} batches · {queueSummary.plays.toLocaleString()} plays</small></div><span>{queueSummary.remaining} left</span></div><VirtualQueue items={activeQueue} selectedPage={selected?.page ?? null} disabled={busy || state.applyingAll} onOpen={(item) => void openQueueItem(item, activeQueue, true)} onSkip={(item) => void skipQueueItem(item)} onTab={focusMappingFromQueue} onShortcuts={() => setShortcutsOpen(true)} /><div className="import-queue-progress"><progress max={queue.length || 1} value={queueSummary.reviewed} aria-label="Reviewed queue progress" /><span>Reviewed {queueSummary.reviewed} of {queue.length} batches</span></div></aside>{state.applyingAll ? <section className="import-empty"><strong>Applying confirmed imports…</strong><span>You can close this window; Retune will resume the queue after a restart.</span></section> : page ? <ImportPage page={page} showQueries={showQueries} onRefresh={refresh} onNext={nextQueueItem} onApplied={appliedAndAdvance} onPrevious={previousQueueItem} onError={(reason) => setError(String(reason))} onTabToQueue={focusQueueTarget} onShortcuts={() => setShortcutsOpen(true)} onStatus={setShortcutStatus} onMutation={(running) => { queueMutationRunning.current = running }} /> : <section className="import-empty"><strong>{emptyPage.title}</strong><span>{emptyPage.detail}</span></section>}</div>}
     <footer className="import-footer"><span>Historical import is an absolute baseline; incremental sync adds new plays, deduplicates Retune-origin scrobbles locally, and never erases existing plays.</span><span className="import-footer-hints">↑↓ move · Tab columns · Enter controls · E edit · Space toggle · X exclude · S skip/resume · A apply · ? shortcuts</span><span role="status" aria-live="polite">{shortcutStatus || (state.username ? `Last.fm: ${state.username}` : 'Account not connected')}</span></footer>
     {acceptAllOpen && acceptAllSummary && <AcceptAllDialog albumEntities={acceptAllSummary.albumEntities} trackEntities={acceptAllSummary.trackEntities} busy={busy} onCancel={() => { setAcceptAllOpen(false); setAcceptAllSummary(null) }} onConfirm={() => void acceptAll()} />}
     {shortcutsOpen && <KeyboardShortcutsDialog onCancel={() => setShortcutsOpen(false)} />}

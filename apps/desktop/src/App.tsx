@@ -298,7 +298,6 @@ function App() {
   useTauriEvent<ConnectionState>('connection-changed', (connection) => dispatch({ type: 'connection', connection }))
   useTauriEvent<LastFmState>('lastfm-changed', (lastfm) => dispatch({ type: 'lastfm', lastfm }))
   useTauriEvent<LastFmImportState>('lastfm-import-changed', (lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
-  useTauriEvent<{ view?: LastFmImportState }>('lastfm-import-apply-finished', ({ view }) => { if (view) dispatch({ type: 'lastfmImport', lastfmImport: view }) })
   useTauriEvent<Settings>('settings-changed', (settings) => dispatch({ type: 'hydrateSettings', settings }))
   useTauriEvent<string>('sync-progress', (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
   useTauriEvent<{ tracks: number; fraction: number }>('sync-progress-count', (progress) => dispatch({ type: 'syncProgress', progress }))

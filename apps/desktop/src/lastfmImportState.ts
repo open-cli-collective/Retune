@@ -6,7 +6,7 @@ export type ImportConfidence = 'exact' | 'likely' | 'low' | null
 export type ImportMatchRelation = 'best-match' | 'same-songs' | 'superset' | null
 export type ImportNavigationTarget = 'queue' | 'source' | 'match'
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
-export type QueueStatus = ReviewStatus | 'excluded'
+export type QueueStatus = ReviewStatus | 'excluded' | 'failed'
 
 export type ImportShortcutContext = {
   key: string
@@ -90,6 +90,7 @@ export type ImportQueueItem = {
   albumEntities: number
   trackEntities: number
   status?: QueueStatus | null
+  error?: string | null
 }
 
 export type ImportQueuePage = {
@@ -112,10 +113,6 @@ export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[]
 
 export function activeImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
   return items.filter((item) => item.remaining)
-}
-
-export function optimisticallyArchiveImportQueue(items: ImportQueueItem[], page: number): ImportQueueItem[] {
-  return items.map((item) => item.page === page ? { ...item, remaining: false, status: 'done' } : item)
 }
 
 export function importQueueTabTarget(shiftKey: boolean): { kind: 'source' | 'match'; row: 0 } {
@@ -294,6 +291,12 @@ export function nextRemainingImportQueue(items: ImportQueueItem[], current: Impo
   const ordered = sortImportQueue(items, sort)
   const currentIndex = current ? ordered.findIndex((item) => item.page === current.page) : -1
   return ordered.slice(currentIndex + 1).find((item) => item.remaining) ?? ordered.slice(0, Math.max(0, currentIndex)).find((item) => item.remaining) ?? null
+}
+
+export function projectAcknowledgedImportApply(items: ImportQueueItem[], appliedPage: number, sort: ImportSort): { queue: ImportQueueItem[]; next: ImportQueueItem | null } {
+  const current = items.find((item) => item.page === appliedPage) ?? null
+  const queue = items.map((item) => item.page === appliedPage ? { ...item, remaining: false, status: 'done' as const, error: null } : item)
+  return { queue, next: nextRemainingImportQueue(queue, current, sort) }
 }
 
 export type ImportQueueVisibleRange = { start: number; end: number; offsetTop: number; contentHeight: number }

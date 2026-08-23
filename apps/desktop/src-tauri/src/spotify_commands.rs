@@ -399,7 +399,6 @@ pub(super) async fn add_spotify_album(
 
 pub(crate) struct AlbumSaveResult {
     pub album_uri: String,
-    pub track_uris: Vec<String>,
 }
 
 /// Saves one album entity upstream and mirrors its content locally. The
@@ -458,7 +457,6 @@ pub(crate) async fn save_album_operation(
     })?;
     Ok(AlbumSaveResult {
         album_uri: album.uri,
-        track_uris,
     })
 }
 

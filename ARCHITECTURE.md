@@ -128,12 +128,19 @@ page’s options.
 
 Whole-album acceptance sends one album URI to Spotify and updates
 `SavedAlbumRecord`; selected-track acceptance sends only track URIs and updates
-`saved_tracks`. Upstream membership completes before the atomic local history
-and metadata mutation, and a durable decision is marked done only after that
-mutation succeeds. The Tauri command starts this idempotent work on the Rust
-runtime and returns after validation; the importer optimistically advances, then
-reconciles from the emitted completion or restores the batch on an emitted
-failure. The source session is bound to Last.fm first; Spotify
+`saved_tracks`. Accept & Next first builds a frozen, account/session-bound apply
+plan and atomically enqueues it in `lastfm-sync.json`; the command returns after
+that enqueue, so the accepted batch disappears from the active projection while
+the next batch can open immediately. One serial Rust worker then performs
+upstream membership, local materialization/history/metadata, reusable mappings,
+and review decisions in order, checkpointing its stage and removing the job only
+after every effect succeeds. Replaying a stage is idempotent; failures retain a
+retryable job and its frozen choices, while running jobs resume after restart.
+Whole-album jobs never issue saved-track membership writes. Accept All stores one
+compact cursor and creates only its next job. Explicit Spotify membership remains
+on the Rust runtime through the shared request gate; completion/failure events
+refresh the queue without replacing a newer selection. The source session is
+bound to Last.fm first; Spotify
 `/me` is nullable until the first lazy match. A later Spotify mismatch
 suspends Spotify-derived work without invalidating the source snapshot.
 The importer serializes each session mutation through durable replacement before

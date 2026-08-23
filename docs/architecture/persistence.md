@@ -21,7 +21,7 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `lastfm-import.json` | Versioned, account-bound Last.fm snapshot/review session; excluded from backup |
 | `lastfm-import-cache/` | Disposable V2 parsed-page cache and authoritative manifests; excluded from backup |
 | `lastfm-mappings.json` | Account-bound reusable track/album mappings and permanent ignore rules; optional in backup |
-| `lastfm-sync.json` | Machine-local incremental checkpoint, active range/cache, backlog, and application journal; excluded from backup |
+| `lastfm-sync.json` | Machine-local incremental checkpoint, active range/cache, backlog/journal, and the account/session-bound review-apply queue; excluded from backup |
 
 The official Tauri window-state plugin manages the main native window's size,
 position, and maximized state in machine-local application state. Its lifecycle

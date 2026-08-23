@@ -122,9 +122,11 @@ Normal albums under the cap remain one batch; larger albums and singles split
 deterministically, and command arguments must identify the requested batch and
 its artist/album identity. Row actions also require a source ID; album-level
 actions can operate without one. Queue summaries cross the IPC boundary as
-bounded cursor/limit pages with `sourceCount`, not source IDs; Accept All applies
-its prepared batches sequentially and refreshes the queue once after the bulk
-operation.
+bounded cursor/limit pages with `sourceCount`, not source IDs. Queued and
+running apply jobs are omitted from the active projection; failed jobs reappear
+with their frozen choices and an actionable error. Accept All persists one
+compact cursor and advances one durable apply job at a time; review choices are
+locked while that cursor is active, including after restart.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the
@@ -133,6 +135,15 @@ is the only bulk exception and prepares remaining batches sequentially before
 showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
 source-history decisions and can be undone before acceptance; they never remove
 a track inherently materialized by a saved whole album.
+
+Accepting one batch first persists a frozen, account/session-bound apply plan in
+`lastfm-sync.json`; the command waits only for that atomic enqueue. A serial Rust
+worker then saves upstream membership, materializes missing tracks, applies
+idempotent history/metadata, persists reusable mappings, and finally commits the
+review decision before removing the job. A process exit or failure leaves the
+job at its last stage for safe replay; account changes suspend it without
+applying to another profile. The UI advances from the authoritative queue after
+enqueue and completion events never replace a newer selection.
 
 Spotify saved-track and saved-album memberships are not core-library state.
 The shell keeps those account-scoped memberships separately while materializing

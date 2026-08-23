@@ -73,6 +73,7 @@ export type LastFmImportState = {
   lastSyncedAt: number | null
   pendingReview: number
   syncProblem: string | null
+  applyingAll: boolean
 }
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'

@@ -2570,7 +2570,7 @@ pub fn run() {
             lastfm_import::lastfm_import_change_album,
             lastfm_import::lastfm_import_apply,
             lastfm_import::lastfm_import_prepare_accept_all,
-            lastfm_import::lastfm_import_accept_all_page,
+            lastfm_import::lastfm_import_accept_all,
             diagnostics::load_diagnostics,
             diagnostics::email_diagnostics
         ])
@@ -2715,6 +2715,7 @@ pub fn run() {
                 lastfm_startup.set_enabled(lastfm_enabled).await;
                 let _ = set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
                 lastfm_import::resume_persisted_import(profile_app.clone()).await;
+                lastfm_import::resume_persisted_apply(profile_app.clone()).await;
                 let _ = lastfm_import_startup.backfill_completed_mappings().await;
                 if lastfm_startup.state().await.connected {
                     let _ = lastfm_import::sync_lastfm_plays(profile_app.clone()).await;
