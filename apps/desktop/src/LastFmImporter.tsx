@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, LastFmImportState, Settings } from './types.ts'
-import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, downloadAction, excludedImportCount, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, normalizeImportMatch, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, collectionSuggestion, downloadAction, excludedImportCount, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportStateView = LastFmImportState
@@ -90,13 +90,6 @@ function matchedTrack(item: PageItem) {
   }
 }
 
-function collectionSuggestion(item: PageItem): AlbumCandidate | null {
-  const match = item.matchResult
-  if (!match || match.selectedUri || matchedTrack(item)) return null
-  const artists = [item.source.artist, ...item.source.variants.map((variant) => variant.artist)].map(normalizeImportMatch)
-  return match.candidates.find((candidate) => candidate.uri.startsWith('spotify:track:') && artists.includes(normalizeImportMatch(candidate.artist))) ?? null
-}
-
 function collectionSummary(page: PageView) {
   let automatic = 0
   let suggested = 0
@@ -104,7 +97,7 @@ function collectionSummary(page: PageView) {
   for (const item of page.rows) {
     const track = matchedTrack(item)
     if (track && !item.matchResult?.selectedUri && item.matchResult?.confidence === 'exact') automatic += 1
-    else if (collectionSuggestion(item)) suggested += 1
+    else if (collectionSuggestion(item.source, item.matchResult)) suggested += 1
     else if (!track) needsReview += 1
   }
   return { automatic, suggested, needsReview }
@@ -239,7 +232,7 @@ function FuzzyPanel({ rows, targetUri, mode, expanded, locked, onMode, onToggle 
 function ImporterRow({ item, rowNumber, checked, needsMatch, collection, fuzzy, fuzzyTarget, onToggle, onExclude, onChangeTrack, onUseTrack, onFuzzyMode, onFuzzyToggle, fuzzyExpanded, fuzzyMode, fuzzyLocked, showQuery, locked }: { item: PageItem; rowNumber: number; checked: boolean; needsMatch: boolean; collection: boolean; fuzzy?: ImportSourceRow[]; fuzzyTarget?: string; onToggle: () => void; onExclude: () => void; onChangeTrack: () => void; onUseTrack: (uri: string) => void; onFuzzyMode: (mode: CountMode) => void; onFuzzyToggle: () => void; fuzzyExpanded: boolean; fuzzyMode: CountMode; fuzzyLocked: boolean; showQuery: boolean; locked: boolean }) {
   const match = item.matchResult
   const track = matchedTrack(item)
-  const suggestion = collection ? collectionSuggestion(item) : null
+  const suggestion = collection ? collectionSuggestion(item.source, item.matchResult) : null
   const trackConfidence: ImportConfidence = selectedImportTrackConfidence(item.source.stableId, match?.selectedUri ?? null, match?.trackMatches ?? {}, match?.confidence ?? null, match?.candidates ?? [])
   const excluded = item.decision.excluded
   const disabled = locked || excluded || !['pending', 'skipped'].includes(item.decision.status)

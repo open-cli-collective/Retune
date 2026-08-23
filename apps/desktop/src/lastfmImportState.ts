@@ -134,6 +134,25 @@ export type ImportSourceRow = {
   variants: ImportVariant[]
 }
 
+export type ImportCollectionSuggestionCandidate = {
+  uri: string
+  artist: string
+  inLibrary: boolean
+  relation: ImportMatchRelation
+}
+
+export type ImportCollectionSuggestionMatch = {
+  selectedUri: string | null
+  trackMatches: Record<string, string>
+  candidates: ImportCollectionSuggestionCandidate[]
+}
+
+export function collectionSuggestion<T extends ImportCollectionSuggestionCandidate>(source: Pick<ImportSourceRow, 'stableId' | 'artist' | 'variants'>, match: (Omit<ImportCollectionSuggestionMatch, 'candidates'> & { candidates: T[] }) | null): T | null {
+  if (!match || match.selectedUri || match.trackMatches[source.stableId]) return null
+  const artists = [source.artist, ...source.variants.map((variant) => variant.artist)].map(normalizeImportMatch)
+  return match.candidates.find((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.inLibrary && candidate.relation !== 'best-match' && artists.includes(normalizeImportMatch(candidate.artist))) ?? null
+}
+
 export type ImportDecision = { status: ReviewStatus; excluded: boolean }
 
 export type ReviewState = {
