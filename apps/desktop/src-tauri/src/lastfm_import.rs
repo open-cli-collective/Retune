@@ -5268,7 +5268,11 @@ fn collection_mapping_uri(row: &SourceRow, mappings: &LastFmMappings) -> Option<
         })
 }
 
-fn mapping_candidate(row: &SourceRow, uri: &str, membership: &CollectionMembership) -> AlbumCandidate {
+fn mapping_candidate(
+    row: &SourceRow,
+    uri: &str,
+    membership: &CollectionMembership,
+) -> AlbumCandidate {
     AlbumCandidate {
         uri: uri.to_owned(),
         name: row.track.clone(),
@@ -5289,8 +5293,8 @@ fn rank_collection_candidates(
 ) {
     for candidate in candidates.iter_mut() {
         candidate.in_library = membership.contains(&candidate.uri);
-        candidate.relation = collection_candidate_is_exact(row, candidate)
-            .then_some(AlbumRelation::BestMatch);
+        candidate.relation =
+            collection_candidate_is_exact(row, candidate).then_some(AlbumRelation::BestMatch);
     }
     candidates.sort_by(|left, right| {
         collection_candidate_rank(row, left)
@@ -5309,7 +5313,11 @@ fn ratify_collection_result(
 ) -> MatchResult {
     rank_collection_candidates(row, &mut result.candidates, membership);
     if let Some(uri) = collection_mapping_uri(row, mappings) {
-        if !result.candidates.iter().any(|candidate| candidate.uri == uri) {
+        if !result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.uri == uri)
+        {
             result
                 .candidates
                 .push(mapping_candidate(row, &uri, membership));
@@ -5352,7 +5360,11 @@ fn ratify_collection_result(
     }
     rank_collection_candidates(row, &mut result.candidates, membership);
     if let Some(uri) = collection_mapping_uri(row, mappings) {
-        if !result.candidates.iter().any(|candidate| candidate.uri == uri) {
+        if !result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.uri == uri)
+        {
             result
                 .candidates
                 .insert(0, mapping_candidate(row, &uri, membership));
@@ -5569,9 +5581,10 @@ where
         .collect::<Vec<_>>();
     if album.is_empty() {
         rows.retain(|row| {
-            session.matches.get(&row.stable_id).is_none_or(|result| {
-                is_album_search_term(&result.search_term)
-            })
+            session
+                .matches
+                .get(&row.stable_id)
+                .is_none_or(|result| is_album_search_term(&result.search_term))
         });
     }
     let results = search(rows).await?;
@@ -5637,11 +5650,8 @@ async fn lazy_match_page(
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    let initial_needs_match = !batch_match_plan(
-        &initial_session,
-        Some((batch_id, artist, album)),
-    )
-    .is_empty();
+    let initial_needs_match =
+        !batch_match_plan(&initial_session, Some((batch_id, artist, album))).is_empty();
     if album.is_empty() && !initial_needs_match && initial_session.spotify_account_id.is_some() {
         if !cached_spotify_binding_is_current(app, service).await? {
             return Ok(None);
@@ -9787,11 +9797,8 @@ mod tests {
     async fn collection_cache_refetches_only_legacy_album_search_rows() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
-        let mut session = LastFmImportSessionV2::new_with_defaults(
-            "user".into(),
-            100,
-            ImportDefaults::default(),
-        );
+        let mut session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 100, ImportDefaults::default());
         aggregate_scrobbles(
             &mut session.rows,
             &[
@@ -9822,7 +9829,9 @@ mod tests {
 
         let gate = tokio::sync::Mutex::new(());
         let searched = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let search_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let first_searched = Arc::clone(&searched);
+        let first_search_calls = Arc::clone(&search_calls);
         let first = lazy_match_page_with_search(
             &service,
             &gate,
@@ -9831,6 +9840,7 @@ mod tests {
             "",
             || async { Ok(("user".into(), "spotify".into())) },
             move |rows| {
+                first_search_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 first_searched
                     .lock()
                     .unwrap()
@@ -9854,11 +9864,16 @@ mod tests {
         .unwrap();
         assert!(first.is_some());
         assert_eq!(
+            search_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
             searched.lock().unwrap().as_slice(),
             &[String::from("Legacy")]
         );
 
         let second_searched = Arc::clone(&searched);
+        let second_search_calls = Arc::clone(&search_calls);
         let second = lazy_match_page_with_search(
             &service,
             &gate,
@@ -9867,6 +9882,7 @@ mod tests {
             "",
             || async { Ok(("user".into(), "spotify".into())) },
             move |rows| {
+                second_search_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 second_searched
                     .lock()
                     .unwrap()
@@ -9877,6 +9893,10 @@ mod tests {
         .await
         .unwrap();
         assert!(second.is_some());
+        assert_eq!(
+            search_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
         assert_eq!(
             searched.lock().unwrap().as_slice(),
             &[String::from("Legacy")]
@@ -10066,6 +10086,90 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].url.contains("/search?"));
         assert!(requests[0].url.contains("type=track"));
+    }
+
+    #[tokio::test]
+    async fn literal_singles_release_batch_keeps_album_matching() {
+        let client = retune_spotify::client::fake_client(
+            [
+                retune_spotify::client::Response::json(
+                    200,
+                    serde_json::json!({
+                        "albums": {
+                            "items": [{
+                                "id": "album",
+                                "uri": "spotify:album:album",
+                                "name": "Singles",
+                                "artists": [{"id": "artist", "name": "Artist"}],
+                                "album_type": "album",
+                                "release_date": "2024",
+                                "total_tracks": 1,
+                                "tracks": {"items": [], "next": null, "total": 1}
+                            }],
+                            "next": null,
+                            "total": 1
+                        }
+                    }),
+                ),
+                retune_spotify::client::Response::json(
+                    200,
+                    serde_json::json!({
+                        "id": "album",
+                        "uri": "spotify:album:album",
+                        "name": "Singles",
+                        "artists": [{"id": "artist", "name": "Artist"}],
+                        "release_date": "2024",
+                        "total_tracks": 1,
+                        "tracks": {
+                            "items": [{
+                                "uri": "spotify:track:one",
+                                "name": "One",
+                                "artists": [{"id": "artist", "name": "Artist"}]
+                            }],
+                            "next": null,
+                            "total": 1
+                        }
+                    }),
+                ),
+            ],
+            "",
+        );
+        let rows = vec![SourceRow {
+            stable_id: source_id("Artist", "Singles", "One"),
+            artist: "Artist".into(),
+            album: "Singles".into(),
+            track: "One".into(),
+            variants: Vec::new(),
+            play_count: 1,
+            earliest: 1,
+            latest: 1,
+        }];
+        let matches = match_batch(
+            &client,
+            "Artist",
+            "Singles",
+            &rows,
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].search_term, album_search_term("Artist", "Singles"));
+        assert_eq!(matches[0].candidates.len(), 1);
+        assert_eq!(
+            matches[0].candidates[0].uri,
+            "spotify:album:album"
+        );
+        assert_eq!(
+            matches[0].candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.contains("type=album"));
+        assert!(requests[1].url.contains("/albums/album"));
+        assert!(requests.iter().all(|request| !request.url.contains("type=track")));
     }
 
     #[test]
@@ -10694,7 +10798,10 @@ mod tests {
                 ],
             ),
             &CollectionMembership {
-                track_uris: BTreeSet::from(["spotify:track:owned".into()]),
+                track_uris: BTreeSet::from([
+                    "spotify:track:owned".into(),
+                    "spotify:track:other".into(),
+                ]),
             },
             &LastFmMappings::default(),
         );
@@ -10750,12 +10857,8 @@ mod tests {
             earliest: 1,
             latest: 1,
         });
-        let variant_candidate = collection_candidate(
-            "spotify:track:variant",
-            "Song!",
-            "The Artist",
-            false,
-        );
+        let variant_candidate =
+            collection_candidate("spotify:track:variant", "Song!", "The Artist", false);
         let mut mappings = LastFmMappings::default();
         mappings.track_mappings.insert(
             source_id(&row.artist, &row.album, &row.track),
@@ -10786,10 +10889,9 @@ mod tests {
             )],
         );
         manual.selected_uri = Some("spotify:track:manual".into());
-        manual.track_matches.insert(
-            row.stable_id.clone(),
-            "spotify:track:manual".into(),
-        );
+        manual
+            .track_matches
+            .insert(row.stable_id.clone(), "spotify:track:manual".into());
         let manual = ratify_collection_result(
             &row,
             manual,
