@@ -12134,6 +12134,105 @@ mod tests {
     }
 
     #[test]
+    fn collection_apply_plan_requires_one_selected_cached_album_and_uses_its_membership() {
+        let rows = vec![collection_test_row("One"), collection_test_row("Two")];
+        let first = collection_album(
+            "spotify:album:first",
+            "Artist",
+            &[
+                ("One", "spotify:track:first-one"),
+                ("Two", "spotify:track:first-two"),
+            ],
+        );
+        let second = collection_album(
+            "spotify:album:second",
+            "Artist",
+            &[
+                ("One", "spotify:track:second-one"),
+                ("Two", "spotify:track:second-two"),
+            ],
+        );
+        let mut session = collection_session(&rows);
+        for (row, uri) in rows
+            .iter()
+            .zip(["spotify:track:first-one", "spotify:track:first-two"])
+        {
+            session
+                .matches
+                .get_mut(&row.stable_id)
+                .unwrap()
+                .track_matches = BTreeMap::from([(row.stable_id.clone(), uri.into())]);
+        }
+        session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                cached_candidates: vec![first.clone(), second],
+                selected_album_uris: vec![
+                    first.matching.uri.clone(),
+                    "spotify:album:second".into(),
+                ],
+                injected_candidate_uris: BTreeMap::new(),
+            },
+        );
+        let selected_ids = rows
+            .iter()
+            .map(|row| row.stable_id.clone())
+            .collect::<Vec<_>>();
+        let options = PageOptions {
+            whole_album: true,
+            ..PageOptions::default()
+        };
+        let error = build_apply_plan(
+            &session,
+            "spotify",
+            1,
+            "Artist",
+            "",
+            &selected_ids,
+            false,
+            options.clone(),
+        )
+        .unwrap_err();
+        assert!(error.contains("one coherent Spotify album"));
+
+        session
+            .collection_album_matches
+            .get_mut(&1)
+            .unwrap()
+            .selected_album_uris = vec!["spotify:album:first".into()];
+        let plan = build_apply_plan(
+            &session,
+            "spotify",
+            1,
+            "Artist",
+            "",
+            &selected_ids,
+            false,
+            options,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.membership,
+            ApplyMembership::Album {
+                uri: "spotify:album:first".into(),
+                name: first.matching.name.clone(),
+                artist: "Artist".into(),
+            }
+        );
+        assert_eq!(
+            plan.metadata_uris.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "spotify:track:first-one".to_owned(),
+                "spotify:track:first-two".to_owned(),
+            ])
+        );
+        assert!(plan
+            .mappings
+            .iter()
+            .all(|mapping| mapping.album_uri.as_deref() == Some("spotify:album:first")));
+    }
+
+    #[test]
     fn collection_whole_album_guard_requires_one_complete_coherent_album() {
         let rows = vec![collection_test_row("One"), collection_test_row("Two")];
         let album = collection_album(
@@ -12284,6 +12383,170 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn collection_projection_coverage_cases_are_authoritative() {
+        struct Expected {
+            aggregate: (usize, usize, usize),
+            selected: Option<(&'static str, usize, usize)>,
+            preview: (&'static str, usize, usize, i32, i32),
+        }
+
+        let aggregate_rows = vec![
+            collection_test_row("One"),
+            collection_test_row("Two"),
+            collection_test_row("Missing"),
+            collection_test_row("Excluded"),
+        ];
+        let aggregate_album = collection_album(
+            "spotify:album:aggregate",
+            "Artist",
+            &[
+                ("One", "spotify:track:one"),
+                ("Two", "spotify:track:two-a"),
+                ("Two", "spotify:track:two-b"),
+                ("Unused", "spotify:track:unused"),
+            ],
+        );
+        let mut aggregate_session = collection_session(&aggregate_rows);
+        aggregate_session.decisions.insert(
+            aggregate_rows[3].stable_id.clone(),
+            RowDecision {
+                status: RowStatus::Pending,
+                excluded: true,
+            },
+        );
+        aggregate_session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                cached_candidates: vec![aggregate_album.clone()],
+                selected_album_uris: vec![aggregate_album.matching.uri.clone()],
+                injected_candidate_uris: BTreeMap::new(),
+            },
+        );
+
+        let resolving_rows = vec![collection_test_row("One")];
+        let resolving_album = collection_album(
+            "spotify:album:resolving",
+            "Artist",
+            &[("One", "spotify:track:resolving")],
+        );
+        let mut resolving_session = collection_session(&resolving_rows);
+        resolving_session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                cached_candidates: vec![resolving_album.clone()],
+                selected_album_uris: Vec::new(),
+                injected_candidate_uris: BTreeMap::new(),
+            },
+        );
+
+        let ambiguous_rows = vec![collection_test_row("One")];
+        let ambiguous_album = collection_album(
+            "spotify:album:ambiguous",
+            "Artist",
+            &[
+                ("One", "spotify:track:ambiguous-a"),
+                ("One", "spotify:track:ambiguous-b"),
+            ],
+        );
+        let mut ambiguous_session = collection_session(&ambiguous_rows);
+        ambiguous_session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                cached_candidates: vec![ambiguous_album.clone()],
+                selected_album_uris: Vec::new(),
+                injected_candidate_uris: BTreeMap::new(),
+            },
+        );
+
+        let cases = vec![
+            (
+                "aggregate and excluded rows",
+                aggregate_session,
+                aggregate_rows,
+                Expected {
+                    aggregate: (1, 1, 1),
+                    selected: Some(("spotify:album:aggregate", 1, 1)),
+                    preview: ("spotify:album:aggregate", 1, 1, 0, 0),
+                },
+            ),
+            (
+                "unselected preview resolves a row",
+                resolving_session,
+                resolving_rows,
+                Expected {
+                    aggregate: (0, 0, 1),
+                    selected: None,
+                    preview: ("spotify:album:resolving", 1, 1, 1, 0),
+                },
+            ),
+            (
+                "unselected preview creates ambiguity",
+                ambiguous_session,
+                ambiguous_rows,
+                Expected {
+                    aggregate: (0, 0, 1),
+                    selected: None,
+                    preview: ("spotify:album:ambiguous", 0, 0, 0, 1),
+                },
+            ),
+        ];
+
+        for (name, session, rows, expected) in cases {
+            let refs = rows.iter().collect::<Vec<_>>();
+            let view = collection_match_view(&session, 1, &refs);
+            assert_eq!(
+                (
+                    view.coverage.matched,
+                    view.coverage.ambiguous,
+                    view.coverage.unresolved,
+                ),
+                expected.aggregate,
+                "aggregate coverage for {name}"
+            );
+            match expected.selected {
+                Some((uri, matched, unique)) => {
+                    let selected = view
+                        .coverage
+                        .selected_albums
+                        .iter()
+                        .find(|album| album.uri == uri)
+                        .unwrap();
+                    assert_eq!(
+                        (selected.matched, selected.unique_coverage),
+                        (matched, unique),
+                        "selected coverage for {name}"
+                    );
+                }
+                None => assert!(
+                    view.coverage.selected_albums.is_empty(),
+                    "selected coverage for {name}"
+                ),
+            }
+            let preview = view
+                .coverage
+                .previews
+                .iter()
+                .find(|preview| preview.uri == expected.preview.0)
+                .unwrap();
+            assert_eq!(
+                (
+                    preview.matched,
+                    preview.unique_coverage,
+                    preview.marginal_matches,
+                    preview.ambiguity_changes,
+                ),
+                (
+                    expected.preview.1,
+                    expected.preview.2,
+                    expected.preview.3,
+                    expected.preview.4,
+                ),
+                "preview coverage for {name}"
+            );
+        }
     }
 
     #[test]

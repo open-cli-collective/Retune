@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionCoverageStatus, collectionDialogScreen, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -167,17 +167,52 @@ test('Last.fm collection album projections preserve match-set order and branch l
   assert.equal(collectionCoverageStatus({ matched: 2, ambiguous: 1, unresolved: 3 }), '2 matched · 1 ambiguous · 3 unresolved')
 })
 
-test('Last.fm collection preview projections preserve track states and selected coverage copy', () => {
-  const cached = [{ uri: 'spotify:album:a' }]
+test('Last.fm collection dialog state preserves results, preview, scroll, and selected projection on failures', () => {
+  const cached = [{ uri: 'spotify:album:a' }, { uri: 'spotify:album:b' }]
   assert.equal(collectionDialogScreen(undefined, cached), 'results')
   assert.equal(collectionDialogScreen('spotify:album:a', cached), 'preview')
-  assert.equal(collectionDialogScreen(undefined, cached), 'results')
   assert.deepEqual(collectionAlbumTrackStatuses(
     ['spotify:track:a', 'spotify:track:b', 'spotify:track:c'],
     [{ uri: 'spotify:track:a', status: 'matched' }, { uri: 'spotify:track:b', status: 'ambiguous' }],
   ), ['matched', 'ambiguous', 'unmatched'])
   assert.equal(collectionPreviewCoverageCopy({ selected: true, matched: 3, uniqueCoverage: 2, marginalMatches: 0, ambiguityChanges: 0 }), '3 matches · 2 unique')
   assert.equal(collectionPreviewCoverageCopy({ selected: false, matched: 0, uniqueCoverage: 0, marginalMatches: 2, ambiguityChanges: -1 }), '+2 marginal matches · -1 ambiguity change')
+
+  const results = [{ uri: 'spotify:album:a' }, { uri: 'spotify:album:b' }]
+  const cachedSelected = ['spotify:album:b']
+  const selected = () => selectedCollectionAlbumUris(cached, cachedSelected)
+  let state = collectionDialogInitialState<{ uri: string }>()
+  state = collectionDialogTransition(state, { type: 'set-query', query: 'Artist album' })
+  state = collectionDialogTransition(state, { type: 'search-succeeded', results })
+  const beforePreview = state
+  state = collectionDialogTransition(state, { type: 'preview-started', uri: 'spotify:album:a', resultsScrollTop: 240 })
+  state = collectionDialogTransition(state, { type: 'preview-succeeded', uri: 'spotify:album:a' })
+  state = collectionDialogTransition(state, { type: 'back-to-results' })
+  assert.equal(state.query, 'Artist album')
+  assert.deepEqual(state.results, beforePreview.results)
+  assert.equal(state.previewUri, undefined)
+  assert.equal(state.resultsScrollTop, 240)
+
+  let firstPreviewState = collectionDialogInitialState<{ uri: string }>()
+  firstPreviewState = collectionDialogTransition(firstPreviewState, { type: 'set-query', query: 'Artist album' })
+  firstPreviewState = collectionDialogTransition(firstPreviewState, { type: 'search-succeeded', results })
+  firstPreviewState = collectionDialogTransition(firstPreviewState, { type: 'preview-started', uri: 'spotify:album:a', resultsScrollTop: 240 })
+  firstPreviewState = collectionDialogTransition(firstPreviewState, { type: 'preview-failed' })
+  assert.equal(firstPreviewState.query, 'Artist album')
+  assert.deepEqual(firstPreviewState.results, results)
+  assert.equal(firstPreviewState.previewUri, undefined)
+  assert.equal(firstPreviewState.resultsScrollTop, 240)
+
+  assert.deepEqual(collectionDialogTransition(state, { type: 'search-failed' }), state)
+  const failedPreview = collectionDialogTransition(
+    collectionDialogTransition(state, { type: 'preview-started', uri: 'spotify:album:b', resultsScrollTop: 320 }),
+    { type: 'preview-failed' },
+  )
+  assert.equal(failedPreview.query, state.query)
+  assert.deepEqual(failedPreview.results, state.results)
+  assert.equal(failedPreview.previewUri, state.previewUri)
+  assert.equal(failedPreview.resultsScrollTop, 320)
+  assert.deepEqual(selected(), ['spotify:album:b'])
 })
 
 test('Last.fm content and history intents remain independent and require one choice', () => {

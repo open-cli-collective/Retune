@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { SpotifyAlbumPresentation, type SpotifyAlbumPresentationData } from './spotifyViews.tsx'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, LastFmImportState, Settings } from './types.ts'
-import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionCoverageStatus, collectionDialogScreen, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, handleImportQueueTab, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CollectionTrackStatusProjection, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportQueueTabTarget, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, handleImportQueueTab, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CollectionTrackStatusProjection, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportQueueTabTarget, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportStateView = LastFmImportState
@@ -235,25 +235,19 @@ function MatchPickerDialog({ kind, query: initialQuery, candidates, selectedUri,
 }
 
 function CollectionAlbumDialog({ page, collection, initialPreviewUri, busy, onCancel, onPage, onError }: { page: PageView; collection: CollectionMatchView; initialPreviewUri?: string; busy: boolean; onCancel: () => void; onPage: (page: PageView) => void; onError: (error: unknown) => void }) {
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState<AlbumCandidate[]>([])
-  const [previewUri, setPreviewUri] = useState<string | undefined>(initialPreviewUri)
+  const [dialogState, setDialogState] = useState(() => collectionDialogInitialState<AlbumCandidate>(initialPreviewUri))
   const [loading, setLoading] = useState(false)
-  const resultsScrollTop = useRef(0)
   const resultList = useRef<HTMLDivElement>(null)
   const selectedUris = useMemo(() => selectedCollectionAlbumUris(collection.cachedAlbums, collection.selectedAlbumUris), [collection.cachedAlbums, collection.selectedAlbumUris])
-  const previewScreen = collectionDialogScreen(previewUri, collection.cachedAlbums)
-  const preview = previewUri ? collection.cachedAlbums.find((candidate) => candidate.uri === previewUri) : undefined
+  const previewScreen = collectionDialogScreen(dialogState.previewUri, collection.cachedAlbums)
+  const preview = dialogState.previewUri ? collection.cachedAlbums.find((candidate) => candidate.uri === dialogState.previewUri) : undefined
   const previewCoverage = preview ? collection.coverage.previews.find((candidate) => candidate.uri === preview.uri) : undefined
   const run = async (action: string, args: Record<string, unknown>) => {
     setLoading(true)
     try {
       const next = await invoke<PageView | AlbumCandidate[] | null>(action, args)
-      if (Array.isArray(next)) setResults(next)
-      else if (next) {
-        onPage(next)
-        if (previewUri) setPreviewUri(next.collection?.cachedAlbums.find((candidate) => candidate.uri === previewUri)?.uri ?? previewUri)
-      }
+      if (Array.isArray(next)) setDialogState((state) => collectionDialogTransition(state, { type: 'search-succeeded', results: next }))
+      else if (next) onPage(next)
       return next
     } catch (error) {
       onError(error)
@@ -261,17 +255,23 @@ function CollectionAlbumDialog({ page, collection, initialPreviewUri, busy, onCa
     } finally { setLoading(false) }
   }
   const search = () => {
-    if (!query.trim()) return
-    void run('lastfm_import_collection_search_albums', { batchId: page.batchId, artist: page.artist, query: query.trim() })
+    if (!dialogState.query.trim()) return
+    void run('lastfm_import_collection_search_albums', { batchId: page.batchId, artist: page.artist, query: dialogState.query.trim() }).then((next) => {
+      if (next === null) setDialogState((state) => collectionDialogTransition(state, { type: 'search-failed' }))
+    })
   }
   const openPreview = async (candidate: AlbumCandidate) => {
-    resultsScrollTop.current = resultList.current?.scrollTop ?? 0
-    setPreviewUri(candidate.uri)
-    await run('lastfm_import_collection_preview_album', { batchId: page.batchId, artist: page.artist, uri: candidate.uri })
+    setDialogState((state) => collectionDialogTransition(state, {
+      type: 'preview-started',
+      uri: candidate.uri,
+      resultsScrollTop: resultList.current?.scrollTop ?? 0,
+    }))
+    const next = await run('lastfm_import_collection_preview_album', { batchId: page.batchId, artist: page.artist, uri: candidate.uri })
+    setDialogState((state) => collectionDialogTransition(state, next ? { type: 'preview-succeeded', uri: candidate.uri } : { type: 'preview-failed' }))
   }
   const closePreview = () => {
-    setPreviewUri(undefined)
-    requestAnimationFrame(() => { if (resultList.current) resultList.current.scrollTop = resultsScrollTop.current })
+    setDialogState((state) => collectionDialogTransition(state, { type: 'back-to-results' }))
+    requestAnimationFrame(() => { if (resultList.current) resultList.current.scrollTop = dialogState.resultsScrollTop })
   }
   const toggleMatch = async () => {
     if (!preview) return
@@ -288,9 +288,9 @@ function CollectionAlbumDialog({ page, collection, initialPreviewUri, busy, onCa
       <p className="import-collection-attribution"><a href={`https://open.spotify.com/album/${preview.uri.split(':').pop()}`} target="_blank" rel="noreferrer">Open in Spotify ↗</a> · Track match state is shown above.</p>
       <footer><button type="button" onClick={closePreview}>Back to results</button><button type="button" className="primary" disabled={busy || loading} onClick={() => void toggleMatch()}>{collectionAlbumActionLabel(selectedUris.includes(preview.uri))}</button></footer>
     </> : <>
-      <div className="import-picker-search"><label htmlFor="collection-album-query">Search Spotify albums</label><div><input id="collection-album-query" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} /><button type="submit" disabled={busy || loading || !query.trim()}>Search</button></div></div>
+      <div className="import-picker-search"><label htmlFor="collection-album-query">Search Spotify albums</label><div><input id="collection-album-query" autoFocus value={dialogState.query} onChange={(event) => setDialogState((state) => collectionDialogTransition(state, { type: 'set-query', query: event.target.value }))} /><button type="submit" disabled={busy || loading || !dialogState.query.trim()}>Search</button></div></div>
       <div className="import-collection-coverage" role="status">{collectionCoverageStatus(collection.coverage)}{selectedUris.length ? ` · ${selectedUris.length} selected` : ''}</div>
-      <div ref={resultList} className="import-picker-results" aria-live="polite">{results.length ? results.map((candidate) => { const coverage = collection.coverage.previews.find((entry) => entry.uri === candidate.uri); return <button type="button" className="import-picker-option" key={candidate.uri} onClick={() => void openPreview(candidate)}><span><strong>{candidate.name}</strong><small>{candidate.artist}{candidate.releaseDate ? ` · ${candidate.releaseDate.slice(0, 4)}` : ''} · {candidate.totalTracks ?? candidate.trackUris.length} tracks{coverage ? ` · ${coverage.marginalMatches >= 0 ? '+' : ''}${coverage.marginalMatches} matches` : ''}</small></span><em>Preview</em></button> }) : <p className="muted">Search to load up to 10 Spotify album summaries.</p>}</div>
+      <div ref={resultList} className="import-picker-results" aria-live="polite">{dialogState.results.length ? dialogState.results.map((candidate) => { const coverage = collection.coverage.previews.find((entry) => entry.uri === candidate.uri); return <button type="button" className="import-picker-option" key={candidate.uri} onClick={() => void openPreview(candidate)}><span><strong>{candidate.name}</strong><small>{candidate.artist}{candidate.releaseDate ? ` · ${candidate.releaseDate.slice(0, 4)}` : ''} · {candidate.totalTracks ?? candidate.trackUris.length} tracks{coverage ? ` · ${coverage.marginalMatches >= 0 ? '+' : ''}${coverage.marginalMatches} matches` : ''}</small></span><em>Preview</em></button> }) : <p className="muted">Search to load up to 10 Spotify album summaries.</p>}</div>
       {collection.cachedAlbums.length > 0 && <section className="import-selected-albums"><h3>Selected albums</h3>{selectedUris.map((uri) => { const candidate = collection.cachedAlbums.find((entry) => entry.uri === uri); if (!candidate) return null; const matched = collection.coverage.selectedAlbums.find((entry) => entry.uri === uri); return <article key={uri} className="import-selected-album"><strong>{candidate.name}</strong><small>{candidate.artist} · {matched?.matched ?? 0} matches · {matched?.uniqueCoverage ?? 0} unique</small><button type="button" onClick={() => void openPreview(candidate)}>Preview</button><button type="button" disabled={busy || loading} onClick={() => removeMatch(uri)}>Remove</button></article> })}</section>}
       <footer><button type="button" onClick={onCancel}>Close</button></footer>
     </>}

@@ -191,6 +191,49 @@ export function collectionDialogScreen(previewUri: string | undefined, cached: C
   return previewUri && cached.some((candidate) => candidate.uri === previewUri) ? 'preview' : 'results'
 }
 
+export type CollectionDialogState<T extends CollectionAlbumProjection = CollectionAlbumProjection> = {
+  query: string
+  results: T[]
+  previewUri?: string
+  resultsScrollTop: number
+  pendingPreview: { previousPreviewUri?: string; previousResultsScrollTop: number } | null
+}
+
+export type CollectionDialogAction<T extends CollectionAlbumProjection = CollectionAlbumProjection> =
+  | { type: 'set-query'; query: string }
+  | { type: 'search-succeeded'; results: T[] }
+  | { type: 'search-failed' }
+  | { type: 'preview-started'; uri: string; resultsScrollTop: number }
+  | { type: 'preview-succeeded'; uri: string }
+  | { type: 'preview-failed' }
+  | { type: 'back-to-results' }
+
+export function collectionDialogInitialState<T extends CollectionAlbumProjection = CollectionAlbumProjection>(previewUri?: string): CollectionDialogState<T> {
+  return { query: '', results: [], previewUri, resultsScrollTop: 0, pendingPreview: null }
+}
+
+export function collectionDialogTransition<T extends CollectionAlbumProjection>(state: CollectionDialogState<T>, action: CollectionDialogAction<T>): CollectionDialogState<T> {
+  switch (action.type) {
+    case 'set-query': return { ...state, query: action.query }
+    case 'search-succeeded': return { ...state, results: action.results }
+    case 'search-failed': return state
+    case 'preview-started': return {
+      ...state,
+      previewUri: action.uri,
+      resultsScrollTop: action.resultsScrollTop,
+      pendingPreview: { previousPreviewUri: state.previewUri, previousResultsScrollTop: action.resultsScrollTop },
+    }
+    case 'preview-succeeded': return { ...state, previewUri: action.uri, pendingPreview: null }
+    case 'preview-failed': return state.pendingPreview ? {
+      ...state,
+      previewUri: state.pendingPreview.previousPreviewUri,
+      resultsScrollTop: state.pendingPreview.previousResultsScrollTop,
+      pendingPreview: null,
+    } : state
+    case 'back-to-results': return { ...state, previewUri: undefined, pendingPreview: null }
+  }
+}
+
 export function collectionAlbumActionLabel(selected: boolean): 'Add to album matches' | 'Remove from album matches' {
   return selected ? 'Remove from album matches' : 'Add to album matches'
 }
