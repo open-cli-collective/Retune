@@ -119,6 +119,17 @@ export function importQueueTabTarget(shiftKey: boolean): { kind: 'source' | 'mat
   return { kind: shiftKey ? 'match' : 'source', row: 0 }
 }
 
+export type ImportQueueTabTarget = Pick<HTMLElement, 'focus' | 'scrollIntoView'>
+
+export function handleImportQueueTab(event: Pick<KeyboardEvent, 'preventDefault' | 'stopPropagation'>, target: ImportQueueTabTarget | null): boolean {
+  if (!target) return false
+  event.preventDefault()
+  event.stopPropagation()
+  target.focus()
+  target.scrollIntoView({ block: 'nearest' })
+  return true
+}
+
 export function importAlbumActionAdvances(action: 'skip-album' | 'restore'): boolean {
   return action === 'skip-album'
 }

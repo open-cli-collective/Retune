@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ModalDialog } from './viewShared.tsx'
 import type { LastFmImportDefaults, LastFmImportState, Settings } from './types.ts'
-import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, collectionSuggestion, downloadAction, excludedImportCount, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
+import { activeImportQueue, applyCurrentImportPageResponse, canHandleImportShortcut, collectionSuggestion, downloadAction, excludedImportCount, handleImportQueueTab, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type CountMode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueuePage, type ImportQueueTabTarget, type ImportSourceRow, type ReviewState } from './lastfmImportState.ts'
 import './lastfmImporter.css'
 
 type ImportStateView = LastFmImportState
@@ -139,11 +139,15 @@ function focusWholeAlbumControl(): boolean {
 }
 
 function focusImporterTarget(kind: Exclude<ImportNavigationTarget, 'queue'>, row: number): boolean {
-  const target = document.querySelector<HTMLElement>(`[data-import-nav="${kind}"][data-import-row="${row}"]`)
+  const target = importerTargetElement(kind, row)
   if (!target) return false
   target.focus()
   target.scrollIntoView({ block: 'nearest' })
   return true
+}
+
+function importerTargetElement(kind: Exclude<ImportNavigationTarget, 'queue'>, row: number): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-import-nav="${kind}"][data-import-row="${row}"]`)
 }
 
 function selectedAlbumAdvisory(page: PageView) {
@@ -477,7 +481,7 @@ function ImportPage({ page, failed, showQueries, onRefresh, onNext, onApplied, o
 const IMPORT_QUEUE_ROW_HEIGHT = 57
 const IMPORT_QUEUE_OVERSCAN = 4
 
-function VirtualQueue({ items, selectedPage, disabled, onOpen, onSkip, onTab, onShortcuts }: { items: ImportQueueItem[]; selectedPage: number | null; disabled: boolean; onOpen: (item: ImportQueueItem) => void; onSkip: (item: ImportQueueItem) => void; onTab: (shiftKey: boolean) => boolean; onShortcuts: () => void }) {
+function VirtualQueue({ items, selectedPage, disabled, onOpen, onSkip, onTab, onShortcuts }: { items: ImportQueueItem[]; selectedPage: number | null; disabled: boolean; onOpen: (item: ImportQueueItem) => void; onSkip: (item: ImportQueueItem) => void; onTab: (shiftKey: boolean) => ImportQueueTabTarget | null; onShortcuts: () => void }) {
   const list = useRef<HTMLDivElement>(null)
   const frame = useRef<number | null>(null)
   const focusPending = useRef(false)
@@ -574,11 +578,8 @@ function VirtualQueue({ items, selectedPage, disabled, onOpen, onSkip, onTab, on
       return
     }
     if (event.key === 'Tab') {
-      const moved = onTab(event.shiftKey)
-      if (moved) {
-        event.preventDefault()
-        event.stopPropagation()
-      }
+      const target = onTab(event.shiftKey)
+      handleImportQueueTab(event, target)
       return
     }
     event.preventDefault()
@@ -672,9 +673,9 @@ export default function LastFmImporter() {
     target.scrollIntoView({ block: 'nearest' })
     return true
   }
-  const focusMappingFromQueue = (shiftKey: boolean) => {
+  const focusMappingFromQueue = (shiftKey: boolean): ImportQueueTabTarget | null => {
     const target = importQueueTabTarget(shiftKey)
-    return focusImporterTarget(target.kind, target.row)
+    return importerTargetElement(target.kind, target.row)
   }
   const refreshQueueOnly = async (strict = false): Promise<ImportQueueItem[]> => {
     const requestGeneration = ++queueRefreshGeneration.current
