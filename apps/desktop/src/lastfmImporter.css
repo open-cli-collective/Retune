@@ -131,6 +131,23 @@
 .import-footer-hints { flex: 1; text-align: center; }
 .import-footer { min-height: 27px; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
 .import-picker-dialog, .import-confirm-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
+.import-collection-dialog { width: min(760px, calc(100vw - 36px)); }
+.import-collection-dialog .spotify-album-presentation { min-height: 0; overflow: auto; }
+.import-collection-dialog .spotify-album-presentation .album-header { padding: 0 0 10px; border-bottom: 1px solid var(--border); }
+.import-collection-dialog .spotify-album-presentation .album-art { width: 88px; height: 88px; }
+.import-collection-dialog .spotify-album-presentation .album-tracks { max-height: 300px; overflow: auto; }
+.import-collection-coverage { color: var(--dim); font-size: 10.5px; }
+.import-collection-attribution { margin: 4px 0; color: var(--dim); font-size: 10.5px; }
+.import-collection-attribution a { color: var(--accent); }
+.import-selected-album-cards, .import-selected-albums { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.import-selected-album-card, .import-selected-album { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
+.import-selected-album-art { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 3px; background: var(--control); }
+.import-selected-album-card img { width: 34px; height: 34px; object-fit: cover; border-radius: 3px; }
+.import-selected-album-card div, .import-selected-album { min-width: 0; }
+.import-selected-album-card div, .import-selected-album > strong { display: flex; flex: 1; flex-direction: column; gap: 2px; overflow: hidden; }
+.import-selected-album-card strong, .import-selected-album strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.import-selected-album-card small, .import-selected-album small { color: var(--dim); font-size: 10px; }
+.import-selected-albums h3 { margin: 0; color: var(--dim); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
 .import-picker-dialog h2, .import-confirm-dialog h2 { margin: 0; font-size: 16px; }
 .import-picker-search { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: 10.5px; }
 .import-picker-search > div { display: flex; gap: 7px; }

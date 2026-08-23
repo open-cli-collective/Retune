@@ -79,6 +79,16 @@ raw-page files; the manifest is written only after the page file and is the
 authority for recovery. The manifest and every page record the exact Last.fm
 username as well as cutoff/page metadata, so punctuation-distinct accounts
 cannot share a snapshot. Unacknowledged orphan files are ignored/overwritten.
+Collection review additionally stores the serde-defaulted, batch-keyed
+`collectionAlbumMatches` map: cached Spotify album previews, selected album
+URIs in selection order, and serde-defaulted per-source provenance for only the
+candidate URIs injected by a selected-album rerank. Coverage, per-track match
+status, and whole-album readiness are derived projections and are not persisted.
+Preview/add/remove mutations use the same serialized read-modify-write and
+atomic replacement path; legacy V2 sessions load an empty collection map and
+treat the new provenance as empty, retaining the existing release-shaped
+behavior. This session state is excluded from backup/export along with the rest
+of `lastfm-import.json`.
 `downloadedThrough` is serde-defaulted for older V2 JSON and remains absent
 until a valid checkpointed timestamp is available; loading an older session does
 not scan cached pages to backfill it. It advances monotonically with ordered

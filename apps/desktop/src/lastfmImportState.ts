@@ -164,6 +164,52 @@ export function collectionSuggestion<T extends ImportCollectionSuggestionCandida
   return match.candidates.find((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.inLibrary && candidate.relation !== 'best-match' && artists.includes(normalizeImportMatch(candidate.artist))) ?? null
 }
 
+export type CollectionAlbumProjection = { uri: string }
+
+export type CollectionTrackMatchStatus = 'matched' | 'ambiguous' | 'unmatched'
+
+export type CollectionTrackStatusProjection = { uri: string; status: CollectionTrackMatchStatus }
+
+export function collectionImportBranch(album: string): 'collection' | 'release' {
+  return album === '' ? 'collection' : 'release'
+}
+
+export function selectedCollectionAlbumUris(cached: CollectionAlbumProjection[], selectedUris: Iterable<string>): string[] {
+  const cachedUris = new Set(cached.map((candidate) => candidate.uri))
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const uri of selectedUris) {
+    if (cachedUris.has(uri) && !seen.has(uri)) {
+      seen.add(uri)
+      result.push(uri)
+    }
+  }
+  return result
+}
+
+export function collectionDialogScreen(previewUri: string | undefined, cached: CollectionAlbumProjection[]): 'results' | 'preview' {
+  return previewUri && cached.some((candidate) => candidate.uri === previewUri) ? 'preview' : 'results'
+}
+
+export function collectionAlbumActionLabel(selected: boolean): 'Add to album matches' | 'Remove from album matches' {
+  return selected ? 'Remove from album matches' : 'Add to album matches'
+}
+
+export function collectionCoverageStatus(coverage: { matched: number; ambiguous: number; unresolved: number }): string {
+  return `${coverage.matched} matched · ${coverage.ambiguous} ambiguous · ${coverage.unresolved} unresolved`
+}
+
+export function collectionAlbumTrackStatuses(trackUris: string[], statuses: CollectionTrackStatusProjection[]): CollectionTrackMatchStatus[] {
+  const byUri = new Map(statuses.map((track) => [track.uri, track.status]))
+  return trackUris.map((uri) => byUri.get(uri) ?? 'unmatched')
+}
+
+export function collectionPreviewCoverageCopy(coverage: { selected: boolean; matched: number; uniqueCoverage: number; marginalMatches: number; ambiguityChanges: number }): string {
+  if (coverage.selected) return `${coverage.matched} matches · ${coverage.uniqueCoverage} unique`
+  const signed = (value: number) => `${value >= 0 ? '+' : ''}${value}`
+  return `${signed(coverage.marginalMatches)} marginal matches · ${signed(coverage.ambiguityChanges)} ambiguity change`
+}
+
 export type ImportDecision = { status: ReviewStatus; excluded: boolean }
 
 export type ReviewState = {

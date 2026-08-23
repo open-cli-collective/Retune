@@ -120,9 +120,12 @@ existing rows visible and can be retried for that group.
 Last.fm source download and aggregation do not use Spotify or its account
 gate. Opening a visible review batch lazily matches it through this same shared
 client/request gate with official `album:`/`artist:` field filters and a limit
-of 10, then fetches candidate tracks for set-overlap classification. An
-importer-wide async lock serializes duplicate batch matches; cached revisits
-make no matching/search request and there is no adjacent prefetch. A cached
+of 10, then fetches candidate tracks for set-overlap classification. Collection
+album search and preview use the same provider and request gate; a search makes
+one album request and a preview makes one album fetch, while cached preview,
+add, remove, and revisit operations make no request. An importer-wide async
+lock serializes duplicate batch matches; cached revisits make no
+matching/search request and there is no adjacent prefetch. A cached
 Spotify-derived page trusts only an exact cached library identity; an inexact
 identity resolves Spotify `/me` before the page is exposed. The first
 successful match binds the session to Spotify `/me`; its final ownership check

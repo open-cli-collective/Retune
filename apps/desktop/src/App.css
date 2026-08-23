@@ -234,6 +234,8 @@ button { color: inherit; }
 .spotify-track-row > span:first-child, .spotify-top-track-row > span:first-child, .spotify-track-row time, .spotify-top-track-row time { color: var(--dim); }
 .spotify-track-row .rating-stars { justify-content: flex-start; }
 .spotify-track-row time, .spotify-top-track-row time { text-align: right; }
+.spotify-track-match-state { display: inline-block; margin-left: 8px; color: var(--dim); font-size: 10px; text-transform: uppercase; }
+.spotify-track-match-state.matched { color: #278c46; }
 .spotify-track-action { padding: 2px 5px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--control); font: inherit; }
 .spotify-track-action.library { width: 68px; }
 .spotify-track-action:disabled { opacity: .55; }

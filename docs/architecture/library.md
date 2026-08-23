@@ -61,8 +61,11 @@ prefers accepted mappings and manual choices, then uniquely exact normalized
 title/primary-artist candidates already in the Retune library or exact saved
 Spotify track/album membership, then uniquely exact candidates without
 ownership. Same-artist near matches are suggestions only; equal-ranked editions
-and wrong artists remain unresolved. Cached collection matches rerank from
-current membership without Spotify requests, while legacy album-shaped search
+and wrong artists remain unresolved. Collection review persists a V2,
+batch-keyed cache of preview candidates and ordered selected album URIs; its
+coverage is derived over the selected union, and cached add/remove/revisit
+operations rerank without Spotify requests or membership writes. Search makes
+one album request and preview makes one album fetch; legacy album-shaped search
 terms refetch only the incompatible rows. A non-empty source album literally
 named `Singles` remains release-shaped.
 
