@@ -5607,7 +5607,7 @@ fn collection_album_preview_coverage(
     eligible: &[&SourceRow],
     selected_tracks: &[AlbumCandidate],
     session: &LastFmImportSessionV2,
-) -> (usize, usize, usize, Vec<CollectionTrackStatus>) {
+) -> (usize, usize, usize, usize, Vec<CollectionTrackStatus>) {
     let candidate_tracks =
         collection_track_candidates(&[candidate], &CollectionMembership::default());
     let candidate_uris = candidate_tracks
@@ -5646,7 +5646,7 @@ fn collection_album_preview_coverage(
                     .is_some_and(|uri| candidate_uris.contains(*uri))
         })
         .count();
-    let (_, ambiguous, _) = count_collection_statuses(
+    let (projected_matched, ambiguous, _) = count_collection_statuses(
         eligible
             .iter()
             .map(|row| collection_row_status(row, session.matches.get(&row.stable_id), &union)),
@@ -5667,7 +5667,13 @@ fn collection_album_preview_coverage(
         })
         .count();
     let statuses = collection_track_statuses(candidate, eligible, &union, session);
-    (matched, ambiguous, unique_coverage, statuses)
+    (
+        matched,
+        projected_matched,
+        ambiguous,
+        unique_coverage,
+        statuses,
+    )
 }
 
 fn count_collection_statuses(
@@ -5708,7 +5714,7 @@ fn collection_match_view(
     let selected_albums = selected
         .iter()
         .map(|album| {
-            let (matched, _, unique_coverage, _) =
+            let (matched, _, _, unique_coverage, _) =
                 collection_album_preview_coverage(album, &eligible, &selected_tracks, session);
             CollectionAlbumCoverage {
                 uri: album.matching.uri.clone(),
@@ -5729,12 +5735,12 @@ fn collection_match_view(
                 collection_row_status(row, session.matches.get(&row.stable_id), &selected_tracks)
             });
             let (before_matched, before_ambiguous, _) = count_collection_statuses(before);
-            let (after_matched, after_ambiguous, unique_coverage, track_statuses) =
+            let (matched, after_matched, after_ambiguous, unique_coverage, track_statuses) =
                 collection_album_preview_coverage(candidate, &eligible, &selected_tracks, session);
             CollectionAlbumPreviewCoverage {
                 uri: candidate.matching.uri.clone(),
                 selected: is_selected,
-                matched: after_matched,
+                matched,
                 unique_coverage,
                 marginal_matches: if is_selected {
                     0
@@ -8785,6 +8791,53 @@ mod tests {
                 .collect(),
             track_durations: vec![180; tracks.len()],
             ..CollectionAlbumCandidate::default()
+        }
+    }
+
+    fn collection_album_for_rows(
+        uri: &str,
+        rows: &[SourceRow],
+        indices: &[usize],
+    ) -> CollectionAlbumCandidate {
+        let mut candidate = CollectionAlbumCandidate {
+            matching: AlbumCandidate {
+                uri: uri.into(),
+                name: uri.rsplit(':').next().unwrap_or(uri).into(),
+                artist: "Artist".into(),
+                ..AlbumCandidate::default()
+            },
+            ..CollectionAlbumCandidate::default()
+        };
+        for index in indices {
+            let row = &rows[*index];
+            candidate.matching.track_uris.push(format!(
+                "spotify:track:{}-{}",
+                uri.rsplit(':').next().unwrap_or(uri),
+                index
+            ));
+            candidate.matching.track_names.push(row.track.clone());
+            candidate.matching.track_artists.push(row.artist.clone());
+            candidate
+                .matching
+                .track_albums
+                .push(candidate.matching.name.clone());
+        }
+        candidate.total_tracks = candidate.matching.track_uris.len() as u32;
+        candidate.track_numbers = (1..=candidate.total_tracks).map(Some).collect();
+        candidate.track_durations = vec![180; candidate.total_tracks as usize];
+        candidate
+    }
+
+    fn exact_collection_track(row: &SourceRow, uri: &str) -> AlbumCandidate {
+        AlbumCandidate {
+            uri: uri.into(),
+            name: row.track.clone(),
+            artist: row.artist.clone(),
+            track_uris: vec![uri.into()],
+            track_names: vec![row.track.clone()],
+            track_artists: vec![row.artist.clone()],
+            track_albums: vec![String::new()],
+            ..AlbumCandidate::default()
         }
     }
 
@@ -12547,6 +12600,127 @@ mod tests {
                 "preview coverage for {name}"
             );
         }
+    }
+
+    #[test]
+    fn collection_preview_marginal_matches_preserve_existing_fallback() {
+        let rows = (0..100)
+            .map(|index| collection_test_row(&format!("Sarah {index}")))
+            .collect::<Vec<_>>();
+        let mut session = collection_session(&rows);
+        for row in &rows[..61] {
+            session
+                .matches
+                .get_mut(&row.stable_id)
+                .unwrap()
+                .track_matches
+                .insert(
+                    row.stable_id.clone(),
+                    format!("spotify:track:baseline-{}", row.track),
+                );
+        }
+        for row in &rows[61..70] {
+            let result = session.matches.get_mut(&row.stable_id).unwrap();
+            result.candidates = vec![
+                exact_collection_track(row, &format!("spotify:track:search-a-{}", row.track)),
+                exact_collection_track(row, &format!("spotify:track:search-b-{}", row.track)),
+            ];
+        }
+        let candidate = collection_album_for_rows("spotify:album:eden", &rows, &[61, 62, 63]);
+        session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                cached_candidates: vec![candidate],
+                selected_album_uris: Vec::new(),
+                injected_candidate_uris: BTreeMap::new(),
+            },
+        );
+
+        let refs = rows.iter().collect::<Vec<_>>();
+        let view = collection_match_view(&session, 1, &refs);
+        assert_eq!(
+            (
+                view.coverage.matched,
+                view.coverage.ambiguous,
+                view.coverage.unresolved,
+            ),
+            (61, 9, 30)
+        );
+        let preview = &view.coverage.previews[0];
+        assert_eq!(
+            (preview.marginal_matches, preview.ambiguity_changes),
+            (3, -3)
+        );
+    }
+
+    #[test]
+    fn collection_preview_marginal_matches_count_ambiguity_conversion() {
+        let rows = (0..50)
+            .map(|index| collection_test_row(&format!("Celtic {index}")))
+            .collect::<Vec<_>>();
+        let mut session = collection_session(&rows);
+        for row in &rows[..3] {
+            session
+                .matches
+                .get_mut(&row.stable_id)
+                .unwrap()
+                .track_matches
+                .insert(
+                    row.stable_id.clone(),
+                    format!("spotify:track:baseline-{}", row.track),
+                );
+        }
+        for row in &rows[3..32] {
+            let result = session.matches.get_mut(&row.stable_id).unwrap();
+            result.candidates = vec![
+                exact_collection_track(row, &format!("spotify:track:search-a-{}", row.track)),
+                exact_collection_track(row, &format!("spotify:track:search-b-{}", row.track)),
+            ];
+        }
+        let mut candidate =
+            collection_album_for_rows("spotify:album:celtic", &rows, &(3..16).collect::<Vec<_>>());
+        for index in 0..5 {
+            candidate
+                .matching
+                .track_uris
+                .push(format!("spotify:track:celtic-unused-{index}"));
+            candidate
+                .matching
+                .track_names
+                .push(format!("Unused {index}"));
+            candidate.matching.track_artists.push("Artist".into());
+            candidate
+                .matching
+                .track_albums
+                .push(candidate.matching.name.clone());
+        }
+        candidate.total_tracks = candidate.matching.track_uris.len() as u32;
+        candidate.track_numbers = (1..=candidate.total_tracks).map(Some).collect();
+        candidate.track_durations = vec![180; candidate.total_tracks as usize];
+        session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                cached_candidates: vec![candidate],
+                selected_album_uris: Vec::new(),
+                injected_candidate_uris: BTreeMap::new(),
+            },
+        );
+
+        let refs = rows.iter().collect::<Vec<_>>();
+        let view = collection_match_view(&session, 1, &refs);
+        assert_eq!(
+            (
+                view.coverage.matched,
+                view.coverage.ambiguous,
+                view.coverage.unresolved,
+            ),
+            (3, 29, 18)
+        );
+        let preview = &view.coverage.previews[0];
+        assert_eq!(
+            (preview.marginal_matches, preview.ambiguity_changes),
+            (13, -13)
+        );
     }
 
     #[test]

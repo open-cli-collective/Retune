@@ -143,8 +143,8 @@
 .import-selected-album-card, .import-selected-album { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
 .import-selected-album-art { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 3px; background: var(--control); }
 .import-selected-album-card img { width: 34px; height: 34px; object-fit: cover; border-radius: 3px; }
-.import-selected-album-card div, .import-selected-album { min-width: 0; }
-.import-selected-album-card div, .import-selected-album > strong { display: flex; flex: 1; flex-direction: column; gap: 2px; overflow: hidden; }
+.import-selected-album-card .import-selected-album-copy, .import-selected-album { min-width: 0; }
+.import-selected-album-card .import-selected-album-copy, .import-selected-album > strong { display: flex; flex: 1; flex-direction: column; gap: 2px; overflow: hidden; }
 .import-selected-album-card strong, .import-selected-album strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .import-selected-album-card small, .import-selected-album small { color: var(--dim); font-size: 10px; }
 .import-selected-albums h3 { margin: 0; color: var(--dim); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
