@@ -158,6 +158,42 @@ export type ImportCollectionSuggestionMatch = {
   candidates: ImportCollectionSuggestionCandidate[]
 }
 
+export type CollectionAmbiguousChoice = {
+  uri: string
+  album: string
+  projectedMatches: number
+  totalTracks: number
+  recommended: boolean
+}
+
+export function collectionAmbiguousChoices(
+  sourceId: string,
+  match: ImportCollectionSuggestionMatch | null,
+  albums: Array<{ uri: string; name: string; trackUris: string[] }>,
+  selectedAlbumUris: string[],
+  coverage: Array<{ uri: string; matched: number; uniqueCoverage: number }>,
+): CollectionAmbiguousChoice[] {
+  if (!match || match.selectedUri || match.trackMatches[sourceId]) return []
+  const selected = new Set(selectedAlbumUris)
+  const exactUris = new Set(match.candidates.filter((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.relation === 'best-match').map((candidate) => candidate.uri))
+  const choices = albums.flatMap((album, order) => {
+    if (!selected.has(album.uri)) return []
+    const albumCoverage = coverage.find((entry) => entry.uri === album.uri)
+    return album.trackUris.filter((uri) => exactUris.has(uri)).map((uri) => ({
+      uri,
+      album: album.name,
+      projectedMatches: Math.min(album.trackUris.length, (albumCoverage?.matched ?? 0) + 1),
+      totalTracks: album.trackUris.length,
+      uniqueCoverage: albumCoverage?.uniqueCoverage ?? 0,
+      order,
+    }))
+  })
+  if (choices.length < 2) return []
+  choices.sort((left, right) => right.projectedMatches - left.projectedMatches || right.uniqueCoverage - left.uniqueCoverage || left.order - right.order)
+  const recommendationIsDistinct = choices[0].projectedMatches !== choices[1].projectedMatches || choices[0].uniqueCoverage !== choices[1].uniqueCoverage
+  return choices.map(({ uniqueCoverage: _uniqueCoverage, order: _order, ...choice }, index) => ({ ...choice, recommended: index === 0 && recommendationIsDistinct }))
+}
+
 export function collectionSuggestion<T extends ImportCollectionSuggestionCandidate>(source: Pick<ImportSourceRow, 'stableId' | 'artist' | 'variants'>, match: (Omit<ImportCollectionSuggestionMatch, 'candidates'> & { candidates: T[] }) | null): T | null {
   if (!match || match.selectedUri || match.trackMatches[source.stableId]) return null
   const artists = [source.artist, ...source.variants.map((variant) => variant.artist)].map(normalizeImportMatch)

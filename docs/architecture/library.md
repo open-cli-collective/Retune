@@ -60,8 +60,11 @@ rows, displayed as `Singles`, and are matched one track at a time. Ratification
 prefers accepted mappings and manual choices, then uniquely exact normalized
 title/primary-artist candidates already in the Retune library or exact saved
 Spotify track/album membership, then uniquely exact candidates without
-ownership. Same-artist near matches are suggestions only; equal-ranked editions
-and wrong artists remain unresolved. Collection review persists a V2,
+ownership. Same-artist near matches are suggestions only; wrong artists remain
+unresolved. Exact tracks found on multiple selected albums remain unresolved
+until the user chooses an album-labelled candidate; the UI recommends one only
+when its existing matched/unique album coverage strictly outranks the
+alternatives. Collection review persists a V2,
 batch-keyed cache of preview candidates and ordered selected album URIs; its
 coverage is derived over the selected union, and cached add/remove/revisit
 operations rerank without Spotify requests or membership writes. Search makes

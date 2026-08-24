@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -156,6 +156,32 @@ test('Last.fm collection suggestions require an owned imperfect same-artist cand
   assert.equal(suggest([{ ...ownedNear, inLibrary: false }]), null)
   assert.equal(suggest([{ ...ownedNear, artist: 'Other Artist' }]), null)
   assert.equal(suggest([{ ...ownedNear, relation: null }]), null)
+})
+
+test('Last.fm collection ambiguities rank exact selected-album choices by existing coverage', () => {
+  const candidates = [
+    { uri: 'spotify:track:album-a', artist: 'Artist', inLibrary: false, relation: 'best-match' as const },
+    { uri: 'spotify:track:album-b', artist: 'Artist', inLibrary: false, relation: 'best-match' as const },
+    { uri: 'spotify:track:near', artist: 'Artist', inLibrary: true, relation: 'same-songs' as const },
+  ]
+  const match = { selectedUri: null, trackMatches: {}, candidates }
+  const albums = [
+    { uri: 'spotify:album:a', name: 'Album A', trackUris: ['spotify:track:album-a', ...Array.from({ length: 15 }, (_, index) => `spotify:track:a-${index}`)] },
+    { uri: 'spotify:album:b', name: 'Album B', trackUris: ['spotify:track:album-b', ...Array.from({ length: 11 }, (_, index) => `spotify:track:b-${index}`)] },
+  ]
+  assert.deepEqual(collectionAmbiguousChoices('source', match, albums, albums.map((album) => album.uri), [
+    { uri: 'spotify:album:a', matched: 14, uniqueCoverage: 14 },
+    { uri: 'spotify:album:b', matched: 9, uniqueCoverage: 9 },
+  ]), [
+    { uri: 'spotify:track:album-a', album: 'Album A', projectedMatches: 15, totalTracks: 16, recommended: true },
+    { uri: 'spotify:track:album-b', album: 'Album B', projectedMatches: 10, totalTracks: 12, recommended: false },
+  ])
+  assert.equal(collectionAmbiguousChoices('source', { ...match, trackMatches: { source: 'spotify:track:album-a' } }, albums, albums.map((album) => album.uri), []).length, 0)
+  assert.equal(collectionAmbiguousChoices('source', match, albums, ['spotify:album:a'], []).length, 0)
+  assert.equal(collectionAmbiguousChoices('source', match, albums, albums.map((album) => album.uri), [
+    { uri: 'spotify:album:a', matched: 1, uniqueCoverage: 1 },
+    { uri: 'spotify:album:b', matched: 1, uniqueCoverage: 1 },
+  ]).some((choice) => choice.recommended), false)
 })
 
 test('Last.fm collection album projections preserve match-set order and branch labels', () => {
