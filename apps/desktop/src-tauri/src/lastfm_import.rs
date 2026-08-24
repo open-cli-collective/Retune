@@ -3544,6 +3544,7 @@ impl Service {
         batch_id: u32,
         artist: &str,
         uri: &str,
+        candidate: Option<CollectionAlbumCandidate>,
         membership: &CollectionMembership,
         mappings: &LastFmMappings,
     ) -> Result<(), String> {
@@ -3553,6 +3554,24 @@ impl Service {
             review_phase_allowed,
             |mut session| {
                 requested_collection_batch(&session, batch_id, artist)?;
+                if let Some(candidate) = candidate {
+                    if candidate.matching.uri != uri || candidate.matching.track_uris.is_empty() {
+                        return Err("Spotify returned an invalid or empty album preview.".into());
+                    }
+                    let state = session
+                        .collection_album_matches
+                        .entry(batch_id)
+                        .or_default();
+                    if let Some(existing) = state
+                        .cached_candidates
+                        .iter_mut()
+                        .find(|existing| existing.matching.uri == uri)
+                    {
+                        *existing = candidate;
+                    } else {
+                        state.cached_candidates.push(candidate);
+                    }
+                }
                 let state = session
                     .collection_album_matches
                     .get_mut(&batch_id)
@@ -5962,13 +5981,43 @@ fn collection_candidate_matches_title(row: &SourceRow, candidate: &AlbumCandidat
         })
 }
 
+fn normalized_word_sequences(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(normalize_for_match)
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn titles_share_contained_words(left: &str, right: &str) -> bool {
+    let left = normalized_word_sequences(left);
+    let right = normalized_word_sequences(right);
+    (!left.is_empty() && !right.is_empty())
+        && (left.windows(right.len()).any(|window| window == right)
+            || right.windows(left.len()).any(|window| window == left))
+}
+
+fn collection_candidate_is_same_songs_title(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
+    let source_titles = std::iter::once(row.track.as_str())
+        .chain(row.variants.iter().map(|variant| variant.track.as_str()));
+    let candidate_titles = std::iter::once(candidate.name.as_str())
+        .chain(candidate.track_names.iter().map(String::as_str));
+    source_titles.clone().any(|source| {
+        candidate_titles
+            .clone()
+            .any(|candidate_title| titles_share_contained_words(source, candidate_title))
+    })
+}
+
 fn collection_candidate_is_exact(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
     collection_candidate_matches_artist(row, candidate)
         && collection_candidate_matches_title(row, candidate)
 }
 
-fn collection_candidate_is_same_artist(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
+fn collection_candidate_is_same_songs(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
     collection_candidate_matches_artist(row, candidate)
+        && collection_candidate_is_same_songs_title(row, candidate)
 }
 
 fn collection_candidate_rank(row: &SourceRow, candidate: &AlbumCandidate) -> u8 {
@@ -5978,7 +6027,7 @@ fn collection_candidate_rank(row: &SourceRow, candidate: &AlbumCandidate) -> u8 
         } else {
             1
         }
-    } else if collection_candidate_is_same_artist(row, candidate) {
+    } else if collection_candidate_is_same_songs(row, candidate) {
         if candidate.in_library {
             2
         } else {
@@ -6038,8 +6087,13 @@ fn rank_collection_candidates(
 ) {
     for candidate in candidates.iter_mut() {
         candidate.in_library = membership.contains(&candidate.uri);
-        candidate.relation =
-            collection_candidate_is_exact(row, candidate).then_some(AlbumRelation::BestMatch);
+        candidate.relation = if collection_candidate_is_exact(row, candidate) {
+            Some(AlbumRelation::BestMatch)
+        } else if collection_candidate_is_same_songs(row, candidate) {
+            Some(AlbumRelation::SameSongs)
+        } else {
+            None
+        };
     }
     candidates.sort_by(|left, right| {
         collection_candidate_rank(row, left)
@@ -7485,6 +7539,24 @@ fn album_tracks_complete(album: &retune_spotify::client::Album) -> bool {
             >= album.total_tracks.max(tracks.total) as usize
 }
 
+async fn fetch_complete_collection_album<T, S>(
+    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    uri: &str,
+) -> Result<retune_spotify::client::Album, String>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+{
+    let album = provider
+        .album(crate::provider::spotify_id(uri))
+        .await
+        .map_err(|error| error.to_string())?;
+    if !album_tracks_complete(&album) {
+        return Err("Spotify returned incomplete album tracks; try again later.".into());
+    }
+    Ok(album)
+}
+
 fn match_result_for(
     source_id: String,
     search_term: String,
@@ -7794,6 +7866,68 @@ fn valid_collection_album_uri(uri: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && !id.contains(':'))
 }
 
+async fn load_collection_album_candidate(
+    app: &tauri::AppHandle,
+    batch_id: u32,
+    artist: &str,
+    uri: &str,
+) -> Result<((String, String), Option<CollectionAlbumCandidate>), String> {
+    let state = app.state::<crate::AppState>();
+    let initial_account = {
+        let _membership_guard = state.spotify_library_gate.lock().await;
+        let accounts =
+            current_matching_account_locked(&state, state.lastfm_import.as_ref()).await?;
+        let session = state
+            .lastfm_import
+            .snapshot()
+            .await
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+        requested_collection_batch(&session, batch_id, artist)?;
+        if session
+            .collection_album_matches
+            .get(&batch_id)
+            .is_some_and(|matches| {
+                matches
+                    .cached_candidates
+                    .iter()
+                    .any(|candidate| candidate.matching.uri == uri)
+            })
+        {
+            return Ok((accounts, None));
+        }
+        accounts
+    };
+
+    let provider = crate::provider_from(&state)?;
+    let album = fetch_complete_collection_album(provider.as_ref(), uri).await?;
+
+    let _membership_guard = state.spotify_library_gate.lock().await;
+    let (username, spotify_account_id) =
+        current_matching_account_locked(&state, state.lastfm_import.as_ref()).await?;
+    if (username.as_str(), spotify_account_id.as_str())
+        != (initial_account.0.as_str(), initial_account.1.as_str())
+    {
+        state.lastfm_import.suspend_for_account_mismatch().await?;
+        return Err(
+            "The connected Spotify account changed while loading the album; the import is suspended for safety."
+                .into(),
+        );
+    }
+    let session = state
+        .lastfm_import
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    requested_collection_batch(&session, batch_id, artist)?;
+    Ok((
+        initial_account,
+        Some(collection_album_candidate(
+            &album,
+            &collection_membership(&state),
+        )),
+    ))
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_collection_search_albums(
     app: tauri::AppHandle,
@@ -7859,71 +7993,26 @@ pub(crate) async fn lastfm_import_collection_preview_album(
     }
     let state = app.state::<crate::AppState>();
     ensure_review_mutable(state.lastfm_import.as_ref()).await?;
-    let initial_account = {
-        let _membership_guard = state.spotify_library_gate.lock().await;
-        let accounts =
-            current_matching_account_locked(&state, state.lastfm_import.as_ref()).await?;
-        let session = state
-            .lastfm_import
-            .snapshot()
-            .await
-            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-        requested_collection_batch(&session, batch_id, &artist)?;
-        if session
-            .collection_album_matches
-            .get(&batch_id)
-            .is_some_and(|matches| {
-                matches
-                    .cached_candidates
-                    .iter()
-                    .any(|candidate| candidate.matching.uri == uri)
-            })
-        {
-            let membership = collection_membership(&state);
-            let mappings = state
-                .lastfm_import
-                .mappings_for(&accounts.0, Some(&accounts.1))
-                .await;
-            state
-                .lastfm_import
-                .rerank_collection_batch(batch_id, &membership, &mappings)
-                .await?;
-            let page = state.lastfm_import.page(batch_id, &artist, "").await;
-            return Ok(page);
-        }
-        accounts
-    };
-    let provider = crate::provider_from(&state)?;
-    let album = provider
-        .album(crate::provider::spotify_id(&uri))
-        .await
-        .map_err(|error| error.to_string())?;
+    let (expected_account, candidate) =
+        load_collection_album_candidate(&app, batch_id, &artist, &uri).await?;
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         current_matching_account_locked(&state, state.lastfm_import.as_ref()).await?;
     if (username.as_str(), spotify_account_id.as_str())
-        != (initial_account.0.as_str(), initial_account.1.as_str())
+        != (expected_account.0.as_str(), expected_account.1.as_str())
     {
         state.lastfm_import.suspend_for_account_mismatch().await?;
         return Err(
-            "The connected Spotify account changed while previewing; the import is suspended for safety."
+            "The connected Spotify account changed while loading the album; the import is suspended for safety."
                 .into(),
         );
     }
-    let session = state
-        .lastfm_import
-        .snapshot()
-        .await
-        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-    requested_collection_batch(&session, batch_id, &artist)?;
-    if !album_tracks_complete(&album) {
-        return Err("Spotify returned incomplete album tracks; try again later.".into());
+    if let Some(candidate) = candidate {
+        state
+            .lastfm_import
+            .cache_collection_album(&username, &spotify_account_id, batch_id, &artist, candidate)
+            .await?;
     }
-    let candidate = collection_album_candidate(&album, &collection_membership(&state));
-    state
-        .lastfm_import
-        .cache_collection_album(&username, &spotify_account_id, batch_id, &artist, candidate)
-        .await?;
     let mappings = state
         .lastfm_import
         .mappings_for(&username, Some(&spotify_account_id))
@@ -7950,9 +8039,20 @@ pub(crate) async fn lastfm_import_collection_add_album(
     }
     let state = app.state::<crate::AppState>();
     ensure_review_mutable(state.lastfm_import.as_ref()).await?;
+    let (expected_account, candidate) =
+        load_collection_album_candidate(&app, batch_id, &artist, &uri).await?;
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         current_matching_account_locked(&state, state.lastfm_import.as_ref()).await?;
+    if (username.as_str(), spotify_account_id.as_str())
+        != (expected_account.0.as_str(), expected_account.1.as_str())
+    {
+        state.lastfm_import.suspend_for_account_mismatch().await?;
+        return Err(
+            "The connected Spotify account changed while loading the album; the import is suspended for safety."
+                .into(),
+        );
+    }
     let membership = collection_membership(&state);
     let mappings = state
         .lastfm_import
@@ -7966,6 +8066,7 @@ pub(crate) async fn lastfm_import_collection_add_album(
             batch_id,
             &artist,
             &uri,
+            candidate,
             &membership,
             &mappings,
         )
@@ -11541,6 +11642,7 @@ mod tests {
                 1,
                 "Artist",
                 &candidate.matching.uri,
+                None,
                 &CollectionMembership::default(),
                 &LastFmMappings::default(),
             )
@@ -11587,6 +11689,7 @@ mod tests {
                 1,
                 "Artist",
                 "spotify:album:uncached",
+                None,
                 &CollectionMembership::default(),
                 &LastFmMappings::default(),
             )
@@ -11597,6 +11700,163 @@ mod tests {
                 .selected_album_uris
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn direct_collection_add_fetches_once_then_cached_add_is_local() {
+        let client = retune_spotify::client::fake_client(
+            [retune_spotify::client::Response::json(
+                200,
+                serde_json::json!({
+                    "id": "album",
+                    "uri": "spotify:album:album",
+                    "name": "Album",
+                    "artists": [{"id": "artist", "name": "Artist"}],
+                    "release_date": "2024",
+                    "total_tracks": 1,
+                    "tracks": {
+                        "items": [{
+                            "uri": "spotify:track:one",
+                            "name": "One",
+                            "artists": [{"id": "artist", "name": "Artist"}],
+                            "track_number": 1,
+                            "duration_ms": 180000
+                        }],
+                        "next": null,
+                        "total": 1
+                    }
+                }),
+            )],
+            "",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        service
+            .save(collection_session(&[collection_test_row("One")]))
+            .await
+            .unwrap();
+
+        let album = fetch_complete_collection_album(&client, "spotify:album:album")
+            .await
+            .unwrap();
+        let candidate = collection_album_candidate(&album, &CollectionMembership::default());
+        service
+            .add_collection_album(
+                "user",
+                "spotify",
+                1,
+                "Artist",
+                "spotify:album:album",
+                Some(candidate),
+                &CollectionMembership::default(),
+                &LastFmMappings::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.transport().requests().len(), 1);
+        assert!(client
+            .transport()
+            .requests()
+            .iter()
+            .all(|request| request.method == retune_spotify::client::Method::Get));
+        let snapshot = service.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.collection_album_matches[&1].selected_album_uris,
+            vec![String::from("spotify:album:album")]
+        );
+        assert_eq!(
+            snapshot
+                .matches
+                .values()
+                .next()
+                .unwrap()
+                .track_matches
+                .values()
+                .next(),
+            Some(&String::from("spotify:track:one"))
+        );
+
+        service
+            .remove_collection_album(
+                "user",
+                "spotify",
+                1,
+                "Artist",
+                "spotify:album:album",
+                &CollectionMembership::default(),
+                &LastFmMappings::default(),
+            )
+            .await
+            .unwrap();
+        service
+            .add_collection_album(
+                "user",
+                "spotify",
+                1,
+                "Artist",
+                "spotify:album:album",
+                None,
+                &CollectionMembership::default(),
+                &LastFmMappings::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.transport().requests().len(), 1);
+
+        let incomplete_client = retune_spotify::client::fake_client(
+            [retune_spotify::client::Response::json(
+                200,
+                serde_json::json!({
+                    "id": "album",
+                    "uri": "spotify:album:album",
+                    "name": "Album",
+                    "total_tracks": 2,
+                    "tracks": {"items": [{"uri": "spotify:track:one", "name": "One"}], "next": null, "total": 2}
+                }),
+            )],
+            "",
+        );
+        assert!(
+            fetch_complete_collection_album(&incomplete_client, "spotify:album:album")
+                .await
+                .is_err()
+        );
+        assert_eq!(incomplete_client.transport().requests().len(), 1);
+        assert!(incomplete_client
+            .transport()
+            .requests()
+            .iter()
+            .all(|request| request.method == retune_spotify::client::Method::Get));
+        let failed_dir = tempfile::tempdir().unwrap();
+        let failed_service = Service::new(failed_dir.path());
+        failed_service
+            .save(collection_session(&[collection_test_row("One")]))
+            .await
+            .unwrap();
+
+        let failing_client = retune_spotify::client::fake_client(
+            [retune_spotify::client::Response::json(
+                404,
+                serde_json::json!({}),
+            )],
+            "",
+        );
+        assert!(
+            fetch_complete_collection_album(&failing_client, "spotify:album:failed")
+                .await
+                .is_err()
+        );
+        assert!(failing_client
+            .transport()
+            .requests()
+            .iter()
+            .all(|request| request.method == retune_spotify::client::Method::Get));
+        let failed_session = failed_service.snapshot().await.unwrap();
+        assert!(failed_session
+            .collection_album_matches
+            .get(&1)
+            .map(|state| state.selected_album_uris.is_empty())
+            .unwrap_or(true));
     }
 
     #[tokio::test]
@@ -13406,6 +13666,68 @@ mod tests {
         );
         assert!(result.track_matches.is_empty());
         assert!(result.candidates[0].in_library);
+        assert_eq!(
+            result.candidates[0].relation,
+            Some(AlbumRelation::SameSongs)
+        );
+    }
+
+    #[test]
+    fn collection_candidate_relations_require_complete_title_words() {
+        for (source_title, candidate_title, candidate_artist, relation) in [
+            ("Song", "Song", "Artist", Some(AlbumRelation::BestMatch)),
+            (
+                "Song",
+                "Song (Live)",
+                "Artist",
+                Some(AlbumRelation::SameSongs),
+            ),
+            ("La Luna", "Anytime, Anywhere", "Artist", None),
+            ("Song", "Song (Live)", "Other Artist", None),
+        ] {
+            let row = collection_row("Artist", source_title);
+            let mut candidates = vec![collection_candidate(
+                "spotify:track:candidate",
+                candidate_title,
+                candidate_artist,
+                true,
+            )];
+            rank_collection_candidates(
+                &row,
+                &mut candidates,
+                &CollectionMembership {
+                    track_uris: BTreeSet::from(["spotify:track:candidate".into()]),
+                },
+            );
+            assert_eq!(candidates[0].relation, relation);
+        }
+    }
+
+    #[test]
+    fn collection_candidate_relations_accept_source_variant_titles() {
+        let mut row = collection_row("Artist", "La Luna");
+        row.variants.push(SourceVariant {
+            artist: "Artist".into(),
+            album: String::new(),
+            track: "Song".into(),
+            play_count: 1,
+            earliest: 1,
+            latest: 1,
+        });
+        let mut candidates = vec![collection_candidate(
+            "spotify:track:variant",
+            "Song (Live)",
+            "Artist",
+            true,
+        )];
+        rank_collection_candidates(
+            &row,
+            &mut candidates,
+            &CollectionMembership {
+                track_uris: BTreeSet::from(["spotify:track:variant".into()]),
+            },
+        );
+        assert_eq!(candidates[0].relation, Some(AlbumRelation::SameSongs));
     }
 
     #[test]

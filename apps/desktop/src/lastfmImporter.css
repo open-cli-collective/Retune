@@ -155,6 +155,9 @@
 .import-picker-results { min-height: 100px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
 .import-picker-option { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); cursor: pointer; }
 button.import-picker-option { width: 100%; grid-template-columns: minmax(0, 1fr) auto; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 0; text-align: left; background: transparent; }
+.import-collection-dialog .import-picker-option { grid-template-columns: minmax(0, 1fr) auto; cursor: default; }
+.import-picker-actions { display: flex; align-items: center; gap: 6px; }
+.import-picker-actions button { min-height: 24px !important; padding: 2px 7px !important; font-size: 10px !important; }
 .import-picker-option:last-child { border-bottom: 0; }
 .import-picker-option:hover, .import-picker-option:focus-within { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .import-picker-option span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }

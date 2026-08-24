@@ -269,28 +269,35 @@ function CollectionAlbumDialog({ page, collection, initialPreviewUri, busy, onCa
     const next = await run('lastfm_import_collection_preview_album', { batchId: page.batchId, artist: page.artist, uri: candidate.uri })
     setDialogState((state) => collectionDialogTransition(state, next ? { type: 'preview-succeeded', uri: candidate.uri } : { type: 'preview-failed' }))
   }
-  const closePreview = () => {
-    setDialogState((state) => collectionDialogTransition(state, { type: 'back-to-results' }))
+  const closePreview = (transition: 'back-to-results' | 'preview-add-succeeded' = 'back-to-results') => {
+    setDialogState((state) => collectionDialogTransition(state, { type: transition }))
     requestAnimationFrame(() => { if (resultList.current) resultList.current.scrollTop = dialogState.resultsScrollTop })
   }
   const toggleMatch = async () => {
     if (!preview) return
-    const action = selectedUris.includes(preview.uri) ? 'lastfm_import_collection_remove_album' : 'lastfm_import_collection_add_album'
-    await run(action, { batchId: page.batchId, artist: page.artist, uri: preview.uri })
+    const selected = selectedUris.includes(preview.uri)
+    const action = selected ? 'lastfm_import_collection_remove_album' : 'lastfm_import_collection_add_album'
+    const next = await run(action, { batchId: page.batchId, artist: page.artist, uri: preview.uri })
+    if (next && !selected) closePreview('preview-add-succeeded')
+  }
+  const toggleResultMatch = (candidate: AlbumCandidate) => {
+    const selected = selectedUris.includes(candidate.uri)
+    const action = selected ? 'lastfm_import_collection_remove_album' : 'lastfm_import_collection_add_album'
+    return run(action, { batchId: page.batchId, artist: page.artist, uri: candidate.uri })
   }
   const removeMatch = (uri: string) => void run('lastfm_import_collection_remove_album', { batchId: page.batchId, artist: page.artist, uri })
   return <ModalDialog className="import-collection-dialog" labelledBy="collection-dialog-title" onCancel={onCancel} onSubmit={search}>
     <header><p className="eyebrow">COLLECTION ALBUM MATCHES</p><h2 id="collection-dialog-title">Add albums from Spotify</h2><p className="muted">Search one album at a time, preview it, and build the match set without changing library membership.</p></header>
     {preview && previewScreen === 'preview' ? <>
-      <button type="button" className="spotify-page-back" onClick={closePreview}>‹ Back to results</button>
+      <button type="button" className="spotify-page-back" onClick={() => closePreview()}>‹ Back to results</button>
       <SpotifyAlbumPresentation album={collectionAlbumPresentation(preview, previewCoverage?.trackStatuses)} compact />
       <p className="import-collection-coverage">{collectionCoverageStatus(collection.coverage)} · {previewCoverage ? collectionPreviewCoverageCopy(previewCoverage) : 'Preview coverage will update after adding'} · {preview.totalTracks ?? preview.trackUris.length} Spotify tracks</p>
       <p className="import-collection-attribution"><a href={`https://open.spotify.com/album/${preview.uri.split(':').pop()}`} target="_blank" rel="noreferrer">Open in Spotify ↗</a> · Track match state is shown above.</p>
-      <footer><button type="button" onClick={closePreview}>Back to results</button><button type="button" className="primary" disabled={busy || loading} onClick={() => void toggleMatch()}>{collectionAlbumActionLabel(selectedUris.includes(preview.uri))}</button></footer>
+      <footer><button type="button" onClick={() => closePreview()}>Back to results</button><button type="button" className="primary" disabled={busy || loading} onClick={() => void toggleMatch()}>{collectionAlbumActionLabel(selectedUris.includes(preview.uri))}</button></footer>
     </> : <>
       <div className="import-picker-search"><label htmlFor="collection-album-query">Search Spotify albums</label><div><input id="collection-album-query" autoFocus value={dialogState.query} onChange={(event) => setDialogState((state) => collectionDialogTransition(state, { type: 'set-query', query: event.target.value }))} /><button type="submit" disabled={busy || loading || !dialogState.query.trim()}>Search</button></div></div>
       <div className="import-collection-coverage" role="status">{collectionCoverageStatus(collection.coverage)}{selectedUris.length ? ` · ${selectedUris.length} selected` : ''}</div>
-      <div ref={resultList} className="import-picker-results" aria-live="polite">{dialogState.results.length ? dialogState.results.map((candidate) => { const coverage = collection.coverage.previews.find((entry) => entry.uri === candidate.uri); return <button type="button" className="import-picker-option" key={candidate.uri} onClick={() => void openPreview(candidate)}><span><strong>{candidate.name}</strong><small>{candidate.artist}{candidate.releaseDate ? ` · ${candidate.releaseDate.slice(0, 4)}` : ''} · {candidate.totalTracks ?? candidate.trackUris.length} tracks{coverage ? ` · ${coverage.marginalMatches >= 0 ? '+' : ''}${coverage.marginalMatches} matches` : ''}</small></span><em>Preview</em></button> }) : <p className="muted">Search to load up to 10 Spotify album summaries.</p>}</div>
+      <div ref={resultList} className="import-picker-results" aria-live="polite">{dialogState.results.length ? dialogState.results.map((candidate) => { const coverage = collection.coverage.previews.find((entry) => entry.uri === candidate.uri); const selected = selectedUris.includes(candidate.uri); return <article className="import-picker-option" key={candidate.uri} tabIndex={0} aria-label={`${candidate.name} by ${candidate.artist}`} onDoubleClick={() => void openPreview(candidate)} onKeyDown={(event) => { if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return; event.preventDefault(); void openPreview(candidate) }}><span><strong>{candidate.name}</strong><small>{candidate.artist}{candidate.releaseDate ? ` · ${candidate.releaseDate.slice(0, 4)}` : ''} · {candidate.totalTracks ?? candidate.trackUris.length} tracks{coverage ? ` · ${coverage.marginalMatches >= 0 ? '+' : ''}${coverage.marginalMatches} matches` : ''}</small></span><div className="import-picker-actions"><button type="button" disabled={busy || loading} onClick={(event) => { event.stopPropagation(); void openPreview(candidate) }} onDoubleClick={(event) => event.stopPropagation()}>Preview</button><button type="button" disabled={busy || loading} onClick={(event) => { event.stopPropagation(); void toggleResultMatch(candidate) }} onDoubleClick={(event) => event.stopPropagation()}>{collectionAlbumActionLabel(selected)}</button></div></article> }) : <p className="muted">Search to load up to 10 Spotify album summaries.</p>}</div>
       {collection.cachedAlbums.length > 0 && <section className="import-selected-albums"><h3>Selected albums</h3>{selectedUris.map((uri) => { const candidate = collection.cachedAlbums.find((entry) => entry.uri === uri); if (!candidate) return null; const matched = collection.coverage.selectedAlbums.find((entry) => entry.uri === uri); return <article key={uri} className="import-selected-album"><strong>{candidate.name}</strong><small>{candidate.artist} · {matched?.matched ?? 0} matches · {matched?.uniqueCoverage ?? 0} unique</small><button type="button" onClick={() => void openPreview(candidate)}>Preview</button><button type="button" disabled={busy || loading} onClick={() => removeMatch(uri)}>Remove</button></article> })}</section>}
       <footer><button type="button" onClick={onCancel}>Close</button></footer>
     </>}

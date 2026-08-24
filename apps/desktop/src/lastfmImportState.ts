@@ -161,7 +161,7 @@ export type ImportCollectionSuggestionMatch = {
 export function collectionSuggestion<T extends ImportCollectionSuggestionCandidate>(source: Pick<ImportSourceRow, 'stableId' | 'artist' | 'variants'>, match: (Omit<ImportCollectionSuggestionMatch, 'candidates'> & { candidates: T[] }) | null): T | null {
   if (!match || match.selectedUri || match.trackMatches[source.stableId]) return null
   const artists = [source.artist, ...source.variants.map((variant) => variant.artist)].map(normalizeImportMatch)
-  return match.candidates.find((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.inLibrary && candidate.relation !== 'best-match' && artists.includes(normalizeImportMatch(candidate.artist))) ?? null
+  return match.candidates.find((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.inLibrary && candidate.relation === 'same-songs' && artists.includes(normalizeImportMatch(candidate.artist))) ?? null
 }
 
 export type CollectionAlbumProjection = { uri: string }
@@ -205,6 +205,7 @@ export type CollectionDialogAction<T extends CollectionAlbumProjection = Collect
   | { type: 'search-failed' }
   | { type: 'preview-started'; uri: string; resultsScrollTop: number }
   | { type: 'preview-succeeded'; uri: string }
+  | { type: 'preview-add-succeeded' }
   | { type: 'preview-failed' }
   | { type: 'back-to-results' }
 
@@ -224,6 +225,7 @@ export function collectionDialogTransition<T extends CollectionAlbumProjection>(
       pendingPreview: { previousPreviewUri: state.previewUri, previousResultsScrollTop: action.resultsScrollTop },
     }
     case 'preview-succeeded': return { ...state, previewUri: action.uri, pendingPreview: null }
+    case 'preview-add-succeeded': return { ...state, previewUri: undefined, pendingPreview: null }
     case 'preview-failed': return state.pendingPreview ? {
       ...state,
       previewUri: state.pendingPreview.previousPreviewUri,

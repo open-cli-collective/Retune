@@ -151,10 +151,11 @@ test('Last.fm collection suggestions require an owned imperfect same-artist cand
   const exactOne = { uri: 'spotify:track:one', artist: 'Artist', inLibrary: true, relation: 'best-match' as const }
   const exactTwo = { uri: 'spotify:track:two', artist: 'Artist', inLibrary: true, relation: 'best-match' as const }
   assert.equal(suggest([exactOne, exactTwo]), null)
-  const ownedNear = { uri: 'spotify:track:near', artist: 'Artist', inLibrary: true, relation: null }
+  const ownedNear = { uri: 'spotify:track:near', artist: 'Artist', inLibrary: true, relation: 'same-songs' as const }
   assert.deepEqual(suggest([ownedNear]), ownedNear)
   assert.equal(suggest([{ ...ownedNear, inLibrary: false }]), null)
   assert.equal(suggest([{ ...ownedNear, artist: 'Other Artist' }]), null)
+  assert.equal(suggest([{ ...ownedNear, relation: null }]), null)
 })
 
 test('Last.fm collection album projections preserve match-set order and branch labels', () => {
@@ -167,7 +168,7 @@ test('Last.fm collection album projections preserve match-set order and branch l
   assert.equal(collectionCoverageStatus({ matched: 2, ambiguous: 1, unresolved: 3 }), '2 matched · 1 ambiguous · 3 unresolved')
 })
 
-test('Last.fm collection dialog state preserves results, preview, scroll, and selected projection on failures', () => {
+test('Last.fm collection dialog preserves results after preview Add and on failures', () => {
   const cached = [{ uri: 'spotify:album:a' }, { uri: 'spotify:album:b' }]
   assert.equal(collectionDialogScreen(undefined, cached), 'results')
   assert.equal(collectionDialogScreen('spotify:album:a', cached), 'preview')
@@ -187,7 +188,7 @@ test('Last.fm collection dialog state preserves results, preview, scroll, and se
   const beforePreview = state
   state = collectionDialogTransition(state, { type: 'preview-started', uri: 'spotify:album:a', resultsScrollTop: 240 })
   state = collectionDialogTransition(state, { type: 'preview-succeeded', uri: 'spotify:album:a' })
-  state = collectionDialogTransition(state, { type: 'back-to-results' })
+  state = collectionDialogTransition(state, { type: 'preview-add-succeeded' })
   assert.equal(state.query, 'Artist album')
   assert.deepEqual(state.results, beforePreview.results)
   assert.equal(state.previewUri, undefined)
@@ -213,6 +214,14 @@ test('Last.fm collection dialog state preserves results, preview, scroll, and se
   assert.equal(failedPreview.previewUri, state.previewUri)
   assert.equal(failedPreview.resultsScrollTop, 320)
   assert.deepEqual(selected(), ['spotify:album:b'])
+})
+
+test('Last.fm collection result rows expose separate accessible actions', () => {
+  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
+  assert.match(importer, /<article className="import-picker-option"[\s\S]*onDoubleClick=/)
+  assert.match(importer, /onClick=\{\(event\) => \{ event\.stopPropagation\(\); void openPreview\(candidate\) \}\}/)
+  assert.match(importer, /onClick=\{\(event\) => \{ event\.stopPropagation\(\); void toggleResultMatch\(candidate\) \}\}/)
+  assert.doesNotMatch(importer, /<button type="button" className="import-picker-option"/)
 })
 
 test('Last.fm content and history intents remain independent and require one choice', () => {

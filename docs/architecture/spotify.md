@@ -122,8 +122,9 @@ gate. Opening a visible review batch lazily matches it through this same shared
 client/request gate with official `album:`/`artist:` field filters and a limit
 of 10, then fetches candidate tracks for set-overlap classification. Explicit
 collection-album search passes the user's free-text or field-filter query through
-the same provider and request gate; a search makes one album request and a preview makes one album fetch, while cached preview,
-add, remove, and revisit operations make no request. An importer-wide async
+the same provider and request gate; a search makes one album request and the
+first Preview or direct Add fetches one album, while cached preview, add,
+remove, and revisit operations make no request. An importer-wide async
 lock serializes duplicate batch matches; cached revisits make no
 matching/search request and there is no adjacent prefetch. A cached
 Spotify-derived page trusts only an exact cached library identity; an inexact
