@@ -381,6 +381,7 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(importerCss, /\.import-queue, \.import-review \{[^}]*min-height: 0/)
   assert.match(importerCss, /\.import-queue-list \{[^}]*overflow: auto/)
   assert.match(importerCss, /\.import-track-list \{[^}]*overflow: auto/)
+  assert.match(importerCss, /button\.import-picker-option \{[^}]*width: 100%[^}]*grid-template-columns: minmax\(0, 1fr\) auto/)
   assert.match(importerCss, /\.import-nav-target:focus \{[^}]*box-shadow: inset 0 0 0 2px var\(--accent\)/)
   assert.match(importerCss, /\.import-match-cell\.needs-action \{[^}]*box-shadow: inset 4px 0 #a64b00/)
 })
