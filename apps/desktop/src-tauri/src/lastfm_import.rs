@@ -5385,6 +5385,10 @@ fn track_search_term(artist: &str, track: &str) -> String {
     format!("track:\"{track}\" artist:\"{artist}\"")
 }
 
+fn collection_album_search_term(query: &str) -> String {
+    query.trim().to_owned()
+}
+
 fn is_album_search_term(search_term: &str) -> bool {
     search_term
         .trim_start()
@@ -7803,13 +7807,7 @@ pub(crate) async fn lastfm_import_collection_search_albums(
     if query.is_empty() {
         return Ok(Vec::new());
     }
-    let search_term = if query.to_ascii_lowercase().contains("album:")
-        || query.to_ascii_lowercase().contains("artist:")
-    {
-        query.to_owned()
-    } else {
-        album_search_term(&artist, query)
-    };
+    let search_term = collection_album_search_term(query);
     let initial_account = {
         let _membership_guard = state.spotify_library_gate.lock().await;
         let (username, spotify_account_id) =
@@ -13525,6 +13523,10 @@ mod tests {
 
     #[test]
     fn collection_cache_requires_track_search_terms_and_literal_singles_is_release_shaped() {
+        assert_eq!(
+            collection_album_search_term("  sarah brightman eden  "),
+            "sarah brightman eden"
+        );
         for (query, expected) in [
             (album_search_term("Artist", "Singles"), true),
             (track_search_term("Artist", "Song"), false),
