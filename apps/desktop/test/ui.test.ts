@@ -373,7 +373,7 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
     const block = appCss.match(new RegExp(`:root\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))?.[1] ?? ''
     assert.match(block, /--panel:\s*#[0-9a-f]{6}/i)
   }
-  const dialogBlock = importerCss.match(/\.import-picker-dialog, \.import-confirm-dialog \{([^}]*)\}/)?.[1] ?? ''
+  const dialogBlock = importerCss.match(/\.import-picker-dialog, \.import-confirm-dialog, \.import-collection-dialog \{([^}]*)\}/)?.[1] ?? ''
   assert.match(dialogBlock, /background: var\(--panel\)/)
   assert.match(dialogBlock, /border: 1px solid var\(--border\)/)
   assert.match(dialogBlock, /box-shadow:/)

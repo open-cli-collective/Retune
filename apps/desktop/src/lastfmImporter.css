@@ -130,7 +130,7 @@
 .import-footer > span { min-width: 0; }
 .import-footer-hints { flex: 1; text-align: center; }
 .import-footer { min-height: 27px; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
-.import-picker-dialog, .import-confirm-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
+.import-picker-dialog, .import-confirm-dialog, .import-collection-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
 .import-collection-dialog { width: min(760px, calc(100vw - 36px)); }
 .import-collection-dialog .spotify-album-presentation { min-height: 0; overflow: auto; }
 .import-collection-dialog .spotify-album-presentation .album-header { padding: 0 0 10px; border-bottom: 1px solid var(--border); }
@@ -148,7 +148,7 @@
 .import-selected-album-card strong, .import-selected-album strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .import-selected-album-card small, .import-selected-album small { color: var(--dim); font-size: 10px; }
 .import-selected-albums h3 { margin: 0; color: var(--dim); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
-.import-picker-dialog h2, .import-confirm-dialog h2 { margin: 0; font-size: 16px; }
+.import-picker-dialog h2, .import-confirm-dialog h2, .import-collection-dialog h2 { margin: 0; font-size: 16px; }
 .import-picker-search { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: 10.5px; }
 .import-picker-search > div { display: flex; gap: 7px; }
 .import-picker-search input { min-width: 0; flex: 1; padding: 6px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--list); }
@@ -162,7 +162,7 @@
 .import-picker-option small { color: var(--dim); font-size: 11px; }
 .import-picker-option em { color: var(--dim); font-size: 10px; font-style: normal; }
 .import-picker-note, .import-confirm-dialog p { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
-.import-picker-dialog footer, .import-confirm-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 3px; }
+.import-picker-dialog footer, .import-confirm-dialog footer, .import-collection-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 3px; }
 .import-shortcuts-dialog { box-sizing: border-box; width: min(520px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
 .import-shortcuts-dialog h2 { margin: 0; font-size: 16px; }
 .import-shortcuts-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 14px; margin: 0; color: var(--dim); font-size: 11px; line-height: 1.35; }
