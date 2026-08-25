@@ -5459,7 +5459,13 @@ pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportSta
 
 fn album_search_term(artist: &str, album: &str) -> String {
     let artist = artist.replace('"', " ");
-    let album = album.replace('"', " ");
+    let simplified = without_parenthetical_text(album);
+    let album = if simplified.trim().is_empty() {
+        album
+    } else {
+        simplified.trim()
+    }
+    .replace('"', " ");
     format!("album:\"{album}\" artist:\"{artist}\"")
 }
 
@@ -5560,8 +5566,9 @@ fn automatic_album_candidate<'a>(
             .filter_map(|name| album_track_match_index(name, &candidate.track_names))
             .collect::<Vec<_>>();
         let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
-        matched.len() * 5 >= source_count * 4
-            && unique_targets * 5 >= candidate.track_names.len() * 4
+        (matched.len() == source_count && unique_targets == source_count)
+            || (matched.len() * 5 >= source_count * 4
+                && unique_targets * 5 >= candidate.track_names.len() * 4)
     });
     let candidate = supported.next()?;
     supported.next().is_none().then_some(candidate)
@@ -14141,6 +14148,40 @@ mod tests {
             automatic_album_candidate("TRON: Legacy", &tron, &tron_candidates)
                 .map(|candidate| candidate.uri.as_str()),
             Some("tron")
+        );
+
+        let narnia = (1..=13)
+            .map(|index| format!("Narnia Track {index}"))
+            .collect::<Vec<_>>();
+        let mut narnia_album = narnia.clone();
+        narnia_album.extend((1..=4).map(|index| format!("Extra Track {index}")));
+        let mut narnia_candidates = vec![candidate(
+            "narnia",
+            "The Chronicles of Narnia: The Lion, the Witch and the Wardrobe (Original Score)",
+            "Harry Gregson-Williams",
+            narnia_album,
+        )];
+        classify_album_candidates_by_name(&narnia, &mut narnia_candidates);
+        assert_eq!(narnia_candidates[0].relation, Some(AlbumRelation::Superset));
+        assert_eq!(
+            automatic_album_candidate(
+                "The Chronicles of Narnia: The Lion, the Witch and the Wardrobe",
+                &narnia,
+                &narnia_candidates,
+            )
+            .map(|candidate| candidate.uri.as_str()),
+            Some("narnia")
+        );
+    }
+
+    #[test]
+    fn album_search_ignores_parenthetical_annotations() {
+        assert_eq!(
+            album_search_term(
+                "John Williams",
+                "Jurassic Park (Original Motion Picture Soundtrack)",
+            ),
+            "album:\"Jurassic Park\" artist:\"John Williams\""
         );
     }
 

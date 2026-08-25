@@ -84,9 +84,12 @@ named `Singles` remains release-shaped.
 Release-shaped batches compare source and Spotify album and track titles with
 the same normalized contained-token rules used by collection matching. Retune
 automatically selects a release only when it is the sole title-compatible
-candidate covering at least 80% of both the source rows and the Spotify album's
-distinct tracks; artist credit is supporting metadata rather than a veto because
-soundtracks and compilations are commonly credited differently across catalogs.
+candidate that either maps every source row one-to-one or covers at least 80% of
+both the source rows and the Spotify album's distinct tracks; clean Spotify
+supersets are therefore selected despite extra tracks. Artist credit is
+supporting metadata rather than a veto because soundtracks and compilations are
+commonly credited differently across catalogs. Generated album searches elide
+parenthetical annotations while retaining Spotify's album and artist filters.
 Unmatched source rows remain available for individual review. Cached
 unselected album results are reclassified locally on load and do not trigger a
 new Spotify request. Manual album searches apply the same automatic selector
