@@ -7595,6 +7595,75 @@ async fn assert_apply_account_locked(
     Ok(())
 }
 
+fn cached_collection_tracks_for_apply(
+    session: &LastFmImportSessionV2,
+    plan: &ApplyPlan,
+    added_at: u64,
+) -> Vec<retune_core::model::NewTrack> {
+    let wanted = plan.metadata_uris.iter().collect::<BTreeSet<_>>();
+    let category = plan
+        .options
+        .genre
+        .as_deref()
+        .map(str::trim)
+        .filter(|genre| !genre.is_empty())
+        .unwrap_or(retune_core::UNCATEGORIZED)
+        .to_owned();
+    let mut tracks = BTreeMap::new();
+    for album in collection_selected_albums(session, plan.batch_id) {
+        for (index, uri) in album.matching.track_uris.iter().enumerate() {
+            if !wanted.contains(uri) || tracks.contains_key(uri) {
+                continue;
+            }
+            let Some(name) = album
+                .matching
+                .track_names
+                .get(index)
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            tracks.insert(
+                uri.clone(),
+                retune_core::model::NewTrack {
+                    uri: uri.clone(),
+                    source: retune_core::model::SourceId::Music,
+                    cat: category.clone(),
+                    art: album
+                        .matching
+                        .track_artists
+                        .get(index)
+                        .filter(|artist| !artist.is_empty())
+                        .unwrap_or(&album.matching.artist)
+                        .clone(),
+                    alb: album
+                        .matching
+                        .track_albums
+                        .get(index)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&album.matching.name)
+                        .clone(),
+                    name: name.clone(),
+                    duration: std::time::Duration::from_secs(
+                        album
+                            .track_durations
+                            .get(index)
+                            .copied()
+                            .unwrap_or_default(),
+                    ),
+                    track_no: album.track_numbers.get(index).copied().flatten(),
+                    disc_no: None,
+                    added_at: Some(added_at),
+                    release_date: album.release_date.clone(),
+                    kind: Some("Spotify".into()),
+                    bitrate_kbps: None,
+                },
+            );
+        }
+    }
+    tracks.into_values().collect()
+}
+
 type ApplyEffectFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 
 async fn run_apply_upstream_effect<
@@ -7627,11 +7696,19 @@ async fn run_apply_upstream_effect<
             }
         }
         ApplyMembership::Tracks(uris) => {
+            let added_at = crate::unix_now();
+            let cached_tracks = service
+                .snapshot()
+                .await
+                .as_ref()
+                .map(|session| cached_collection_tracks_for_apply(session, plan, added_at))
+                .unwrap_or_default();
             crate::spotify_commands::save_tracks_operation(
                 state,
                 provider,
                 uris.clone(),
-                crate::unix_now(),
+                cached_tracks,
+                added_at,
             )
             .await?;
         }
@@ -17142,6 +17219,73 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(client.transport().requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn production_upstream_effect_reuses_collection_cache_without_track_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+        let row = collection_test_row("One");
+        let mut session = collection_session(std::slice::from_ref(&row));
+        let mut album = collection_album(
+            "spotify:album:album",
+            "Artist",
+            &[("One", "spotify:track:one")],
+        );
+        album.matching.name = "Album".into();
+        album.matching.track_albums = vec!["Album".into()];
+        album.release_date = Some("1994".into());
+        session.collection_album_matches.insert(
+            1,
+            CollectionAlbumMatchState {
+                selected_album_uris: vec![album.matching.uri.clone()],
+                cached_candidates: vec![album],
+                ..CollectionAlbumMatchState::default()
+            },
+        );
+        service.save(session.clone()).await.unwrap();
+        *state.spotify_library.lock().unwrap() = SpotifyLibraryState {
+            account_id: "spotify".into(),
+            complete: true,
+            ..SpotifyLibraryState::default()
+        };
+        state
+            .token_store
+            .save(&Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+                scopes: "user-library-modify".into(),
+                playback_credentials: None,
+            })
+            .unwrap();
+        let client = fake_client([Response::json(200, Value::Null)], "user-library-modify");
+        let mut plan = apply_test_plan_for(&session, 1, &row.stable_id, "spotify:track:one");
+        plan.lastfm_username = "user".into();
+        plan.spotify_account_id = "spotify".into();
+        plan.album.clear();
+        plan.membership = ApplyMembership::Tracks(vec!["spotify:track:one".into()]);
+        plan.metadata_uris = vec!["spotify:track:one".into()];
+
+        {
+            let _membership_guard = state.spotify_library_gate.lock().await;
+            run_apply_upstream_effect(&state, &service, &client, &plan)
+                .await
+                .unwrap();
+        }
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("/me/library"));
+        assert!(!requests[0].url.contains("/tracks/"));
+        let library = state.library.lock().unwrap();
+        let track = library.tracks().first().unwrap();
+        assert_eq!(track.uri, "spotify:track:one");
+        assert_eq!(track.name, "One");
+        assert_eq!(track.art, "Artist");
+        assert_eq!(track.alb, "Album");
+        assert_eq!(track.duration, Duration::from_secs(180));
+        assert_eq!(track.release_date.as_deref(), Some("1994"));
     }
 
     #[tokio::test]

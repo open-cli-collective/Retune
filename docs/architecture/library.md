@@ -212,6 +212,11 @@ job at its last stage for safe replay; account changes suspend it without
 applying to another profile. The UI advances from the authoritative queue after
 enqueue and completion events never replace a newer selection.
 
+Track-mode collection applies materialize missing local records from the
+persisted selected-album preview cache before the Spotify membership write.
+Only targets absent from that cache fall back to individual Spotify metadata
+reads, so retrying a frozen cached job does not repeat `/tracks/{id}` requests.
+
 Spotify saved-track and saved-album memberships are not core-library state.
 The shell keeps those account-scoped memberships separately while materializing
 their Spotify tracks here for playback, ratings, and play counts. A materialized

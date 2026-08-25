@@ -527,7 +527,8 @@ pub(super) async fn add_spotify_tracks(
     let state = app.state::<AppState>();
     let _membership_guard = state.spotify_library_gate.lock().await;
     let provider = provider_from(&state)?;
-    let ids = save_tracks_operation(&state, provider.as_ref(), uris, unix_now()).await?;
+    let ids =
+        save_tracks_operation(&state, provider.as_ref(), uris, Vec::new(), unix_now()).await?;
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())?;
     Ok(ids)
@@ -539,6 +540,7 @@ pub(crate) async fn save_tracks_operation<T: Transport, S: TokenStore>(
     state: &AppState,
     provider: &SpotifyClient<T, S>,
     uris: Vec<String>,
+    cached_tracks: Vec<retune_core::model::NewTrack>,
     added_at: u64,
 ) -> Result<Vec<u64>, String> {
     let mut seen = HashSet::new();
@@ -567,8 +569,17 @@ pub(crate) async fn save_tracks_operation<T: Transport, S: TokenStore>(
             },
         );
     }
+    let mut cached_tracks = cached_tracks
+        .into_iter()
+        .map(|track| (track.uri.clone(), track))
+        .collect::<HashMap<_, _>>();
     let mut tracks = Vec::with_capacity(missing_uris.len());
     for uri in &missing_uris {
+        if let Some(mut track) = cached_tracks.remove(uri) {
+            track.added_at = Some(added_at);
+            tracks.push(track);
+            continue;
+        }
         let track = provider
             .track(track_id(uri).expect("validated above"))
             .await
