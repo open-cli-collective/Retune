@@ -67,7 +67,8 @@
 .import-collection-note { margin: 5px 0 0; color: var(--dim); font-size: 10.5px; }
 .import-collection-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 5px 0 0; color: var(--dim); font-size: 10.5px; }
 .import-collection-summary span:first-child { color: #278c46; font-weight: 650; }
-.import-collection-summary span:last-child { color: #a64b00; font-weight: 650; }
+.import-collection-summary span:nth-child(3) { color: #a64b00; font-weight: 650; }
+.import-collection-summary button { min-height: 22px !important; margin: -4px 0; padding: 2px 7px !important; font-size: 10px !important; }
 .import-page-actions { flex-wrap: wrap; justify-content: flex-end; }
 .import-page-actions > span { color: var(--dim); font-size: 10.5px; }
 .import-album-strip { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-bottom: 1px solid var(--border); background: var(--panel); }
@@ -132,7 +133,7 @@
 .import-footer-hints { flex: 1; text-align: center; }
 .import-footer { min-height: 27px; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
 .import-picker-dialog, .import-confirm-dialog, .import-collection-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
-.import-collection-dialog { width: min(760px, calc(100vw - 36px)); overflow-y: auto; }
+.import-collection-dialog { width: min(760px, calc(100vw - 36px)); height: min(720px, calc(100vh - 36px)); min-width: min(520px, calc(100vw - 36px)); min-height: min(420px, calc(100vh - 36px)); max-width: calc(100vw - 36px); max-height: calc(100vh - 36px); resize: both; overflow: hidden; }
 .import-collection-dialog .spotify-album-presentation { min-height: 0; overflow: auto; }
 .import-collection-dialog .spotify-album-presentation .album-header { padding: 0 0 10px; border-bottom: 1px solid var(--border); }
 .import-collection-dialog .spotify-album-presentation .album-art { width: 88px; height: 88px; }
@@ -141,6 +142,8 @@
 .import-collection-attribution { margin: 4px 0; color: var(--dim); font-size: 10.5px; }
 .import-collection-attribution a { color: var(--accent); }
 .import-selected-album-cards, .import-selected-albums { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.import-selected-album-cards[open] { height: min(210px, 28vh); min-height: 58px; max-height: 50vh; resize: vertical; overflow: auto; }
+.import-selected-album-cards:not([open]) { height: auto; resize: none; overflow: hidden; }
 .import-selected-album-cards summary { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; list-style: disclosure-closed; }
 .import-selected-album-cards[open] summary { list-style: disclosure-open; }
 .import-selected-album-cards summary::marker { color: var(--dim); }
@@ -160,7 +163,8 @@
 .import-picker-search > div { display: flex; gap: 7px; }
 .import-picker-search input { min-width: 0; flex: 1; padding: 6px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--list); }
 .import-picker-results { min-height: 100px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
-.import-collection-dialog .import-picker-results { min-height: 0; max-height: min(360px, 45vh); }
+.import-collection-dialog .import-picker-results { height: 110px; min-height: 42px; max-height: 45vh; flex: 0 0 auto; resize: vertical; }
+.import-collection-dialog .import-selected-albums { min-height: 70px; flex: 1; overflow: auto; }
 .import-picker-option { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); cursor: pointer; }
 button.import-picker-option { width: 100%; grid-template-columns: minmax(0, 1fr) auto; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 0; text-align: left; background: transparent; }
 .import-collection-dialog .import-picker-option { grid-template-columns: minmax(0, 1fr) auto; cursor: default; }

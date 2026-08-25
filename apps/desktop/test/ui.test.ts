@@ -425,7 +425,7 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(importerCss, /\.import-queue, \.import-review \{[^}]*min-height: 0/)
   assert.match(importerCss, /\.import-queue-list \{[^}]*overflow: auto/)
   assert.match(importerCss, /\.import-track-list \{[^}]*overflow: auto/)
-  assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow-y: auto/)
+  assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
   assert.match(importerCss, /button\.import-picker-option \{[^}]*width: 100%[^}]*grid-template-columns: minmax\(0, 1fr\) auto/)
   assert.match(importerCss, /\.import-nav-target:focus \{[^}]*box-shadow: inset 0 0 0 2px var\(--accent\)/)
   assert.match(importerCss, /\.import-match-cell\.needs-action \{[^}]*box-shadow: inset 4px 0 #a64b00/)
@@ -452,8 +452,13 @@ test('Last.fm collection review explains individual matching and keeps release U
   assert.match(importer, /<small>\{collectionCoverageStatus\(collectionMatches\.coverage\)\}<\/small><\/summary>/)
   assert.doesNotMatch(importer, /<details key=\{uri\} className="import-selected-album"/)
   assert.match(importer, /stablePartitionImportRows\(page\.rows, requiredMatchIds/)
-  assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow-y: auto/)
+  assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
   assert.match(importerCss, /\.import-selected-album-cards summary \{[^}]*list-style: disclosure-closed/)
+  assert.match(importer, /Use \{suggestedMatches\.length\} Suggested/)
+  assert.match(importer, /lastfm_import_select_matches/)
+  assert.match(importerCss, /\.import-collection-dialog \{[^}]*resize: both/)
+  assert.match(importerCss, /\.import-collection-dialog \.import-picker-results \{[^}]*resize: vertical/)
+  assert.match(importerCss, /\.import-selected-album-cards\[open\] \{[^}]*resize: vertical/)
 })
 
 test('Last.fm queue selection restores focus after loading and retains native button semantics', () => {

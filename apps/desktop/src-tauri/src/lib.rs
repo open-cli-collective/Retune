@@ -2566,6 +2566,7 @@ pub fn run() {
             lastfm_import::lastfm_import_count_mode,
             lastfm_import::lastfm_import_search_terms,
             lastfm_import::lastfm_import_select_match,
+            lastfm_import::lastfm_import_select_matches,
             lastfm_import::lastfm_import_collection_search_albums,
             lastfm_import::lastfm_import_collection_preview_album,
             lastfm_import::lastfm_import_collection_add_album,

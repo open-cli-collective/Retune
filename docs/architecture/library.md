@@ -77,7 +77,10 @@ Track-match review mutations keep their existing account guards, atomic
 persistence, and import-change event, while `lastfm_import_select_match` and
 `lastfm_import_change_track` also return the affected `ImportPageView` for
 direct installation on the visible page. Choosing a cached candidate does not
-make a Spotify request.
+make a Spotify request. `lastfm_import_select_matches` applies a non-empty set
+of candidates from one review batch in one atomic session write and returns the
+same page projection; the collection UI uses it to ratify all currently valid
+same-artist suggestions without issuing Spotify requests.
 
 The visible review-page projection stably partitions actionable selected rows
 whose IDs are in `requiredImportMatchIds` (selected rows without a track target)
