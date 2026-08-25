@@ -6085,6 +6085,43 @@ fn title_token_overlap(left: &str, right: &str) -> usize {
     left.intersection(&right).count()
 }
 
+fn differs_by_one_inserted_character(left: &str, right: &str) -> bool {
+    let (shorter, longer) = if left.chars().count() < right.chars().count() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    if shorter.chars().count() + 1 != longer.chars().count() {
+        return false;
+    }
+    let mut shorter = shorter.chars();
+    let mut expected = shorter.next();
+    let mut skipped = false;
+    for character in longer.chars() {
+        if expected == Some(character) {
+            expected = shorter.next();
+        } else if skipped {
+            return false;
+        } else {
+            skipped = true;
+        }
+    }
+    expected.is_none()
+}
+
+fn titles_differ_by_one_token_typo(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
+    let left_only = left.difference(right).collect::<Vec<_>>();
+    let right_only = right.difference(left).collect::<Vec<_>>();
+    left_only.len() == 1
+        && right_only.len() == 1
+        && left_only[0]
+            .chars()
+            .count()
+            .min(right_only[0].chars().count())
+            >= 5
+        && differs_by_one_inserted_character(left_only[0], right_only[0])
+}
+
 fn titles_share_contained_words(left: &str, right: &str) -> bool {
     let left = normalized_word_sequences(left)
         .into_iter()
@@ -6092,7 +6129,11 @@ fn titles_share_contained_words(left: &str, right: &str) -> bool {
     let right = normalized_word_sequences(right)
         .into_iter()
         .collect::<BTreeSet<_>>();
-    !left.is_empty() && !right.is_empty() && (left.is_subset(&right) || right.is_subset(&left))
+    !left.is_empty()
+        && !right.is_empty()
+        && (left.is_subset(&right)
+            || right.is_subset(&left)
+            || titles_differ_by_one_token_typo(&left, &right))
 }
 
 fn collection_candidate_title_overlap(row: &SourceRow, candidate: &AlbumCandidate) -> usize {
@@ -13987,6 +14028,13 @@ mod tests {
                 "Artist",
                 Some(AlbumRelation::SameSongs),
             ),
+            (
+                "Siúil A Rún (Walk My Love)",
+                "Siulil A Run",
+                "Artist",
+                Some(AlbumRelation::SameSongs),
+            ),
+            ("Sailing A Run", "Siulil A Run", "Artist", None),
             (
                 "Song of Love",
                 "Love Song",

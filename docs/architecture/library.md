@@ -63,7 +63,8 @@ Spotify track/album membership, then uniquely exact candidates without
 ownership. Same-artist near matches are suggestions only; wrong artists remain
 unresolved. Catalog comparison is diacritic-insensitive. Near-title comparison
 ignores parenthetical annotations, accepts bidirectional token containment, and uses token overlap only to order otherwise
-equal candidates within the visible batch. Generated track searches apply the
+equal candidates within the visible batch. It also tolerates one inserted or
+missing character in a single title token of at least five characters. Generated track searches apply the
 same parenthetical simplification rather than issuing a second Spotify request.
 Exact or near-title tracks found on multiple selected albums remain unresolved
 until the user chooses an album-labelled candidate; the UI recommends one only
