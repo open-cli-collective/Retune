@@ -5802,23 +5802,17 @@ fn collection_row_status(
     {
         return CollectionRowStatus::Matched;
     }
-    let exact = selected_tracks
-        .iter()
-        .filter(|candidate| collection_candidate_matches_title(row, candidate))
+    let supported = collection_best_title_matches(row, selected_tracks)
+        .into_iter()
         .map(|candidate| candidate.uri.as_str())
         .collect::<BTreeSet<_>>();
-    if exact.len() > 1 {
+    if supported.len() > 1 {
         CollectionRowStatus::Ambiguous
-    } else if exact.len() == 1 {
+    } else if supported.len() == 1 {
         CollectionRowStatus::Matched
-    } else if result.is_some_and(|result| {
-        result
-            .candidates
-            .iter()
-            .filter(|candidate| collection_candidate_is_exact(row, candidate))
-            .count()
-            > 1
-    }) {
+    } else if result
+        .is_some_and(|result| collection_best_title_matches(row, &result.candidates).len() > 1)
+    {
         CollectionRowStatus::Ambiguous
     } else {
         CollectionRowStatus::Unresolved
@@ -6365,13 +6359,37 @@ fn collection_candidate_is_same_songs_title(row: &SourceRow, candidate: &AlbumCa
 }
 
 fn collection_candidate_is_exact(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
-    collection_candidate_matches_artist(row, candidate)
-        && collection_candidate_matches_title(row, candidate)
+    collection_candidate_matches_title(row, candidate)
 }
 
 fn collection_candidate_is_same_songs(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
-    collection_candidate_matches_artist(row, candidate)
-        && collection_candidate_is_same_songs_title(row, candidate)
+    collection_candidate_is_same_songs_title(row, candidate)
+}
+
+fn collection_best_title_matches<'a>(
+    row: &SourceRow,
+    candidates: &'a [AlbumCandidate],
+) -> Vec<&'a AlbumCandidate> {
+    let exact = candidates
+        .iter()
+        .filter(|candidate| collection_candidate_is_exact(row, candidate))
+        .collect::<Vec<_>>();
+    if exact.is_empty() {
+        candidates
+            .iter()
+            .filter(|candidate| collection_candidate_is_same_songs(row, candidate))
+            .collect()
+    } else {
+        exact
+    }
+}
+
+fn collection_title_confidence(row: &SourceRow, candidate: &AlbumCandidate) -> Confidence {
+    if collection_candidate_is_exact(row, candidate) {
+        Confidence::Exact
+    } else {
+        Confidence::Likely
+    }
 }
 
 fn collection_candidate_rank(row: &SourceRow, candidate: &AlbumCandidate) -> u8 {
@@ -6452,6 +6470,7 @@ fn rank_collection_candidates(
     candidates.sort_by_cached_key(|candidate| {
         (
             collection_candidate_rank(row, candidate),
+            !collection_candidate_matches_artist(row, candidate),
             Reverse(collection_candidate_title_overlap(row, candidate)),
             normalize_for_match(&candidate.name),
             candidate.uri.clone(),
@@ -6487,27 +6506,21 @@ fn ratify_collection_result(
         result.selected_uri = None;
         result.track_matches.clear();
         result.confidence = None;
-        let exact_owned = result
-            .candidates
+        let supported = collection_best_title_matches(row, &result.candidates);
+        let owned = supported
             .iter()
-            .filter(|candidate| {
-                candidate.in_library && collection_candidate_is_exact(row, candidate)
-            })
+            .copied()
+            .filter(|candidate| candidate.in_library)
             .collect::<Vec<_>>();
-        let exact = result
-            .candidates
-            .iter()
-            .filter(|candidate| collection_candidate_is_exact(row, candidate))
-            .collect::<Vec<_>>();
-        let selected = if exact_owned.len() == 1 {
-            exact_owned.first().copied()
-        } else if exact_owned.is_empty() && exact.len() == 1 {
-            exact.first().copied()
+        let selected = if owned.len() == 1 {
+            owned.first().copied()
+        } else if owned.is_empty() && supported.len() == 1 {
+            supported.first().copied()
         } else {
             None
         };
         if let Some(candidate) = selected {
-            result.confidence = Some(Confidence::Exact);
+            result.confidence = Some(collection_title_confidence(row, candidate));
             result
                 .track_matches
                 .insert(row.stable_id.clone(), candidate.uri.clone());
@@ -6592,22 +6605,25 @@ fn ratify_collection_result_with_selected_albums_and_injected(
         result.track_matches = BTreeMap::from([(row.stable_id.clone(), uri)]);
         return result;
     }
-    let exact_selected = selected_tracks
-        .iter()
-        .filter(|candidate| collection_candidate_matches_title(row, candidate))
-        .collect::<Vec<_>>();
-    let exact_selected_uri = (exact_selected.len() == 1).then(|| exact_selected[0].uri.clone());
+    let supported_selected = collection_best_title_matches(row, &selected_tracks);
+    let selected_candidate = (supported_selected.len() == 1).then(|| supported_selected[0]);
+    let selected_track_uri = selected_candidate.map(|candidate| candidate.uri.clone());
     if let Some(selected_uri) = result.selected_uri.clone() {
         // A track picker choice is durable session state and outranks a changed set.
-        if exact_selected_uri.as_deref() == Some(selected_uri.as_str()) {
+        if selected_track_uri.as_deref() == Some(selected_uri.as_str()) {
             if let Some(candidate) = result
                 .candidates
                 .iter_mut()
                 .find(|candidate| candidate.uri == selected_uri)
             {
-                candidate.relation = Some(AlbumRelation::BestMatch);
+                candidate.relation = Some(if collection_candidate_is_exact(row, candidate) {
+                    AlbumRelation::BestMatch
+                } else {
+                    AlbumRelation::SameSongs
+                });
             }
-            result.confidence = Some(Confidence::Exact);
+            result.confidence =
+                selected_candidate.map(|candidate| collection_title_confidence(row, candidate));
         }
         return result;
     }
@@ -6615,45 +6631,47 @@ fn ratify_collection_result_with_selected_albums_and_injected(
     result.selected_uri = None;
     result.track_matches.clear();
     result.confidence = None;
-    if let Some(uri) = exact_selected_uri {
+    if let Some(candidate) = selected_candidate {
+        let uri = candidate.uri.clone();
+        let confidence = collection_title_confidence(row, candidate);
         if let Some(candidate) = result
             .candidates
             .iter_mut()
             .find(|candidate| candidate.uri == uri)
         {
-            candidate.relation = Some(AlbumRelation::BestMatch);
+            candidate.relation = Some(if confidence == Confidence::Exact {
+                AlbumRelation::BestMatch
+            } else {
+                AlbumRelation::SameSongs
+            });
         }
-        result.confidence = Some(Confidence::Exact);
+        result.confidence = Some(confidence);
         result.track_matches.insert(row.stable_id.clone(), uri);
         return result;
     }
-    if exact_selected.len() > 1 {
-        // Distinct editions with the same spelling stay ambiguous.
+    if supported_selected.len() > 1 {
+        // Distinct editions with the same strongest title relation stay ambiguous.
         return result;
     }
 
     // Keep the existing library-aware fallback for rows not covered by the set.
     let mut fallback = previous;
     rank_collection_candidates(row, &mut fallback.candidates, membership);
-    let exact_owned = fallback
-        .candidates
+    let supported = collection_best_title_matches(row, &fallback.candidates);
+    let owned = supported
         .iter()
-        .filter(|candidate| candidate.in_library && collection_candidate_is_exact(row, candidate))
+        .copied()
+        .filter(|candidate| candidate.in_library)
         .collect::<Vec<_>>();
-    let exact = fallback
-        .candidates
-        .iter()
-        .filter(|candidate| collection_candidate_is_exact(row, candidate))
-        .collect::<Vec<_>>();
-    let selected = if exact_owned.len() == 1 {
-        exact_owned.first().copied()
-    } else if exact_owned.is_empty() && exact.len() == 1 {
-        exact.first().copied()
+    let selected = if owned.len() == 1 {
+        owned.first().copied()
+    } else if owned.is_empty() && supported.len() == 1 {
+        supported.first().copied()
     } else {
         None
     };
     if let Some(candidate) = selected {
-        result.confidence = Some(Confidence::Exact);
+        result.confidence = Some(collection_title_confidence(row, candidate));
         result
             .track_matches
             .insert(row.stable_id.clone(), candidate.uri.clone());
@@ -7080,58 +7098,54 @@ fn exact_album_match_for_rows(session: &LastFmImportSessionV2, rows: &[&SourceRo
             let Some(album) = selected.first().copied() else {
                 return false;
             };
-            if selected.len() != 1
-                || album.matching.track_uris.len() != rows.len()
-                || !normalize_for_match(&first.artist)
-                    .eq(&normalize_for_match(&album.matching.artist))
-            {
+            if selected.len() != 1 || album.matching.track_uris.len() != rows.len() {
                 return false;
             }
             let mut targets = BTreeSet::new();
             return rows.iter().all(|row| {
-                let exact = (0..album.matching.track_uris.len())
-                    .filter(|index| {
-                        let candidate = AlbumCandidate {
-                            uri: album.matching.track_uris[*index].clone(),
-                            name: album
-                                .matching
-                                .track_names
-                                .get(*index)
-                                .cloned()
-                                .unwrap_or_default(),
-                            artist: album
-                                .matching
-                                .track_artists
-                                .get(*index)
-                                .cloned()
-                                .unwrap_or_else(|| album.matching.artist.clone()),
-                            in_library: false,
-                            track_uris: vec![album.matching.track_uris[*index].clone()],
-                            track_names: vec![album
-                                .matching
-                                .track_names
-                                .get(*index)
-                                .cloned()
-                                .unwrap_or_default()],
-                            track_artists: vec![album
-                                .matching
-                                .track_artists
-                                .get(*index)
-                                .cloned()
-                                .unwrap_or_else(|| album.matching.artist.clone())],
-                            track_albums: vec![album.matching.name.clone()],
-                            relation: None,
-                        };
-                        collection_candidate_is_exact(row, &candidate)
+                let candidates = (0..album.matching.track_uris.len())
+                    .map(|index| AlbumCandidate {
+                        uri: album.matching.track_uris[index].clone(),
+                        name: album
+                            .matching
+                            .track_names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default(),
+                        artist: album
+                            .matching
+                            .track_artists
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| album.matching.artist.clone()),
+                        in_library: false,
+                        track_uris: vec![album.matching.track_uris[index].clone()],
+                        track_names: vec![album
+                            .matching
+                            .track_names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default()],
+                        track_artists: vec![album
+                            .matching
+                            .track_artists
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| album.matching.artist.clone())],
+                        track_albums: vec![album.matching.name.clone()],
+                        relation: None,
                     })
-                    .count();
+                    .collect::<Vec<_>>();
+                let supported = collection_best_title_matches(row, &candidates).len();
                 let Some(result) = session.matches.get(&row.stable_id) else {
                     return false;
                 };
                 let Some(target) = matched_track_uri(result, &row.stable_id) else {
                     return false;
                 };
-                exact == 1 && album.matching.track_uris.contains(&target) && targets.insert(target)
+                supported == 1
+                    && album.matching.track_uris.contains(&target)
+                    && targets.insert(target)
             });
         }
     }
@@ -12878,12 +12892,15 @@ mod tests {
             &CollectionMembership::default(),
             &LastFmMappings::default(),
         );
-        assert_eq!(result.confidence, None);
-        assert!(result.track_matches.is_empty());
-        assert!(result
-            .candidates
-            .iter()
-            .all(|candidate| candidate.relation.is_none()));
+        assert_eq!(result.confidence, Some(Confidence::Exact));
+        assert_eq!(
+            result.track_matches.get(&row.stable_id).map(String::as_str),
+            Some("spotify:track:other")
+        );
+        assert_eq!(
+            result.candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
     }
 
     #[tokio::test]
@@ -14421,7 +14438,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_ratification_is_conservative_and_membership_first() {
+    fn collection_ratification_uses_local_titles_then_membership_and_artist_ranking() {
         let row = collection_row("Artist", "Song");
         let owned = collection_candidate("spotify:track:owned", "Song", "Artist", true);
         let unowned = collection_candidate("spotify:track:unowned", "Song", "Artist", false);
@@ -14492,8 +14509,14 @@ mod tests {
             },
             &LastFmMappings::default(),
         );
-        assert!(result.track_matches.is_empty());
-        assert_eq!(result.candidates[0].relation, None);
+        assert_eq!(
+            result.track_matches.get(&row.stable_id).map(String::as_str),
+            Some("spotify:track:wrong")
+        );
+        assert_eq!(
+            result.candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
 
         let result = ratify_collection_result(
             &row,
@@ -14511,7 +14534,11 @@ mod tests {
             },
             &LastFmMappings::default(),
         );
-        assert!(result.track_matches.is_empty());
+        assert_eq!(
+            result.track_matches.get(&row.stable_id).map(String::as_str),
+            Some("spotify:track:near")
+        );
+        assert_eq!(result.confidence, Some(Confidence::Likely));
         assert!(result.candidates[0].in_library);
         assert_eq!(
             result.candidates[0].relation,
@@ -14561,8 +14588,19 @@ mod tests {
                 "Artist",
                 Some(AlbumRelation::SameSongs),
             ),
+            (
+                "El Cid: Fanfare And Entry of The Nobles",
+                "Fanfare & Entry Of The Nobles (From \"El Cid\")",
+                "Cincinnati Pops Orchestra",
+                Some(AlbumRelation::SameSongs),
+            ),
             ("La Luna", "Anytime, Anywhere", "Artist", None),
-            ("Song", "Song (Live)", "Other Artist", None),
+            (
+                "Song",
+                "Song (Live)",
+                "Other Artist",
+                Some(AlbumRelation::SameSongs),
+            ),
         ] {
             let row = collection_row("Artist", source_title);
             let mut candidates = vec![collection_candidate(

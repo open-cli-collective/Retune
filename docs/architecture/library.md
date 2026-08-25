@@ -57,16 +57,15 @@ restored on resume. Fuzzy disclosures are bounded to the visible persisted
 `ImportBatch`; the target-wide count decision still includes completed source
 rows from other batches. Last.fm rows with an empty source album are collection
 rows, displayed as `Singles`, and are matched one track at a time. Ratification
-prefers accepted mappings and manual choices, then uniquely exact normalized
-title/primary-artist candidates already in the Retune library or exact saved
-Spotify track/album membership, then uniquely exact candidates without
-ownership. Same-artist near matches are suggestions only; wrong artists from
-ordinary search remain unresolved. Within the user's explicitly selected album
-set, a unique exact-title track auto-selects even when Spotify credits it to a
-different artist; multiple exact-title targets remain ambiguous. Catalog
-comparison is diacritic-insensitive. Near-title comparison
-ignores parenthetical annotations, accepts bidirectional token containment, and uses token overlap only to order otherwise
-equal candidates within the visible batch. It also tolerates one inserted or
+prefers accepted mappings and manual choices, then the strongest unique local
+title match from Spotify's already-scoped results. Exact normalized titles win
+over near titles; saved Retune/Spotify membership and matching artist text rank
+candidates within the same title tier but do not veto a match. The same rule
+applies to the user's selected album set, and multiple candidates in the
+strongest title tier remain ambiguous. Catalog comparison is
+diacritic-insensitive. Near-title comparison ignores parenthetical annotations,
+accepts bidirectional token containment, and uses token overlap only to order
+otherwise equal candidates within the visible batch. It also tolerates one inserted or
 missing character or one adjacent transposition in a single title token of at
 least five characters. Generated track searches apply the
 same parenthetical simplification rather than issuing a second Spotify request.
