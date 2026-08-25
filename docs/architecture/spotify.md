@@ -126,7 +126,9 @@ the same provider and request gate; a search makes one album request and the
 first Preview or direct Add fetches one album, while cached preview, add,
 remove, and revisit operations make no request. An importer-wide async
 lock serializes duplicate batch matches; cached revisits make no
-matching/search request and there is no adjacent prefetch. A cached
+matching/search request. After the visible batch resolves, React starts one
+lookahead request for the next batch in the active sort order through that same
+command and lock; it does not prefetch beyond that batch. A cached
 Spotify-derived page trusts only an exact cached library identity; an inexact
 identity resolves Spotify `/me` before the page is exposed. The first
 successful match binds the session to Spotify `/me`; its final ownership check

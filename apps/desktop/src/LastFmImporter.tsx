@@ -230,7 +230,7 @@ function DownloadPane({ state, defaults, busy, onDefaults, onStart }: { state: I
   </section>
 }
 
-function MatchPickerDialog({ kind, query: initialQuery, candidates, selectedUri, busy, onCancel, onSearch, onChoose }: { kind: PickerKind; query: string; candidates: AlbumCandidate[]; selectedUri: string | null; busy: boolean; onCancel: () => void; onSearch: (query: string) => void; onChoose: (uri: string) => void }) {
+function MatchPickerDialog({ kind, query: initialQuery, candidates, selectedUri, selectedConfidence, busy, onCancel, onSearch, onChoose }: { kind: PickerKind; query: string; candidates: AlbumCandidate[]; selectedUri: string | null; selectedConfidence: MatchResult['confidence']; busy: boolean; onCancel: () => void; onSearch: (query: string) => void; onChoose: (uri: string) => void }) {
   const [query, setQuery] = useState(initialQuery)
   const [choice, setChoice] = useState(selectedUri ?? '')
   useEffect(() => { setQuery(initialQuery) }, [initialQuery])
@@ -238,7 +238,7 @@ function MatchPickerDialog({ kind, query: initialQuery, candidates, selectedUri,
   return <ModalDialog className="import-picker-dialog" labelledBy="import-picker-title" onCancel={onCancel} onSubmit={() => { if (choice) void onChoose(choice) }}>
     <header><p className="eyebrow">{kind === 'album' ? 'CHANGE ALBUM' : 'CHANGE TRACK'}</p><h2 id="import-picker-title">{kind === 'album' ? 'Choose a Spotify release' : 'Choose a Spotify track'}</h2></header>
     <div className="import-picker-search"><label htmlFor="import-picker-query">Search Spotify</label><div><input id="import-picker-query" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !busy && query.trim()) { event.preventDefault(); onSearch(query) } }} /><button type="button" disabled={busy || !query.trim()} onClick={() => onSearch(query)}>Search</button></div></div>
-    <div className="import-picker-results" aria-live="polite">{candidates.length ? candidates.slice(0, 10).map((candidate) => <label className="import-picker-option" key={candidate.uri}><input type="radio" name="import-picker-choice" checked={choice === candidate.uri} onChange={() => setChoice(candidate.uri)} /><span><strong>{candidate.name}</strong><small>{candidate.artist}{kind === 'album' ? ` · ${candidate.trackUris.length} tracks` : candidate.trackAlbums[0] ? ` · ${candidate.trackAlbums[0]}` : ''}</small></span><em>{kind === 'album' ? relationLabel(candidate.relation) : confidenceLabel(candidate.relation === 'best-match' ? 'exact' : candidate.relation ? 'likely' : 'low')}</em></label>) : <p className="muted">Search to load up to 10 real Spotify candidates.</p>}</div>
+    <div className="import-picker-results" aria-live="polite">{candidates.length ? candidates.slice(0, 10).map((candidate) => <label className="import-picker-option" key={candidate.uri}><input type="radio" name="import-picker-choice" checked={choice === candidate.uri} onChange={() => setChoice(candidate.uri)} /><span><strong>{candidate.name}</strong><small>{candidate.artist}{kind === 'album' ? ` · ${candidate.trackUris.length} tracks` : candidate.trackAlbums[0] ? ` · ${candidate.trackAlbums[0]}` : ''}</small></span><em>{kind === 'album' ? relationLabel(candidate.relation) : confidenceLabel(candidate.uri === selectedUri && selectedConfidence ? selectedConfidence : candidate.relation === 'best-match' ? 'exact' : candidate.relation ? 'likely' : 'low')}</em></label>) : <p className="muted">Search to load up to 10 real Spotify candidates.</p>}</div>
     {kind === 'album' && <p className="import-picker-note">Counts follow the tracks you keep. Choosing a release remaps this page together.</p>}
     <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={busy || !choice}>Use This {kind === 'album' ? 'Album' : 'Track'}</button></footer>
   </ModalDialog>
@@ -646,7 +646,7 @@ function ImportPage({ page, failed, showQueries, onRefresh, onNext, onApplied, o
     {pageError && <p className="import-page-error" role="alert">{pageError}</p>}
     <footer className="import-review-footer"><span>{failed ? 'This batch failed and its choices are frozen.' : `${selectedImportCount(review)} selected · ${excludedImportCount(review)} excluded · ${restPendingImportCount(review)} not selected`}</span><div>{failed ? <button type="button" className="primary" disabled={busy} onClick={() => void retry()}>Retry Apply</button> : <>{suggestedMatches.length > 0 && <button type="button" disabled={busy} onClick={() => void applySuggestedMatches()}>Use {suggestedMatches.length} Suggestions</button>}<button type="button" disabled={busy || !selectedImportCount(review)} onClick={() => void apply(false)}>Accept Changes</button><button type="button" className="primary" disabled={busy || !selectedImportCount(review)} onClick={() => void apply(true)}>Accept &amp; Next Batch</button></>}</div></footer>
     {collectionDialogOpen && collectionMatches && <CollectionAlbumDialog page={page} collection={collectionMatches} initialPreviewUri={collectionPreviewUri} busy={busy || failed} onCancel={() => { setCollectionDialogOpen(false); setCollectionPreviewUri(undefined) }} onPage={onCollectionPage} onError={onError} />}
-    {picker && pickerItem && <MatchPickerDialog kind={picker.kind} query={picker.query} candidates={pickerCandidates(picker.kind, pickerMatch?.candidates ?? [])} selectedUri={pickerSelectedUri(picker.kind, picker.sourceId, pickerMatch?.selectedUri ?? null, pickerMatch?.trackMatches ?? {})} busy={busy || failed} onCancel={() => setPicker(null)} onSearch={searchPicker} onChoose={choosePicker} />}
+    {picker && pickerItem && <MatchPickerDialog kind={picker.kind} query={picker.query} candidates={pickerCandidates(picker.kind, pickerMatch?.candidates ?? [])} selectedUri={pickerSelectedUri(picker.kind, picker.sourceId, pickerMatch?.selectedUri ?? null, pickerMatch?.trackMatches ?? {})} selectedConfidence={pickerMatch?.confidence ?? null} busy={busy || failed} onCancel={() => setPicker(null)} onSearch={searchPicker} onChoose={choosePicker} />}
   </section>
 }
 
@@ -790,6 +790,7 @@ export default function LastFmImporter() {
   const queueMutationRunning = useRef(false)
   const focusQueueAfterOpen = useRef(false)
   const advancingApply = useRef(false)
+  const prefetchedTransition = useRef('')
   const orderedQueue = useMemo(() => sortImportQueue(queue, sort), [queue, sort])
   const activeQueue = useMemo(() => activeImportQueue(orderedQueue), [orderedQueue])
   const queueSummary = useMemo(() => {
@@ -899,6 +900,18 @@ export default function LastFmImporter() {
     return () => { void subscription.then((stop) => stop()); void completions.then((stop) => stop()) }
   }, [refresh])
   useEffect(() => { setPage((current) => pageWithQueuePosition(current, activeQueue)) }, [activeQueue])
+  useEffect(() => {
+    if (!page || pageLoading || selected?.page !== page.batchId) return
+    const next = nextRemainingImportQueue(queue, selected, sort)
+    if (!next) return
+    const transition = `${page.batchId}:${next.page}`
+    if (prefetchedTransition.current === transition) return
+    prefetchedTransition.current = transition
+    // ponytail: one-batch lookahead; widen only if measured navigation still stalls.
+    void invoke('lastfm_import_page', { batchId: next.page, artist: next.artist, album: next.album }).catch(() => {
+      if (prefetchedTransition.current === transition) prefetchedTransition.current = ''
+    })
+  }, [page, pageLoading, queue, selected, sort])
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     let theme: Settings['theme'] = 'system'

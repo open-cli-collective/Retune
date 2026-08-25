@@ -67,7 +67,8 @@ different artist; multiple exact-title targets remain ambiguous. Catalog
 comparison is diacritic-insensitive. Near-title comparison
 ignores parenthetical annotations, accepts bidirectional token containment, and uses token overlap only to order otherwise
 equal candidates within the visible batch. It also tolerates one inserted or
-missing character in a single title token of at least five characters. Generated track searches apply the
+missing character or one adjacent transposition in a single title token of at
+least five characters. Generated track searches apply the
 same parenthetical simplification rather than issuing a second Spotify request.
 Exact or near-title tracks found on multiple selected albums remain unresolved
 until the user chooses an album-labelled candidate; the UI recommends one only
@@ -191,11 +192,14 @@ locked while that cursor is active, including after restart.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the
-first match, and caches the result. Correctly cached collection batches reopen
+first match, and caches the result. Once that page is visible, React requests
+exactly the next batch in the active sort order as a one-item lookahead; an
+overlapping foreground open joins the same importer lock and cached result.
+Correctly cached collection batches reopen
 without an API call; only legacy empty-album rows with album-shaped cached
 search terms refetch. Whole-album import stays disabled for a collection until
-one coherent release is explicitly chosen. Accept All
-is the only bulk exception and prepares remaining batches sequentially before
+one coherent release is explicitly chosen. Accept All prepares all remaining
+batches sequentially before
 showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
 source-history decisions and can be undone before acceptance; they never remove
 a track inherently materialized by a saved whole album.

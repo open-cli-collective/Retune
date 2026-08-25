@@ -475,6 +475,7 @@ test('Last.fm queue selection restores focus after loading and retains native bu
   assert.match(importer, /const importQueuePageLimit = 1000/)
   assert.match(importer, /const selectedPageRef = useRef<number \| undefined>\(undefined\)/)
   assert.match(importer, /const queueRefreshGeneration = useRef\(0\)/)
+  assert.match(importer, /const prefetchedTransition = useRef\(''\)/)
   assert.match(importer, /const sortRef = useRef<.*>\('plays'\)/)
   assert.match(refreshBlock, /const refresh = useCallback\(async/)
   assert.doesNotMatch(refreshBlock, /\}, \[selectedPage, sort\]\)/)
@@ -489,6 +490,7 @@ test('Last.fm queue selection restores focus after loading and retains native bu
   assert.match(importer, /await invoke\('lastfm_import_apply'[\s\S]*if \(advance\) await onApplied\(\)/)
   assert.match(importer, /const appliedAndAdvance = async \(\) => \{[\s\S]*focusQueueAfterOpen\.current = true[\s\S]*projectAcknowledgedImportApply\([\s\S]*setSelected\(null\)[\s\S]*setPage\(null\)[\s\S]*refreshQueueOnly\(true\)/)
   assert.match(importer, /const refreshQueueOnly = async \(strict = false\)/)
+  assert.match(importer, /nextRemainingImportQueue\(queue, selected, sort\)[\s\S]*prefetchedTransition\.current = transition[\s\S]*invoke\('lastfm_import_page'/)
   assert.match(importer, /requestGeneration !== queueRefreshGeneration\.current/)
   assert.match(importer, /lastfm-import-apply-finished/)
   assert.match(importer, /lastfm_import_retry_apply/)
@@ -528,7 +530,7 @@ test('Last.fm row confidence uses a standalone track candidate without changing 
     { uri: rematchedUri, relation: null },
   ]
 
-  assert.equal(selectedImportTrackConfidence('now', albumUri, { now: rematchedUri, honor: honorUri }, 'likely', candidates), 'low')
+  assert.equal(selectedImportTrackConfidence('now', albumUri, { now: rematchedUri, honor: honorUri }, 'likely', candidates), 'likely')
   assert.equal(selectedImportTrackConfidence('honor', albumUri, { honor: honorUri }, 'likely', candidates), 'likely')
 })
 

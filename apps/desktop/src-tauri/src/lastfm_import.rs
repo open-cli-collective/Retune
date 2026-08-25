@@ -5673,11 +5673,7 @@ fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
             if result.selected_uri.is_none() {
                 update_selected_match(result, &row.stable_id, &row.track, &candidate);
             } else {
-                result.confidence = Some(match candidate.relation {
-                    Some(AlbumRelation::BestMatch) => Confidence::Exact,
-                    Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
-                    None => Confidence::Low,
-                });
+                result.confidence = Some(selected_match_confidence(&row.track, &candidate));
                 if !result.track_matches.contains_key(&row.stable_id) {
                     if let Some(index) = album_track_match_index(&row.track, &candidate.track_names)
                     {
@@ -6295,6 +6291,27 @@ fn differs_by_one_inserted_character(left: &str, right: &str) -> bool {
     expected.is_none()
 }
 
+fn differs_by_one_adjacent_transposition(left: &str, right: &str) -> bool {
+    if left.chars().count() != right.chars().count() {
+        return false;
+    }
+    let mut differences = left
+        .chars()
+        .zip(right.chars())
+        .enumerate()
+        .filter(|(_, (left, right))| left != right);
+    let Some((first_index, (first_left, first_right))) = differences.next() else {
+        return false;
+    };
+    let Some((second_index, (second_left, second_right))) = differences.next() else {
+        return false;
+    };
+    differences.next().is_none()
+        && second_index == first_index + 1
+        && first_left == second_right
+        && first_right == second_left
+}
+
 fn titles_differ_by_one_token_typo(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
     let left_only = left.difference(right).collect::<Vec<_>>();
     let right_only = right.difference(left).collect::<Vec<_>>();
@@ -6305,7 +6322,8 @@ fn titles_differ_by_one_token_typo(left: &BTreeSet<String>, right: &BTreeSet<Str
             .count()
             .min(right_only[0].chars().count())
             >= 5
-        && differs_by_one_inserted_character(left_only[0], right_only[0])
+        && (differs_by_one_inserted_character(left_only[0], right_only[0])
+            || differs_by_one_adjacent_transposition(left_only[0], right_only[0]))
 }
 
 fn titles_share_contained_words(left: &str, right: &str) -> bool {
@@ -6858,6 +6876,10 @@ where
                 .is_none_or(|result| is_album_search_term(&result.search_term))
         });
     }
+    let row_tracks = rows
+        .iter()
+        .map(|row| (row.stable_id.clone(), row.track.clone()))
+        .collect::<HashMap<_, _>>();
     let results = search(rows).await?;
     let results = if album.is_empty() {
         let current_session = service
@@ -6872,6 +6894,7 @@ where
                     result,
                     current_session.matches.get(&source_id),
                     &source_id,
+                    row_tracks.get(&source_id).map(String::as_str).unwrap_or(""),
                 )
             })
             .collect()
@@ -7363,11 +7386,7 @@ fn update_selected_match(
     candidate: &AlbumCandidate,
 ) {
     result.selected_uri = Some(candidate.uri.clone());
-    result.confidence = Some(match candidate.relation {
-        Some(AlbumRelation::BestMatch) => Confidence::Exact,
-        Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
-        None => Confidence::Low,
-    });
+    result.confidence = Some(selected_match_confidence(source_track, candidate));
     result.track_matches.remove(source_id);
     if let Some(index) = album_track_match_index(source_track, &candidate.track_names) {
         if let Some(track_uri) = candidate.track_uris.get(index) {
@@ -7379,6 +7398,17 @@ fn update_selected_match(
         result
             .track_matches
             .insert(source_id.to_owned(), candidate.uri.clone());
+    }
+}
+
+fn selected_match_confidence(source_track: &str, candidate: &AlbumCandidate) -> Confidence {
+    match candidate.relation {
+        Some(AlbumRelation::BestMatch) => Confidence::Exact,
+        Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
+        None if album_track_match_index(source_track, &candidate.track_names).is_some() => {
+            Confidence::Likely
+        }
+        None => Confidence::Low,
     }
 }
 
@@ -7915,11 +7945,7 @@ fn match_result_for(
 ) -> MatchResult {
     let selected =
         selected_uri.and_then(|uri| candidates.iter().find(|candidate| candidate.uri == uri));
-    let confidence = selected.map(|candidate| match candidate.relation {
-        Some(AlbumRelation::BestMatch) => Confidence::Exact,
-        Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
-        None => Confidence::Low,
-    });
+    let confidence = selected.map(|candidate| selected_match_confidence(source_track, candidate));
     let selected_uri = selected
         .filter(|candidate| candidate.relation.is_some())
         .map(|candidate| candidate.uri.clone());
@@ -7949,6 +7975,7 @@ fn preserve_match_selection(
     mut result: MatchResult,
     previous: Option<&MatchResult>,
     source_id: &str,
+    source_track: &str,
 ) -> MatchResult {
     let Some(previous) = previous else {
         return result;
@@ -7984,6 +8011,16 @@ fn preserve_match_selection(
         {
             result.candidates.insert(0, candidate);
         }
+    }
+    for candidate in result
+        .candidates
+        .iter_mut()
+        .filter(|candidate| candidate.uri.starts_with("spotify:track:"))
+    {
+        classify_album_candidates_by_name(
+            &[source_track.to_owned()],
+            std::slice::from_mut(candidate),
+        );
     }
     result.candidates.truncate(10);
     result
@@ -8544,6 +8581,7 @@ pub(crate) async fn lastfm_import_change_track(
         match_result_for(id.clone(), search_term, candidates, &row.track, None),
         session.matches.get(&id),
         &id,
+        &row.track,
     );
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
@@ -8610,6 +8648,7 @@ pub(crate) async fn lastfm_import_change_album(
                 ),
                 session.matches.get(&candidate_row.stable_id),
                 &candidate_row.stable_id,
+                &candidate_row.track,
             )
         })
         .collect();
@@ -11560,7 +11599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lazy_coordinator_shares_duplicate_opens_and_does_not_prefetch_adjacent_batches() {
+    async fn lazy_coordinator_shares_duplicate_opens_and_keeps_batch_scope() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
         let mut session =
@@ -14183,6 +14222,20 @@ mod tests {
             ),
             "album:\"Jurassic Park\" artist:\"John Williams\""
         );
+        assert_eq!(
+            album_track_match_index("Harry & Hermoine", &["Harry & Hermione".into()]),
+            Some(0)
+        );
+        assert_eq!(
+            selected_match_confidence(
+                "Harry & Hermoine",
+                &AlbumCandidate {
+                    track_names: vec!["Harry & Hermione".into()],
+                    ..AlbumCandidate::default()
+                },
+            ),
+            Confidence::Likely
+        );
     }
 
     #[test]
@@ -16233,7 +16286,7 @@ mod tests {
             "One",
             None,
         );
-        let preserved = preserve_match_selection(refreshed, Some(&previous), "id");
+        let preserved = preserve_match_selection(refreshed, Some(&previous), "id", "One");
 
         assert_eq!(preserved.selected_uri, previous.selected_uri);
         assert_eq!(preserved.track_matches, previous.track_matches);
@@ -16267,7 +16320,7 @@ mod tests {
             "Song",
             None,
         );
-        let preserved = preserve_match_selection(refreshed, Some(&stale), "id");
+        let preserved = preserve_match_selection(refreshed, Some(&stale), "id", "Song");
         assert_eq!(
             preserved.candidates[0].relation,
             Some(AlbumRelation::BestMatch)
@@ -16296,7 +16349,8 @@ mod tests {
             "One",
             Some("spotify:album:new"),
         );
-        let refreshed = preserve_match_selection(automatically_selected, Some(&unselected), "id");
+        let refreshed =
+            preserve_match_selection(automatically_selected, Some(&unselected), "id", "One");
         assert_eq!(refreshed.selected_uri.as_deref(), Some("spotify:album:new"));
     }
 

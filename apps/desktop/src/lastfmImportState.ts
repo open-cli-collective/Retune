@@ -436,7 +436,7 @@ export function selectedImportTrackConfidence(sourceId: string, selectedUri: str
   if (!standalone) return albumConfidence
   if (standalone.relation === 'best-match') return 'exact'
   if (standalone.relation === 'same-songs' || standalone.relation === 'superset') return 'likely'
-  return 'low'
+  return selectedUri?.startsWith('spotify:album:') ? albumConfidence : 'low'
 }
 
 export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): number {
