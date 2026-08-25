@@ -175,11 +175,11 @@ export function collectionAmbiguousChoices(
 ): CollectionAmbiguousChoice[] {
   if (!match || match.selectedUri || match.trackMatches[sourceId]) return []
   const selected = new Set(selectedAlbumUris)
-  const exactUris = new Set(match.candidates.filter((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.relation === 'best-match').map((candidate) => candidate.uri))
+  const supportedUris = new Set(match.candidates.filter((candidate) => candidate.uri.startsWith('spotify:track:') && (candidate.relation === 'best-match' || candidate.relation === 'same-songs')).map((candidate) => candidate.uri))
   const choices = albums.flatMap((album, order) => {
     if (!selected.has(album.uri)) return []
     const albumCoverage = coverage.find((entry) => entry.uri === album.uri)
-    return album.trackUris.filter((uri) => exactUris.has(uri)).map((uri) => ({
+    return album.trackUris.filter((uri) => supportedUris.has(uri)).map((uri) => ({
       uri,
       album: album.name,
       projectedMatches: Math.min(album.trackUris.length, (albumCoverage?.matched ?? 0) + 1),
@@ -416,7 +416,8 @@ export function validImportIntent(importContent: boolean, includeHistoricalPlayC
 
 export function trackPickerQuery(source: Pick<ImportSourceRow, 'artist' | 'track'>): string {
   const quote = (value: string) => value.replace(/"/g, ' ')
-  return `track:"${quote(source.track)}" artist:"${quote(source.artist)}"`
+  const simplified = source.track.replace(/\([^)]*\)/g, ' ').replace(/\//g, ' ').replace(/\s+/g, ' ').trim()
+  return `track:"${quote(simplified || source.track)}" artist:"${quote(source.artist)}"`
 }
 
 export function pickerCandidates<T extends { uri: string }>(kind: ImportPickerKind, candidates: T[]): T[] {

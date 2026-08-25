@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     future::Future,
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 pub(crate) const SESSION_VERSION: u8 = 2;
 pub(crate) const LASTFM_PAGE_LIMIT: u32 = 200;
@@ -786,6 +788,14 @@ pub(crate) fn normalize_for_match(value: &str) -> String {
     value
         .chars()
         .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalize_catalog_text(value: &str) -> String {
+    value
+        .nfd()
+        .filter(|character| !is_combining_mark(*character) && character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
 }
@@ -5450,7 +5460,14 @@ fn album_search_term(artist: &str, album: &str) -> String {
 
 fn track_search_term(artist: &str, track: &str) -> String {
     let artist = artist.replace('"', " ");
-    let track = track.replace('"', " ");
+    let simplified = without_parenthetical_text(track);
+    let track = if simplified.trim().is_empty() {
+        track
+    } else {
+        simplified.trim()
+    }
+    .replace(['/', '"'], " ");
+    let track = track.split_whitespace().collect::<Vec<_>>().join(" ");
     format!("track:\"{track}\" artist:\"{artist}\"")
 }
 
@@ -5471,13 +5488,13 @@ pub(crate) fn classify_album_candidates_by_name(
 ) {
     let source = source_track_names
         .iter()
-        .map(|name| normalize_for_match(name))
+        .map(|name| normalize_catalog_text(name))
         .collect::<BTreeSet<_>>();
     for candidate in candidates.iter_mut() {
         let target = candidate
             .track_names
             .iter()
-            .map(|name| normalize_for_match(name))
+            .map(|name| normalize_catalog_text(name))
             .collect::<BTreeSet<_>>();
         let overlap = source.intersection(&target).count();
         candidate.relation = if overlap == source.len() && target.len() == source.len() {
@@ -6003,17 +6020,17 @@ fn candidate_primary_artist(candidate: &AlbumCandidate) -> &str {
 }
 
 fn collection_candidate_matches_artist(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
-    let candidate_artist = normalize_for_match(candidate_primary_artist(candidate));
+    let candidate_artist = normalize_catalog_text(candidate_primary_artist(candidate));
     !candidate_artist.is_empty()
-        && (normalize_for_match(&row.artist) == candidate_artist
+        && (normalize_catalog_text(&row.artist) == candidate_artist
             || row
                 .variants
                 .iter()
-                .any(|variant| normalize_for_match(&variant.artist) == candidate_artist))
+                .any(|variant| normalize_catalog_text(&variant.artist) == candidate_artist))
 }
 
 fn collection_candidate_matches_title(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
-    let candidate_title = normalize_for_match(&candidate.name);
+    let candidate_title = normalize_catalog_text(&candidate.name);
     if candidate_title.is_empty() {
         return false;
     }
@@ -6021,31 +6038,73 @@ fn collection_candidate_matches_title(row: &SourceRow, candidate: &AlbumCandidat
         .iter()
         .map(|variant| variant.track.as_str())
         .chain(std::iter::once(row.track.as_str()))
-        .any(|track| normalize_for_match(track) == candidate_title)
+        .any(|track| normalize_catalog_text(track) == candidate_title)
         || candidate.track_names.iter().any(|track| {
             row.variants
                 .iter()
                 .map(|variant| variant.track.as_str())
                 .chain(std::iter::once(row.track.as_str()))
-                .any(|source| normalize_for_match(source) == normalize_for_match(track))
+                .any(|source| normalize_catalog_text(source) == normalize_catalog_text(track))
         })
 }
 
-fn normalized_word_sequences(value: &str) -> Vec<String> {
+fn without_parenthetical_text(value: &str) -> String {
+    let mut parenthesis_depth = 0_u32;
     value
+        .chars()
+        .filter(|character| match character {
+            '(' => {
+                parenthesis_depth += 1;
+                false
+            }
+            ')' => {
+                parenthesis_depth = parenthesis_depth.saturating_sub(1);
+                false
+            }
+            _ => parenthesis_depth == 0,
+        })
+        .collect::<String>()
+}
+
+fn normalized_word_sequences(value: &str) -> Vec<String> {
+    without_parenthetical_text(value)
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .map(normalize_for_match)
+        .map(normalize_catalog_text)
         .filter(|word| !word.is_empty())
         .collect()
 }
 
+fn title_token_overlap(left: &str, right: &str) -> usize {
+    let left = normalized_word_sequences(left)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let right = normalized_word_sequences(right)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    left.intersection(&right).count()
+}
+
 fn titles_share_contained_words(left: &str, right: &str) -> bool {
-    let left = normalized_word_sequences(left);
-    let right = normalized_word_sequences(right);
-    (!left.is_empty() && !right.is_empty())
-        && (left.windows(right.len()).any(|window| window == right)
-            || right.windows(left.len()).any(|window| window == left))
+    let left = normalized_word_sequences(left)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let right = normalized_word_sequences(right)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    !left.is_empty() && !right.is_empty() && (left.is_subset(&right) || right.is_subset(&left))
+}
+
+fn collection_candidate_title_overlap(row: &SourceRow, candidate: &AlbumCandidate) -> usize {
+    std::iter::once(row.track.as_str())
+        .chain(row.variants.iter().map(|variant| variant.track.as_str()))
+        .flat_map(|source| {
+            std::iter::once(candidate.name.as_str())
+                .chain(candidate.track_names.iter().map(String::as_str))
+                .map(move |target| title_token_overlap(source, target))
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn collection_candidate_is_same_songs_title(row: &SourceRow, candidate: &AlbumCandidate) -> bool {
@@ -6145,11 +6204,13 @@ fn rank_collection_candidates(
             None
         };
     }
-    candidates.sort_by(|left, right| {
-        collection_candidate_rank(row, left)
-            .cmp(&collection_candidate_rank(row, right))
-            .then_with(|| normalize_for_match(&left.name).cmp(&normalize_for_match(&right.name)))
-            .then_with(|| left.uri.cmp(&right.uri))
+    candidates.sort_by_cached_key(|candidate| {
+        (
+            collection_candidate_rank(row, candidate),
+            Reverse(collection_candidate_title_overlap(row, candidate)),
+            normalize_for_match(&candidate.name),
+            candidate.uri.clone(),
+        )
     });
     candidates.truncate(10);
 }
@@ -7666,7 +7727,7 @@ fn preserve_match_selection(
     result.selected_uri = previous.selected_uri.clone();
     result.confidence = previous.confidence;
     result.track_matches = previous.track_matches.clone();
-    let mut candidates = previous
+    let preserved = previous
         .candidates
         .iter()
         .filter(|candidate| {
@@ -7683,16 +7744,16 @@ fn preserve_match_selection(
         })
         .cloned()
         .collect::<Vec<_>>();
-    for candidate in result.candidates {
-        if !candidates
+    for candidate in preserved {
+        if !result
+            .candidates
             .iter()
             .any(|existing| existing.uri == candidate.uri)
         {
-            candidates.push(candidate);
+            result.candidates.insert(0, candidate);
         }
     }
-    candidates.truncate(10);
-    result.candidates = candidates;
+    result.candidates.truncate(10);
     result
 }
 
@@ -13899,11 +13960,36 @@ mod tests {
 
     #[test]
     fn collection_candidate_relations_require_complete_title_words() {
+        assert_eq!(
+            track_search_term(
+                "Celtic Woman",
+                "Last Rose of Summer (intro)/Walking in the Air"
+            ),
+            "track:\"Last Rose of Summer Walking in the Air\" artist:\"Celtic Woman\""
+        );
         for (source_title, candidate_title, candidate_artist, relation) in [
             ("Song", "Song", "Artist", Some(AlbumRelation::BestMatch)),
             (
+                "Dulaman",
+                "Dúlaman",
+                "Artist",
+                Some(AlbumRelation::BestMatch),
+            ),
+            (
                 "Song",
                 "Song (Live)",
+                "Artist",
+                Some(AlbumRelation::SameSongs),
+            ),
+            (
+                "Last Rose of Summer (intro)/Walking in the Air",
+                "Last Rose of Summer/Walking in the Air – Medley",
+                "Artist",
+                Some(AlbumRelation::SameSongs),
+            ),
+            (
+                "Song of Love",
+                "Love Song",
                 "Artist",
                 Some(AlbumRelation::SameSongs),
             ),
@@ -13953,6 +14039,22 @@ mod tests {
             },
         );
         assert_eq!(candidates[0].relation, Some(AlbumRelation::SameSongs));
+    }
+
+    #[test]
+    fn collection_candidates_break_relation_ties_by_title_token_overlap() {
+        let row = collection_row("Artist", "Last Rose of Summer Walking in the Air");
+        let mut candidates = vec![
+            collection_candidate("spotify:track:short", "Walking in the Air", "Artist", false),
+            collection_candidate(
+                "spotify:track:full",
+                "Last Rose of Summer Walking in the Air Medley",
+                "Artist",
+                false,
+            ),
+        ];
+        rank_collection_candidates(&row, &mut candidates, &CollectionMembership::default());
+        assert_eq!(candidates[0].uri, "spotify:track:full");
     }
 
     #[test]
@@ -15628,6 +15730,33 @@ mod tests {
             .candidates
             .iter()
             .any(|candidate| candidate.uri == "spotify:track:new"));
+
+        let stale = MatchResult {
+            selected_uri: Some("spotify:track:same".into()),
+            candidates: vec![AlbumCandidate {
+                uri: "spotify:track:same".into(),
+                relation: None,
+                ..collection_candidate("spotify:track:same", "Song", "Artist", false)
+            }],
+            track_matches: BTreeMap::from([("id".into(), "spotify:track:same".into())]),
+            ..previous.clone()
+        };
+        let refreshed = match_result_for(
+            "id".into(),
+            "track search".into(),
+            vec![AlbumCandidate {
+                uri: "spotify:track:same".into(),
+                relation: Some(AlbumRelation::BestMatch),
+                ..collection_candidate("spotify:track:same", "Song", "Artist", false)
+            }],
+            "Song",
+            false,
+        );
+        let preserved = preserve_match_selection(refreshed, Some(&stale), "id");
+        assert_eq!(
+            preserved.candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
     }
 
     fn apply_test_plan_for(

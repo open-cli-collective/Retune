@@ -1,24 +1,26 @@
 import { useEffect, useLayoutEffect, useRef } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { dialogTabTarget, menuPosition } from './ui.ts'
 
 const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'
 
-export function ModalDialog({ className, labelledBy, onCancel, onSubmit, closeOnBackdrop = false, children }: {
+export function ModalDialog({ className, labelledBy, dialogRef, onCancel, onSubmit, closeOnBackdrop = false, children }: {
   className: string
   labelledBy: string
+  dialogRef?: RefObject<HTMLFormElement | null>
   onCancel?: () => void
   onSubmit?: () => void | Promise<void>
   closeOnBackdrop?: boolean
   children: ReactNode
 }) {
-  const dialog = useRef<HTMLFormElement>(null)
+  const internalDialog = useRef<HTMLFormElement>(null)
+  const dialog = dialogRef ?? internalDialog
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null
     const element = dialog.current
     if (element && !element.contains(document.activeElement)) (element.querySelector<HTMLElement>('[autofocus]') ?? element.querySelector<HTMLElement>(FOCUSABLE) ?? element).focus()
     return () => previous?.focus()
-  }, [])
+  }, [dialog])
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
     if (closeOnBackdrop && event.target === event.currentTarget) onCancel?.()
   }}><form ref={dialog} className={className} role="dialog" aria-modal="true" aria-labelledby={labelledBy} tabIndex={-1} onSubmit={(event) => {

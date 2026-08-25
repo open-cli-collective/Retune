@@ -134,6 +134,7 @@
 .import-footer { min-height: 27px; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
 .import-picker-dialog, .import-confirm-dialog, .import-collection-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
 .import-collection-dialog { width: min(760px, calc(100vw - 36px)); height: min(720px, calc(100vh - 36px)); min-width: min(520px, calc(100vw - 36px)); min-height: min(420px, calc(100vh - 36px)); max-width: calc(100vw - 36px); max-height: calc(100vh - 36px); resize: both; overflow: hidden; }
+.import-dialog-drag-handle { cursor: move; user-select: none; }
 .import-collection-dialog .spotify-album-presentation { min-height: 0; overflow: auto; }
 .import-collection-dialog .spotify-album-presentation .album-header { padding: 0 0 10px; border-bottom: 1px solid var(--border); }
 .import-collection-dialog .spotify-album-presentation .album-art { width: 88px; height: 88px; }
@@ -142,7 +143,8 @@
 .import-collection-attribution { margin: 4px 0; color: var(--dim); font-size: 10.5px; }
 .import-collection-attribution a { color: var(--accent); }
 .import-selected-album-cards, .import-selected-albums { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
-.import-selected-album-cards[open] { height: min(210px, 28vh); min-height: 58px; max-height: 50vh; resize: vertical; overflow: auto; }
+.import-selected-album-cards { gap: 0; }
+.import-selected-album-cards[open] { height: min(210px, 28vh); min-height: 58px; max-height: 50vh; overflow: auto; }
 .import-selected-album-cards:not([open]) { height: auto; resize: none; overflow: hidden; }
 .import-selected-album-cards summary { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; list-style: disclosure-closed; }
 .import-selected-album-cards[open] summary { list-style: disclosure-open; }
@@ -151,6 +153,8 @@
 .import-selected-album-cards summary strong { font-size: 11px; }
 .import-selected-album-cards summary small { color: var(--dim); font-size: 10px; }
 .import-selected-album-card, .import-selected-album { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
+.import-selected-album-cards .import-selected-album-card { border-radius: 0; }
+.import-selected-album-cards .import-selected-album-card + .import-selected-album-card { border-top: 0; }
 .import-selected-album-art { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 3px; background: var(--control); }
 .import-selected-album-card img { width: 34px; height: 34px; object-fit: cover; border-radius: 3px; }
 .import-selected-album-card .import-selected-album-copy, .import-selected-album { min-width: 0; }
@@ -163,7 +167,9 @@
 .import-picker-search > div { display: flex; gap: 7px; }
 .import-picker-search input { min-width: 0; flex: 1; padding: 6px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--list); }
 .import-picker-results { min-height: 100px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
-.import-collection-dialog .import-picker-results { height: 110px; min-height: 42px; max-height: 45vh; flex: 0 0 auto; resize: vertical; }
+.import-collection-dialog .import-picker-results { height: 110px; min-height: 42px; max-height: 45vh; flex: 0 0 auto; }
+.import-resize-handle { height: 11px; flex: 0 0 11px; display: grid; place-items: center; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); color: var(--dim); background: var(--control); cursor: row-resize; font-size: 11px; line-height: 1; touch-action: none; user-select: none; }
+.import-resize-handle:hover, .import-resize-handle:focus-visible { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--control)); outline: 1px solid var(--accent); outline-offset: -1px; }
 .import-collection-dialog .import-selected-albums { min-height: 70px; flex: 1; overflow: auto; }
 .import-picker-option { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); cursor: pointer; }
 button.import-picker-option { width: 100%; grid-template-columns: minmax(0, 1fr) auto; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 0; text-align: left; background: transparent; }

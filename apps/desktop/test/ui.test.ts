@@ -191,6 +191,10 @@ test('Last.fm collection ambiguities rank exact selected-album choices by existi
     { uri: 'spotify:album:a', matched: 1, uniqueCoverage: 1 },
     { uri: 'spotify:album:b', matched: 1, uniqueCoverage: 1 },
   ]).some((choice) => choice.recommended), false)
+  assert.equal(collectionAmbiguousChoices('source', {
+    ...match,
+    candidates: candidates.map((candidate) => ({ ...candidate, relation: 'same-songs' as const })),
+  }, albums, albums.map((album) => album.uri), []).length, 2)
 })
 
 test('Last.fm collection album projections preserve match-set order and branch labels', () => {
@@ -447,18 +451,20 @@ test('Last.fm collection review explains individual matching and keeps release U
   assert.match(importerCss, /\.import-suggestion-label/)
   assert.match(importer, /collection && trackConfidence === 'exact'/)
   assert.match(importer, /const \[selectedAlbumsExpanded, setSelectedAlbumsExpanded\] = useState\(true\)/)
-  assert.match(importer, /<details className="import-selected-album-cards" open=\{selectedAlbumsExpanded\} onToggle=\{\(event\) => setSelectedAlbumsExpanded\(event\.currentTarget\.open\)\}>/)
+  assert.match(importer, /<details ref=\{selectedAlbums\} className="import-selected-album-cards" open=\{selectedAlbumsExpanded\}/)
   assert.match(importer, /<summary><strong>\{selectedCollectionUris\.length\} selected album/)
   assert.match(importer, /<small>\{collectionCoverageStatus\(collectionMatches\.coverage\)\}<\/small><\/summary>/)
   assert.doesNotMatch(importer, /<details key=\{uri\} className="import-selected-album"/)
   assert.match(importer, /stablePartitionImportRows\(page\.rows, requiredMatchIds/)
   assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
   assert.match(importerCss, /\.import-selected-album-cards summary \{[^}]*list-style: disclosure-closed/)
-  assert.match(importer, /Use \{suggestedMatches\.length\} Suggested/)
+  assert.match(importer, /Use \{suggestedMatches\.length\} Suggestions/)
   assert.match(importer, /lastfm_import_select_matches/)
   assert.match(importerCss, /\.import-collection-dialog \{[^}]*resize: both/)
-  assert.match(importerCss, /\.import-collection-dialog \.import-picker-results \{[^}]*resize: vertical/)
-  assert.match(importerCss, /\.import-selected-album-cards\[open\] \{[^}]*resize: vertical/)
+  assert.match(importer, /VerticalResizeHandle target=\{resultList\}/)
+  assert.match(importer, /VerticalResizeHandle target=\{selectedAlbums\}/)
+  assert.match(importerCss, /\.import-resize-handle \{[^}]*cursor: row-resize/)
+  assert.match(importer, /className="import-dialog-drag-handle" title="Drag to move"/)
 })
 
 test('Last.fm queue selection restores focus after loading and retains native button semantics', () => {
@@ -506,6 +512,7 @@ test('Last.fm track picker starts from the source row and cancel preserves album
   const beforeCancel = structuredClone(pageMatches)
 
   assert.equal(trackPickerQuery(now), 'track:"Now We Are Free" artist:"The Lyndhurst Orchestra"')
+  assert.equal(trackPickerQuery({ ...now, track: 'Last Rose of Summer (intro)/Walking in the Air' }), 'track:"Last Rose of Summer Walking in the Air" artist:"The Lyndhurst Orchestra"')
   assert.deepEqual(pickerCandidates('track', albumCandidates), [])
   assert.equal(pickerSelectedUri('track', 'now', albumUri, pageMatches.tracks), pageMatches.tracks.now)
   assert.deepEqual(pageMatches, beforeCancel)

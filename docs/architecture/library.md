@@ -61,7 +61,11 @@ prefers accepted mappings and manual choices, then uniquely exact normalized
 title/primary-artist candidates already in the Retune library or exact saved
 Spotify track/album membership, then uniquely exact candidates without
 ownership. Same-artist near matches are suggestions only; wrong artists remain
-unresolved. Exact tracks found on multiple selected albums remain unresolved
+unresolved. Catalog comparison is diacritic-insensitive. Near-title comparison
+ignores parenthetical annotations, accepts bidirectional token containment, and uses token overlap only to order otherwise
+equal candidates within the visible batch. Generated track searches apply the
+same parenthetical simplification rather than issuing a second Spotify request.
+Exact or near-title tracks found on multiple selected albums remain unresolved
 until the user chooses an album-labelled candidate; the UI recommends one only
 when its existing matched/unique album coverage strictly outranks the
 alternatives. Collection review persists a V2,
@@ -91,7 +95,8 @@ changing the persisted source order. For collection rows, a same-artist
 SUGGESTED / Use This Track only when exactly one distinct target URI remains
 after deduplication and the target is already in the library or belongs to a
 selected album-match union. Wrong-artist, low-confidence, and multiple-target
-near matches remain unresolved.
+near matches use the same album-labelled chooser; low-confidence matches remain
+unresolved.
 
 The source importer is V2. It records a fixed profile-bound `historyTo`, probes
 Last.fm metadata once, downloads pages at the documented 200-row limit; Last.fm's
