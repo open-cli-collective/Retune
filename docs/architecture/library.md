@@ -73,6 +73,23 @@ cached operations make no request. Legacy album-shaped search terms refetch
 only the incompatible rows. A non-empty source album literally
 named `Singles` remains release-shaped.
 
+Track-match review mutations keep their existing account guards, atomic
+persistence, and import-change event, while `lastfm_import_select_match` and
+`lastfm_import_change_track` also return the affected `ImportPageView` for
+direct installation on the visible page. Choosing a cached candidate does not
+make a Spotify request.
+
+The visible review-page projection stably partitions actionable selected rows
+whose IDs are in `requiredImportMatchIds` (selected rows without a track target)
+ahead of the remaining rows, preserving source order inside both groups. A
+successful mapping therefore moves that row below any remaining work without
+changing the persisted source order. For collection rows, a same-artist
+`same-songs` track is never ratified automatically: the UI shows it through
+SUGGESTED / Use This Track only when exactly one distinct target URI remains
+after deduplication and the target is already in the library or belongs to a
+selected album-match union. Wrong-artist, low-confidence, and multiple-target
+near matches remain unresolved.
+
 The source importer is V2. It records a fixed profile-bound `historyTo`, probes
 Last.fm metadata once, downloads pages at the documented 200-row limit; Last.fm's
 page total is oldest, so Retune moves toward page 1, and stores parsed raw pages under a snapshot-specific

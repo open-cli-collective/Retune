@@ -194,10 +194,19 @@ export function collectionAmbiguousChoices(
   return choices.map(({ uniqueCoverage: _uniqueCoverage, order: _order, ...choice }, index) => ({ ...choice, recommended: index === 0 && recommendationIsDistinct }))
 }
 
-export function collectionSuggestion<T extends ImportCollectionSuggestionCandidate>(source: Pick<ImportSourceRow, 'stableId' | 'artist' | 'variants'>, match: (Omit<ImportCollectionSuggestionMatch, 'candidates'> & { candidates: T[] }) | null): T | null {
+export function collectionSuggestion<T extends ImportCollectionSuggestionCandidate>(source: Pick<ImportSourceRow, 'stableId' | 'artist' | 'variants'>, match: (Omit<ImportCollectionSuggestionMatch, 'candidates'> & { candidates: T[] }) | null, selectedTrackUris: Iterable<string> = []): T | null {
   if (!match || match.selectedUri || match.trackMatches[source.stableId]) return null
   const artists = [source.artist, ...source.variants.map((variant) => variant.artist)].map(normalizeImportMatch)
-  return match.candidates.find((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.inLibrary && candidate.relation === 'same-songs' && artists.includes(normalizeImportMatch(candidate.artist))) ?? null
+  const selected = new Set(selectedTrackUris)
+  const candidates = new Map(match.candidates
+    .filter((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.relation === 'same-songs' && (candidate.inLibrary || selected.has(candidate.uri)) && artists.includes(normalizeImportMatch(candidate.artist)))
+    .map((candidate) => [candidate.uri, candidate]))
+  return candidates.size === 1 ? candidates.values().next().value ?? null : null
+}
+
+export function stablePartitionImportRows<T>(rows: T[], requiredIds: Iterable<string>, id: (row: T) => string): T[] {
+  const required = new Set(requiredIds)
+  return [...rows.filter((row) => required.has(id(row))), ...rows.filter((row) => !required.has(id(row)))]
 }
 
 export type CollectionAlbumProjection = { uri: string }
