@@ -5542,15 +5542,14 @@ fn album_track_match_index(source: &str, targets: &[String]) -> Option<usize> {
 }
 
 fn automatic_album_candidate<'a>(
-    artist: &str,
+    album: &str,
     source_track_names: &[String],
     candidates: &'a [AlbumCandidate],
 ) -> Option<&'a AlbumCandidate> {
-    let artist = normalize_catalog_text(artist);
     let source_count = source_track_names.len();
     let mut supported = candidates.iter().filter(|candidate| {
         if candidate.relation.is_none()
-            || normalize_catalog_text(&candidate.artist) != artist
+            || !titles_share_contained_words(album, &candidate.name)
             || source_count == 0
             || candidate.track_names.is_empty()
         {
@@ -5636,7 +5635,7 @@ fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
             .first()
             .map(|uri| (*uri).to_owned())
             .or_else(|| {
-                automatic_album_candidate(&first.artist, &source_tracks, &candidates)
+                automatic_album_candidate(&first.album, &source_tracks, &candidates)
                     .map(|candidate| candidate.uri.clone())
             })
         else {
@@ -6683,7 +6682,7 @@ where
     let search_term = album_search_term(artist, album);
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
     let candidates = album_candidates(provider, &search_term, &source_track_names).await?;
-    let selected_uri = automatic_album_candidate(artist, &source_track_names, &candidates)
+    let selected_uri = automatic_album_candidate(album, &source_track_names, &candidates)
         .map(|candidate| candidate.uri.clone());
     Ok(rows
         .iter()
@@ -7931,6 +7930,9 @@ fn preserve_match_selection(
     let Some(previous) = previous else {
         return result;
     };
+    if previous.selected_uri.is_none() && previous.track_matches.is_empty() {
+        return result;
+    }
     result.selected_uri = previous.selected_uri.clone();
     result.confidence = previous.confidence;
     result.track_matches = previous.track_matches.clone();
@@ -8570,6 +8572,8 @@ pub(crate) async fn lastfm_import_change_album(
     };
     let provider = crate::provider_from(&state)?;
     let candidates = album_candidates(provider.as_ref(), &search_term, &related).await?;
+    let selected_uri = automatic_album_candidate(&row.album, &related, &candidates)
+        .map(|candidate| candidate.uri.clone());
     let matches = batch_rows(&batch, &rows_by_id)
         .into_iter()
         .map(|candidate_row| {
@@ -8579,7 +8583,7 @@ pub(crate) async fn lastfm_import_change_album(
                     search_term.clone(),
                     candidates.clone(),
                     &candidate_row.track,
-                    None,
+                    selected_uri.as_deref(),
                 ),
                 session.matches.get(&candidate_row.stable_id),
                 &candidate_row.stable_id,
@@ -14012,9 +14016,9 @@ mod tests {
 
     #[test]
     fn album_title_coverage_selects_freedom_and_tron_style_matches() {
-        let candidate = |uri: &str, artist: &str, names: Vec<String>| AlbumCandidate {
+        let candidate = |uri: &str, name: &str, artist: &str, names: Vec<String>| AlbumCandidate {
             uri: uri.into(),
-            name: "Release".into(),
+            name: name.into(),
             artist: artist.into(),
             in_library: false,
             track_uris: (0..names.len())
@@ -14029,6 +14033,7 @@ mod tests {
         let freedom = vec!["Offering".to_owned(), "Call".to_owned()];
         let mut freedom_candidates = vec![candidate(
             "freedom",
+            "Freedom",
             "Michael W. Smith",
             vec!["The Offering".into(), "The Call".into()],
         )];
@@ -14038,7 +14043,7 @@ mod tests {
             Some(AlbumRelation::BestMatch)
         );
         assert_eq!(
-            automatic_album_candidate("Michael W. Smith", &freedom, &freedom_candidates)
+            automatic_album_candidate("Freedom", &freedom, &freedom_candidates)
                 .map(|candidate| candidate.uri.as_str()),
             Some("freedom")
         );
@@ -14067,14 +14072,80 @@ mod tests {
         let mut complete = tron_album.clone();
         complete.extend((1..=9).map(|index| format!("Bonus {index}")));
         let mut tron_candidates = vec![
-            candidate("tron", "Daft Punk", tron_album),
-            candidate("complete", "Daft Punk", complete),
+            candidate("tron", "TRON: Legacy", "Daft Punk", tron_album),
+            candidate(
+                "complete",
+                "TRON: Legacy - The Complete Edition",
+                "Daft Punk",
+                complete,
+            ),
         ];
         classify_album_candidates_by_name(&tron, &mut tron_candidates);
         assert_eq!(
-            automatic_album_candidate("Daft Punk", &tron, &tron_candidates)
+            automatic_album_candidate("TRON: Legacy", &tron, &tron_candidates)
                 .map(|candidate| candidate.uri.as_str()),
             Some("tron")
+        );
+    }
+
+    #[test]
+    fn album_title_and_track_coverage_outweigh_compilation_artist_credit() {
+        let source = vec![
+            "Dear Clarice (featuring Sir Anthony Hopkins)".into(),
+            "Gourmet Vaise Tartare".into(),
+            "Avarice".into(),
+            "For a Small Stipend".into(),
+            "Firenze Di Notte".into(),
+            "To Every Captive Soul".into(),
+            "Vide Cor Meum".into(),
+            "Let My Home Be My Gallows (featuring Sir Anthony Hopkins)".into(),
+            "The Burning Heart (featuring Sir Anthony Hopkins)".into(),
+            "Aria da Capo (From Goldberg Variations, BWV 988)".into(),
+            "The Capponi Library".into(),
+            "Virtue".into(),
+            "Dear Clarice (feat. Sir Anthony Hopkins)".into(),
+            "Let My Home Be My Gallows (feat. Sir Anthony Hopkins)".into(),
+            "The Burning Heart (feat. Sir Anthony Hopkins)".into(),
+            "Aria da Capo (From the Goldberg Variations, BWV 988)".into(),
+        ];
+        let tracks = vec![
+            "Dear Clarice".into(),
+            "Goldberg Variations Bwv 988: Aria - Da Capo".into(),
+            "The Capponi Library".into(),
+            "Gourmet Valse Tartare".into(),
+            "Avarice".into(),
+            "For A Small Stipend".into(),
+            "Firenze Di Notte".into(),
+            "Virtue".into(),
+            "Let My Home Be My Gallows".into(),
+            "The Burning Heart".into(),
+            "To Every Captive Soul".into(),
+            "Vide Cor Meum".into(),
+        ];
+        let mut candidates = vec![AlbumCandidate {
+            uri: "hannibal".into(),
+            name: "Hannibal - Original Motion Picture Soundtrack".into(),
+            artist: "Various Artists".into(),
+            in_library: false,
+            track_uris: (0..tracks.len())
+                .map(|index| format!("spotify:track:hannibal:{index}"))
+                .collect(),
+            track_names: tracks,
+            track_artists: Vec::new(),
+            track_albums: Vec::new(),
+            relation: None,
+        }];
+
+        classify_album_candidates_by_name(&source, &mut candidates);
+
+        assert_eq!(
+            automatic_album_candidate("Hannibal", &source, &candidates)
+                .map(|candidate| candidate.uri.as_str()),
+            Some("hannibal")
+        );
+        assert_eq!(
+            automatic_album_candidate("Unrelated Album", &source, &candidates),
+            None
         );
     }
 
@@ -16104,6 +16175,32 @@ mod tests {
             preserved.candidates[0].relation,
             Some(AlbumRelation::BestMatch)
         );
+
+        let unselected = MatchResult {
+            selected_uri: None,
+            confidence: None,
+            track_matches: BTreeMap::new(),
+            ..previous
+        };
+        let automatically_selected = match_result_for(
+            "id".into(),
+            "album search".into(),
+            vec![AlbumCandidate {
+                uri: "spotify:album:new".into(),
+                name: "New release".into(),
+                artist: "Various Artists".into(),
+                in_library: false,
+                track_uris: vec!["spotify:track:new".into()],
+                track_names: vec!["One".into()],
+                track_artists: vec!["Artist".into()],
+                track_albums: vec!["New release".into()],
+                relation: Some(AlbumRelation::BestMatch),
+            }],
+            "One",
+            Some("spotify:album:new"),
+        );
+        let refreshed = preserve_match_selection(automatically_selected, Some(&unselected), "id");
+        assert_eq!(refreshed.selected_uri.as_deref(), Some("spotify:album:new"));
     }
 
     fn apply_test_plan_for(
