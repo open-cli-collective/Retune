@@ -78,6 +78,14 @@ cached operations make no request. Legacy album-shaped search terms refetch
 only the incompatible rows. A non-empty source album literally
 named `Singles` remains release-shaped.
 
+Release-shaped batches compare source and Spotify track titles with the same
+normalized contained-token rules used by collection matching. Retune
+automatically selects a release only when it is the sole same-artist candidate
+covering at least 80% of both the source rows and the Spotify album's distinct
+tracks; unmatched source rows remain available for individual review. Cached
+unselected album results are reclassified locally on load and do not trigger a
+new Spotify request.
+
 Track-match review mutations keep their existing account guards, atomic
 persistence, and import-change event, while `lastfm_import_select_match` and
 `lastfm_import_change_track` also return the affected `ImportPageView` for

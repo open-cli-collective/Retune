@@ -2347,7 +2347,12 @@ impl Service {
         let mappings_store = MappingsStore::new(&app_data_dir);
         let mut load_problems = Vec::new();
         let session = match store.load() {
-            Ok(session) => session,
+            Ok(mut session) => {
+                if let Some(session) = session.as_mut() {
+                    refresh_cached_album_matches(session);
+                }
+                session
+            }
             Err(error) => {
                 log::warn!("Last.fm importer state is unavailable: {error}");
                 None
@@ -5486,27 +5491,202 @@ pub(crate) fn classify_album_candidates_by_name(
     source_track_names: &[String],
     candidates: &mut [AlbumCandidate],
 ) {
-    let source = source_track_names
-        .iter()
-        .map(|name| normalize_catalog_text(name))
-        .collect::<BTreeSet<_>>();
+    let source = source_track_names.iter().collect::<BTreeSet<_>>();
     for candidate in candidates.iter_mut() {
-        let target = candidate
-            .track_names
+        let matched = source
             .iter()
-            .map(|name| normalize_catalog_text(name))
-            .collect::<BTreeSet<_>>();
-        let overlap = source.intersection(&target).count();
-        candidate.relation = if overlap == source.len() && target.len() == source.len() {
+            .filter_map(|name| album_track_match_index(name, &candidate.track_names))
+            .collect::<Vec<_>>();
+        let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
+        candidate.relation = if matched.len() == source.len()
+            && unique_targets == candidate.track_names.len()
+            && candidate.track_names.len() == source.len()
+        {
             Some(AlbumRelation::BestMatch)
-        } else if overlap == source.len() && target.len() > source.len() {
+        } else if matched.len() == source.len() && candidate.track_names.len() > source.len() {
             Some(AlbumRelation::Superset)
-        } else if overlap > 0 && overlap * 2 >= source.len().max(1) {
+        } else if !matched.is_empty() && matched.len() * 2 >= source.len().max(1) {
             Some(AlbumRelation::SameSongs)
         } else {
             None
         };
     }
+}
+
+fn album_track_match_index(source: &str, targets: &[String]) -> Option<usize> {
+    let exact = normalize_catalog_text(source);
+    if exact.is_empty() {
+        return None;
+    }
+    if let Some(index) = targets
+        .iter()
+        .position(|target| normalize_catalog_text(target) == exact)
+    {
+        return Some(index);
+    }
+    let mut prefixed = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| normalize_catalog_text(target).starts_with(&exact));
+    if let Some((index, _)) = prefixed.next() {
+        if prefixed.next().is_none() {
+            return Some(index);
+        }
+    }
+    let mut compatible = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| titles_share_contained_words(source, target));
+    let (index, _) = compatible.next()?;
+    compatible.next().is_none().then_some(index)
+}
+
+fn automatic_album_candidate<'a>(
+    artist: &str,
+    source_track_names: &[String],
+    candidates: &'a [AlbumCandidate],
+) -> Option<&'a AlbumCandidate> {
+    let artist = normalize_catalog_text(artist);
+    let source_count = source_track_names.len();
+    let mut supported = candidates.iter().filter(|candidate| {
+        if candidate.relation.is_none()
+            || normalize_catalog_text(&candidate.artist) != artist
+            || source_count == 0
+            || candidate.track_names.is_empty()
+        {
+            return false;
+        }
+        let matched = source_track_names
+            .iter()
+            .filter_map(|name| album_track_match_index(name, &candidate.track_names))
+            .collect::<Vec<_>>();
+        let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
+        matched.len() * 5 >= source_count * 4
+            && unique_targets * 5 >= candidate.track_names.len() * 4
+    });
+    let candidate = supported.next()?;
+    supported.next().is_none().then_some(candidate)
+}
+
+fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
+    let row_indices = session
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.stable_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut changed = false;
+    for batch in &session.batches {
+        if !batch
+            .source_ids
+            .iter()
+            .all(|id| session.matches.contains_key(id))
+        {
+            continue;
+        }
+        let selected_albums = batch
+            .source_ids
+            .iter()
+            .filter_map(|id| session.matches[id].selected_uri.as_deref())
+            .filter(|uri| uri.starts_with("spotify:album:"))
+            .collect::<BTreeSet<_>>();
+        let has_track_selection = batch.source_ids.iter().any(|id| {
+            session.matches[id]
+                .selected_uri
+                .as_deref()
+                .is_some_and(|uri| !uri.starts_with("spotify:album:"))
+        });
+        let can_auto_select = selected_albums.is_empty()
+            && batch
+                .source_ids
+                .iter()
+                .all(|id| session.matches[id].track_matches.is_empty());
+        if has_track_selection
+            || selected_albums.len() > 1
+            || (!can_auto_select && selected_albums.is_empty())
+        {
+            continue;
+        }
+        let rows = batch
+            .source_ids
+            .iter()
+            .filter_map(|id| {
+                row_indices
+                    .get(id.as_str())
+                    .map(|index| &session.rows[*index])
+            })
+            .collect::<Vec<_>>();
+        let Some(first) = rows.first() else {
+            continue;
+        };
+        if first.album.is_empty() {
+            continue;
+        }
+        let source_tracks = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
+        let Some(mut candidates) = batch
+            .source_ids
+            .iter()
+            .find_map(|id| session.matches.get(id))
+            .map(|result| result.candidates.clone())
+        else {
+            continue;
+        };
+        classify_album_candidates_by_name(&source_tracks, &mut candidates);
+        let Some(selected_uri) = selected_albums
+            .first()
+            .map(|uri| (*uri).to_owned())
+            .or_else(|| {
+                automatic_album_candidate(&first.artist, &source_tracks, &candidates)
+                    .map(|candidate| candidate.uri.clone())
+            })
+        else {
+            continue;
+        };
+        let relations = candidates
+            .iter()
+            .map(|candidate| (candidate.uri.as_str(), candidate.relation))
+            .collect::<HashMap<_, _>>();
+        for row in rows {
+            let Some(result) = session.matches.get_mut(&row.stable_id) else {
+                continue;
+            };
+            let previous = result.clone();
+            for candidate in &mut result.candidates {
+                if let Some(relation) = relations.get(candidate.uri.as_str()) {
+                    candidate.relation = *relation;
+                }
+            }
+            let Some(candidate) = result
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == selected_uri)
+                .cloned()
+            else {
+                continue;
+            };
+            if result.selected_uri.is_none() {
+                update_selected_match(result, &row.stable_id, &row.track, &candidate);
+            } else {
+                result.confidence = Some(match candidate.relation {
+                    Some(AlbumRelation::BestMatch) => Confidence::Exact,
+                    Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
+                    None => Confidence::Low,
+                });
+                if !result.track_matches.contains_key(&row.stable_id) {
+                    if let Some(index) = album_track_match_index(&row.track, &candidate.track_names)
+                    {
+                        if let Some(uri) = candidate.track_uris.get(index) {
+                            result
+                                .track_matches
+                                .insert(row.stable_id.clone(), uri.clone());
+                        }
+                    }
+                }
+            }
+            changed |= previous != *result;
+        }
+    }
+    changed
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -6494,7 +6674,7 @@ where
                 search_term,
                 candidates,
                 &row.track,
-                false,
+                None,
             );
             matches.push(ratify_collection_result(row, result, membership, mappings));
         }
@@ -6503,6 +6683,8 @@ where
     let search_term = album_search_term(artist, album);
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
     let candidates = album_candidates(provider, &search_term, &source_track_names).await?;
+    let selected_uri = automatic_album_candidate(artist, &source_track_names, &candidates)
+        .map(|candidate| candidate.uri.clone());
     Ok(rows
         .iter()
         .map(|row| {
@@ -6511,7 +6693,7 @@ where
                 search_term.clone(),
                 candidates.clone(),
                 &row.track,
-                false,
+                selected_uri.as_deref(),
             )
         })
         .collect())
@@ -6959,10 +7141,7 @@ fn matched_track_uri_for_row(result: &MatchResult, row: &SourceRow) -> Option<St
         if candidate.uri.starts_with("spotify:track:") {
             return Some(candidate.uri.clone());
         }
-        let index = candidate
-            .track_names
-            .iter()
-            .position(|name| normalize_for_match(name) == normalize_for_match(&row.track))?;
+        let index = album_track_match_index(&row.track, &candidate.track_names)?;
         candidate.track_uris.get(index).cloned()
     })
 }
@@ -7168,11 +7347,7 @@ fn update_selected_match(
         None => Confidence::Low,
     });
     result.track_matches.remove(source_id);
-    if let Some(index) = candidate
-        .track_names
-        .iter()
-        .position(|name| normalize_for_match(name) == normalize_for_match(source_track))
-    {
+    if let Some(index) = album_track_match_index(source_track, &candidate.track_names) {
         if let Some(track_uri) = candidate.track_uris.get(index) {
             result
                 .track_matches
@@ -7714,15 +7889,10 @@ fn match_result_for(
     search_term: String,
     mut candidates: Vec<AlbumCandidate>,
     source_track: &str,
-    auto_select: bool,
+    selected_uri: Option<&str>,
 ) -> MatchResult {
-    let selected = auto_select
-        .then(|| {
-            candidates
-                .iter()
-                .min_by_key(|candidate| candidate_rank(candidate.relation))
-        })
-        .flatten();
+    let selected =
+        selected_uri.and_then(|uri| candidates.iter().find(|candidate| candidate.uri == uri));
     let confidence = selected.map(|candidate| match candidate.relation {
         Some(AlbumRelation::BestMatch) => Confidence::Exact,
         Some(AlbumRelation::SameSongs | AlbumRelation::Superset) => Confidence::Likely,
@@ -7733,11 +7903,7 @@ fn match_result_for(
         .map(|candidate| candidate.uri.clone());
     let mut track_matches = BTreeMap::new();
     if let Some(selected) = selected.filter(|candidate| candidate.relation.is_some()) {
-        if let Some(index) = selected
-            .track_names
-            .iter()
-            .position(|name| normalize_for_match(name) == normalize_for_match(source_track))
-        {
+        if let Some(index) = album_track_match_index(source_track, &selected.track_names) {
             if let Some(uri) = selected.track_uris.get(index) {
                 track_matches.insert(source_id.clone(), uri.clone());
             }
@@ -8350,7 +8516,7 @@ pub(crate) async fn lastfm_import_change_track(
         classify_album_candidates_by_name(std::slice::from_ref(&row.track), &mut candidates);
     }
     let result = preserve_match_selection(
-        match_result_for(id.clone(), search_term, candidates, &row.track, false),
+        match_result_for(id.clone(), search_term, candidates, &row.track, None),
         session.matches.get(&id),
         &id,
     );
@@ -8413,7 +8579,7 @@ pub(crate) async fn lastfm_import_change_album(
                     search_term.clone(),
                     candidates.clone(),
                     &candidate_row.track,
-                    false,
+                    None,
                 ),
                 session.matches.get(&candidate_row.stable_id),
                 &candidate_row.stable_id,
@@ -13845,6 +14011,139 @@ mod tests {
     }
 
     #[test]
+    fn album_title_coverage_selects_freedom_and_tron_style_matches() {
+        let candidate = |uri: &str, artist: &str, names: Vec<String>| AlbumCandidate {
+            uri: uri.into(),
+            name: "Release".into(),
+            artist: artist.into(),
+            in_library: false,
+            track_uris: (0..names.len())
+                .map(|index| format!("spotify:track:{uri}:{index}"))
+                .collect(),
+            track_names: names,
+            track_artists: Vec::new(),
+            track_albums: Vec::new(),
+            relation: None,
+        };
+
+        let freedom = vec!["Offering".to_owned(), "Call".to_owned()];
+        let mut freedom_candidates = vec![candidate(
+            "freedom",
+            "Michael W. Smith",
+            vec!["The Offering".into(), "The Call".into()],
+        )];
+        classify_album_candidates_by_name(&freedom, &mut freedom_candidates);
+        assert_eq!(
+            freedom_candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
+        assert_eq!(
+            automatic_album_candidate("Michael W. Smith", &freedom, &freedom_candidates)
+                .map(|candidate| candidate.uri.as_str()),
+            Some("freedom")
+        );
+        assert_eq!(
+            album_track_match_index(
+                "TRON Legacy (End Titles)",
+                &[
+                    "Overture - From TRON Legacy Score".into(),
+                    "TRON Legacy (End Titles) - From TRON Legacy Score".into(),
+                ],
+            ),
+            Some(1)
+        );
+
+        let mut tron = (1..=22)
+            .map(|index| format!("Track {index}"))
+            .collect::<Vec<_>>();
+        tron.extend([
+            "Track 1 - From TRON Legacy Score".into(),
+            "Track 2 - From TRON Legacy Score".into(),
+            "Sea of Simulation".into(),
+        ]);
+        let tron_album = (1..=22)
+            .map(|index| format!("Track {index} - From TRON Legacy Score"))
+            .collect::<Vec<_>>();
+        let mut complete = tron_album.clone();
+        complete.extend((1..=9).map(|index| format!("Bonus {index}")));
+        let mut tron_candidates = vec![
+            candidate("tron", "Daft Punk", tron_album),
+            candidate("complete", "Daft Punk", complete),
+        ];
+        classify_album_candidates_by_name(&tron, &mut tron_candidates);
+        assert_eq!(
+            automatic_album_candidate("Daft Punk", &tron, &tron_candidates)
+                .map(|candidate| candidate.uri.as_str()),
+            Some("tron")
+        );
+    }
+
+    #[test]
+    fn cached_supported_album_is_selected_without_another_spotify_search() {
+        let rows = ["Offering", "Call"]
+            .into_iter()
+            .map(|track| SourceRow {
+                stable_id: source_id("Michael W. Smith", "Freedom", track),
+                artist: "Michael W. Smith".into(),
+                album: "Freedom".into(),
+                track: track.into(),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: 1,
+                latest: 1,
+            })
+            .collect::<Vec<_>>();
+        let candidate = AlbumCandidate {
+            uri: "spotify:album:freedom".into(),
+            name: "Freedom".into(),
+            artist: "Michael W. Smith".into(),
+            in_library: false,
+            track_uris: vec!["spotify:track:offering".into(), "spotify:track:call".into()],
+            track_names: vec!["The Offering".into(), "The Call".into()],
+            track_artists: Vec::new(),
+            track_albums: Vec::new(),
+            relation: Some(AlbumRelation::SameSongs),
+        };
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1);
+        session.rows = rows.clone();
+        session.batches = build_review_batches(&session.rows);
+        session.phase = ImportPhase::Review;
+        for row in &rows {
+            session.matches.insert(
+                row.stable_id.clone(),
+                MatchResult {
+                    source_id: row.stable_id.clone(),
+                    search_term: album_search_term(&row.artist, &row.album),
+                    confidence: None,
+                    selected_uri: None,
+                    candidates: vec![candidate.clone()],
+                    track_matches: BTreeMap::new(),
+                },
+            );
+        }
+
+        assert!(refresh_cached_album_matches(&mut session));
+        for row in &rows {
+            let result = &session.matches[&row.stable_id];
+            assert_eq!(
+                result.selected_uri.as_deref(),
+                Some("spotify:album:freedom")
+            );
+            assert!(result.track_matches.contains_key(&row.stable_id));
+        }
+        session
+            .matches
+            .get_mut(&rows[0].stable_id)
+            .unwrap()
+            .track_matches
+            .remove(&rows[0].stable_id);
+        assert!(refresh_cached_album_matches(&mut session));
+        assert!(session.matches[&rows[0].stable_id]
+            .track_matches
+            .contains_key(&rows[0].stable_id));
+    }
+
+    #[test]
     fn legacy_album_candidate_json_defaults_to_not_in_library() {
         let candidate: AlbumCandidate = serde_json::from_value(serde_json::json!({
             "uri": "spotify:track:legacy",
@@ -15764,7 +16063,7 @@ mod tests {
                 relation: Some(AlbumRelation::BestMatch),
             }],
             "One",
-            false,
+            None,
         );
         let preserved = preserve_match_selection(refreshed, Some(&previous), "id");
 
@@ -15798,7 +16097,7 @@ mod tests {
                 ..collection_candidate("spotify:track:same", "Song", "Artist", false)
             }],
             "Song",
-            false,
+            None,
         );
         let preserved = preserve_match_selection(refreshed, Some(&stale), "id");
         assert_eq!(
