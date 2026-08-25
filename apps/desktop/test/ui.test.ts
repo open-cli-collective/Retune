@@ -447,6 +447,7 @@ test('Last.fm collection review explains individual matching and keeps release U
   assert.match(importer, /collection && !collectionAlbumReady/)
   assert.match(importer, /const collection = page\.album === ''/)
   assert.match(importer, /collection \? collectionSuggestion\(item\.source, item\.matchResult, selectedTrackUris\) : null/)
+  assert.match(importer, /const displayedSearchTerm = collection && !track \? trackPickerQuery\(item\.source\) : match\?\.searchTerm/)
   assert.match(importerCss, /\.import-library-badge/)
   assert.match(importerCss, /\.import-suggestion-label/)
   assert.match(importer, /collection && trackConfidence === 'exact'/)
