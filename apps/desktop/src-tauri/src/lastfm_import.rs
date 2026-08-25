@@ -5801,7 +5801,7 @@ fn collection_row_status(
     }
     let exact = selected_tracks
         .iter()
-        .filter(|candidate| collection_candidate_is_exact(row, candidate))
+        .filter(|candidate| collection_candidate_matches_title(row, candidate))
         .map(|candidate| candidate.uri.as_str())
         .collect::<BTreeSet<_>>();
     if exact.len() > 1 {
@@ -5847,7 +5847,7 @@ fn collection_track_statuses(
                 }
                 let exact = selected_tracks
                     .iter()
-                    .filter(|track| collection_candidate_is_exact(row, track))
+                    .filter(|track| collection_candidate_matches_title(row, track))
                     .map(|track| track.uri.as_str())
                     .collect::<BTreeSet<_>>();
                 if exact.contains(uri.as_str()) {
@@ -5905,7 +5905,7 @@ fn collection_album_preview_coverage(
             }
             let exact = union
                 .iter()
-                .filter(|track| collection_candidate_is_exact(row, track))
+                .filter(|track| collection_candidate_matches_title(row, track))
                 .map(|track| track.uri.as_str())
                 .collect::<BTreeSet<_>>();
             exact.len() == 1
@@ -5925,7 +5925,7 @@ fn collection_album_preview_coverage(
         .filter(|row| {
             let exact = union
                 .iter()
-                .filter(|track| collection_candidate_is_exact(row, track))
+                .filter(|track| collection_candidate_matches_title(row, track))
                 .map(|track| track.uri.as_str())
                 .collect::<BTreeSet<_>>();
             exact.len() == 1
@@ -6567,23 +6567,39 @@ fn ratify_collection_result_with_selected_albums_and_injected(
         result.track_matches = BTreeMap::from([(row.stable_id.clone(), uri)]);
         return result;
     }
-    if result.selected_uri.is_some() {
+    let exact_selected = selected_tracks
+        .iter()
+        .filter(|candidate| collection_candidate_matches_title(row, candidate))
+        .collect::<Vec<_>>();
+    let exact_selected_uri = (exact_selected.len() == 1).then(|| exact_selected[0].uri.clone());
+    if let Some(selected_uri) = result.selected_uri.clone() {
         // A track picker choice is durable session state and outranks a changed set.
+        if exact_selected_uri.as_deref() == Some(selected_uri.as_str()) {
+            if let Some(candidate) = result
+                .candidates
+                .iter_mut()
+                .find(|candidate| candidate.uri == selected_uri)
+            {
+                candidate.relation = Some(AlbumRelation::BestMatch);
+            }
+            result.confidence = Some(Confidence::Exact);
+        }
         return result;
     }
 
     result.selected_uri = None;
     result.track_matches.clear();
     result.confidence = None;
-    let exact_selected = selected_tracks
-        .iter()
-        .filter(|candidate| collection_candidate_is_exact(row, candidate))
-        .collect::<Vec<_>>();
-    if exact_selected.len() == 1 {
+    if let Some(uri) = exact_selected_uri {
+        if let Some(candidate) = result
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.uri == uri)
+        {
+            candidate.relation = Some(AlbumRelation::BestMatch);
+        }
         result.confidence = Some(Confidence::Exact);
-        result
-            .track_matches
-            .insert(row.stable_id.clone(), exact_selected[0].uri.clone());
+        result.track_matches.insert(row.stable_id.clone(), uri);
         return result;
     }
     if exact_selected.len() > 1 {
@@ -12762,7 +12778,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_matching_rejects_wrong_artist_and_unmatched_rows() {
+    fn selected_album_exact_title_outweighs_track_artist_credit() {
         let row = collection_test_row("One");
         let wrong_artist = collection_album(
             "spotify:album:other",
@@ -12773,6 +12789,46 @@ mod tests {
             &row,
             collection_match(&row),
             &[&wrong_artist],
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        );
+        assert_eq!(result.confidence, Some(Confidence::Exact));
+        assert_eq!(
+            result.track_matches.get(&row.stable_id).map(String::as_str),
+            Some("spotify:track:other")
+        );
+        assert_eq!(
+            result.candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
+
+        let mut manually_selected = collection_match(&row);
+        manually_selected.selected_uri = Some("spotify:track:other".into());
+        manually_selected.confidence = Some(Confidence::Low);
+        manually_selected.track_matches =
+            BTreeMap::from([(row.stable_id.clone(), "spotify:track:other".into())]);
+        manually_selected.candidates =
+            collection_track_candidates(&[&wrong_artist], &CollectionMembership::default());
+        let result = ratify_collection_result_with_selected_albums(
+            &row,
+            manually_selected,
+            &[&wrong_artist],
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        );
+        assert_eq!(result.selected_uri.as_deref(), Some("spotify:track:other"));
+        assert_eq!(result.confidence, Some(Confidence::Exact));
+        assert_eq!(
+            result.candidates[0].relation,
+            Some(AlbumRelation::BestMatch)
+        );
+
+        let mut ordinary_search = collection_match(&row);
+        ordinary_search.candidates =
+            collection_track_candidates(&[&wrong_artist], &CollectionMembership::default());
+        let result = ratify_collection_result(
+            &row,
+            ordinary_search,
             &CollectionMembership::default(),
             &LastFmMappings::default(),
         );

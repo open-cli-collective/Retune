@@ -60,8 +60,11 @@ rows, displayed as `Singles`, and are matched one track at a time. Ratification
 prefers accepted mappings and manual choices, then uniquely exact normalized
 title/primary-artist candidates already in the Retune library or exact saved
 Spotify track/album membership, then uniquely exact candidates without
-ownership. Same-artist near matches are suggestions only; wrong artists remain
-unresolved. Catalog comparison is diacritic-insensitive. Near-title comparison
+ownership. Same-artist near matches are suggestions only; wrong artists from
+ordinary search remain unresolved. Within the user's explicitly selected album
+set, a unique exact-title track auto-selects even when Spotify credits it to a
+different artist; multiple exact-title targets remain ambiguous. Catalog
+comparison is diacritic-insensitive. Near-title comparison
 ignores parenthetical annotations, accepts bidirectional token containment, and uses token overlap only to order otherwise
 equal candidates within the visible batch. It also tolerates one inserted or
 missing character in a single title token of at least five characters. Generated track searches apply the
