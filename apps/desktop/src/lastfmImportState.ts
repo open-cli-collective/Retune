@@ -220,6 +220,9 @@ export function stablePartitionImportRows<T>(rows: T[], requiredIds: Iterable<st
 
 export type CollectionAlbumProjection = { uri: string }
 
+export type AutomaticCollectionAlbumTrack = { album: string; artist: string; inLibrary: boolean }
+export type AutomaticCollectionAlbumContributor = { name: string; artist: string; matchCount: number }
+
 export type CollectionTrackMatchStatus = 'matched' | 'ambiguous' | 'unmatched'
 
 export type CollectionTrackStatusProjection = { uri: string; status: CollectionTrackMatchStatus }
@@ -239,6 +242,19 @@ export function selectedCollectionAlbumUris(cached: CollectionAlbumProjection[],
     }
   }
   return result
+}
+
+export function automaticCollectionAlbumContributors(tracks: AutomaticCollectionAlbumTrack[], addedAlbums: Array<{ name: string; artist: string }> = []): AutomaticCollectionAlbumContributor[] {
+  const added = new Set(addedAlbums.map((album) => `${album.artist}\0${album.name}`))
+  const contributors = new Map<string, AutomaticCollectionAlbumContributor>()
+  for (const track of tracks) {
+    if (!track.inLibrary || !track.album || added.has(`${track.artist}\0${track.album}`)) continue
+    const key = `${track.artist}\0${track.album}`
+    const contributor = contributors.get(key)
+    if (contributor) contributor.matchCount += 1
+    else contributors.set(key, { name: track.album, artist: track.artist, matchCount: 1 })
+  }
+  return [...contributors.values()].sort((a, b) => b.matchCount - a.matchCount || a.artist.localeCompare(b.artist) || a.name.localeCompare(b.name))
 }
 
 export function collectionDialogScreen(previewUri: string | undefined, cached: CollectionAlbumProjection[]): 'results' | 'preview' {

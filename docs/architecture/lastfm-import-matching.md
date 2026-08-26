@@ -142,6 +142,11 @@ Adding or removing an album reranks unresolved automatic rows locally while
 preserving accepted mappings and explicit manual choices. Coverage summaries
 are derived from the selected union, not from all search results.
 
+The review UI groups already-selected library track matches by their Spotify
+album as automatic contributors. These groups are informational: only albums
+the user explicitly adds belong to the selected album union and can be removed
+from the match set.
+
 ## Confidence, required work, and count merges
 
 `Exact`, `Likely`, and `Low` describe evidence for the projected target; they do
