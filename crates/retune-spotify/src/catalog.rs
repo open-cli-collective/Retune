@@ -118,6 +118,20 @@ impl SpotifyCatalog {
             .and_modify(|current| current.merge_full(&incoming))
             .or_insert(incoming);
         if let Some(tracks) = album.tracks.as_ref() {
+            if tracks_complete {
+                let parent = AlbumSummary {
+                    id: album.id.clone(),
+                    uri: album.uri.clone(),
+                    name: album.name.clone(),
+                    release_date: album.release_date.clone(),
+                    images: album.images.clone(),
+                };
+                for track in &tracks.items {
+                    let mut track = track.clone();
+                    track.album = Some(parent.clone());
+                    self.observe_track(&track);
+                }
+            }
             self.observe_album_track_page(&album.uri, 0, tracks, tracks_complete);
         }
         self.bump();
@@ -291,9 +305,11 @@ impl SpotifyCatalog {
             .take(limit as usize)
             .map(|uri| self.v1.tracks.get(uri).map(CatalogTrack::to_api))
             .collect::<Option<Vec<_>>>()?;
+        let next_offset = offset.saturating_add(items.len() as u32);
         Some(Page {
             items,
-            next: None,
+            next: (next_offset < tracks.total)
+                .then(|| format!("{album_uri}?offset={next_offset}&limit={limit}")),
             skipped: 0,
             total: tracks.total,
         })
@@ -908,6 +924,35 @@ mod tests {
             .complete_album_tracks("spotify:album:a", 0, 10)
             .unwrap();
         assert_eq!(cached.items, vec![first, second]);
+    }
+
+    #[test]
+    fn complete_album_tracks_preserve_cached_pagination() {
+        let mut catalog = SpotifyCatalog::default();
+        let tracks = [track("one"), track("two"), track("three")];
+        catalog.observe_album_track_page(
+            "spotify:album:a",
+            0,
+            &Page {
+                items: tracks.to_vec(),
+                next: None,
+                skipped: 0,
+                total: tracks.len() as u32,
+            },
+            true,
+        );
+
+        let first = catalog
+            .complete_album_tracks("spotify:album:a", 0, 2)
+            .unwrap();
+        assert_eq!(first.items, tracks[..2]);
+        assert!(first.next.is_some());
+
+        let last = catalog
+            .complete_album_tracks("spotify:album:a", 2, 2)
+            .unwrap();
+        assert_eq!(last.items, tracks[2..]);
+        assert!(last.next.is_none());
     }
 
     #[test]

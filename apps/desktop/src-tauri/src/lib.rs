@@ -2789,9 +2789,20 @@ pub fn run() {
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    let state = catalog_app.state::<AppState>();
-                    if let Err(error) = flush_spotify_catalog(&state) {
-                        log::warn!("Could not persist Spotify catalog: {error}");
+                    let flush_app = catalog_app.clone();
+                    match tauri::async_runtime::spawn_blocking(move || {
+                        let state = flush_app.state::<AppState>();
+                        flush_spotify_catalog(&state)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            log::warn!("Could not persist Spotify catalog: {error}");
+                        }
+                        Err(error) => {
+                            log::warn!("Spotify catalog persistence task failed: {error}");
+                        }
                     }
                 }
             });
