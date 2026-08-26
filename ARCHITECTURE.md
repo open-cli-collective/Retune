@@ -215,6 +215,7 @@ receipts, active downloads, journals, and pending review remain machine-local.
 ## Domain details
 
 - [Library](docs/architecture/library.md)
+- [Last.fm import matching](docs/architecture/lastfm-import-matching.md)
 - [Spotify](docs/architecture/spotify.md)
 - [Playback](docs/architecture/playback.md)
 - [Persistence](docs/architecture/persistence.md)

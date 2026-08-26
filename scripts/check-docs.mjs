@@ -10,6 +10,7 @@ const required = [
   "docs/DEVELOPMENT.md",
   "docs/INSTALL.md",
   "docs/architecture/library.md",
+  "docs/architecture/lastfm-import-matching.md",
   "docs/architecture/spotify.md",
   "docs/architecture/playback.md",
   "docs/architecture/persistence.md",

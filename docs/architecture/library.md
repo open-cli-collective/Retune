@@ -86,12 +86,17 @@ cached operations make no request. Legacy album-shaped search terms refetch
 only the incompatible rows. A non-empty source album literally
 named `Singles` remains release-shaped.
 
+The complete candidate precedence, normalization, release/collection ranking,
+ambiguity, and count-merge rules are documented in
+[Last.fm import matching](lastfm-import-matching.md).
+
 Release-shaped batches compare source and Spotify album and track titles with
 the same normalized contained-token rules used by collection matching. Retune
-automatically selects a release only when it is the sole title-compatible
-candidate that either maps every source row one-to-one or covers at least 80% of
-both the source rows and the Spotify album's distinct tracks; clean Spotify
-supersets are therefore selected despite extra tracks. Artist credit is
+automatically selects the uniquely strongest supported relation among candidates
+that either map every source row one-to-one or cover at least 80% of both the
+source rows and the Spotify album's distinct tracks; equally strong releases
+remain unresolved. Clean Spotify supersets can therefore be selected despite
+extra tracks. Artist credit is
 supporting metadata rather than a veto because soundtracks and compilations are
 commonly credited differently across catalogs. Generated album searches elide
 parenthetical annotations while retaining Spotify's album and artist filters.
