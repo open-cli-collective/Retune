@@ -5597,25 +5597,32 @@ fn automatic_album_candidate<'a>(
     candidates: &'a [AlbumCandidate],
 ) -> Option<&'a AlbumCandidate> {
     let source_count = source_track_names.len();
-    let mut supported = candidates.iter().filter(|candidate| {
-        if candidate.relation.is_none()
-            || !titles_share_contained_words(album, &candidate.name)
-            || source_count == 0
-            || candidate.track_names.is_empty()
-        {
-            return false;
-        }
-        let matched = source_track_names
-            .iter()
-            .filter_map(|name| album_track_match_index(name, &candidate.track_names))
-            .collect::<Vec<_>>();
-        let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
-        (matched.len() == source_count && unique_targets == source_count)
-            || (matched.len() * 5 >= source_count * 4
-                && unique_targets * 5 >= candidate.track_names.len() * 4)
-    });
-    let candidate = supported.next()?;
-    supported.next().is_none().then_some(candidate)
+    let mut supported = candidates
+        .iter()
+        .filter(|candidate| {
+            if candidate.relation.is_none()
+                || !titles_share_contained_words(album, &candidate.name)
+                || source_count == 0
+                || candidate.track_names.is_empty()
+            {
+                return false;
+            }
+            let matched = source_track_names
+                .iter()
+                .filter_map(|name| album_track_match_index(name, &candidate.track_names))
+                .collect::<Vec<_>>();
+            let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
+            (matched.len() == source_count && unique_targets == source_count)
+                || (matched.len() * 5 >= source_count * 4
+                    && unique_targets * 5 >= candidate.track_names.len() * 4)
+        })
+        .collect::<Vec<_>>();
+    supported.sort_by_key(|candidate| candidate_rank(candidate.relation));
+    let candidate = *supported.first()?;
+    supported
+        .get(1)
+        .is_none_or(|next| candidate_rank(next.relation) > candidate_rank(candidate.relation))
+        .then_some(candidate)
 }
 
 fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
@@ -14298,6 +14305,36 @@ mod tests {
             automatic_album_candidate("Freedom", &freedom, &freedom_candidates)
                 .map(|candidate| candidate.uri.as_str()),
             Some("freedom")
+        );
+
+        let babel = (1..=15)
+            .map(|index| format!("Babel Track {index}"))
+            .collect::<Vec<_>>();
+        let mut babel_candidates = vec![
+            candidate("standard", "Babel", "Mumford & Sons", babel[..12].to_vec()),
+            candidate(
+                "deluxe",
+                "Babel (Deluxe Version)",
+                "Mumford & Sons",
+                babel.clone(),
+            ),
+        ];
+        classify_album_candidates_by_name(&babel, &mut babel_candidates);
+        assert_eq!(
+            automatic_album_candidate("Babel (Deluxe Edition)", &babel, &babel_candidates)
+                .map(|candidate| candidate.uri.as_str()),
+            Some("deluxe")
+        );
+        babel_candidates.push(candidate(
+            "other-deluxe",
+            "Babel (Deluxe Edition)",
+            "Mumford & Sons",
+            babel.clone(),
+        ));
+        classify_album_candidates_by_name(&babel, &mut babel_candidates);
+        assert_eq!(
+            automatic_album_candidate("Babel (Deluxe Edition)", &babel, &babel_candidates),
+            None
         );
         assert_eq!(
             album_track_match_index(
