@@ -454,6 +454,14 @@ export function resolveImportCount(rows: ImportSourceRow[], mode: CountMode): nu
   return rows.reduce((total, row) => total + row.playCount, 0)
 }
 
+export function importCountMergePresentation(rows: ImportSourceRow[], mode: CountMode, resultCount: number): { sourceNameCount: number; resultCount: number; resultCopy: string } {
+  return {
+    sourceNameCount: rows.reduce((total, row) => total + row.variants.length, 0),
+    resultCount,
+    resultCopy: mode === 'sum' ? 'summed onto the match' : mode === 'overwrite' ? 'highest count applied to the match' : 'historical plays ignored',
+  }
+}
+
 export function sortImportQueue(items: ImportQueueItem[], sort: ImportSort): ImportQueueItem[] {
   return [...items].sort((left, right) => {
     if (sort === 'artist') return left.artist.localeCompare(right.artist) || left.album.localeCompare(right.album) || left.page - right.page

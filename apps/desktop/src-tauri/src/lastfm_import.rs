@@ -461,6 +461,7 @@ pub(crate) struct ImportPageView {
     pub options: PageOptions,
     pub fuzzy_groups: BTreeMap<String, Vec<SourceRow>>,
     pub count_modes: BTreeMap<String, CountMode>,
+    pub resolved_counts: BTreeMap<String, u64>,
     pub locked_count_modes: BTreeSet<String>,
     pub collection: Option<CollectionMatchView>,
 }
@@ -3862,6 +3863,7 @@ impl Service {
             })
             .collect();
         let mut fuzzy_groups = BTreeMap::<String, Vec<SourceRow>>::new();
+        let mut count_rows = BTreeMap::<String, Vec<&SourceRow>>::new();
         for row in &rows {
             let decision = default_decision(session, &row.stable_id);
             let participates = !decision.excluded
@@ -3882,6 +3884,7 @@ impl Service {
             else {
                 continue;
             };
+            count_rows.entry(target_uri.clone()).or_default().push(*row);
             fuzzy_groups
                 .entry(target_uri)
                 .or_default()
@@ -3907,6 +3910,10 @@ impl Service {
             .into_iter()
             .filter(|target| visible_targets.contains(target))
             .collect();
+        let resolved_counts = historical_counts_for_targets(session, &count_rows)
+            .into_iter()
+            .filter(|(target, _)| visible_targets.contains(target))
+            .collect();
         let collection = album
             .is_empty()
             .then(|| collection_match_view(session, batch_id, &rows));
@@ -3921,6 +3928,7 @@ impl Service {
             options,
             fuzzy_groups,
             count_modes,
+            resolved_counts,
             locked_count_modes,
             collection,
         })
@@ -13956,11 +13964,10 @@ mod tests {
             .stable_id
             .clone();
         let visible_target = "spotify:track:visible".to_owned();
-        let hidden_target = "spotify:track:hidden".to_owned();
         for (source_id, target) in visible_ids
             .iter()
             .map(|id| (id, &visible_target))
-            .chain(std::iter::once((&hidden_id, &hidden_target)))
+            .chain(std::iter::once((&hidden_id, &visible_target)))
         {
             session.matches.insert(
                 source_id.clone(),
@@ -13982,7 +13989,7 @@ mod tests {
             },
         );
         session.decisions.insert(
-            hidden_id,
+            hidden_id.clone(),
             RowDecision {
                 status: RowStatus::Done,
                 excluded: false,
@@ -13991,11 +13998,17 @@ mod tests {
         session
             .count_modes
             .insert(visible_target.clone(), CountMode::Overwrite);
-        session.count_modes.insert(hidden_target, CountMode::Zero);
         session.page_options.insert(
             "Artist\u{1f}Visible".into(),
             PageOptions {
                 selected_track_ids: visible_ids.iter().cloned().collect(),
+                ..PageOptions::default()
+            },
+        );
+        session.page_options.insert(
+            "Artist\u{1f}Hidden".into(),
+            PageOptions {
+                selected_track_ids: BTreeSet::from([hidden_id]),
                 ..PageOptions::default()
             },
         );
@@ -14011,19 +14024,60 @@ mod tests {
                     .any(|row| row.album == "Visible")
             })
             .unwrap();
-        let page = service
-            .page(visible_page.page, "Artist", "Visible")
-            .await
+        for (mode, expected) in [
+            (CountMode::Sum, 3),
+            (CountMode::Overwrite, 1),
+            (CountMode::Zero, 0),
+        ] {
+            let mut configured = session.clone();
+            configured.count_modes.insert(visible_target.clone(), mode);
+            service.save(configured).await.unwrap();
+            let saved = service.snapshot().await.unwrap();
+            let page = service
+                .page(visible_page.page, "Artist", "Visible")
+                .await
+                .unwrap();
+            assert_eq!(
+                page.fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>(),
+                BTreeSet::from([visible_target.clone()])
+            );
+            assert_eq!(
+                page.fuzzy_groups[&visible_target]
+                    .iter()
+                    .map(|row| row.stable_id.clone())
+                    .collect::<BTreeSet<_>>(),
+                visible_ids.iter().cloned().collect::<BTreeSet<_>>()
+            );
+            assert_eq!(page.resolved_counts.get(&visible_target), Some(&expected));
+            assert_eq!(
+                page.count_modes,
+                BTreeMap::from([(visible_target.clone(), mode)])
+            );
+            assert_eq!(
+                page.locked_count_modes,
+                BTreeSet::from([visible_target.clone()])
+            );
+
+            let options = saved.options_for_batch(visible_page.page, "Artist", "Visible");
+            let plan = build_apply_plan(
+                &saved,
+                "spotify",
+                visible_page.page,
+                "Artist",
+                "Visible",
+                &visible_ids,
+                false,
+                options,
+            )
             .unwrap();
-        assert_eq!(
-            page.fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>(),
-            BTreeSet::from([visible_target.clone()])
-        );
-        assert_eq!(
-            page.count_modes,
-            BTreeMap::from([(visible_target.clone(), CountMode::Overwrite)])
-        );
-        assert_eq!(page.locked_count_modes, BTreeSet::from([visible_target]));
+            assert_eq!(
+                plan.updates
+                    .iter()
+                    .find(|update| update.uri == visible_target)
+                    .and_then(|update| update.play_count),
+                Some(expected)
+            );
+        }
     }
 
     #[tokio::test]

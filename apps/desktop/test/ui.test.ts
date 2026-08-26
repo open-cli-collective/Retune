@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -69,6 +69,9 @@ test('Last.fm fuzzy count modes and all queue sorts are deterministic', () => {
   assert.equal(resolveImportCount(rows, 'sum'), 5)
   assert.equal(resolveImportCount(rows, 'overwrite'), 2)
   assert.equal(resolveImportCount(rows, 'zero'), 0)
+  assert.deepEqual(importCountMergePresentation(rows, 'sum', 12), { sourceNameCount: 3, resultCount: 12, resultCopy: 'summed onto the match' })
+  assert.deepEqual(importCountMergePresentation(rows, 'overwrite', 10), { sourceNameCount: 3, resultCount: 10, resultCopy: 'highest count applied to the match' })
+  assert.deepEqual(importCountMergePresentation(rows, 'zero', 0), { sourceNameCount: 3, resultCount: 0, resultCopy: 'historical plays ignored' })
   assert.deepEqual(sortImportQueue(importQueue(), 'plays').map((item) => item.artist), ['Beta', 'Alpha'])
   assert.deepEqual(sortImportQueue(importQueue(), 'artist').map((item) => item.artist), ['Alpha', 'Beta'])
   assert.deepEqual(sortImportQueue(importQueue(), 'batch').map((item) => item.artist), ['Alpha', 'Beta'])
@@ -439,6 +442,18 @@ test('Last.fm queue rendering and importer modal styles keep large lists and sur
   assert.match(importerCss, /button\.import-picker-option \{[^}]*width: 100%[^}]*grid-template-columns: minmax\(0, 1fr\) auto/)
   assert.match(importerCss, /\.import-nav-target:focus \{[^}]*box-shadow: inset 0 0 0 2px var\(--accent\)/)
   assert.match(importerCss, /\.import-match-cell\.needs-action \{[^}]*box-shadow: inset 4px 0 #a64b00/)
+  assert.match(importer, /<section className="import-fuzzy-panel" aria-labelledby=\{headingId\}>/)
+  assert.match(importer, /Last\.fm names → 1 Spotify track/)
+  assert.match(importer, /expanded \? 'Hide merge' : 'Show merge'/)
+  assert.match(importer, /aria-controls=\{mergeId\}/)
+  assert.match(importer, /className="import-fuzzy-connector" aria-hidden="true"/)
+  assert.match(importer, /<output className="import-fuzzy-result-copy" role="status" aria-live="polite"/)
+  assert.match(importer, /<fieldset disabled=\{locked\} className="import-fuzzy-strategies"/)
+  assert.match(importer, /importCountMergePresentation\(rows, mode, resultCount\)/)
+  assert.match(importer, /fuzzyResultCount: page\.resolvedCounts\[group\.target\]/)
+  assert.match(importerCss, /\.import-fuzzy-merge \{[^}]*display: grid/)
+  assert.match(importerCss, /\.import-fuzzy-connector::before \{[^}]*border-top:[^}]*border-right:[^}]*border-bottom:/)
+  assert.match(importerCss, /@media \(max-width: 720px\) \{[\s\S]*\.import-fuzzy-merge \{[^}]*grid-template-columns: minmax\(0, 1fr\)/)
 })
 
 test('Last.fm collection review explains individual matching and keeps release UI scoped', () => {

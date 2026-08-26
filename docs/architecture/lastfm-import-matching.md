@@ -157,6 +157,11 @@ reused for unlocked targets across import sessions; accepting a target freezes
 its mode. Completed source rows from other batches participate when they map to
 the same target.
 
+In the `ImportPageView` projection, `fuzzyGroups` remains scoped to the
+current batch for source disclosure, while `resolvedCounts` is the
+authoritative target-wide result including eligible completed rows, resolved
+with the selected count mode.
+
 ## Acceptance and reusable mappings
 
 Accepting a batch freezes an account- and session-bound apply plan. Whole-album
