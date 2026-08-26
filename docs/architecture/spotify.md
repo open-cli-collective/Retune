@@ -1,8 +1,9 @@
 # Spotify integration
 
-`retune-spotify` owns authentication, Web API transport, retry policy, and
-normalization. The desktop provider composes it into sync, search, follows,
-library membership, playlists, and playback activation.
+`retune-spotify` owns authentication, Web API transport, retry policy,
+normalization, and the install-local Spotify music catalog. The desktop
+provider composes it into sync, search, follows, library membership, playlists,
+and playback activation.
 
 ## Authentication and tokens
 
@@ -95,6 +96,20 @@ Artist genres use an in-memory and persistent cache. Uncached artist lookups are
 paced and capped per sync. Artist discography initially requests albums and
 singles ten at a time; the UI explicitly loads later pages, preserves earlier
 pages, and deduplicates requests.
+
+The shared client also owns a versioned `SpotifyCatalog` keyed by artist ID and
+album/track URI. Full artist, album, and track reads consult only complete
+catalog records before token loading, request gating, and request counting;
+incomplete records fetch normally and then accrete. Search, saved-library,
+artist-album, album, track, and playlist-track responses write observations
+through the same client. Summary observations fill gaps, full observations
+replace fields they supply, and a complete ordered album-track list replaces
+partial membership atomically. Optional collections distinguish unknown from
+known-empty, and local text hints never create Spotify identities. The desktop
+persists this cache as `spotify-catalog.json` with atomic replacement, flushes
+dirty generations every 30 seconds and at exit, and quarantines corrupt or
+unknown versions. It is machine-local and excluded from backup; disconnect,
+OAuth grant replacement, and confirmed account mismatch clear it.
 
 ## Search contract
 

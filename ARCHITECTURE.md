@@ -10,7 +10,7 @@ React UI
    ▼
 desktop application shell
    ├── retune-core       pure library and browse model
-   ├── retune-spotify    OAuth, Web API, normalization
+   ├── retune-spotify    OAuth, Web API, normalization, materialized catalog
    ├── retune-audio      local-file scan, tags, decoding
    ├── playback          controller + Spotify/file backends
    ├── lastfm_import     account-bound history, incremental reconciliation, review, and apply boundary
@@ -36,6 +36,9 @@ shell owns orchestration and persistence. Domain crates do not depend on Tauri.
 - The core `Library` owns durable overlay records and pure projections.
 - The Tauri shell owns live application state and saves changes through stores.
 - Spotify owns remote library membership, follows, and owned-playlist content.
+- `retune-spotify` owns the install-local versioned Spotify music catalog;
+  the desktop shell loads and atomically persists it, while account changes
+  clear it before a new grant is exposed.
 - The playback controller owns the canonical queue, active order, generation,
   and user-facing playback state.
 - React owns view selection, navigation, dialog state, and transient gestures.
@@ -51,8 +54,9 @@ shell owns orchestration and persistence. Domain crates do not depend on Tauri.
 
 The shell asks the shared Spotify provider for each library section in sequence.
 Batches are applied incrementally so partial progress is useful. Core upsert
-refreshes provider fields while preserving local overlay edits. The resulting
-library is persisted atomically.
+refreshes provider fields while preserving local overlay edits. Responses also
+accrete complete and partial artist, album, and track facts in the shared
+catalog. The resulting library is persisted atomically.
 
 ### User mutation
 

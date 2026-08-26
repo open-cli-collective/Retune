@@ -125,6 +125,7 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
         &state.spotify_library,
         SpotifyLibraryState::default(),
     )?;
+    crate::clear_spotify_catalog(&state)?;
     state
         .token_store
         .save(&web_oauth_tokens(
@@ -134,8 +135,11 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
             granted_scopes,
         ))
         .map_err(|error| error.to_string())?;
-    *state.spotify.lock().expect("spotify mutex poisoned") =
-        spotify_provider(&client_id, Arc::clone(&state.token_store))?;
+    *state.spotify.lock().expect("spotify mutex poisoned") = spotify_provider(
+        &client_id,
+        Arc::clone(&state.token_store),
+        Arc::clone(&state.spotify_catalog),
+    )?;
     set_auto_connect(&app, true)?;
     emit_connection_state(&app)?;
     drop(membership_guard);
@@ -250,6 +254,7 @@ pub(super) async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), Stri
         &state.spotify_library,
         SpotifyLibraryState::default(),
     )?;
+    crate::clear_spotify_catalog(&state)?;
     app.state::<AppState>()
         .token_store
         .clear()

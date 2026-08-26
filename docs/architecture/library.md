@@ -69,6 +69,11 @@ otherwise equal candidates within the visible batch. It also tolerates one inser
 missing character or one adjacent transposition in a single title token of at
 least five characters. Generated track searches apply the
 same parenthetical simplification rather than issuing a second Spotify request.
+
+The Spotify metadata used for these comparisons remains owned by the shared
+`retune-spotify` catalog. The core library consumes supplied records and never
+reads or persists that machine-local cache, so overlay and Last.fm decisions
+remain deterministic and portable.
 Exact or near-title tracks found on multiple selected albums remain unresolved
 until the user chooses an album-labelled candidate; the UI recommends one only
 when its existing matched/unique album coverage strictly outranks the

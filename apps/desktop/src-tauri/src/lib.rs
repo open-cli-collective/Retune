@@ -21,7 +21,7 @@ use std::{
     io::Read,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -45,6 +45,7 @@ use retune_core::{
 };
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
+    catalog::SpotifyCatalog,
     client::{
         endpoint_family, Album, HttpTransport, SpotifyClient, Track as SpotifyTrack, Transport,
     },
@@ -53,8 +54,9 @@ use retune_spotify::{
 };
 use serde::{Deserialize, Serialize};
 use store::{
-    BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSyncStore,
-    LastFmScrobblingProfile, OverlayStore, Settings, SpotifyLibraryState, StoreError, Theme,
+    BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSpotifyCatalogStore,
+    FsSyncStore, LastFmScrobblingProfile, OverlayStore, Settings, SpotifyLibraryState, StoreError,
+    Theme,
 };
 use sync_orchestrator::SyncOrchestrator;
 use tauri::{
@@ -96,6 +98,9 @@ struct AppState {
     menu_checks: Option<MenuChecks>,
     recovery_notice: Mutex<Option<String>>,
     token_store: SharedTokenStore,
+    spotify_catalog: Arc<Mutex<SpotifyCatalog>>,
+    spotify_catalog_store: FsSpotifyCatalogStore,
+    spotify_catalog_saved_generation: AtomicU64,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
@@ -118,6 +123,7 @@ pub(crate) fn test_app_state(
     let token_store = Arc::new(CachedTokenStore::new(Box::new(store::FsTokenStore::new(
         &app_data_dir,
     )) as Box<dyn TokenStore>));
+    let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
     AppState {
         library: Mutex::new(library),
         store: FsOverlayStore::new(&app_data_dir),
@@ -133,6 +139,9 @@ pub(crate) fn test_app_state(
         menu_checks: None,
         recovery_notice: Mutex::new(None),
         token_store,
+        spotify_catalog,
+        spotify_catalog_store: FsSpotifyCatalogStore::new(&app_data_dir),
+        spotify_catalog_saved_generation: AtomicU64::new(0),
         spotify: Mutex::new(None),
         artwork_cache: Mutex::default(),
         playback: Arc::new(Playback::default()),
@@ -783,8 +792,11 @@ async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(
             .map_err(|error| error.to_string())?;
     }
     if client_id_changed {
-        *state.spotify.lock().expect("spotify mutex poisoned") =
-            spotify_provider(&settings.spotify_client_id, Arc::clone(&state.token_store))?;
+        *state.spotify.lock().expect("spotify mutex poisoned") = spotify_provider(
+            &settings.spotify_client_id,
+            Arc::clone(&state.token_store),
+            Arc::clone(&state.spotify_catalog),
+        )?;
     }
     Ok(())
 }
@@ -878,14 +890,16 @@ async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
 fn spotify_provider(
     client_id: &str,
     token_store: SharedTokenStore,
+    catalog: Arc<Mutex<SpotifyCatalog>>,
 ) -> Result<Option<Arc<SpotifyProvider>>, String> {
     if client_id.trim().is_empty() {
         return Ok(None);
     }
-    Ok(Some(Arc::new(SpotifyClient::new(
+    Ok(Some(Arc::new(SpotifyClient::new_with_catalog(
         client_id.trim(),
         HttpTransport::new(),
         token_store,
+        catalog,
     ))))
 }
 
@@ -894,6 +908,47 @@ fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionS
         .load()
         .map(ConnectionState::from_tokens)
         .map_err(|error| error.to_string())
+}
+
+fn flush_spotify_catalog(state: &AppState) -> Result<(), String> {
+    let (catalog, generation) = {
+        let catalog = state
+            .spotify_catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned");
+        (catalog.clone(), catalog.generation())
+    };
+    if generation
+        == state
+            .spotify_catalog_saved_generation
+            .load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
+    state
+        .spotify_catalog_store
+        .save(&catalog)
+        .map_err(|error| error.to_string())?;
+    let current_generation = state
+        .spotify_catalog
+        .lock()
+        .expect("Spotify catalog mutex poisoned")
+        .generation();
+    if current_generation == generation {
+        state
+            .spotify_catalog_saved_generation
+            .store(generation, Ordering::Release);
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_spotify_catalog(state: &AppState) -> Result<(), String> {
+    state
+        .spotify_catalog
+        .lock()
+        .expect("Spotify catalog mutex poisoned")
+        .clear();
+    flush_spotify_catalog(state)
 }
 
 pub(crate) fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
@@ -1203,6 +1258,7 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
                 &state.spotify_library,
                 reset,
             )?;
+            clear_spotify_catalog(&state)?;
         }
     }
     let sync_provider =
@@ -2623,6 +2679,12 @@ pub fn run() {
             let settings_store = FsSettingsStore::new(&app_data_dir);
             let sync_store = FsSyncStore::new(&app_data_dir);
             let spotify_library = sync_store.spotify_library()?;
+            let spotify_catalog_store = FsSpotifyCatalogStore::new(&app_data_dir);
+            let spotify_catalog = Arc::new(Mutex::new(spotify_catalog_store.load()?));
+            let spotify_catalog_saved_generation = spotify_catalog
+                .lock()
+                .expect("Spotify catalog mutex poisoned")
+                .generation();
             let playlist_store = FsPlaylistStore::new(&app_data_dir);
             let playlists = playlist_store.load()?;
             let settings = settings_store.load()?.unwrap_or_default();
@@ -2659,7 +2721,11 @@ pub fn run() {
                 );
             }
             menu_checks.sync_connection(&connection)?;
-            let spotify = spotify_provider(&settings.spotify_client_id, Arc::clone(&token_store))
+            let spotify = spotify_provider(
+                &settings.spotify_client_id,
+                Arc::clone(&token_store),
+                Arc::clone(&spotify_catalog),
+            )
                 .map_err(std::io::Error::other)?;
             let startup_action = startup_action(
                 &connection,
@@ -2705,6 +2771,9 @@ pub fn run() {
                 menu_checks: Some(menu_checks),
                 recovery_notice: Mutex::new(recovery_notice),
                 token_store,
+                spotify_catalog,
+                spotify_catalog_store,
+                spotify_catalog_saved_generation: AtomicU64::new(spotify_catalog_saved_generation),
                 spotify: Mutex::new(spotify),
                 artwork_cache: Mutex::default(),
                 playback: Arc::clone(&playback),
@@ -2713,6 +2782,18 @@ pub fn run() {
                 media_keys,
                 sync_orchestrator: SyncOrchestrator::default(),
                 playlist_reauth_notified: AtomicBool::new(false),
+            });
+            let catalog_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    let state = catalog_app.state::<AppState>();
+                    if let Err(error) = flush_spotify_catalog(&state) {
+                        log::warn!("Could not persist Spotify catalog: {error}");
+                    }
+                }
             });
             lastfm.attach_app(app.handle().clone());
             let lastfm_startup = Arc::clone(&lastfm);
@@ -2792,6 +2873,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 playback.invalidate_local().await;
             });
+        }
+        tauri::RunEvent::ExitRequested { .. } => {
+            if let Err(error) = flush_spotify_catalog(&app.state::<AppState>()) {
+                log::warn!("Could not persist Spotify catalog at exit: {error}");
+            }
         }
         _ => {}
     });
@@ -3234,7 +3320,6 @@ mod tests {
         });
         let client = playlist_client([
             Response::json(200, track.clone()),
-            Response::json(200, track),
             Response::json(
                 200,
                 serde_json::json!({"uri": "spotify:track:missing", "name": "Missing"}),
@@ -3271,7 +3356,7 @@ mod tests {
             resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
             None
         );
-        assert_eq!(client.transport().requests().len(), 3);
+        assert_eq!(client.transport().requests().len(), 2);
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use retune_core::io::{export_json, import};
 use retune_core::model::Library;
+use retune_spotify::catalog::SpotifyCatalog;
 use retune_spotify::tokens::{TokenStore, Tokens};
 use serde::{Deserialize, Serialize};
 
@@ -520,6 +521,10 @@ pub struct FsPlaylistStore {
     path: PathBuf,
 }
 
+pub struct FsSpotifyCatalogStore {
+    path: PathBuf,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SpotifyLibraryState {
     #[serde(default)]
@@ -616,6 +621,81 @@ impl FsPlaylistStore {
 
     pub fn save(&self, playlists: &PlaylistCache) -> StoreResult<()> {
         atomic_write(&self.path, &serde_json::to_vec(playlists)?)
+    }
+}
+
+impl FsSpotifyCatalogStore {
+    pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: app_data_dir.as_ref().join("spotify-catalog.json"),
+        }
+    }
+
+    pub fn load(&self) -> StoreResult<SpotifyCatalog> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SpotifyCatalog::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match serde_json::from_slice::<SpotifyCatalog>(&bytes) {
+            Ok(catalog) if catalog.is_supported() => {
+                let counts = catalog.counts();
+                log::info!(
+                    "Loaded Spotify catalog generation={} artists={} albums={} tracks={}",
+                    catalog.generation(),
+                    counts.artists,
+                    counts.albums,
+                    counts.tracks
+                );
+                Ok(catalog)
+            }
+            Ok(catalog) => {
+                self.quarantine("unsupported version")?;
+                log::warn!(
+                    "Ignored unsupported Spotify catalog version {}; started empty",
+                    catalog.version
+                );
+                Ok(SpotifyCatalog::default())
+            }
+            Err(error) => {
+                self.quarantine("invalid JSON")?;
+                log::warn!("Ignored corrupt Spotify catalog ({error}); started empty");
+                Ok(SpotifyCatalog::default())
+            }
+        }
+    }
+
+    pub fn save(&self, catalog: &SpotifyCatalog) -> StoreResult<()> {
+        if !catalog.is_supported() {
+            return Err(StoreError::InvalidSettings(
+                "unsupported Spotify catalog version",
+            ));
+        }
+        atomic_write(&self.path, &serde_json::to_vec(catalog)?)?;
+        let counts = catalog.counts();
+        log::info!(
+            "Saved Spotify catalog generation={} artists={} albums={} tracks={}",
+            catalog.generation(),
+            counts.artists,
+            counts.albums,
+            counts.tracks
+        );
+        Ok(())
+    }
+
+    fn quarantine(&self, reason: &str) -> StoreResult<PathBuf> {
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let quarantined = self
+            .path
+            .with_file_name(format!("spotify-catalog.json.corrupt-{timestamp}"));
+        fs::rename(&self.path, &quarantined)?;
+        log::warn!(
+            "Quarantined Spotify catalog ({reason}) at {}",
+            quarantined.display()
+        );
+        Ok(quarantined)
     }
 }
 
@@ -1128,6 +1208,67 @@ mod tests {
             FsSyncStore::new(dir.path()).artist_genres().unwrap()["artist-1"],
             ["rock"]
         );
+    }
+
+    #[test]
+    fn spotify_catalog_round_trip_is_atomic_and_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSpotifyCatalogStore::new(dir.path());
+        let mut catalog = SpotifyCatalog::default();
+        catalog.set_track_local_hint("spotify:track:one", "Artist — Album — One");
+
+        store.save(&catalog).unwrap();
+
+        assert_eq!(store.load().unwrap(), catalog);
+        assert!(dir.path().join("spotify-catalog.json").is_file());
+        assert!(!dir.path().join("library.json").exists());
+        assert!(!dir.path().join("spotify-catalog.json.tmp").exists());
+    }
+
+    #[test]
+    fn corrupt_spotify_catalog_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("spotify-catalog.json"), b"not-json").unwrap();
+
+        let catalog = FsSpotifyCatalogStore::new(dir.path()).load().unwrap();
+
+        assert_eq!(catalog, SpotifyCatalog::default());
+        assert!(!dir.path().join("spotify-catalog.json").exists());
+        assert!(fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("spotify-catalog.json.corrupt-")));
+    }
+
+    #[test]
+    fn unknown_spotify_catalog_version_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("spotify-catalog.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 99,
+                "artists": {},
+                "albums": {},
+                "tracks": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            FsSpotifyCatalogStore::new(dir.path()).load().unwrap(),
+            SpotifyCatalog::default()
+        );
+        assert!(fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("spotify-catalog.json.corrupt-")));
     }
 
     #[test]

@@ -12,6 +12,7 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `playlists.json` | Playlist metadata/content cache |
 | `cooldowns.json` | Typed Spotify endpoint cooldowns |
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
+| `spotify-catalog.json` | Versioned machine-local Spotify artist, album, and track catalog; excluded from backup |
 | `spotify-library.json` | Account-scoped exact Spotify saved-track and saved-album membership |
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state; mode 0600 on Unix |
@@ -61,6 +62,17 @@ portable backup or restore. Its minimal shape is `SpotifyLibraryState`:
 with the same temporary-file-and-rename atomic replacement as other app data.
 Missing or incomplete state is unknown and does not authorize destructive
 reconciliation until a complete sync establishes the exact account state.
+
+`spotify-catalog.json` is a versioned `SpotifyCatalog` V1 wrapper containing
+deterministic artist-ID, album-URI, and track-URI maps. It stores only reusable
+Spotify metadata and complete ordered album-track membership; query results,
+saved membership, ratings, plays, and Last.fm decisions remain elsewhere.
+Unknown versus known-empty collections and entity/relationship completeness are
+explicit. Local text hints are non-identity metadata. The shell loads the
+catalog before constructing the shared client, writes it with atomic replacement
+after dirty generations (at most every 30 seconds and at exit), and quarantines
+corrupt or unsupported files. It is excluded from backup and is cleared on
+disconnect, OAuth grant replacement, or confirmed Spotify account mismatch.
 
 `lastfm-import.json` is `LastFmImportSessionV2`. It stores the immutable
 `historyTo`, an optional `downloadedThrough` timestamp, Last.fm username,
