@@ -630,7 +630,8 @@ fn normalized_track(
         .artists
         .first()
         .or_else(|| album.and_then(|album| album.artists.first()))
-        .map(|artist| artist.id.clone());
+        .map(|artist| artist.id.clone())
+        .filter(|id| !id.is_empty());
     PendingTrack {
         track: NewTrack {
             added_at,
@@ -1213,7 +1214,7 @@ mod tests {
     use retune_core::model::SourceId;
     use retune_spotify::{
         catalog::SpotifyCatalog,
-        client::{fake_client, Album, FakeTransport, Page, Response, Track},
+        client::{fake_client, Album, FakeTransport, Page, Response, SimplifiedArtist, Track},
         tokens::InMemoryTokenStore,
     };
 
@@ -1541,7 +1542,10 @@ mod tests {
             id: "album-1".into(),
             uri: "spotify:album:1".into(),
             name: "Record".into(),
-            artists: vec![],
+            artists: vec![SimplifiedArtist {
+                id: String::new(),
+                name: "Album Artist".into(),
+            }],
             images: vec![],
             release_date: None,
             album_type: Some("album".into()),
@@ -1553,7 +1557,10 @@ mod tests {
                     duration_ms: Some(1_000),
                     track_number: Some(1),
                     disc_number: Some(1),
-                    artists: vec![],
+                    artists: vec![SimplifiedArtist {
+                        id: String::new(),
+                        name: "Track Artist".into(),
+                    }],
                     album: None,
                 }],
                 next: None,
@@ -1577,6 +1584,7 @@ mod tests {
         assert_eq!(cached_album.uri, album.uri);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].uri, "spotify:track:1");
+        assert_eq!(tracks[0].art, "Track Artist");
         assert!(client.transport().requests().is_empty());
     }
 

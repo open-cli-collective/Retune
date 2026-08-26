@@ -336,7 +336,8 @@ pub struct CatalogImage {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CatalogArtistRef {
-    pub id: String,
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
 }
 
@@ -818,7 +819,7 @@ impl From<CatalogImage> for Image {
 impl From<&SimplifiedArtist> for CatalogArtistRef {
     fn from(value: &SimplifiedArtist) -> Self {
         Self {
-            id: value.id.clone(),
+            id: Some(value.id.clone()),
             name: value.name.clone(),
         }
     }
@@ -827,7 +828,7 @@ impl From<&SimplifiedArtist> for CatalogArtistRef {
 impl From<CatalogArtistRef> for SimplifiedArtist {
     fn from(value: CatalogArtistRef) -> Self {
         Self {
-            id: value.id,
+            id: value.id.unwrap_or_default(),
             name: value.name,
         }
     }
@@ -957,9 +958,25 @@ mod tests {
         assert_eq!(
             catalog.v1.tracks["spotify:track:track"].artists,
             Some(vec![CatalogArtistRef {
-                id: "artist-1".into(),
+                id: Some("artist-1".into()),
                 name: "Artist".into(),
             }])
+        );
+    }
+
+    #[test]
+    fn idless_artist_credit_defaults_and_projects_to_an_empty_wire_id() {
+        let credit: CatalogArtistRef = serde_json::from_value(serde_json::json!({
+            "name": "Named Artist"
+        }))
+        .unwrap();
+        assert_eq!(credit.id, None);
+        assert_eq!(
+            SimplifiedArtist::from(credit),
+            SimplifiedArtist {
+                id: String::new(),
+                name: "Named Artist".into(),
+            }
         );
     }
 
