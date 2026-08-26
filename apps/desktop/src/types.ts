@@ -74,6 +74,7 @@ export type LastFmImportState = {
   pendingReview: number
   syncProblem: string | null
   applyingAll: boolean
+  spotifyLimit: { kind: 'transient' | 'quota'; deadline: number } | null
 }
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'

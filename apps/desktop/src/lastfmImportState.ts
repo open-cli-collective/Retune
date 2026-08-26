@@ -91,6 +91,15 @@ export type ImportQueueItem = {
   trackEntities: number
   status?: QueueStatus | null
   error?: string | null
+  retryAt?: number | null
+}
+
+export function spotifyLimitCountdown(retryAt: number, now: number): string {
+  const remaining = Math.max(0, Math.ceil(retryAt - now))
+  const hours = Math.floor(remaining / 3600)
+  const minutes = Math.floor((remaining % 3600) / 60)
+  const seconds = remaining % 60
+  return [hours && `${hours}h`, (hours || minutes) && `${minutes}m`, `${seconds}s`].filter(Boolean).join(' ')
 }
 
 export type ImportQueuePage = {

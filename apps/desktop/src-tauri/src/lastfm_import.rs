@@ -393,6 +393,7 @@ pub(crate) struct ImportStateView {
     pub pending_review: usize,
     pub sync_problem: Option<String>,
     pub applying_all: bool,
+    pub spotify_limit: Option<crate::store::Cooldown>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -420,6 +421,7 @@ pub(crate) struct ImportQueueItem {
     pub track_entities: u32,
     pub status: Option<QueueStatus>,
     pub error: Option<String>,
+    pub retry_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1761,6 +1763,8 @@ struct ReviewApplyJob {
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
+    retry_at: Option<u64>,
+    #[serde(default)]
     bulk_index: Option<usize>,
 }
 
@@ -2516,6 +2520,7 @@ impl Service {
                 job.plan = failed.plan;
                 job.status = ApplyJobStatus::Queued;
                 job.error = None;
+                job.retry_at = None;
                 job.bulk_index = failed.bulk_index.or(bulk_index);
             } else {
                 state.apply_queue.push(ReviewApplyJob {
@@ -2525,6 +2530,7 @@ impl Service {
                     stage: ApplyJobStage::Upstream,
                     attempt: 0,
                     error: None,
+                    retry_at: None,
                     bulk_index,
                 });
             }
@@ -2581,6 +2587,7 @@ impl Service {
             job.status = ApplyJobStatus::Running;
             job.attempt = job.attempt.saturating_add(1);
             job.error = None;
+            job.retry_at = None;
             log::info!(
                 target: "lastfm_import",
                 "apply claim job={} attempt={} stage={:?}",
@@ -2607,7 +2614,17 @@ impl Service {
         .await
     }
 
+    #[cfg(test)]
     async fn fail_apply_job(&self, id: &str, message: String) -> Result<(), String> {
+        self.fail_apply_job_until(id, message, None).await
+    }
+
+    async fn fail_apply_job_until(
+        &self,
+        id: &str,
+        message: String,
+        retry_at: Option<u64>,
+    ) -> Result<(), String> {
         log::warn!(target: "lastfm_import", "apply failure job={} message={}", id, message);
         self.mutate_sync(|state| {
             let bulk_job = state
@@ -2619,6 +2636,7 @@ impl Service {
             if let Some(job) = state.apply_queue.iter_mut().find(|job| job.id == id) {
                 job.status = ApplyJobStatus::Failed;
                 job.error = Some(message.clone());
+                job.retry_at = retry_at;
             }
             if state
                 .accept_all
@@ -4191,6 +4209,20 @@ impl Service {
     }
 }
 
+fn spotify_retry_at(state: &crate::AppState, error: &str) -> Option<u64> {
+    let endpoint = error
+        .strip_prefix("Spotify rate limited ")
+        .and_then(|detail| detail.split(';').next())
+        .or_else(|| error.strip_prefix("Spotify Development Mode quota exhausted for "))?;
+    let family = retune_spotify::client::endpoint_family(endpoint);
+    state
+        .sync_store
+        .cooldowns(crate::unix_now())
+        .ok()?
+        .get(&family)
+        .map(|cooldown| cooldown.deadline)
+}
+
 fn select_match_in_session(
     session: &mut LastFmImportSessionV2,
     batch_id: u32,
@@ -4345,6 +4377,7 @@ fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
         pending_review: 0,
         sync_problem: None,
         applying_all: false,
+        spotify_limit: None,
     }
 }
 
@@ -4397,6 +4430,7 @@ fn suspended_state_view() -> ImportStateView {
         pending_review: 0,
         sync_problem: None,
         applying_all: false,
+        spotify_limit: None,
     }
 }
 
@@ -7859,10 +7893,13 @@ fn start_apply_worker(app: tauri::AppHandle, service: Arc<Service>) {
                 }
             };
             if let Err(error) = run_apply_job(&app, Arc::clone(&service), &job).await {
-                let _ = service.fail_apply_job(&job.id, error.clone()).await;
+                let retry_at = spotify_retry_at(&app.state::<crate::AppState>(), &error);
+                let _ = service
+                    .fail_apply_job_until(&job.id, error.clone(), retry_at)
+                    .await;
                 let _ = app.emit(
                     "lastfm-import-apply-finished",
-                    serde_json::json!({ "batchId": job.plan.batch_id, "message": error }),
+                    serde_json::json!({ "batchId": job.plan.batch_id, "message": error, "retryAt": retry_at }),
                 );
                 restart_worker = false;
                 break;
@@ -8148,6 +8185,13 @@ pub(crate) async fn lastfm_import_state(app: tauri::AppHandle) -> Result<ImportS
     if view.phase.is_none() {
         view.username = lastfm_username(&app).await.ok();
     }
+    view.spotify_limit = state
+        .sync_store
+        .cooldowns(crate::unix_now())
+        .map_err(|error| error.to_string())?
+        .values()
+        .min_by_key(|cooldown| cooldown.deadline)
+        .copied();
     Ok(view)
 }
 
@@ -9059,6 +9103,7 @@ async fn enqueue_next_accept_all_job(service: &Service) -> Result<bool, String> 
                     stage: ApplyJobStage::Upstream,
                     attempt: 0,
                     error: None,
+                    retry_at: None,
                     bulk_index: Some(cursor.next_batch_index),
                 });
                 Ok(())
@@ -9210,6 +9255,7 @@ fn queue_item(
             .map(|_| QueueStatus::Failed)
             .or_else(|| queue_status(session, rows)),
         error: failed.and_then(|job| job.error.clone()),
+        retry_at: failed.and_then(|job| job.retry_at),
     })
 }
 
@@ -16616,13 +16662,18 @@ mod tests {
 
         assert_eq!(service.queue_page(0, 10).await.unwrap().total, 0);
         service
-            .fail_apply_job(&format!("{}:1", session.cache_id), "try again".into())
+            .fail_apply_job_until(
+                &format!("{}:1", session.cache_id),
+                "try again".into(),
+                Some(7_261),
+            )
             .await
             .unwrap();
         let queue = service.queue_page(0, 10).await.unwrap();
         assert_eq!(queue.total, 1);
         assert_eq!(queue.items[0].status, Some(QueueStatus::Failed));
         assert_eq!(queue.items[0].error.as_deref(), Some("try again"));
+        assert_eq!(queue.items[0].retry_at, Some(7_261));
         assert_eq!(
             service
                 .snapshot()

@@ -37,6 +37,9 @@ Rate-limit behavior distinguishes two conditions:
   error immediately and do not blindly retry. Preserve a supplied deadline, but
   never invent one.
 
+Content actions persist supplied `Retry-After` deadlines in the same cooldown
+store so asynchronous import failures can show a local reset time and countdown.
+
 5xx responses retry after one and three seconds before failing. The provider
 records request counts and typed cooldowns by endpoint family; persisted
 cooldowns prevent relaunch from immediately repeating a blocked request.

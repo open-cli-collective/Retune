@@ -20,6 +20,10 @@
 .import-query-toggle { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .import-query-toggle input { margin: 0; }
 .import-error { margin: 9px 18px 0; padding: 8px 10px; border: 1px solid #d66; border-radius: 5px; color: #a22; background: color-mix(in srgb, #f88 12%, var(--list)); font-size: 12px; }
+.import-error, .import-limit { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.import-limit { margin: 9px 18px 0; padding: 8px 10px; border: 1px solid #c58a32; border-radius: 5px; color: #7d4d00; background: color-mix(in srgb, #e9a53a 12%, var(--list)); font-size: 12px; }
+:root[data-theme="dark"] .import-limit { color: #ffc271; }
+.import-limit-reset { font-variant-numeric: tabular-nums; font-weight: 650; }
 .import-workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(248px, 28%) minmax(0, 1fr); }
 .import-queue, .import-review { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .import-queue { border-right: 1px solid var(--border); background: var(--panel); }

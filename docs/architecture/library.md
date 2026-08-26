@@ -104,6 +104,12 @@ of candidates from one review batch in one atomic session write and returns the
 same page projection; the collection UI uses it to ratify all currently valid
 same-artist suggestions without issuing Spotify requests.
 
+Failed asynchronous apply jobs persist Spotify's supplied retry deadline with
+the frozen job. Review shows that deadline in local time with a live countdown;
+quota errors without a Spotify deadline say so instead of inventing one.
+The importer state also projects the earliest active persisted Spotify cooldown,
+so the same deadline remains visible without a selected failure and after relaunch.
+
 The visible review-page projection stably partitions actionable selected rows
 whose IDs are in `requiredImportMatchIds` (selected rows without a track target)
 ahead of the remaining rows, preserving source order inside both groups. A

@@ -3,6 +3,43 @@ use crate::provider::{saved_album_record, SearchGroup};
 use librespot_core::{authentication::Credentials, config::SessionConfig, session::Session};
 use retune_spotify::tokens::PlaybackCredentials;
 
+fn spotify_action_cooldown(
+    error: &retune_spotify::Error,
+    now: u64,
+) -> Option<(&str, store::CooldownKind, u64)> {
+    match error {
+        retune_spotify::Error::RateLimited {
+            endpoint,
+            retry_after_secs,
+        } => Some((
+            endpoint,
+            store::CooldownKind::Transient,
+            now.saturating_add(*retry_after_secs),
+        )),
+        retune_spotify::Error::QuotaExceeded {
+            endpoint,
+            retry_after_secs: Some(retry_after_secs),
+        } => Some((
+            endpoint,
+            store::CooldownKind::Quota,
+            now.saturating_add(*retry_after_secs),
+        )),
+        _ => None,
+    }
+}
+
+fn spotify_action_error(state: &AppState, error: retune_spotify::Error) -> String {
+    let now = unix_now();
+    if let Some((endpoint, kind, deadline)) = spotify_action_cooldown(&error, now) {
+        if let Err(persist_error) =
+            record_cooldown(&state.sync_store, endpoint, kind, deadline, now)
+        {
+            log::warn!("Could not persist Spotify action cooldown: {persist_error}");
+        }
+    }
+    error.to_string()
+}
+
 fn album_library_uris(uri: &str) -> Vec<String> {
     vec![uri.to_owned()]
 }
@@ -433,7 +470,7 @@ pub(crate) async fn save_album_operation<T: Transport, S: TokenStore>(
     provider
         .save_to_library(&album_uris)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| spotify_action_error(state, error))?;
     if current.is_exact() {
         let mut next = current;
         next.add_saved_album(album_record);
@@ -583,7 +620,7 @@ pub(crate) async fn save_tracks_operation<T: Transport, S: TokenStore>(
         let track = provider
             .track(track_id(uri).expect("validated above"))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| spotify_action_error(state, error))?;
         let artist = match track.artists.first() {
             Some(artist) => provider.artist(&artist.id).await.ok(),
             None => None,
@@ -612,7 +649,7 @@ pub(crate) async fn save_tracks_operation<T: Transport, S: TokenStore>(
     provider
         .save_to_library(&requested_uris)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| spotify_action_error(state, error))?;
     if let Some(next) = next {
         state
             .sync_store
@@ -698,9 +735,26 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        playback_credentials, replace_spotify_library_state, web_oauth_tokens, FsSyncStore, Mutex,
-        SpotifyLibraryState,
+        playback_credentials, replace_spotify_library_state, spotify_action_cooldown,
+        web_oauth_tokens, FsSyncStore, Mutex, SpotifyLibraryState,
     };
+
+    #[test]
+    fn spotify_action_cooldown_preserves_only_supplied_deadlines() {
+        let quota = retune_spotify::Error::QuotaExceeded {
+            endpoint: "/me/library".into(),
+            retry_after_secs: Some(120),
+        };
+        assert_eq!(
+            spotify_action_cooldown(&quota, 1_000),
+            Some(("/me/library", crate::store::CooldownKind::Quota, 1_120))
+        );
+        let unknown = retune_spotify::Error::QuotaExceeded {
+            endpoint: "/me/library".into(),
+            retry_after_secs: None,
+        };
+        assert_eq!(spotify_action_cooldown(&unknown, 1_000), None);
+    }
 
     #[test]
     fn replacing_oauth_state_clears_prior_exact_membership() {
