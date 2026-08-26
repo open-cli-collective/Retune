@@ -4293,11 +4293,41 @@ mod tests {
         let exported: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(exported.get("lastfmMappings").is_some());
         assert!(exported.get("lastfm-sync").is_none());
+        assert!(exported.get("spotifyCatalog").is_none());
 
         let (_, _, _, restored) = import_with_settings_and_mappings(&bytes, true).unwrap();
         assert_eq!(restored, Some(mappings.clone()));
         let (_, _, _, merged) = import_with_settings_and_mappings(&bytes, false).unwrap();
         assert!(merged.is_none());
+    }
+
+    #[test]
+    fn spotify_catalog_flush_persists_dirty_data_and_clear() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState::default(),
+            lastfm::Service::new(directory.path(), true, false),
+            lastfm_import::Service::new(directory.path()),
+        );
+        state
+            .spotify_catalog
+            .lock()
+            .unwrap()
+            .set_track_local_hint("spotify:track:one", "Artist — Album — One");
+
+        flush_spotify_catalog(&state).unwrap();
+        let store = FsSpotifyCatalogStore::new(directory.path());
+        assert!(store
+            .load()
+            .unwrap()
+            .v1
+            .tracks
+            .contains_key("spotify:track:one"));
+
+        clear_spotify_catalog(&state).unwrap();
+        assert!(store.load().unwrap().v1.tracks.is_empty());
     }
 
     #[test]

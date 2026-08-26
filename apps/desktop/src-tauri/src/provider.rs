@@ -1208,9 +1208,12 @@ impl MediaProvider for FakeProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use retune_core::model::SourceId;
     use retune_spotify::{
-        client::{fake_client, FakeTransport, Response},
+        catalog::SpotifyCatalog,
+        client::{fake_client, Album, FakeTransport, Page, Response, Track},
         tokens::InMemoryTokenStore,
     };
 
@@ -1530,6 +1533,51 @@ mod tests {
         assert!(client.transport().requests()[1]
             .url
             .contains("/albums/1/tracks?offset=1&limit=50"));
+    }
+
+    #[tokio::test]
+    async fn complete_cached_album_content_needs_no_spotify_request() {
+        let album = Album {
+            id: "album-1".into(),
+            uri: "spotify:album:1".into(),
+            name: "Record".into(),
+            artists: vec![],
+            images: vec![],
+            release_date: None,
+            album_type: Some("album".into()),
+            total_tracks: 1,
+            tracks: Some(Page {
+                items: vec![Track {
+                    uri: "spotify:track:1".into(),
+                    name: "One".into(),
+                    duration_ms: Some(1_000),
+                    track_number: Some(1),
+                    disc_number: Some(1),
+                    artists: vec![],
+                    album: None,
+                }],
+                next: None,
+                skipped: 0,
+                total: 1,
+            }),
+        };
+        let mut catalog = SpotifyCatalog::default();
+        catalog.observe_album(&album, true);
+        let client = SpotifyClient::new_with_catalog(
+            "client",
+            FakeTransport::new([]),
+            InMemoryTokenStore::new(None),
+            Arc::new(Mutex::new(catalog)),
+        );
+
+        let (cached_album, tracks) = album_content(&client, "spotify:album:1", None)
+            .await
+            .unwrap();
+
+        assert_eq!(cached_album.uri, album.uri);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].uri, "spotify:track:1");
+        assert!(client.transport().requests().is_empty());
     }
 
     #[tokio::test]

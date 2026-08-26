@@ -421,6 +421,8 @@ pub struct CatalogTrack {
     pub local_hint: Option<String>,
 }
 
+// ponytail: serde DTOs collapse omitted and explicit empty; preserve rich data
+// until presence-aware DTOs exist for intentional collection replacement.
 impl CatalogArtist {
     fn stub(id: &str) -> Self {
         Self {
@@ -470,11 +472,25 @@ impl CatalogArtist {
 
     fn merge_full(&mut self, incoming: &Self) {
         self.name = incoming.name.clone();
-        self.genres = incoming.genres.clone();
+        if incoming
+            .genres
+            .as_ref()
+            .is_some_and(|genres| !genres.is_empty())
+            || self.genres.is_none()
+        {
+            self.genres = incoming.genres.clone();
+        }
         if incoming.followers.is_some() {
             self.followers = incoming.followers;
         }
-        self.images = incoming.images.clone();
+        if incoming
+            .images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+            || self.images.is_none()
+        {
+            self.images = incoming.images.clone();
+        }
         self.complete = true;
     }
 
@@ -579,8 +595,22 @@ impl CatalogAlbum {
     fn merge_full(&mut self, incoming: &Self) {
         self.id = incoming.id.clone();
         self.name = incoming.name.clone();
-        self.artists = incoming.artists.clone();
-        self.images = incoming.images.clone();
+        if incoming
+            .artists
+            .as_ref()
+            .is_some_and(|artists| !artists.is_empty())
+            || self.artists.is_none()
+        {
+            self.artists = incoming.artists.clone();
+        }
+        if incoming
+            .images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+            || self.images.is_none()
+        {
+            self.images = incoming.images.clone();
+        }
         if incoming.release_date.is_some() {
             self.release_date = incoming.release_date.clone();
         }
@@ -714,7 +744,14 @@ impl CatalogTrack {
         if incoming.disc_number.is_some() {
             self.disc_number = incoming.disc_number;
         }
-        self.artists = incoming.artists.clone();
+        if incoming
+            .artists
+            .as_ref()
+            .is_some_and(|artists| !artists.is_empty())
+            || self.artists.is_none()
+        {
+            self.artists = incoming.artists.clone();
+        }
         if incoming.album.is_some() {
             self.album = incoming.album.clone();
         }
@@ -857,6 +894,73 @@ mod tests {
         let value = &catalog.v1.artists["artist-1"];
         assert_eq!(value.genres, Some(vec![]));
         assert!(value.complete);
+    }
+
+    #[test]
+    fn sparse_full_observations_preserve_rich_collections() {
+        let mut catalog = SpotifyCatalog::default();
+        let rich_artist = Artist {
+            id: "artist-1".into(),
+            name: "Artist".into(),
+            genres: vec!["rock".into()],
+            followers: Some(Followers { total: 3 }),
+            images: vec![Image {
+                url: "artist-image".into(),
+                width: Some(300),
+            }],
+        };
+        let sparse_artist = Artist {
+            id: rich_artist.id.clone(),
+            name: rich_artist.name.clone(),
+            genres: vec![],
+            followers: None,
+            images: vec![],
+        };
+        catalog.observe_artist(&rich_artist);
+        catalog.observe_artist(&sparse_artist);
+
+        let rich_track = Track {
+            uri: "spotify:track:track".into(),
+            name: "Track".into(),
+            duration_ms: Some(10),
+            track_number: Some(1),
+            disc_number: Some(1),
+            artists: vec![SimplifiedArtist {
+                id: rich_artist.id.clone(),
+                name: rich_artist.name.clone(),
+            }],
+            album: None,
+        };
+        let sparse_track = Track {
+            uri: rich_track.uri.clone(),
+            name: rich_track.name.clone(),
+            duration_ms: None,
+            track_number: None,
+            disc_number: None,
+            artists: vec![],
+            album: None,
+        };
+        catalog.observe_track(&rich_track);
+        catalog.observe_track(&sparse_track);
+
+        assert_eq!(
+            catalog.v1.artists["artist-1"].genres,
+            Some(vec!["rock".into()])
+        );
+        assert_eq!(
+            catalog.v1.artists["artist-1"].images,
+            Some(vec![CatalogImage {
+                url: "artist-image".into(),
+                width: Some(300),
+            }])
+        );
+        assert_eq!(
+            catalog.v1.tracks["spotify:track:track"].artists,
+            Some(vec![CatalogArtistRef {
+                id: "artist-1".into(),
+                name: "Artist".into(),
+            }])
+        );
     }
 
     #[test]

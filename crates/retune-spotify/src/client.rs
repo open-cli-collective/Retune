@@ -373,7 +373,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         };
         let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
         for track in &page.items {
-            catalog.observe_track(track);
+            catalog.observe_track_summary(track);
         }
         Ok(page)
     }
@@ -2211,6 +2211,54 @@ mod tests {
                 .unwrap()
                 .1
                 .contains("is_local")
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_track_summary_does_not_hide_a_full_track_lookup() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "items": [{"is_local": false, "item": {
+                            "uri": "spotify:track:one", "name": "One",
+                            "artists": [], "album": null, "duration_ms": 1234
+                        }}],
+                        "next": null, "total": 1
+                    }),
+                ),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "uri": "spotify:track:one", "name": "One",
+                        "artists": [], "album": null, "duration_ms": 1234,
+                        "track_number": 7, "disc_number": 2
+                    }),
+                ),
+            ]),
+            InMemoryTokenStore::new(Some(Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+                scopes: String::new(),
+                playback_credentials: None,
+            })),
+        );
+
+        let page = client.playlist_tracks("playlist", 0, 1).await.unwrap();
+        assert_eq!(page.items[0].track_number, None);
+        assert_eq!(page.items[0].disc_number, None);
+
+        let track = client.track("one").await.unwrap();
+        assert_eq!(track.track_number, Some(7));
+        assert_eq!(track.disc_number, Some(2));
+        assert_eq!(client.transport().requests().len(), 2);
+        assert!(
+            client.transport().requests()[1]
+                .url
+                .ends_with("/tracks/one")
         );
     }
 
