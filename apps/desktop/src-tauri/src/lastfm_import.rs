@@ -5564,6 +5564,16 @@ fn album_track_match_index(source: &str, targets: &[String]) -> Option<usize> {
     {
         return Some(index);
     }
+    let source_words = normalized_word_sequences(source);
+    let mut equivalent = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| normalized_word_sequences(target) == source_words);
+    if let Some((index, _)) = equivalent.next() {
+        if equivalent.next().is_none() {
+            return Some(index);
+        }
+    }
     let mut prefixed = targets
         .iter()
         .enumerate()
@@ -14375,6 +14385,17 @@ mod tests {
                 },
             ),
             Confidence::Likely
+        );
+        assert_eq!(
+            album_track_match_index(
+                "Raise Your Banner (feat. Anders Fridén) [Single Edit]",
+                &[
+                    "Raise Your Banner".into(),
+                    "Raise Your Banner - Single Edit".into(),
+                    "Raise Your Banner - Instrumental".into(),
+                ],
+            ),
+            Some(1)
         );
     }
 
