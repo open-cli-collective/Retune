@@ -84,12 +84,23 @@ most specific evidence first:
 2. normalized token-sequence equality after parenthetical removal;
 3. one unique target whose compact title begins with the source title;
 4. one unique bidirectional contained-token or tolerated-typo target.
+5. for release-shaped rows only, retry after removing a dash-delimited trailing
+   source artist or source album that exactly matches the batch metadata;
+6. one unique best target sharing at least two tokens longer than three
+   characters and at least half the meaningful tokens of the shorter title.
 
 This ordering prevents a broad match from hiding a more specific edition. For
 example, `Raise Your Banner (feat. Anders Fridén) [Single Edit]` selects
 `Raise Your Banner - Single Edit` before the base `Raise Your Banner` track.
 If the strongest stage still produces multiple distinct targets, the row stays
-unresolved.
+unresolved. Spotify qualifiers remain intact: repeated titles such as `Main
+Theme (From "Jurassic Park")` and `Main Theme (From "Schindler's List")` tie
+instead of collapsing to `Main Theme`.
+
+Spotify album tracks include duration and Retune caches it for collection album
+previews. Last.fm recent-play history does not supply source duration, so
+duration is not a historical-import match signal unless a future cached source
+provides it; Retune does not issue per-track metadata calls solely to obtain it.
 
 Artist credit supports ranking but does not veto a release-shaped match.
 Soundtracks, classical releases, featured performers, and compilations are

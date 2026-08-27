@@ -4281,11 +4281,11 @@ fn select_match_in_session(
             .rows
             .iter()
             .filter(|row| batch_ids.contains(&row.stable_id))
-            .map(|row| (row.stable_id.clone(), row.track.clone()))
+            .cloned()
             .collect::<Vec<_>>();
         let mut group_track_matches = BTreeMap::new();
-        for (id, track) in related {
-            let Some(result) = session.matches.get_mut(&id) else {
+        for row in related {
+            let Some(result) = session.matches.get_mut(&row.stable_id) else {
                 continue;
             };
             let Some(candidate) = result
@@ -4296,9 +4296,9 @@ fn select_match_in_session(
             else {
                 continue;
             };
-            update_selected_match(result, &id, &track, &candidate);
-            if let Some(uri) = result.track_matches.get(&id) {
-                group_track_matches.insert(id, uri.clone());
+            update_selected_release_match(result, &row, &candidate);
+            if let Some(uri) = result.track_matches.get(&row.stable_id) {
+                group_track_matches.insert(row.stable_id, uri.clone());
             }
         }
         for row in session
@@ -5582,11 +5582,24 @@ pub(crate) fn classify_album_candidates_by_name(
     source_track_names: &[String],
     candidates: &mut [AlbumCandidate],
 ) {
-    let source = source_track_names.iter().collect::<BTreeSet<_>>();
+    classify_album_candidates_with(source_track_names, candidates, |source, targets| {
+        album_track_match_index(source, targets)
+    });
+}
+
+fn classify_album_candidates_for_rows(rows: &[SourceRow], candidates: &mut [AlbumCandidate]) {
+    classify_album_candidates_with(rows, candidates, release_track_match_index);
+}
+
+fn classify_album_candidates_with<T>(
+    source: &[T],
+    candidates: &mut [AlbumCandidate],
+    match_index: impl Fn(&T, &[String]) -> Option<usize>,
+) {
     for candidate in candidates.iter_mut() {
         let matched = source
             .iter()
-            .filter_map(|name| album_track_match_index(name, &candidate.track_names))
+            .filter_map(|source| match_index(source, &candidate.track_names))
             .collect::<Vec<_>>();
         let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
         candidate.relation = if matched.len() == source.len()
@@ -5642,12 +5655,92 @@ fn album_track_match_index(source: &str, targets: &[String]) -> Option<usize> {
     compatible.next().is_none().then_some(index)
 }
 
+fn release_track_match_index(source: &SourceRow, targets: &[String]) -> Option<usize> {
+    album_track_match_index(&source.track, targets).or_else(|| {
+        let title = without_known_source_suffix(&source.track, &source.artist, &source.album);
+        (title != source.track)
+            .then(|| album_track_match_index(&title, targets))
+            .flatten()
+            .or_else(|| unique_significant_token_match(&title, targets))
+    })
+}
+
+fn without_known_source_suffix(track: &str, artist: &str, album: &str) -> String {
+    for separator in [" - ", " – ", " — "] {
+        let Some((title, suffix)) = track.rsplit_once(separator) else {
+            continue;
+        };
+        let suffix = normalize_catalog_text(suffix);
+        if !suffix.is_empty()
+            && (suffix == normalize_catalog_text(artist)
+                || (!album.is_empty() && suffix == normalize_catalog_text(album)))
+        {
+            return title.trim().to_owned();
+        }
+    }
+    track.to_owned()
+}
+
+fn significant_title_tokens(value: &str) -> BTreeSet<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .map(normalize_catalog_text)
+        .filter(|word| word.chars().count() > 3)
+        .collect()
+}
+
+fn unique_significant_token_match(source: &str, targets: &[String]) -> Option<usize> {
+    let source = significant_title_tokens(source);
+    let mut scored = targets.iter().enumerate().filter_map(|(index, target)| {
+        let target = significant_title_tokens(target);
+        let overlap = source.intersection(&target).count();
+        let shorter = source.len().min(target.len());
+        (overlap >= 2 && overlap * 2 >= shorter).then_some((index, overlap, shorter))
+    });
+    let best = scored.next()?;
+    let mut tied = false;
+    let best = scored.fold(best, |best, candidate| {
+        let best_score = (best.1 * 100 / best.2, best.1);
+        let candidate_score = (candidate.1 * 100 / candidate.2, candidate.1);
+        if candidate_score > best_score {
+            tied = false;
+            candidate
+        } else {
+            if candidate_score == best_score {
+                tied = true;
+            }
+            best
+        }
+    });
+    (!tied).then_some(best.0)
+}
+
+#[cfg(test)]
 fn automatic_album_candidate<'a>(
     album: &str,
     source_track_names: &[String],
     candidates: &'a [AlbumCandidate],
 ) -> Option<&'a AlbumCandidate> {
-    let source_count = source_track_names.len();
+    automatic_album_candidate_with(album, source_track_names, candidates, |source, targets| {
+        album_track_match_index(source, targets)
+    })
+}
+
+fn automatic_album_candidate_for_rows<'a>(
+    album: &str,
+    rows: &[SourceRow],
+    candidates: &'a [AlbumCandidate],
+) -> Option<&'a AlbumCandidate> {
+    automatic_album_candidate_with(album, rows, candidates, release_track_match_index)
+}
+
+fn automatic_album_candidate_with<'a, T>(
+    album: &str,
+    source: &[T],
+    candidates: &'a [AlbumCandidate],
+    match_index: impl Fn(&T, &[String]) -> Option<usize>,
+) -> Option<&'a AlbumCandidate> {
+    let source_count = source.len();
     let mut supported = candidates
         .iter()
         .filter(|candidate| {
@@ -5658,9 +5751,9 @@ fn automatic_album_candidate<'a>(
             {
                 return false;
             }
-            let matched = source_track_names
+            let matched = source
                 .iter()
-                .filter_map(|name| album_track_match_index(name, &candidate.track_names))
+                .filter_map(|source| match_index(source, &candidate.track_names))
                 .collect::<Vec<_>>();
             let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
             (matched.len() == source_count && unique_targets == source_count)
@@ -5730,7 +5823,6 @@ fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
         if first.album.is_empty() {
             continue;
         }
-        let source_tracks = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
         let Some(mut candidates) = batch
             .source_ids
             .iter()
@@ -5739,12 +5831,13 @@ fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
         else {
             continue;
         };
-        classify_album_candidates_by_name(&source_tracks, &mut candidates);
+        let source_rows = rows.iter().map(|row| (*row).clone()).collect::<Vec<_>>();
+        classify_album_candidates_for_rows(&source_rows, &mut candidates);
         let Some(selected_uri) = selected_albums
             .first()
             .map(|uri| (*uri).to_owned())
             .or_else(|| {
-                automatic_album_candidate(&first.album, &source_tracks, &candidates)
+                automatic_album_candidate_for_rows(&first.album, &source_rows, &candidates)
                     .map(|candidate| candidate.uri.clone())
             })
         else {
@@ -5773,12 +5866,12 @@ fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
                 continue;
             };
             if result.selected_uri.is_none() {
-                update_selected_match(result, &row.stable_id, &row.track, &candidate);
+                update_selected_release_match(result, row, &candidate);
             } else {
-                result.confidence = Some(selected_match_confidence(&row.track, &candidate));
+                let source_track = without_known_source_suffix(&row.track, &row.artist, &row.album);
+                result.confidence = Some(selected_match_confidence(&source_track, &candidate));
                 if !result.track_matches.contains_key(&row.stable_id) {
-                    if let Some(index) = album_track_match_index(&row.track, &candidate.track_names)
-                    {
+                    if let Some(index) = release_track_match_index(row, &candidate.track_names) {
                         if let Some(uri) = candidate.track_uris.get(index) {
                             result
                                 .track_matches
@@ -6846,17 +6939,17 @@ where
     }
     let search_term = album_search_term(artist, album);
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
-    let candidates = album_candidates(provider, &search_term, &source_track_names).await?;
-    let selected_uri = automatic_album_candidate(album, &source_track_names, &candidates)
+    let mut candidates = album_candidates(provider, &search_term, &source_track_names).await?;
+    classify_album_candidates_for_rows(rows, &mut candidates);
+    let selected_uri = automatic_album_candidate_for_rows(album, rows, &candidates)
         .map(|candidate| candidate.uri.clone());
     Ok(rows
         .iter()
         .map(|row| {
-            match_result_for(
-                row.stable_id.clone(),
+            match_result_for_release(
+                row,
                 search_term.clone(),
                 candidates.clone(),
-                &row.track,
                 selected_uri.as_deref(),
             )
         })
@@ -7306,7 +7399,7 @@ fn matched_track_uri_for_row(result: &MatchResult, row: &SourceRow) -> Option<St
         if candidate.uri.starts_with("spotify:track:") {
             return Some(candidate.uri.clone());
         }
-        let index = album_track_match_index(&row.track, &candidate.track_names)?;
+        let index = release_track_match_index(row, &candidate.track_names)?;
         candidate.track_uris.get(index).cloned()
     })
 }
@@ -7518,6 +7611,24 @@ fn update_selected_match(
         result
             .track_matches
             .insert(source_id.to_owned(), candidate.uri.clone());
+    }
+}
+
+fn update_selected_release_match(
+    result: &mut MatchResult,
+    source: &SourceRow,
+    candidate: &AlbumCandidate,
+) {
+    let title = without_known_source_suffix(&source.track, &source.artist, &source.album);
+    update_selected_match(result, &source.stable_id, &title, candidate);
+    if !result.track_matches.contains_key(&source.stable_id) {
+        if let Some(index) = release_track_match_index(source, &candidate.track_names) {
+            if let Some(uri) = candidate.track_uris.get(index) {
+                result
+                    .track_matches
+                    .insert(source.stable_id.clone(), uri.clone());
+            }
+        }
     }
 }
 
@@ -8169,6 +8280,36 @@ fn match_result_for(
         candidates,
         track_matches,
     }
+}
+
+fn match_result_for_release(
+    source: &SourceRow,
+    search_term: String,
+    candidates: Vec<AlbumCandidate>,
+    selected_uri: Option<&str>,
+) -> MatchResult {
+    let title = without_known_source_suffix(&source.track, &source.artist, &source.album);
+    let mut result = match_result_for(
+        source.stable_id.clone(),
+        search_term,
+        candidates,
+        &title,
+        selected_uri,
+    );
+    let selected = result
+        .selected_uri
+        .as_deref()
+        .and_then(|uri| {
+            result
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == uri)
+        })
+        .cloned();
+    if let Some(selected) = selected {
+        update_selected_release_match(&mut result, source, &selected);
+    }
+    result
 }
 
 fn preserve_match_selection(
@@ -8867,14 +9008,14 @@ pub(crate) async fn lastfm_import_change_track(
     if row.album.is_empty() {
         rank_collection_candidates(row, &mut candidates, &membership);
     } else {
-        classify_album_candidates_by_name(std::slice::from_ref(&row.track), &mut candidates);
+        classify_album_candidates_for_rows(std::slice::from_ref(row), &mut candidates);
     }
-    let result = preserve_match_selection(
-        match_result_for(id.clone(), search_term, candidates, &row.track, None),
-        session.matches.get(&id),
-        &id,
-        &row.track,
-    );
+    let result = if row.album.is_empty() {
+        match_result_for(id.clone(), search_term, candidates, &row.track, None)
+    } else {
+        match_result_for_release(row, search_term, candidates, None)
+    };
+    let result = preserve_match_selection(result, session.matches.get(&id), &id, &row.track);
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         assert_current_account_locked(&state, state.lastfm_import.as_ref()).await?;
@@ -8914,8 +9055,12 @@ pub(crate) async fn lastfm_import_change_album(
     let batch = requested_batch(&session, batch_id, &row.artist, &row.album)
         .ok_or_else(|| "The source row does not belong to this review batch.".to_string())?;
     let rows_by_id = source_row_map(&session);
-    let related = batch_rows(&batch, &rows_by_id)
+    let related_rows = batch_rows(&batch, &rows_by_id)
         .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let related = related_rows
+        .iter()
         .map(|candidate| candidate.track.clone())
         .collect::<Vec<_>>();
     let search_term = if query.trim().is_empty() {
@@ -8924,26 +9069,23 @@ pub(crate) async fn lastfm_import_change_album(
         query.trim().to_owned()
     };
     let provider = crate::provider_from(&state)?;
-    let candidates = if let Some(uri) = spotify_share_uri(&search_term, "album")? {
+    let mut candidates = if let Some(uri) = spotify_share_uri(&search_term, "album")? {
         let album = fetch_complete_collection_album(provider.as_ref(), &uri).await?;
-        let mut candidates =
-            vec![collection_album_candidate(&album, &CollectionMembership::default()).matching];
-        classify_album_candidates_by_name(&related, &mut candidates);
-        candidates
+        vec![collection_album_candidate(&album, &CollectionMembership::default()).matching]
     } else {
         album_candidates(provider.as_ref(), &search_term, &related).await?
     };
-    let selected_uri = automatic_album_candidate(&row.album, &related, &candidates)
+    classify_album_candidates_for_rows(&related_rows, &mut candidates);
+    let selected_uri = automatic_album_candidate_for_rows(&row.album, &related_rows, &candidates)
         .map(|candidate| candidate.uri.clone());
-    let matches = batch_rows(&batch, &rows_by_id)
-        .into_iter()
+    let matches = related_rows
+        .iter()
         .map(|candidate_row| {
             preserve_match_selection(
-                match_result_for(
-                    candidate_row.stable_id.clone(),
+                match_result_for_release(
+                    candidate_row,
                     search_term.clone(),
                     candidates.clone(),
-                    &candidate_row.track,
                     selected_uri.as_deref(),
                 ),
                 session.matches.get(&candidate_row.stable_id),
@@ -14690,6 +14832,101 @@ mod tests {
             )
             .map(|candidate| candidate.uri.as_str()),
             Some("narnia")
+        );
+    }
+
+    #[test]
+    fn release_matching_uses_known_suffixes_and_unique_significant_tokens() {
+        let row = |track: &str| SourceRow {
+            stable_id: source_id("James Horner", "Back To Titanic", track),
+            artist: "James Horner".into(),
+            album: "Back To Titanic".into(),
+            track: track.into(),
+            variants: Vec::new(),
+            play_count: 1,
+            earliest: 1,
+            latest: 1,
+        };
+        let rows = vec![
+            row("The Portrait – James Horner"),
+            row("Jack Dawson's Luck – Back To Titanic"),
+            row("A Building Panic – Back To Titanic"),
+        ];
+        let mut candidates = vec![AlbumCandidate {
+            uri: "spotify:album:titanic".into(),
+            name: "Back To Titanic – More Music from the Motion Picture".into(),
+            artist: "James Horner".into(),
+            track_uris: vec![
+                "spotify:track:portrait".into(),
+                "spotify:track:luck".into(),
+                "spotify:track:panic".into(),
+            ],
+            track_names: vec![
+                "The Portrait – From 'Titanic' Soundtrack".into(),
+                "Jack Dawson's Luck (includes 'John Ryan's Polka') – From 'Titanic' Soundtrack"
+                    .into(),
+                "A Building Panic (Album Suite) – From 'Titanic' Soundtrack".into(),
+            ],
+            track_artists: vec!["James Horner".into(); 3],
+            track_albums: vec!["Back To Titanic".into(); 3],
+            ..AlbumCandidate::default()
+        }];
+
+        classify_album_candidates_for_rows(&rows, &mut candidates);
+        assert_eq!(candidates[0].relation, Some(AlbumRelation::BestMatch));
+        assert_eq!(
+            automatic_album_candidate_for_rows("Back To Titanic", &rows, &candidates)
+                .map(|candidate| candidate.uri.as_str()),
+            Some("spotify:album:titanic")
+        );
+        for (row, expected) in rows.iter().zip([
+            "spotify:track:portrait",
+            "spotify:track:luck",
+            "spotify:track:panic",
+        ]) {
+            let result = match_result_for_release(
+                row,
+                "album search".into(),
+                candidates.clone(),
+                Some("spotify:album:titanic"),
+            );
+            assert_eq!(
+                result.track_matches.get(&row.stable_id).map(String::as_str),
+                Some(expected)
+            );
+        }
+
+        let classical = SourceRow {
+            track: "Un pochettino meno adagio – Vivacissimo – Adagio –".into(),
+            ..row("placeholder")
+        };
+        assert_eq!(
+            release_track_match_index(
+                &classical,
+                &[
+                    "Symphony No. 7 in C Major, Op. 105: II. Vivacissimo – Adagio – Largamente molto"
+                        .into(),
+                    "Symphony No. 5: Adagio".into(),
+                ],
+            ),
+            Some(0)
+        );
+
+        let generic = SourceRow {
+            artist: "John Williams".into(),
+            album: "Greatest Hits".into(),
+            track: "Main Theme".into(),
+            ..row("placeholder")
+        };
+        assert_eq!(
+            release_track_match_index(
+                &generic,
+                &[
+                    "Main Theme (From 'Jurassic Park')".into(),
+                    "Main Theme (From 'Schindler's List')".into(),
+                ],
+            ),
+            None
         );
     }
 
