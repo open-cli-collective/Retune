@@ -12,13 +12,17 @@ const streamingQualities = [
 ] as const
 const playThresholds: PlayThresholdPercent[] = [50, 75, 90, 100]
 
-function AutocompleteInput({ suggestions, value, onValue, placeholder }: {
+export function AutocompleteInput({ suggestions, value, onValue, placeholder, disabled, ariaLabel, onBlur, onKeyDown }: {
   suggestions: string[]
   value: string
   onValue: (value: string) => void
   placeholder?: string
+  disabled?: boolean
+  ariaLabel?: string
+  onBlur?: React.FocusEventHandler<HTMLInputElement>
+  onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
 }) {
-  return <input value={value} placeholder={placeholder} onChange={(event) => {
+  return <input aria-label={ariaLabel} disabled={disabled} value={value} placeholder={placeholder} onBlur={onBlur} onKeyDown={onKeyDown} onChange={(event) => {
     const input = event.target
     const typed = input.value
     const insertion = (event.nativeEvent as InputEvent).inputType === 'insertText' && input.selectionStart === typed.length
