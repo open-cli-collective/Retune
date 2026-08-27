@@ -43,6 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rodio = { version = "0.21.1", default-features = false, features = ["playback"] }
 rand = "0.9"
 url = "2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

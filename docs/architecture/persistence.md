@@ -12,14 +12,17 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `playlists.json` | Playlist metadata/content cache |
 | `cooldowns.json` | Typed Spotify endpoint cooldowns |
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
+| `spotify-catalog.json` | Versioned machine-local Spotify artist, album, and track catalog; excluded from backup |
 | `spotify-library.json` | Account-scoped exact Spotify saved-track and saved-album membership |
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state; mode 0600 on Unix |
 | `dev-lastfm-session.json` | Development Last.fm session; mode 0600 on Unix |
 | `lastfm-pending-token.json` | Short-lived Last.fm authorization token; mode 0600 on Unix |
-| `lastfm-scrobbles.json` | Ordered durable Last.fm scrobble queue; excluded from backup |
+| `lastfm-scrobbles.json` | V2 ordered pending queue plus accepted local-scrobble receipts; excluded from backup |
 | `lastfm-import.json` | Versioned, account-bound Last.fm snapshot/review session; excluded from backup |
 | `lastfm-import-cache/` | Disposable V2 parsed-page cache and authoritative manifests; excluded from backup |
+| `lastfm-mappings.json` | Account-bound reusable track/album mappings and permanent ignore rules; optional in backup |
+| `lastfm-sync.json` | Machine-local incremental checkpoint, active range/cache, backlog/journal, and the account/session-bound review-apply queue; excluded from backup |
 
 The official Tauri window-state plugin manages the main native window's size,
 position, and maximized state in machine-local application state. Its lifecycle
@@ -60,29 +63,89 @@ with the same temporary-file-and-rename atomic replacement as other app data.
 Missing or incomplete state is unknown and does not authorize destructive
 reconciliation until a complete sync establishes the exact account state.
 
+`spotify-catalog.json` is a versioned `SpotifyCatalog` V1 wrapper containing
+deterministic artist-ID, album-URI, and track-URI maps. It stores only reusable
+Spotify metadata and complete ordered album-track membership; query results,
+saved membership, ratings, plays, and Last.fm decisions remain elsewhere.
+Unknown versus known-empty collections and entity/relationship completeness are
+explicit. Local text hints are non-identity metadata. The shell loads the
+catalog before constructing the shared client, writes it with atomic replacement
+after dirty generations (at most every 30 seconds and at exit), and quarantines
+corrupt or unsupported files. It is excluded from backup and is cleared on
+disconnect, OAuth grant replacement, or confirmed Spotify account mismatch.
+
 `lastfm-import.json` is `LastFmImportSessionV2`. It stores the immutable
-`historyTo`, Last.fm username, nullable Spotify `/me` account ID, snapshot cache
-ID, descending page cursor, downloaded/total pages, totals, retryable error and
-attempt, session defaults for the two independent intents (content and
-historical play counts) plus whole-album mode, compact aggregated rows,
-decisions, stable 1-based `ImportBatch` pages capped at 100 source rows, batch
-options, match results/candidates/selected URIs, a
-session-level Spotify-target-to-Sum/Overwrite/Zero map, and the session-level
-search-term display preference. Last.fm pages are written atomically as parsed
+`historyTo`, an optional `downloadedThrough` timestamp, Last.fm username,
+nullable Spotify `/me` account ID, snapshot cache ID, descending page cursor,
+downloaded/total pages, totals, retryable error and attempt, session defaults
+for the two independent intents (content and historical play counts) plus
+whole-album mode, compact aggregated rows, decisions, stable 1-based
+`ImportBatch` pages capped at 100 source rows, batch options, match
+results/candidates/selected URIs, a
+reusable default plus frozen Spotify-target-to-Sum/Overwrite/Zero map, and the
+session-level search-term display preference. Match candidates include the
+backward-compatible serde-defaulted `inLibrary` projection (`false` for older
+sessions); it is cache-derived membership UI state, not a new acceptance or
+mapping decision. Last.fm pages are written atomically as parsed
 raw-page files; the manifest is written only after the page file and is the
 authority for recovery. The manifest and every page record the exact Last.fm
 username as well as cutoff/page metadata, so punctuation-distinct accounts
 cannot share a snapshot. Unacknowledged orphan files are ignored/overwritten.
+Collection review additionally stores the serde-defaulted, batch-keyed
+`collectionAlbumMatches` map: cached Spotify album previews, selected album
+URIs in selection order, and serde-defaulted per-source provenance for only the
+candidate URIs injected by a selected-album rerank. Coverage, per-track match
+status, and whole-album readiness are derived projections and are not persisted.
+Preview/add/remove mutations use the same serialized read-modify-write and
+atomic replacement path; legacy V2 sessions load an empty collection map and
+treat the new provenance as empty, retaining the existing release-shaped
+behavior. This session state is excluded from backup/export along with the rest
+of `lastfm-import.json`.
+`downloadedThrough` is serde-defaulted for older V2 JSON and remains absent
+until a valid checkpointed timestamp is available; loading an older session does
+not scan cached pages to backfill it. It advances monotonically with ordered
+page checkpoints and is exposed alongside `historyTo` to the importer UI.
 An acknowledged missing, corrupt, oversized, or metadata-mismatched page
-quarantines the entire snapshot and starts a fresh V2 session. The source
-runner retries the same probe/page after Last.fm's capped internal retry is
-exhausted, persisting state and waiting at the capped delay without advancing
-the cursor. No raw page is aggregated until the manifest is complete; review
+quarantines the entire snapshot and starts a fresh V2 session. The sequential
+metadata probe retains its existing retry helper. Concurrent page workers make
+one logical request after Last.fm's capped internal retry is exhausted and
+return structured outcomes without mutating importer state; the ordered
+coordinator persists one retry attempt and waits at the capped delay before
+re-entering from the failed cursor without advancing it. No raw page is aggregated until the manifest is complete; review
 entry and cache cleanup follow one atomic session write. Session and cache
 files use mode 0600 on Unix and a 100 MiB safety ceiling. Corrupt or unknown
 session versions are quarantined and never applied. This machine/account state
 is deliberately outside normal backup/restore, like `spotify-library.json` and
 the scrobble queue.
+
+`lastfm-scrobbles.json` is `ScrobbleLedgerV2`: the legacy array migrates to
+`pending`, while successful code-0 submissions add corrected metadata, submitted
+metadata, and timestamp receipts. Reconciliation consumes receipts and remote
+events as multisets; ignored or rejected submissions do not create receipts.
+Receipts are pruned only after the corresponding reconciliation commit.
+
+`lastfm-mappings.json` is account-bound and stores explicit source-track to
+Spotify-track mappings, source-album mappings with normalized target track
+names, the reusable count-merge default, and permanent excluded-track,
+ignored-album, and ignored-artist rules.
+Explicit track mappings win over album mappings. Skip decisions are not stored
+there. Completed V2 historical sessions idempotently backfill accepted choices.
+Unreadable or unsupported mappings are quarantined with a timestamped sibling
+before fresh mappings are used, and the reset is reported in sync status.
+
+`lastfm-sync.json` stores the Last.fm/Spotify identities, `syncedThrough`,
+`lastSyncedAt`, one fixed padded download range and cache identity, stable
+unresolved backlog, sync error, and the before/after application journal. The
+first activation records `syncedThrough=now` and does not backfill. A range is
+locally filtered to `[syncedThrough, cutoff)` and is not applied until every
+page is cached. The journal records exact affected-library values plus
+checkpoint, backlog, and receipt effects before `library.json` changes. Recovery
+finalizes only an exact before or after match and reports a typed conflict for
+anything else. Disconnect or Last.fm account replacement clears this machine
+sync state and receipts but preserves owner-bound mappings; Spotify identity
+mismatches suspend safe application. Unreadable or unsupported sync state is
+quarantined with a timestamped sibling, then reset to a fresh no-checkpoint
+state so the next sync starts at its current activation time.
 
 `lastfmScrobblingProfile` is persisted in settings and is accepted only when
 its trimmed username is non-empty and `startedAt` is positive. Settings load,
@@ -147,8 +210,9 @@ Last.fm release session keys use the native credential store with service
 that credential value and is never sent to the frontend except as connected
 account display state. Debug builds and local bundles use
 `dev-lastfm-session.json`. Authorization request tokens use the short-lived
-owner-only pending-token file. Scrobbles are written atomically oldest-first to
-the ordered queue file, sent in batches of at most 50, and removed after an
+owner-only pending-token file. Pending scrobbles and accepted receipts are
+written atomically oldest-first to the V2 ledger, sent in batches of at most 50,
+and pending items are removed after an
 accepted/ignored response (including ignored code 3). The queue is
 machine/account state and is intentionally omitted from backup and restore;
 each queued scrobble carries its non-secret owning Last.fm username. Session and
@@ -174,10 +238,13 @@ Retune starts with an empty library and reports the problem rather than
 overwriting the evidence.
 
 Backup/export produces JSON or gzip containing the core library plus portable
-settings and playlist cache. Restore validates and replaces the library and
-applies exported portable settings/playlists after confirmation. Merge is
-additive library-only: it ignores exported settings/playlists, deduplicates by
-URI, and preserves existing overlay values.
+settings, playlist cache, and optional `lastfmMappings`. Restore validates and
+replaces the library, restores mappings dormant until their Last.fm and Spotify
+identities match, and applies exported portable settings/playlists after
+confirmation. Merge is additive library-only: it ignores exported settings,
+playlists, and mappings, deduplicates by URI, and preserves existing overlay
+values. Checkpoints, receipts, active downloads, journals, and pending review
+are never exported.
 
 Machine-specific credentials and Spotify client configuration are not portable
 backup data.

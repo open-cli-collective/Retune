@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useState } from 'react'
 import { diagnosticLevels, formatDiagnosticReport, reportWindow, type DiagnosticLevel, type DiagnosticReport } from './diagnostics.ts'
-import type { LastFmState, MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
+import type { LastFmImportState, LastFmState, MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
 import { clearedTrackRating, overlayEditTargets } from './ui.ts'
 import { ModalDialog, RatingStars } from './viewShared.tsx'
 
@@ -12,13 +12,17 @@ const streamingQualities = [
 ] as const
 const playThresholds: PlayThresholdPercent[] = [50, 75, 90, 100]
 
-function AutocompleteInput({ suggestions, value, onValue, placeholder }: {
+export function AutocompleteInput({ suggestions, value, onValue, placeholder, disabled, ariaLabel, onBlur, onKeyDown }: {
   suggestions: string[]
   value: string
   onValue: (value: string) => void
   placeholder?: string
+  disabled?: boolean
+  ariaLabel?: string
+  onBlur?: React.FocusEventHandler<HTMLInputElement>
+  onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
 }) {
-  return <input value={value} placeholder={placeholder} onChange={(event) => {
+  return <input aria-label={ariaLabel} disabled={disabled} value={value} placeholder={placeholder} onBlur={onBlur} onKeyDown={onKeyDown} onChange={(event) => {
     const input = event.target
     const typed = input.value
     const insertion = (event.nativeEvent as InputEvent).inputType === 'insertText' && input.selectionStart === typed.length
@@ -233,13 +237,15 @@ function BugPreferences() {
   </>
 }
 
-export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onImport, onSave }: {
+export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSyncLastfm, onSave }: {
   settings: Settings
   lastfm: LastFmState
+  lastfmImport: LastFmImportState
   onZoom: (zoom: number) => void
   onCancel: () => void
   onLastfm: (state: LastFmState) => void
   onImport: () => void
+  onSyncLastfm: () => void
   onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio' | 'bug'
@@ -324,7 +330,13 @@ export function Preferences({ settings, lastfm, onZoom, onCancel, onLastfm, onIm
                   <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect</button>
                 </div>
                 <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Sent once a track passes Last.fm's listening threshold.</small></span></label>
-                <button type="button" className="lastfm-pill primary" onClick={onImport}>Import / Resume</button>
+                <div className="lastfm-actions">
+                  <button type="button" className="lastfm-pill primary" onClick={onSyncLastfm} disabled={lastfmImport.syncing}>{lastfmImport.syncing ? 'Syncing…' : 'Sync Last.fm plays'}</button>
+                  <button type="button" className="lastfm-pill" onClick={onImport}>Import / Resume</button>
+                </div>
+                <small className="lastfm-sync-status">
+                  {lastfmImport.syncProblem ?? (lastfmImport.pendingReview ? `${lastfmImport.pendingReview.toLocaleString()} plays need review.` : lastfmImport.lastSyncedAt ? `Last synced ${new Date(lastfmImport.lastSyncedAt * 1000).toLocaleString()}.` : 'Exact play reconciliation starts with the next sync.')}
+                </small>
               </> : <div className="lastfm-status-row">
                 <span className={`lastfm-status-dot${lastfm.pending ? ' pending' : ''}`} aria-hidden="true" />
                 <span className="lastfm-status-copy muted">

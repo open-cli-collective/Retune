@@ -3,6 +3,43 @@ use crate::provider::{saved_album_record, SearchGroup};
 use librespot_core::{authentication::Credentials, config::SessionConfig, session::Session};
 use retune_spotify::tokens::PlaybackCredentials;
 
+fn spotify_action_cooldown(
+    error: &retune_spotify::Error,
+    now: u64,
+) -> Option<(&str, store::CooldownKind, u64)> {
+    match error {
+        retune_spotify::Error::RateLimited {
+            endpoint,
+            retry_after_secs,
+        } => Some((
+            endpoint,
+            store::CooldownKind::Transient,
+            now.saturating_add(*retry_after_secs),
+        )),
+        retune_spotify::Error::QuotaExceeded {
+            endpoint,
+            retry_after_secs: Some(retry_after_secs),
+        } => Some((
+            endpoint,
+            store::CooldownKind::Quota,
+            now.saturating_add(*retry_after_secs),
+        )),
+        _ => None,
+    }
+}
+
+fn spotify_action_error(state: &AppState, error: retune_spotify::Error) -> String {
+    let now = unix_now();
+    if let Some((endpoint, kind, deadline)) = spotify_action_cooldown(&error, now) {
+        if let Err(persist_error) =
+            record_cooldown(&state.sync_store, endpoint, kind, deadline, now)
+        {
+            log::warn!("Could not persist Spotify action cooldown: {persist_error}");
+        }
+    }
+    error.to_string()
+}
+
 fn album_library_uris(uri: &str) -> Vec<String> {
     vec![uri.to_owned()]
 }
@@ -88,6 +125,7 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
         &state.spotify_library,
         SpotifyLibraryState::default(),
     )?;
+    crate::clear_spotify_catalog(&state)?;
     state
         .token_store
         .save(&web_oauth_tokens(
@@ -97,8 +135,11 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
             granted_scopes,
         ))
         .map_err(|error| error.to_string())?;
-    *state.spotify.lock().expect("spotify mutex poisoned") =
-        spotify_provider(&client_id, Arc::clone(&state.token_store))?;
+    *state.spotify.lock().expect("spotify mutex poisoned") = spotify_provider(
+        &client_id,
+        Arc::clone(&state.token_store),
+        Arc::clone(&state.spotify_catalog),
+    )?;
     set_auto_connect(&app, true)?;
     emit_connection_state(&app)?;
     drop(membership_guard);
@@ -213,6 +254,7 @@ pub(super) async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), Stri
         &state.spotify_library,
         SpotifyLibraryState::default(),
     )?;
+    crate::clear_spotify_catalog(&state)?;
     app.state::<AppState>()
         .token_store
         .clear()
@@ -399,15 +441,14 @@ pub(super) async fn add_spotify_album(
 
 pub(crate) struct AlbumSaveResult {
     pub album_uri: String,
-    pub track_uris: Vec<String>,
 }
 
 /// Saves one album entity upstream and mirrors its content locally. The
 /// caller holds `spotify_library_gate`; replaying this operation is safe
 /// because Spotify's library PUT is idempotent and local upsert deduplicates.
-pub(crate) async fn save_album_operation(
+pub(crate) async fn save_album_operation<T: Transport, S: TokenStore>(
     state: &AppState,
-    provider: &SpotifyProvider,
+    provider: &SpotifyClient<T, S>,
     uri: &str,
     name: &str,
     artist: &str,
@@ -434,7 +475,7 @@ pub(crate) async fn save_album_operation(
     provider
         .save_to_library(&album_uris)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| spotify_action_error(state, error))?;
     if current.is_exact() {
         let mut next = current;
         next.add_saved_album(album_record);
@@ -458,7 +499,6 @@ pub(crate) async fn save_album_operation(
     })?;
     Ok(AlbumSaveResult {
         album_uri: album.uri,
-        track_uris,
     })
 }
 
@@ -529,7 +569,8 @@ pub(super) async fn add_spotify_tracks(
     let state = app.state::<AppState>();
     let _membership_guard = state.spotify_library_gate.lock().await;
     let provider = provider_from(&state)?;
-    let ids = save_tracks_operation(&state, provider.as_ref(), uris, unix_now()).await?;
+    let ids =
+        save_tracks_operation(&state, provider.as_ref(), uris, Vec::new(), unix_now()).await?;
     app.emit("library-changed", ())
         .map_err(|error| error.to_string())?;
     Ok(ids)
@@ -537,10 +578,11 @@ pub(super) async fn add_spotify_tracks(
 
 /// Saves only track entities upstream and mirrors those tracks locally. The
 /// caller holds `spotify_library_gate`; no album URI is synthesized here.
-pub(crate) async fn save_tracks_operation(
+pub(crate) async fn save_tracks_operation<T: Transport, S: TokenStore>(
     state: &AppState,
-    provider: &SpotifyProvider,
+    provider: &SpotifyClient<T, S>,
     uris: Vec<String>,
+    cached_tracks: Vec<retune_core::model::NewTrack>,
     added_at: u64,
 ) -> Result<Vec<u64>, String> {
     let mut seen = HashSet::new();
@@ -569,12 +611,21 @@ pub(crate) async fn save_tracks_operation(
             },
         );
     }
+    let mut cached_tracks = cached_tracks
+        .into_iter()
+        .map(|track| (track.uri.clone(), track))
+        .collect::<HashMap<_, _>>();
     let mut tracks = Vec::with_capacity(missing_uris.len());
     for uri in &missing_uris {
+        if let Some(mut track) = cached_tracks.remove(uri) {
+            track.added_at = Some(added_at);
+            tracks.push(track);
+            continue;
+        }
         let track = provider
             .track(track_id(uri).expect("validated above"))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| spotify_action_error(state, error))?;
         let artist = match track.artists.first() {
             Some(artist) => provider.artist(&artist.id).await.ok(),
             None => None,
@@ -603,7 +654,7 @@ pub(crate) async fn save_tracks_operation(
     provider
         .save_to_library(&requested_uris)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| spotify_action_error(state, error))?;
     if let Some(next) = next {
         state
             .sync_store
@@ -689,9 +740,26 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        playback_credentials, replace_spotify_library_state, web_oauth_tokens, FsSyncStore, Mutex,
-        SpotifyLibraryState,
+        playback_credentials, replace_spotify_library_state, spotify_action_cooldown,
+        web_oauth_tokens, FsSyncStore, Mutex, SpotifyLibraryState,
     };
+
+    #[test]
+    fn spotify_action_cooldown_preserves_only_supplied_deadlines() {
+        let quota = retune_spotify::Error::QuotaExceeded {
+            endpoint: "/me/library".into(),
+            retry_after_secs: Some(120),
+        };
+        assert_eq!(
+            spotify_action_cooldown(&quota, 1_000),
+            Some(("/me/library", crate::store::CooldownKind::Quota, 1_120))
+        );
+        let unknown = retune_spotify::Error::QuotaExceeded {
+            endpoint: "/me/library".into(),
+            retry_after_secs: None,
+        };
+        assert_eq!(spotify_action_cooldown(&unknown, 1_000), None);
+    }
 
     #[test]
     fn replacing_oauth_state_clears_prior_exact_membership() {

@@ -35,8 +35,9 @@ Overlay edits never mutate source-file tags or Spotify metadata.
 Last.fm import is an application-shell boundary in
 `apps/desktop/src-tauri/src/lastfm_import.rs`; `retune-core` remains a pure,
 deterministic mutation target. History is an absolute baseline: resolved source
-counts use one session-persisted Sum, highest-played spelling Overwrite, or Zero
-decision per collapsed Spotify track target, then local play count takes the maximum of current and historical
+counts use one reusable account-bound Sum, highest-played spelling Overwrite, or
+Zero default across unlocked Spotify targets. Acceptance freezes the strategy
+used by each selected target, then local play count takes the maximum of current and historical
 values. `last_played_at` takes the latest relevant scrobble and `added_at` takes
 the earliest; Zero never erases known Retune plays. Blank genre/rating options
 are no-ops. Whole-album rating is stored as an album rating, while
@@ -44,26 +45,112 @@ selected-track mode stores explicit track ratings only.
 
 Each page has two independent intents: import Spotify content and include
 historical play counts. Both default on, at least one must remain on, and
-whole-album is a separate page-level content mode defaulting off. Content-only
+whole-album is a separate page-level content mode. It defaults on only when one
+Spotify album maps every included source track one-to-one with no extra tracks;
+the user's persisted page choice then wins. Content-only
 acceptance saves membership and applies source `added_at` without changing
 plays or `last_played_at`; counts-only performs no Spotify write and updates
 only already-materialized matched Retune tracks.
+Enabling whole-album mode repairs an empty source-row selection by selecting all
+actionable, non-excluded rows; an existing partial selection remains unchanged.
 
 The importer’s “Show Spotify search terms” preference is session-level and is
 restored on resume. Fuzzy disclosures are bounded to the visible persisted
 `ImportBatch`; the target-wide count decision still includes completed source
-rows from other batches.
+rows from other batches. Last.fm rows with an empty source album are collection
+rows, displayed as `Singles`, and are matched one track at a time. Ratification
+prefers accepted mappings and manual choices, then the strongest unique local
+title match from Spotify's already-scoped results. Exact normalized titles win
+over near titles; saved Retune/Spotify membership and matching artist text rank
+candidates within the same title tier but do not veto a match. The same rule
+applies to the user's selected album set, and multiple candidates in the
+strongest title tier remain ambiguous. Catalog comparison is
+diacritic-insensitive. Near-title comparison ignores parenthetical annotations,
+accepts bidirectional token containment, and uses token overlap only to order
+otherwise equal candidates within the visible batch. It also tolerates one inserted or
+missing character or one adjacent transposition in a single title token of at
+least five characters. Generated track searches apply the
+same parenthetical simplification rather than issuing a second Spotify request.
+
+The Spotify metadata used for these comparisons remains owned by the shared
+`retune-spotify` catalog. The core library consumes supplied records and never
+reads or persists that machine-local cache, so overlay and Last.fm decisions
+remain deterministic and portable.
+Exact or near-title tracks found on multiple selected albums remain unresolved
+until the user chooses an album-labelled candidate; the UI recommends one only
+when its existing matched/unique album coverage strictly outranks the
+alternatives. Collection review persists a V2,
+batch-keyed cache of preview candidates and ordered selected album URIs; its
+coverage is derived over the selected union, and cached add/remove/revisit
+operations rerank without Spotify requests or membership writes. Search makes
+one album request; the first Preview or direct Add fetches one album, while
+cached operations make no request. Legacy album-shaped search terms refetch
+only the incompatible rows. A non-empty source album literally
+named `Singles` remains release-shaped.
+
+The complete candidate precedence, normalization, release/collection ranking,
+ambiguity, and count-merge rules are documented in
+[Last.fm import matching](lastfm-import-matching.md).
+
+Release-shaped batches compare source and Spotify album and track titles with
+the same normalized contained-token rules used by collection matching. Retune
+automatically selects the uniquely strongest supported relation among candidates
+that either map every source row one-to-one or cover at least 80% of both the
+source rows and the Spotify album's distinct tracks; equally strong releases
+remain unresolved. Clean Spotify supersets can therefore be selected despite
+extra tracks. Artist credit is
+supporting metadata rather than a veto because soundtracks and compilations are
+commonly credited differently across catalogs. Generated album searches elide
+parenthetical annotations while retaining Spotify's album and artist filters.
+Unmatched source rows remain available for individual review. Cached
+unselected album results are reclassified locally on load and do not trigger a
+new Spotify request. Manual album searches apply the same automatic selector
+while preserving prior explicit track or album choices.
+
+Track-match review mutations keep their existing account guards, atomic
+persistence, and import-change event, while `lastfm_import_select_match` and
+`lastfm_import_change_track` also return the affected `ImportPageView` for
+direct installation on the visible page. Choosing a cached candidate does not
+make a Spotify request. `lastfm_import_select_matches` applies a non-empty set
+of candidates from one review batch in one atomic session write and returns the
+same page projection; the collection UI uses it to ratify all currently valid
+same-artist suggestions without issuing Spotify requests.
+
+Failed asynchronous apply jobs persist Spotify's supplied retry deadline with
+the frozen job. Review shows that deadline in local time with a live countdown;
+quota errors without a Spotify deadline say so instead of inventing one.
+The importer state also projects the earliest active persisted Spotify cooldown,
+so the same deadline remains visible without a selected failure and after relaunch.
+
+The visible review-page projection stably partitions actionable selected rows
+whose IDs are in `requiredImportMatchIds` (selected rows without a track target)
+ahead of the remaining rows, preserving source order inside both groups. A
+successful mapping therefore moves that row below any remaining work without
+changing the persisted source order. For collection rows, a same-artist
+`same-songs` track is never ratified automatically: the UI shows it through
+SUGGESTED / Use This Track only when exactly one distinct target URI remains
+after deduplication and the target is already in the library or belongs to a
+selected album-match union. Wrong-artist, low-confidence, and multiple-target
+near matches use the same album-labelled chooser; low-confidence matches remain
+unresolved.
 
 The source importer is V2. It records a fixed profile-bound `historyTo`, probes
-Last.fm metadata once, downloads pages at the documented 200-row limit from
-oldest toward page 1, and stores parsed raw pages under a snapshot-specific
-machine cache. Rows at or after `historyTo` are rejected before caching or
+Last.fm metadata once, downloads pages at the documented 200-row limit; Last.fm's
+page total is oldest, so Retune moves toward page 1, and stores parsed raw pages under a snapshot-specific
+machine cache. The metadata probe remains sequential; after the total is known,
+bounded windows of four source requests are launched together and
+processed/checkpointed in descending page order. Rows at or after `historyTo` are rejected before caching or
 counting; the exact Last.fm username is recorded in the manifest and each page.
 The manifest is authoritative: an orphan page file is harmless and may be
 overwritten, while an acknowledged missing, corrupt, oversized, or
-metadata-mismatched page quarantines the whole snapshot and restarts V2. A
-retryable Last.fm failure is persisted and retried in-process at the capped
-backoff without advancing the cursor. No aggregation happens until every page
+metadata-mismatched page quarantines the whole snapshot and restarts V2. The
+manifest and session cursor remain a contiguous descending suffix; a failed
+window retains its already-checkpointed prefix, discards lower in-memory
+results, and resumes from the failed page. A process exit can therefore
+refetch only the unfinished part of one window. Concurrent workers return
+structured outcomes without mutating importer retry state; the ordered
+coordinator persists one attempt for a retryable failure, waits at the capped
+backoff, and re-enters from the failed cursor without advancing it. No aggregation happens until every page
 is acknowledged; then raw-page reads, sorting, and aggregation run off the
 async runtime before review is entered atomically (or Done when no rows remain)
 and the cache is best-effort deleted. A saved Downloading or Aggregating session
@@ -75,20 +162,78 @@ aggregation transition and emitted state, so a connected-account change cannot
 expose the completed snapshot. React only observes that work. An empty state
 does not create one.
 
+### Last.fm incremental reconciliation
+
+The first exact sync establishes `syncedThrough=now`; it does not backfill
+older post-enable history. Launch, reconnect, and the explicit “Sync Last.fm
+plays” action each process one fixed half-open window. The query is padded for
+Last.fm’s exclusive bounds and the exact window is filtered locally. Incremental
+download reuses the historical parser, 200-row pages, four-page downloader,
+manifest/cache, retry protections, and oldest-to-newest checkpoints. It never
+calls Spotify and does not aggregate until the range is complete.
+
+Retune-origin scrobbles are represented by accepted local receipts and are
+matched as a multiset, so they are not imported again. Every other accepted
+mapped event increments its materialized Retune track additively and advances
+`last_played_at` to the newest external timestamp; the historical play-count
+threshold does not apply. An explicit track mapping wins over an album mapping.
+Unknown or unavailable targets remain in the stable importer backlog, which can
+accept later windows without blocking their download. Explicit accepted matches
+and permanent track, album, and artist ignore rules are reusable and sweep
+applicable backlog occurrences; Skip is temporary. Accept & Next archives a
+reviewed batch from the queue, records mappings only for selected rows, and leaves
+future occurrences of unselected rows eligible for review. No target is silently added
+to the library: explicit reviewed content choices use the existing Spotify save
+operations.
+
+The Tauri shell’s pure reconciliation function receives remote events, accepted
+receipts, mappings/ignore rules, and available library URIs. It returns additive
+increments, latest timestamps, unresolved events, and consumed receipts without
+filesystem, HTTP, async, Tauri, or Spotify concerns. A before/after application
+journal is persisted before the atomic library write and records checkpoint,
+backlog, and receipt effects. Recovery applies the before state, finalizes the
+after state, or exposes a typed conflict; it never guesses.
+
 Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.
 Normal albums under the cap remain one batch; larger albums and singles split
 deterministically, and command arguments must identify the requested batch and
-its source rows. Queue summaries cross the IPC boundary as bounded cursor/limit
-pages with `sourceCount`, not source IDs; Accept All applies its prepared batches
-sequentially and refreshes the queue once after the bulk operation.
+its artist/album identity. Row actions also require a source ID; album-level
+actions can operate without one. Queue summaries cross the IPC boundary as
+bounded cursor/limit pages with `sourceCount`, not source IDs. Queued and
+running apply jobs are omitted from the active projection; failed jobs reappear
+with their frozen choices and an explicit retry action. A failed Accept All job
+parks its cursor until that frozen job succeeds, then resumes from its saved
+bulk index. Accept All persists one
+compact cursor and advances one durable apply job at a time; review choices are
+locked while that cursor is active, including after restart.
 
 Spotify matching is lazy. Opening a visible batch uses the shared client and
 request gate, serializes duplicate requests, binds the Spotify account on the
-first match, and caches the result; reopening it makes no API call. Accept All
-is the only bulk exception and prepares remaining batches sequentially before
+first match, and caches the result. Once that page is visible, React requests
+exactly the next batch in the active sort order as a one-item lookahead; an
+overlapping foreground open joins the same importer lock and cached result.
+Correctly cached collection batches reopen
+without an API call; only legacy empty-album rows with album-shaped cached
+search terms refetch. Whole-album import stays disabled for a collection until
+one coherent release is explicitly chosen. Accept All prepares all remaining
+batches sequentially before
 showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
 source-history decisions and can be undone before acceptance; they never remove
 a track inherently materialized by a saved whole album.
+
+Accepting one batch first persists a frozen, account/session-bound apply plan in
+`lastfm-sync.json`; the command waits only for that atomic enqueue. A serial Rust
+worker then saves upstream membership, materializes missing tracks, applies
+idempotent history/metadata, persists reusable mappings, and finally commits the
+review decision before removing the job. A process exit or failure leaves the
+job at its last stage for safe replay; account changes suspend it without
+applying to another profile. The UI advances from the authoritative queue after
+enqueue and completion events never replace a newer selection.
+
+Track-mode collection applies materialize missing local records from the
+persisted selected-album preview cache before the Spotify membership write.
+Only targets absent from that cache fall back to individual Spotify metadata
+reads, so retrying a frozen cached job does not repeat `/tracks/{id}` requests.
 
 Spotify saved-track and saved-album memberships are not core-library state.
 The shell keeps those account-scoped memberships separately while materializing

@@ -129,7 +129,7 @@ export const initialState: State = {
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
   lastfm: { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null },
-  lastfmImport: { phase: null, username: null, spotifyAccountId: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true },
+  lastfmImport: { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: null, applyingAll: false, spotifyLimit: null },
   spotifyResults: null,
   spotifySearching: false,
   playlistRevision: 0,

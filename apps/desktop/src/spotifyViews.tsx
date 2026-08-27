@@ -101,6 +101,47 @@ export function SpotifyPageBack({ label, onBack }: { label: string; onBack: () =
   return <button className="spotify-page-back" onClick={onBack}>‹ Back to {label}</button>
 }
 
+export type SpotifyAlbumPresentationData = {
+  uri: string
+  name: string
+  artist: string
+  albumType?: string | null
+  year?: string | null
+  imageUrl?: string | null
+  tracks: { uri: string; name: string; trackNo?: number | null; durationSecs?: number; matchState?: 'matched' | 'ambiguous' | 'unmatched' }[]
+}
+
+/** Album artwork, metadata, and track rows without playback or membership controls. */
+export function SpotifyAlbumPresentation({ album, compact = false, titleAs = 'h2', artistContent, headerMeta, headerActions, renderTrack, trackFooter }: {
+  album: SpotifyAlbumPresentationData
+  compact?: boolean
+  titleAs?: 'h1' | 'h2'
+  artistContent?: ReactNode
+  headerMeta?: ReactNode
+  headerActions?: ReactNode
+  renderTrack?: (track: SpotifyAlbumPresentationData['tracks'][number], index: number) => ReactNode
+  trackFooter?: ReactNode
+}) {
+  const totalDurationSecs = album.tracks.reduce((total, track) => total + (track.durationSecs ?? 0), 0)
+  const title = titleAs === 'h1' ? <h1>{album.name}</h1> : <h2>{album.name}</h2>
+  return <section className={`spotify-album-presentation${compact ? ' compact' : ''}`} aria-label={`${album.name} album preview`}>
+    <header className="spotify-page-header album-header">
+      <div className="spotify-page-art album-art"><SpotifyArtwork imageUrl={album.imageUrl ?? null} /></div>
+      <div className="spotify-page-copy">
+        <div className="spotify-eyebrow">ALBUM{album.albumType && album.albumType.toLowerCase() !== 'album' && ` · ${album.albumType.toUpperCase()}`}</div>
+        {title}
+        {artistContent ?? <p className="spotify-link artist-link">{album.artist}</p>}
+        {headerMeta ?? <div className="spotify-page-meta"><span>{album.year && `${album.year} · `}{album.tracks.length} {album.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(totalDurationSecs / 60)} min</span></div>}
+        {headerActions}
+      </div>
+    </header>
+    <div className="spotify-page-section album-tracks">
+      {album.tracks.map((track, index) => renderTrack?.(track, index) ?? <div className="spotify-track-row" key={`${track.uri}-${index}`}><span>{track.trackNo ?? index + 1}</span><span>{track.name}{track.matchState && <small className={`spotify-track-match-state ${track.matchState}`}>{track.matchState}</small>}</span><time>{formatTime(track.durationSecs ?? 0)}</time></div>)}
+      {trackFooter}
+    </div>
+  </section>
+}
+
 function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, onBack, onArtist, onAdd, onRemove, onAddTrack, onRemoveTrack, onPlay, onPlaylist, onError }: {
   entry: Extract<SpotifyNavEntry, { kind: 'album' }>
   backLabel: string
@@ -166,25 +207,30 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
       setTrackBusy(undefined)
     }
   }
+  const presentation: SpotifyAlbumPresentationData = {
+    uri: page.uri,
+    name: page.name,
+    artist: page.artist,
+    albumType: page.albumType,
+    year: page.year,
+    imageUrl: page.imageUrl,
+    tracks: page.tracks.map((track) => ({ uri: track.uri, name: track.name, trackNo: track.trackNo, durationSecs: track.durationSecs })),
+  }
   return <div className="spotify-page">
     <SpotifyPageBack label={backLabel} onBack={onBack} />
-    <header className="spotify-page-header album-header">
-      <div className="spotify-page-art album-art"><SpotifyArtwork imageUrl={page.imageUrl} /></div>
-      <div className="spotify-page-copy">
-        <div className="spotify-eyebrow">ALBUM{page.albumType.toLowerCase() !== 'album' && ` · ${page.albumType.toUpperCase()}`}</div>
-        <h1>{page.name}</h1>
-        <button className="spotify-link artist-link" onClick={() => onArtist(page.artistId)}>{page.artist}</button>
-        <div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={page.contentComplete && !adding && !busy ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span>{page.addedAt !== null && <time>Date Added: {new Date(page.addedAt * 1000).toLocaleDateString()}</time>}</div>
-        <div className="spotify-page-actions">
-          <button className="primary" onClick={() => onPlay(tracks[0].id, tracks)} disabled={!tracks.length}>▶ Play</button>
-          {savedAlbum
-            ? <button disabled={adding || busy} onClick={() => void remove()}>{busy ? 'Removing…' : adding ? 'Adding…' : '✓ In Library — Remove'}</button>
-            : <button disabled={adding || busy} onClick={() => void add()}>{busy ? 'Removing…' : adding ? 'Adding…' : '+ Add to Library'}</button>}
-        </div>
-      </div>
-    </header>
-    <section className="spotify-page-section album-tracks">
-      {page.tracks.map((track, index) => {
+    <SpotifyAlbumPresentation
+      album={presentation}
+      titleAs="h1"
+      artistContent={<button className="spotify-link artist-link" onClick={() => onArtist(page.artistId)}>{page.artist}</button>}
+      headerMeta={<div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={page.contentComplete && !adding && !busy ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span>{page.addedAt !== null && <time>Date Added: {new Date(page.addedAt * 1000).toLocaleDateString()}</time>}</div>}
+      headerActions={<div className="spotify-page-actions">
+        <button className="primary" onClick={() => onPlay(tracks[0].id, tracks)} disabled={!tracks.length}>▶ Play</button>
+        {savedAlbum
+          ? <button disabled={adding || busy} onClick={() => void remove()}>{busy ? 'Removing…' : adding ? 'Adding…' : '✓ In Library — Remove'}</button>
+          : <button disabled={adding || busy} onClick={() => void add()}>{busy ? 'Removing…' : adding ? 'Adding…' : '+ Add to Library'}</button>}
+      </div>}
+      renderTrack={(_presentationTrack, index) => {
+        const track = page.tracks[index]
         const subject: PlaylistSubject = { kind: 'tracks', label: `Track · ${track.name}`, uris: [track.uri] }
         const savedIndividually = trackIsSavedIndividually(track)
         const mutating = trackBusy === track.uri
@@ -199,9 +245,10 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
         <button className="spotify-track-action" draggable={false} title={`Play ${track.name}`} aria-label={`Play ${track.name}`} onClick={(event) => { event.stopPropagation(); onPlay(tracks[index].id, tracks) }} onDoubleClick={(event) => event.stopPropagation()}>▶ Play</button>
         <button className="spotify-track-action library" draggable={false} disabled={mutating} title={savedIndividually ? 'Remove from Library' : 'Add to Library'} aria-label={savedIndividually ? `Remove ${track.name} from Library` : `Add ${track.name} to Library`} onClick={(event) => { event.stopPropagation(); void toggleTrack(track) }} onDoubleClick={(event) => event.stopPropagation()}>{mutating ? savedIndividually ? 'Removing…' : 'Adding…' : savedIndividually ? '✓ Added' : '+ Add'}</button>
         {menu?.index === index && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setMenu(undefined); onPlaylist(subject) }}>Add to Playlist…</button></ContextMenu>}
-      </div>})}
-      <p className="spotify-page-hint">Double-click a track to preview. Adding the album pulls every track into your local overlay.</p>
-    </section>
+      </div>
+      }}
+      trackFooter={<p className="spotify-page-hint">Double-click a track to preview. Adding the album pulls every track into your local overlay.</p>}
+    />
   </div>
 }
 

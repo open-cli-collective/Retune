@@ -10,6 +10,7 @@ import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryVi
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, LastFmImportState, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
+import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
@@ -394,6 +395,11 @@ function App() {
   const openLastfmImporter = () => {
     invoke('open_lastfm_importer').catch(fail)
   }
+  const syncLastfm = () => {
+    invoke<LastFmImportState>('sync_lastfm_plays')
+      .then((lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
+      .catch(fail)
+  }
   const cancelPreferences = () => {
     skipSettingsSave.current = true
     setZoom(preferenceZoom.current)
@@ -688,7 +694,7 @@ function App() {
             </>
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} lastfmRemaining={state.lastfmImport.remaining} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
+          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} lastfmImport={state.lastfmImport} lastfmRemaining={Math.max(state.lastfmImport.remaining, state.lastfmImport.pendingReview)} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
@@ -704,7 +710,7 @@ function App() {
           return invoke('sync_from_spotify')
         })
         .catch(fail)} />}
-      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} onZoom={setZoom} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSave={({ browserPanes, ...settings }) => {
+      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={setZoom} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onSave={({ browserPanes, ...settings }) => {
         const audioChanged = settings.streamingBitrate !== state.settings.streamingBitrate
           || settings.normalizeVolume !== state.settings.normalizeVolume
           || settings.gapless !== state.settings.gapless
@@ -1364,13 +1370,18 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
   </ModalDialog>
 }
 
-function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, lastfmRemaining, onLastfmImport, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; lastfmRemaining: number; onLastfmImport: () => void; empty: boolean }) {
+function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, lastfmImport, lastfmRemaining, onLastfmImport, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; lastfmImport: LastFmImportState; lastfmRemaining: number; onLastfmImport: () => void; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
+  const sourceWork = lastfmImport.phase === 'downloading' || lastfmImport.phase === 'aggregating'
+  const progress = importDownloadProgressLabel(lastfmImport.processedScrobbles, lastfmImport.totalScrobbles, importDownloadPercent(lastfmImport.downloadedPages, lastfmImport.totalPages))
   return <footer className="status-bar">{syncProgress
     ? <span className="sync-status"><span>⟳ Syncing from Spotify…</span><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></span>
+    : sourceWork ? <button type="button" className="status-import-link" onClick={onLastfmImport}>{importStatusText(lastfmImport.phase, lastfmImport.username)} · {progress}</button>
+    : lastfmImport.syncing ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⟳ Syncing Last.fm plays…</button>
+    : lastfmImport.syncProblem ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Last.fm sync needs attention</button>
     : lastfmRemaining > 0 ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Finish importing from Last.fm — {lastfmRemaining} left</button>
     : <span>{syncPhase ?? importStatus ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)}</span>}</footer>
 }

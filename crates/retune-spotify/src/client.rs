@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 
 use crate::auth::TokenResponse;
+use crate::catalog::SpotifyCatalog;
 use crate::tokens::{InMemoryTokenStore, TokenStore, Tokens};
 use crate::{Error, Result};
 
@@ -212,7 +213,7 @@ pub struct SpotifyClient<T, S> {
     client_id: String,
     transport: T,
     tokens: S,
-    artist_cache: Mutex<HashMap<String, Artist>>,
+    catalog: Arc<Mutex<SpotifyCatalog>>,
     request_counts: Mutex<BTreeMap<String, u64>>,
     refresh_lock: AsyncMutex<()>,
     request_not_before: AsyncMutex<Option<Instant>>,
@@ -220,15 +221,40 @@ pub struct SpotifyClient<T, S> {
 
 impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     pub fn new(client_id: impl Into<String>, transport: T, tokens: S) -> Self {
+        Self::new_with_catalog(
+            client_id,
+            transport,
+            tokens,
+            Arc::new(Mutex::new(SpotifyCatalog::default())),
+        )
+    }
+
+    pub fn new_with_catalog(
+        client_id: impl Into<String>,
+        transport: T,
+        tokens: S,
+        catalog: Arc<Mutex<SpotifyCatalog>>,
+    ) -> Self {
         Self {
             client_id: client_id.into(),
             transport,
             tokens,
-            artist_cache: Mutex::default(),
+            catalog,
             request_counts: Mutex::default(),
             refresh_lock: AsyncMutex::new(()),
             request_not_before: AsyncMutex::new(None),
         }
+    }
+
+    pub fn catalog(&self) -> Arc<Mutex<SpotifyCatalog>> {
+        Arc::clone(&self.catalog)
+    }
+
+    pub fn clear_catalog(&self) {
+        self.catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .clear();
     }
 
     pub fn transport(&self) -> &T {
@@ -262,7 +288,12 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn saved_tracks(&self, offset: u32, limit: u32) -> Result<Page<SavedTrack>> {
-        self.get(&paged("/me/tracks", offset, limit)).await
+        let page: Page<SavedTrack> = self.get(&paged("/me/tracks", offset, limit)).await?;
+        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
+        for saved in &page.items {
+            catalog.observe_track(&saved.track);
+        }
+        Ok(page)
     }
 
     pub async fn me(&self) -> Result<Profile> {
@@ -334,12 +365,17 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                 }
             })
             .collect();
-        Ok(Page {
+        let page = Page {
             items,
             next,
             skipped,
             total,
-        })
+        };
+        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
+        for track in &page.items {
+            catalog.observe_track_summary(track);
+        }
+        Ok(page)
     }
 
     pub async fn add_playlist_tracks(
@@ -426,7 +462,12 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn saved_albums(&self, offset: u32, limit: u32) -> Result<Page<SavedAlbum>> {
-        self.get(&paged("/me/albums", offset, limit)).await
+        let page: Page<SavedAlbum> = self.get(&paged("/me/albums", offset, limit)).await?;
+        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
+        for saved in &page.items {
+            catalog.observe_album_summary(&saved.album);
+        }
+        Ok(page)
     }
 
     pub async fn saved_shows(&self, offset: u32, limit: u32) -> Result<Page<SavedShow>> {
@@ -467,25 +508,39 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
 
     pub async fn artist(&self, id: &str) -> Result<Artist> {
         if let Some(artist) = self
-            .artist_cache
+            .catalog
             .lock()
-            .expect("artist cache mutex poisoned")
-            .get(id)
-            .cloned()
+            .expect("Spotify catalog mutex poisoned")
+            .complete_artist(id)
         {
+            log::info!("Spotify catalog cache hit kind=artist");
             return Ok(artist);
         }
         let artist: Artist = self.get(&format!("/artists/{id}")).await?;
-        self.artist_cache
+        self.catalog
             .lock()
-            .expect("artist cache mutex poisoned")
-            .insert(id.into(), artist.clone());
+            .expect("Spotify catalog mutex poisoned")
+            .observe_artist(&artist);
         Ok(artist)
     }
 
     pub async fn album(&self, id: &str) -> Result<Album> {
+        let uri = format!("spotify:album:{id}");
+        if let Some(album) = self
+            .catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .complete_album(&uri)
+        {
+            log::info!("Spotify catalog cache hit kind=album");
+            return Ok(album);
+        }
         let mut album: Album = self.get(&format!("/albums/{id}")).await?;
         let Some(mut tracks) = album.tracks.take() else {
+            self.catalog
+                .lock()
+                .expect("Spotify catalog mutex poisoned")
+                .observe_album(&album, false);
             return Ok(album);
         };
         let mut offset = (tracks.items.len() + tracks.skipped) as u32;
@@ -501,12 +556,46 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             }
             offset += count;
         }
+        let complete = tracks.next.is_none()
+            && tracks.skipped == 0
+            && tracks.items.len() as u32 == tracks.total;
+        if complete {
+            let parent = AlbumSummary {
+                id: album.id.clone(),
+                uri: album.uri.clone(),
+                name: album.name.clone(),
+                release_date: album.release_date.clone(),
+                images: album.images.clone(),
+            };
+            for track in &mut tracks.items {
+                track.album = Some(parent.clone());
+            }
+        }
         album.tracks = Some(tracks);
+        self.catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .observe_album(&album, complete);
         Ok(album)
     }
 
     pub async fn track(&self, id: &str) -> Result<Track> {
-        self.get(&format!("/tracks/{id}")).await
+        let uri = format!("spotify:track:{id}");
+        if let Some(track) = self
+            .catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .complete_track(&uri)
+        {
+            log::info!("Spotify catalog cache hit kind=track");
+            return Ok(track);
+        }
+        let track: Track = self.get(&format!("/tracks/{id}")).await?;
+        self.catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .observe_track(&track);
+        Ok(track)
     }
 
     pub async fn is_following_artist(&self, id: &str) -> Result<bool> {
@@ -545,7 +634,18 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             .append_pair("offset", &offset.to_string())
             .append_pair("limit", &limit.min(10).to_string())
             .finish();
-        self.get(&format!("/search?{query}")).await
+        let results: SearchResults = self.get(&format!("/search?{query}")).await?;
+        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
+        for artist in &results.artists.items {
+            catalog.observe_artist_summary(artist);
+        }
+        for album in &results.albums.items {
+            catalog.observe_album_summary(album);
+        }
+        for track in &results.tracks.items {
+            catalog.observe_track(track);
+        }
+        Ok(results)
     }
 
     pub async fn artist_albums(
@@ -559,8 +659,14 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             .append_pair("offset", &offset.to_string())
             .append_pair("limit", &limit.to_string())
             .finish();
-        self.get(&format!("/artists/{artist_id}/albums?{query}"))
-            .await
+        let page: Page<Album> = self
+            .get(&format!("/artists/{artist_id}/albums?{query}"))
+            .await?;
+        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
+        for album in &page.items {
+            catalog.observe_album_summary(album);
+        }
+        Ok(page)
     }
 
     pub async fn album_tracks(
@@ -569,8 +675,28 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         offset: u32,
         limit: u32,
     ) -> Result<Page<Track>> {
-        self.get(&paged(&format!("/albums/{album_id}/tracks"), offset, limit))
-            .await
+        let uri = format!("spotify:album:{album_id}");
+        if let Some(page) = self
+            .catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .complete_album_tracks(&uri, offset, limit)
+        {
+            log::info!("Spotify catalog cache hit kind=album_tracks");
+            return Ok(page);
+        }
+        let page: Page<Track> = self
+            .get(&paged(&format!("/albums/{album_id}/tracks"), offset, limit))
+            .await?;
+        let complete = offset == 0
+            && page.next.is_none()
+            && page.skipped == 0
+            && page.items.len() as u32 == page.total;
+        self.catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .observe_album_track_page(&uri, offset, &page, complete);
+        Ok(page)
     }
 
     pub async fn player(&self) -> Result<Option<PlayerState>> {
@@ -1378,7 +1504,9 @@ mod tests {
         assert_eq!(page.items[0].track.name, "One");
         assert_eq!(page.items[0].added_at, Some(1_704_164_645));
         assert_eq!(page.items[1].added_at, Some(1_704_164_645));
+        assert_eq!(client.track("1").await.unwrap(), page.items[0].track);
         let requests = client.transport().requests();
+        assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].url,
             format!("{API_BASE}/me/tracks?offset=20&limit=10")
@@ -1447,10 +1575,15 @@ mod tests {
         assert_eq!(tracks.tracks.items[0].artists[0].name, "Dead by April");
         assert!(tracks.artists.items.is_empty());
         assert!(tracks.albums.items.is_empty());
+        assert_eq!(
+            client.track("track-id").await.unwrap(),
+            tracks.tracks.items[0]
+        );
 
         let requests = client.transport().requests();
         assert!(requests[0].url.contains("type=album"));
         assert!(requests[1].url.contains("type=track"));
+        assert_eq!(requests.len(), 2);
     }
 
     #[tokio::test]
@@ -1777,7 +1910,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["One", "Two"]
         );
+        let track = client.track("1").await.unwrap();
+        assert_eq!(
+            track.album.as_ref().map(|album| album.uri.as_str()),
+            Some("spotify:album:album")
+        );
         let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
         assert!(requests[0].url.ends_with("/albums/album"));
         assert!(
             requests[1]
@@ -2076,6 +2215,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playlist_track_summary_does_not_hide_a_full_track_lookup() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "items": [{"is_local": false, "item": {
+                            "uri": "spotify:track:one", "name": "One",
+                            "artists": [], "album": null, "duration_ms": 1234
+                        }}],
+                        "next": null, "total": 1
+                    }),
+                ),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "uri": "spotify:track:one", "name": "One",
+                        "artists": [], "album": null, "duration_ms": 1234,
+                        "track_number": 7, "disc_number": 2
+                    }),
+                ),
+            ]),
+            InMemoryTokenStore::new(Some(Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+                scopes: String::new(),
+                playback_credentials: None,
+            })),
+        );
+
+        let page = client.playlist_tracks("playlist", 0, 1).await.unwrap();
+        assert_eq!(page.items[0].track_number, None);
+        assert_eq!(page.items[0].disc_number, None);
+
+        let track = client.track("one").await.unwrap();
+        assert_eq!(track.track_number, Some(7));
+        assert_eq!(track.disc_number, Some(2));
+        assert_eq!(client.transport().requests().len(), 2);
+        assert!(
+            client.transport().requests()[1]
+                .url
+                .ends_with("/tracks/one")
+        );
+    }
+
+    #[tokio::test]
     async fn playlist_create_posts_private_playlist() {
         let client = SpotifyClient::new(
             "client",
@@ -2291,6 +2478,102 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn complete_catalog_reads_skip_tokens_and_transport() {
+        let catalog = Arc::new(Mutex::new(crate::catalog::SpotifyCatalog::default()));
+        let artist = Artist {
+            id: "artist-1".into(),
+            name: "Artist".into(),
+            genres: vec!["rock".into()],
+            followers: None,
+            images: vec![],
+        };
+        let track = Track {
+            uri: "spotify:track:track-1".into(),
+            name: "Track".into(),
+            duration_ms: Some(100),
+            track_number: Some(1),
+            disc_number: Some(1),
+            artists: vec![SimplifiedArtist {
+                id: artist.id.clone(),
+                name: artist.name.clone(),
+            }],
+            album: Some(AlbumSummary {
+                id: "album-1".into(),
+                uri: "spotify:album:album-1".into(),
+                name: "Album".into(),
+                release_date: Some("2024".into()),
+                images: vec![],
+            }),
+        };
+        let album = Album {
+            id: "album-1".into(),
+            uri: "spotify:album:album-1".into(),
+            name: "Album".into(),
+            artists: track.artists.clone(),
+            images: vec![],
+            release_date: Some("2024".into()),
+            album_type: Some("album".into()),
+            total_tracks: 1,
+            tracks: Some(Page {
+                items: vec![track.clone()],
+                next: None,
+                skipped: 0,
+                total: 1,
+            }),
+        };
+        {
+            let mut cached = catalog.lock().unwrap();
+            cached.observe_artist(&artist);
+            cached.observe_track(&track);
+            cached.observe_album(&album, true);
+        }
+        let client = SpotifyClient::new_with_catalog(
+            "client",
+            FakeTransport::new([]),
+            InMemoryTokenStore::new(None),
+            catalog,
+        );
+
+        assert_eq!(client.artist("artist-1").await.unwrap(), artist);
+        assert_eq!(client.track("track-1").await.unwrap(), track);
+        assert_eq!(client.album("album-1").await.unwrap(), album);
+        assert_eq!(
+            client.album_tracks("album-1", 0, 50).await.unwrap().items,
+            vec![track]
+        );
+        assert!(client.transport().requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn incomplete_track_fetches_once_then_uses_catalog() {
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(
+                200,
+                serde_json::json!({
+                    "uri": "spotify:track:one",
+                    "name": "One",
+                    "duration_ms": 10,
+                    "artists": [],
+                    "album": null
+                }),
+            )]),
+            InMemoryTokenStore::new(Some(Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+                scopes: String::new(),
+                playback_credentials: None,
+            })),
+        );
+
+        let first = client.track("one").await.unwrap();
+        let second = client.track("one").await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(client.transport().requests().len(), 1);
     }
 
     #[test]

@@ -8,6 +8,7 @@ the behavior you are changing:
 | Change | Read |
 | --- | --- |
 | Overlay model, browse projection, ratings, imports | [Library](docs/architecture/library.md) |
+| Last.fm import matching, candidate ranking, ambiguity | [Import matching](docs/architecture/lastfm-import-matching.md) |
 | OAuth, Spotify API, sync, playlists, rate limits | [Spotify](docs/architecture/spotify.md) |
 | Queueing, backends, playback events, play counts | [Playback](docs/architecture/playback.md) |
 | Files, tokens, backup/restore | [Persistence](docs/architecture/persistence.md) |

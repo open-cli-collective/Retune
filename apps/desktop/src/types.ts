@@ -57,15 +57,24 @@ export type LastFmImportState = {
   phase: 'downloading' | 'aggregating' | 'review' | 'done' | 'suspended' | null
   username: string | null
   spotifyAccountId: string | null
+  historyTo: number | null
+  downloadedThrough: number | null
   nextPage: number
   totalPages: number | null
   downloadedPages: number
   totalScrobbles: number
   includedScrobbles: number
+  processedScrobbles: number
   defaults: LastFmImportDefaults
   remaining: number
   retryableError: { message: string; attempt: number; retryable: boolean } | null
   searchTerms: boolean
+  syncing: boolean
+  lastSyncedAt: number | null
+  pendingReview: number
+  syncProblem: string | null
+  applyingAll: boolean
+  spotifyLimit: { kind: 'transient' | 'quota'; deadline: number } | null
 }
 export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'

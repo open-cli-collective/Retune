@@ -1,6 +1,7 @@
 //! Offline-testable Spotify Web API adapter.
 
 pub mod auth;
+pub mod catalog;
 pub mod client;
 pub mod normalize;
 pub mod tokens;

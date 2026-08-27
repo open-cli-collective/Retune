@@ -1,8 +1,9 @@
 # Spotify integration
 
-`retune-spotify` owns authentication, Web API transport, retry policy, and
-normalization. The desktop provider composes it into sync, search, follows,
-library membership, playlists, and playback activation.
+`retune-spotify` owns authentication, Web API transport, retry policy,
+normalization, and the install-local Spotify music catalog. The desktop
+provider composes it into sync, search, follows, library membership, playlists,
+and playback activation.
 
 ## Authentication and tokens
 
@@ -36,6 +37,9 @@ Rate-limit behavior distinguishes two conditions:
 - Quota exhaustion (`error.reason == "QUOTA_EXCEEDED"`): return a typed quota
   error immediately and do not blindly retry. Preserve a supplied deadline, but
   never invent one.
+
+Content actions persist supplied `Retry-After` deadlines in the same cooldown
+store so asynchronous import failures can show a local reset time and countdown.
 
 5xx responses retry after one and three seconds before failing. The provider
 records request counts and typed cooldowns by endpoint family; persisted
@@ -93,6 +97,20 @@ paced and capped per sync. Artist discography initially requests albums and
 singles ten at a time; the UI explicitly loads later pages, preserves earlier
 pages, and deduplicates requests.
 
+The shared client also owns a versioned `SpotifyCatalog` keyed by artist ID and
+album/track URI. Full artist, album, and track reads consult only complete
+catalog records before token loading, request gating, and request counting;
+incomplete records fetch normally and then accrete. Search, saved-library,
+artist-album, album, track, and playlist-track responses write observations
+through the same client. Summary observations fill gaps, full observations
+replace fields they supply, and a complete ordered album-track list replaces
+partial membership atomically. Optional collections distinguish unknown from
+known-empty, and local text hints never create Spotify identities. The desktop
+persists this cache as `spotify-catalog.json` with atomic replacement, flushes
+dirty generations every 30 seconds and at exit, and quarantines corrupt or
+unknown versions. It is machine-local and excluded from backup; disconnect,
+OAuth grant replacement, and confirmed account mismatch clear it.
+
 ## Search contract
 
 Spotify search keeps one combined `artist,album,track` request and sends an
@@ -120,9 +138,15 @@ existing rows visible and can be retried for that group.
 Last.fm source download and aggregation do not use Spotify or its account
 gate. Opening a visible review batch lazily matches it through this same shared
 client/request gate with official `album:`/`artist:` field filters and a limit
-of 10, then fetches candidate tracks for set-overlap classification. An
-importer-wide async lock serializes duplicate batch matches; cached revisits
-make no matching/search request and there is no adjacent prefetch. A cached
+of 10, then fetches candidate tracks for set-overlap classification. Explicit
+collection-album search passes the user's free-text or field-filter query through
+the same provider and request gate; a search makes one album request and the
+first Preview or direct Add fetches one album, while cached preview, add,
+remove, and revisit operations make no request. An importer-wide async
+lock serializes duplicate batch matches; cached revisits make no
+matching/search request. After the visible batch resolves, React starts one
+lookahead request for the next batch in the active sort order through that same
+command and lock; it does not prefetch beyond that batch. A cached
 Spotify-derived page trusts only an exact cached library identity; an inexact
 identity resolves Spotify `/me` before the page is exposed. The first
 successful match binds the session to Spotify `/me`; its final ownership check
@@ -149,7 +173,7 @@ mutate item contents for playlists the current user does not own; it may display
 their available metadata and cached counts.
 
 The Last.fm importer reuses this shared client only for visible-batch matching
-and explicit content acceptance. Its album search uses the official
+and explicit content acceptance. Automatic release matching uses the official
 `album:`/`artist:` field filters with a limit of 10, then fetches candidate album
 tracks for overlap classification; track rematching uses a direct `track:`
 search. Import album acceptance calls the same reusable album operation as the
