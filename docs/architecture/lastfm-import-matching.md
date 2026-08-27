@@ -123,6 +123,12 @@ Rows not supported by its track set remain visible for individual review. Cached
 unselected candidates are reclassified on load, so improvements to deterministic
 matching apply without another Spotify request.
 
+Manual album and track searches also accept canonical Spotify URIs,
+`spotify://` links, and `https://open.spotify.com` share links. A pasted link
+resolves that exact entity through the materialized catalog/shared client rather
+than running text search. Explicitly choosing an exact album link may keep
+unmatched source rows for individual review; it does not manufacture mappings.
+
 ## Collection matching
 
 The selected collection albums form a deduplicated union of Spotify track URIs.

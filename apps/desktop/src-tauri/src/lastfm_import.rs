@@ -4249,20 +4249,25 @@ fn select_match_in_session(
         return Err("The source row does not belong to this review batch.".into());
     };
     let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let Some(candidate) = session
-        .matches
-        .get(source_id)
-        .and_then(|result| {
-            result
-                .candidates
-                .iter()
-                .find(|candidate| candidate.uri == uri)
-        })
-        .cloned()
-    else {
+    let Some((candidate, explicit_album)) = session.matches.get(source_id).and_then(|result| {
+        let candidate = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.uri == uri)
+            .cloned()?;
+        let explicit_album = spotify_share_uri(&result.search_term, "album")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(uri);
+        Some((candidate, explicit_album))
+    }) else {
         return Err("This source row has no Spotify candidates.".into());
     };
-    if candidate.relation.is_none() && !candidate.uri.starts_with("spotify:track:") {
+    if candidate.relation.is_none()
+        && !candidate.uri.starts_with("spotify:track:")
+        && !explicit_album
+    {
         return Err("That Spotify match is not supported by the source track set.".into());
     }
     if candidate.uri.starts_with("spotify:album:") {
@@ -8433,6 +8438,46 @@ fn valid_collection_album_uri(uri: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && !id.contains(':'))
 }
 
+fn spotify_share_uri(value: &str, expected_kind: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    let parsed = if let Some(rest) = value.strip_prefix("spotify://") {
+        let parts = rest.trim_end_matches('/').split('/').collect::<Vec<_>>();
+        (parts.len() == 2).then(|| (parts[0], parts[1]))
+    } else if let Some(rest) = value.strip_prefix("spotify:") {
+        let parts = rest.split(':').collect::<Vec<_>>();
+        (parts.len() == 2).then(|| (parts[0], parts[1]))
+    } else if let Some(rest) = value.strip_prefix("https://open.spotify.com/") {
+        let path = rest.split(['?', '#']).next().unwrap_or_default();
+        let mut parts = path.trim_end_matches('/').split('/').collect::<Vec<_>>();
+        if parts.first().is_some_and(|part| part.starts_with("intl-")) {
+            parts.remove(0);
+        }
+        (parts.len() == 2).then(|| (parts[0], parts[1]))
+    } else {
+        return Ok(None);
+    };
+    let Some((kind, id)) = parsed else {
+        return Err(format!(
+            "Paste a valid Spotify {expected_kind} link or URI."
+        ));
+    };
+    if kind != expected_kind {
+        return Err(format!(
+            "That Spotify link points to a Spotify {kind}, not a Spotify {expected_kind}."
+        ));
+    }
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(format!(
+            "Paste a valid Spotify {expected_kind} link or URI."
+        ));
+    }
+    Ok(Some(format!("spotify:{kind}:{id}")))
+}
+
 async fn load_collection_album_candidate(
     app: &tauri::AppHandle,
     batch_id: u32,
@@ -8508,6 +8553,7 @@ pub(crate) async fn lastfm_import_collection_search_albums(
     if query.is_empty() {
         return Ok(Vec::new());
     }
+    let direct_uri = spotify_share_uri(query, "album")?;
     let search_term = collection_album_search_term(query);
     let initial_account = {
         let _membership_guard = state.spotify_library_gate.lock().await;
@@ -8522,7 +8568,16 @@ pub(crate) async fn lastfm_import_collection_search_albums(
         (username, spotify_account_id)
     };
     let provider = crate::provider_from(&state)?;
-    let results = crate::provider::search_albums(provider.as_ref(), &search_term).await?;
+    let direct_album = if let Some(uri) = direct_uri {
+        Some(fetch_complete_collection_album(provider.as_ref(), &uri).await?)
+    } else {
+        None
+    };
+    let results = if direct_album.is_none() {
+        Some(crate::provider::search_albums(provider.as_ref(), &search_term).await?)
+    } else {
+        None
+    };
     let _membership_guard = state.spotify_library_gate.lock().await;
     let (username, spotify_account_id) =
         current_matching_account_locked(&state, state.lastfm_import.as_ref()).await?;
@@ -8541,7 +8596,14 @@ pub(crate) async fn lastfm_import_collection_search_albums(
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     requested_collection_batch(&session, batch_id, &artist)?;
+    if let Some(album) = direct_album {
+        return Ok(vec![collection_album_candidate(
+            &album,
+            &collection_membership(&state),
+        )]);
+    }
     Ok(results
+        .expect("text search results are present")
         .items
         .into_iter()
         .map(collection_album_summary)
@@ -8715,22 +8777,50 @@ pub(crate) async fn lastfm_import_change_track(
         query.trim().to_owned()
     };
     let provider = crate::provider_from(&state)?;
-    let results = crate::provider::search_tracks(provider.as_ref(), &search_term).await?;
-    let candidates = results
-        .items
-        .into_iter()
-        .map(|track| AlbumCandidate {
+    let candidates = if let Some(uri) = spotify_share_uri(&search_term, "track")? {
+        let track = provider
+            .track(crate::provider::spotify_id(&uri))
+            .await
+            .map_err(|error| error.to_string())?;
+        let artist = track
+            .artists
+            .first()
+            .map(|artist| artist.name.clone())
+            .unwrap_or_default();
+        let album = track
+            .album
+            .as_ref()
+            .map(|album| album.name.clone())
+            .unwrap_or_default();
+        vec![AlbumCandidate {
             uri: track.uri.clone(),
             name: track.name.clone(),
-            artist: track.artist.clone(),
+            artist: artist.clone(),
             in_library: membership.contains(&track.uri),
-            track_uris: vec![track.uri.clone()],
-            track_names: vec![track.name.clone()],
-            track_artists: vec![track.artist],
-            track_albums: vec![track.alb],
+            track_uris: vec![track.uri],
+            track_names: vec![track.name],
+            track_artists: vec![artist],
+            track_albums: vec![album],
             relation: None,
-        })
-        .collect::<Vec<_>>();
+        }]
+    } else {
+        crate::provider::search_tracks(provider.as_ref(), &search_term)
+            .await?
+            .items
+            .into_iter()
+            .map(|track| AlbumCandidate {
+                uri: track.uri.clone(),
+                name: track.name.clone(),
+                artist: track.artist.clone(),
+                in_library: membership.contains(&track.uri),
+                track_uris: vec![track.uri.clone()],
+                track_names: vec![track.name.clone()],
+                track_artists: vec![track.artist],
+                track_albums: vec![track.alb],
+                relation: None,
+            })
+            .collect::<Vec<_>>()
+    };
     let mut candidates = candidates;
     if row.album.is_empty() {
         rank_collection_candidates(row, &mut candidates, &membership);
@@ -8792,7 +8882,15 @@ pub(crate) async fn lastfm_import_change_album(
         query.trim().to_owned()
     };
     let provider = crate::provider_from(&state)?;
-    let candidates = album_candidates(provider.as_ref(), &search_term, &related).await?;
+    let candidates = if let Some(uri) = spotify_share_uri(&search_term, "album")? {
+        let album = fetch_complete_collection_album(provider.as_ref(), &uri).await?;
+        let mut candidates =
+            vec![collection_album_candidate(&album, &CollectionMembership::default()).matching];
+        classify_album_candidates_by_name(&related, &mut candidates);
+        candidates
+    } else {
+        album_candidates(provider.as_ref(), &search_term, &related).await?
+    };
     let selected_uri = automatic_album_candidate(&row.album, &related, &candidates)
         .map(|candidate| candidate.uri.clone());
     let matches = batch_rows(&batch, &rows_by_id)
@@ -14325,6 +14423,71 @@ mod tests {
         assert_eq!(candidates[0].relation, Some(AlbumRelation::BestMatch));
         assert_eq!(candidates[1].relation, Some(AlbumRelation::Superset));
         assert_eq!(candidates[2].relation, Some(AlbumRelation::SameSongs));
+    }
+
+    #[test]
+    fn spotify_share_links_resolve_exact_entities_and_explicit_albums_remain_reviewable() {
+        for value in [
+            "spotify:album:Album123",
+            "spotify://album/Album123",
+            "https://open.spotify.com/album/Album123?si=share",
+            "https://open.spotify.com/intl-de/album/Album123#details",
+        ] {
+            assert_eq!(
+                spotify_share_uri(value, "album").unwrap().as_deref(),
+                Some("spotify:album:Album123")
+            );
+        }
+        assert_eq!(
+            spotify_share_uri("spotify:track:Track123", "track")
+                .unwrap()
+                .as_deref(),
+            Some("spotify:track:Track123")
+        );
+        assert_eq!(
+            spotify_share_uri("Sibelius symphonies", "album").unwrap(),
+            None
+        );
+        assert!(spotify_share_uri("spotify:track:Track123", "album").is_err());
+        assert!(spotify_share_uri("https://open.spotify.com/album/not-valid!", "album").is_err());
+
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[scrobble("Jean Sibelius", "Symphonies", "Movement I", 1)],
+        );
+        session.phase = ImportPhase::Review;
+        session.batches = build_review_batches(&session.rows);
+        let row = session.rows[0].clone();
+        session.matches.insert(
+            row.stable_id.clone(),
+            MatchResult {
+                source_id: row.stable_id.clone(),
+                search_term: "https://open.spotify.com/album/Album123?si=share".into(),
+                confidence: None,
+                selected_uri: None,
+                candidates: vec![AlbumCandidate {
+                    uri: "spotify:album:Album123".into(),
+                    name: "Exact recording".into(),
+                    artist: "Orchestra".into(),
+                    in_library: false,
+                    track_uris: vec!["spotify:track:Different".into()],
+                    track_names: vec!["Different movement".into()],
+                    track_artists: vec!["Orchestra".into()],
+                    track_albums: vec!["Exact recording".into()],
+                    relation: None,
+                }],
+                track_matches: BTreeMap::new(),
+            },
+        );
+
+        select_match_in_session(&mut session, 1, &row.stable_id, "spotify:album:Album123").unwrap();
+        let result = &session.matches[&row.stable_id];
+        assert_eq!(
+            result.selected_uri.as_deref(),
+            Some("spotify:album:Album123")
+        );
+        assert!(result.track_matches.is_empty());
     }
 
     #[test]

@@ -474,6 +474,8 @@ test('Last.fm collection review explains individual matching and keeps release U
   assert.match(importer, /suggested/)
   assert.match(importer, /need review/)
   assert.match(importer, /Use This Track/)
+  assert.match(importer, /Search Spotify or paste a share link/)
+  assert.match(importer, /Search Spotify albums or paste a share link/)
   assert.match(importer, /ALREADY IN YOUR LIBRARY/)
   assert.match(importer, /collection && !collectionAlbumReady/)
   assert.match(importer, /const collection = page\.album === ''/)
