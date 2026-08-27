@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, automaticCollectionAlbumContributors, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, automaticCollectionAlbumContributors, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -290,6 +290,17 @@ test('Last.fm content and history intents remain independent and require one cho
   assert.equal(validImportIntent(true, false), true)
   assert.equal(validImportIntent(false, true), true)
   assert.equal(validImportIntent(false, false), false)
+})
+
+test('Last.fm whole-album mode repairs an empty selection without replacing a partial selection', () => {
+  let state = defaultReviewState(importRows())
+  state = toggleImportRow(toggleImportRow(state, 'a'), 'b')
+  state = setWholeAlbumImport(state, true)
+  assert.equal(state.wholeAlbum, true)
+  assert.equal(selectedImportCount(state), 2)
+  state = toggleImportRow(state, 'b')
+  state = setWholeAlbumImport(state, true)
+  assert.deepEqual([...state.checked], ['a'])
 })
 
 test('Last.fm per-target fuzzy strategies and stale-free queue advancement are deterministic', () => {

@@ -51,6 +51,8 @@ the user's persisted page choice then wins. Content-only
 acceptance saves membership and applies source `added_at` without changing
 plays or `last_played_at`; counts-only performs no Spotify write and updates
 only already-materialized matched Retune tracks.
+Enabling whole-album mode repairs an empty source-row selection by selecting all
+actionable, non-excluded rows; an existing partial selection remains unchanged.
 
 The importer’s “Show Spotify search terms” preference is session-level and is
 restored on resume. Fuzzy disclosures are bounded to the visible persisted

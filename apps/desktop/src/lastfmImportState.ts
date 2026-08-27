@@ -376,6 +376,12 @@ export function toggleImportRow(state: ReviewState, id: string): ReviewState {
   return { ...state, checked }
 }
 
+export function setWholeAlbumImport(state: ReviewState, wholeAlbum: boolean): ReviewState {
+  if (!wholeAlbum || selectedImportCount(state)) return { ...state, wholeAlbum }
+  const checked = new Set(state.rows.filter((row) => reviewable(state, row.stableId) && !state.decisions[row.stableId]?.excluded).map((row) => row.stableId))
+  return { ...state, wholeAlbum, checked }
+}
+
 export function excludeImportRow(state: ReviewState, id: string, excluded = true): ReviewState {
   if (!reviewable(state, id)) return state
   return withDecision(state, [id], { excluded })
