@@ -128,6 +128,10 @@ Manual album and track searches also accept canonical Spotify URIs,
 resolves that exact entity through the materialized catalog/shared client rather
 than running text search. Explicitly choosing an exact album link may keep
 unmatched source rows for individual review; it does not manufacture mappings.
+The track picker first offers tracks already cached for the selected release or
+selected collection album set, then offers global Spotify search as a fallback.
+Choosing a cached track makes no Spotify request; Rust verifies that its URI
+belongs to a currently selected album before persisting the mapping.
 
 ## Collection matching
 

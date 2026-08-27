@@ -4249,19 +4249,25 @@ fn select_match_in_session(
         return Err("The source row does not belong to this review batch.".into());
     };
     let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let Some((candidate, explicit_album)) = session.matches.get(source_id).and_then(|result| {
-        let candidate = result
-            .candidates
-            .iter()
-            .find(|candidate| candidate.uri == uri)
-            .cloned()?;
-        let explicit_album = spotify_share_uri(&result.search_term, "album")
+    let explicit_album = session.matches.get(source_id).is_some_and(|result| {
+        spotify_share_uri(&result.search_term, "album")
             .ok()
             .flatten()
             .as_deref()
-            == Some(uri);
-        Some((candidate, explicit_album))
-    }) else {
+            == Some(uri)
+    });
+    let candidate = session
+        .matches
+        .get(source_id)
+        .and_then(|result| {
+            result
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == uri)
+                .cloned()
+        })
+        .or_else(|| selected_album_track_candidate(session, batch_id, source_id, &row_album, uri));
+    let Some(candidate) = candidate else {
         return Err("This source row has no Spotify candidates.".into());
     };
     if candidate.relation.is_none()
@@ -4305,6 +4311,18 @@ fn select_match_in_session(
             }
         }
     } else {
+        if row_album.is_empty() {
+            let Some(result) = session.matches.get_mut(source_id) else {
+                return Err("This source row has no Spotify candidates.".into());
+            };
+            if !result
+                .candidates
+                .iter()
+                .any(|existing| existing.uri == candidate.uri)
+            {
+                result.candidates.insert(0, candidate.clone());
+            }
+        }
         let row_track = session
             .rows
             .iter()
@@ -4347,6 +4365,26 @@ fn select_match_in_session(
         }
     }
     Ok((row_artist, row_album))
+}
+
+fn selected_album_track_candidate(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+    source_id: &str,
+    row_album: &str,
+    uri: &str,
+) -> Option<AlbumCandidate> {
+    if row_album.is_empty() {
+        return collection_selected_albums(session, batch_id)
+            .into_iter()
+            .find_map(|album| album_track_candidate(&album.matching, uri, false));
+    }
+    let result = session.matches.get(source_id)?;
+    let selected_uri = result.selected_uri.as_deref()?;
+    let album = result.candidates.iter().find(|candidate| {
+        candidate.uri == selected_uri && selected_uri.starts_with("spotify:album:")
+    })?;
+    album_track_candidate(album, uri, false)
 }
 
 fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
@@ -5774,49 +5812,53 @@ fn collection_track_candidates(
     let mut seen = BTreeSet::new();
     for album in albums {
         let matching = &album.matching;
-        for (index, uri) in matching.track_uris.iter().enumerate() {
+        for uri in &matching.track_uris {
             if !seen.insert(uri.clone()) {
                 continue;
             }
-            let name = matching
-                .track_names
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| matching.name.clone());
-            let artist = matching
-                .track_artists
-                .get(index)
-                .cloned()
-                .filter(|artist| !artist.trim().is_empty())
-                .unwrap_or_else(|| matching.artist.clone());
-            let album_name = matching
-                .track_albums
-                .get(index)
-                .cloned()
-                .filter(|album| !album.trim().is_empty())
-                .unwrap_or_else(|| matching.name.clone());
-            candidates.push(AlbumCandidate {
-                uri: uri.clone(),
-                name,
-                artist,
-                in_library: membership.contains(uri),
-                track_uris: vec![uri.clone()],
-                track_names: vec![matching
-                    .track_names
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| matching.name.clone())],
-                track_artists: vec![matching
-                    .track_artists
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| matching.artist.clone())],
-                track_albums: vec![album_name],
-                relation: None,
-            });
+            candidates.push(
+                album_track_candidate(matching, uri, membership.contains(uri))
+                    .expect("track URI came from this album"),
+            );
         }
     }
     candidates
+}
+
+fn album_track_candidate(
+    album: &AlbumCandidate,
+    uri: &str,
+    in_library: bool,
+) -> Option<AlbumCandidate> {
+    let index = album.track_uris.iter().position(|track| track == uri)?;
+    let name = album
+        .track_names
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| album.name.clone());
+    let artist = album
+        .track_artists
+        .get(index)
+        .cloned()
+        .filter(|artist| !artist.trim().is_empty())
+        .unwrap_or_else(|| album.artist.clone());
+    let album_name = album
+        .track_albums
+        .get(index)
+        .cloned()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| album.name.clone());
+    Some(AlbumCandidate {
+        uri: uri.to_owned(),
+        name: name.clone(),
+        artist: artist.clone(),
+        in_library,
+        track_uris: vec![uri.to_owned()],
+        track_names: vec![name],
+        track_artists: vec![artist],
+        track_albums: vec![album_name],
+        relation: None,
+    })
 }
 
 fn collection_selected_albums(
@@ -12696,6 +12738,28 @@ mod tests {
                 Some(expected)
             );
         }
+
+        select_match_in_session(&mut session, 1, &rows[0].stable_id, "spotify:track:shared")
+            .unwrap();
+        let result = &session.matches[&rows[0].stable_id];
+        assert_eq!(
+            result
+                .track_matches
+                .get(&rows[0].stable_id)
+                .map(String::as_str),
+            Some("spotify:track:shared")
+        );
+        assert!(result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.uri == "spotify:track:shared"));
+        assert!(select_match_in_session(
+            &mut session,
+            1,
+            &rows[0].stable_id,
+            "spotify:track:not-selected",
+        )
+        .is_err());
     }
 
     #[test]
@@ -14426,7 +14490,7 @@ mod tests {
     }
 
     #[test]
-    fn spotify_share_links_resolve_exact_entities_and_explicit_albums_remain_reviewable() {
+    fn spotify_share_links_and_selected_album_tracks_remain_reviewable() {
         for value in [
             "spotify:album:Album123",
             "spotify://album/Album123",
@@ -14488,6 +14552,18 @@ mod tests {
             Some("spotify:album:Album123")
         );
         assert!(result.track_matches.is_empty());
+
+        select_match_in_session(&mut session, 1, &row.stable_id, "spotify:track:Different")
+            .unwrap();
+        let result = &session.matches[&row.stable_id];
+        assert_eq!(
+            result.selected_uri.as_deref(),
+            Some("spotify:album:Album123")
+        );
+        assert_eq!(
+            result.track_matches.get(&row.stable_id).map(String::as_str),
+            Some("spotify:track:Different")
+        );
     }
 
     #[test]

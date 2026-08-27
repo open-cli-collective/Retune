@@ -540,6 +540,7 @@ test('Last.fm queue selection restores focus after loading and retains native bu
 })
 
 test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {
+  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
   const albumUri = 'spotify:album:gladiator'
   const now = { ...importRows()[0], artist: 'The Lyndhurst Orchestra', album: 'Gladiator - Music from the Motion Picture', track: 'Now We Are Free' }
   const albumCandidates = [{ uri: albumUri }, { uri: 'spotify:album:other-release' }]
@@ -554,6 +555,9 @@ test('Last.fm track picker starts from the source row and cancel preserves album
   assert.deepEqual(pickerCandidates('track', albumCandidates), [])
   assert.equal(pickerSelectedUri('track', 'now', albumUri, pageMatches.tracks), pageMatches.tracks.now)
   assert.deepEqual(pageMatches, beforeCancel)
+  assert.match(importer, /Tracks from selected album matches/)
+  assert.match(importer, /Search all Spotify/)
+  assert.match(importer, /selectedAlbums\.map\(\(album\) => <optgroup/)
 })
 
 test('Last.fm row confidence uses a standalone track candidate without changing album confidence', () => {

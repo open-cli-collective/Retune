@@ -184,6 +184,8 @@
 .import-picker-search { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: 10.5px; }
 .import-picker-search > div { display: flex; gap: 7px; }
 .import-picker-search input { min-width: 0; flex: 1; padding: 6px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--list); }
+.import-picker-album-tracks { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: 10.5px; }
+.import-picker-album-tracks select { width: 100%; padding: 6px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--list); color: var(--text); }
 .import-picker-results { min-height: 100px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--list); }
 .import-collection-dialog .import-picker-results { height: 110px; min-height: 42px; max-height: 45vh; flex: 0 0 auto; }
 .import-resize-handle { height: 11px; flex: 0 0 11px; display: grid; place-items: center; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); color: var(--dim); background: var(--control); cursor: row-resize; font-size: 11px; line-height: 1; touch-action: none; user-select: none; }
