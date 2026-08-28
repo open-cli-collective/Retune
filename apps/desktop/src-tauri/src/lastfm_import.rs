@@ -3985,6 +3985,11 @@ impl Service {
         let ids = if matches!(action, "exclude" | "undo-exclude") {
             let ids =
                 ids.ok_or_else(|| "A source row ID is required for this action.".to_string())?;
+            if ids.len() > LASTFM_REVIEW_BATCH_SIZE {
+                return Err(format!(
+                    "A Last.fm review action accepts at most {LASTFM_REVIEW_BATCH_SIZE} source row IDs."
+                ));
+            }
             let mut deduped = Vec::with_capacity(ids.len());
             let mut seen = BTreeSet::new();
             for id in ids {
@@ -10193,6 +10198,36 @@ mod tests {
         let mut reset = saved.clone();
         reset.decisions.clear();
         service.save(reset.clone()).await.unwrap();
+        let oversized = vec![rows[0].stable_id.clone(); LASTFM_REVIEW_BATCH_SIZE + 1];
+        let oversized_error = service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some(oversized.as_slice()),
+                "exclude",
+                "Artist",
+                "",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            oversized_error,
+            format!(
+                "A Last.fm review action accepts at most {LASTFM_REVIEW_BATCH_SIZE} source row IDs."
+            )
+        );
+        assert!(!service
+            .snapshot()
+            .await
+            .unwrap()
+            .decisions
+            .values()
+            .any(|decision| decision.excluded));
+        assert_eq!(
+            service.export_mappings().await.mappings.excluded_tracks,
+            expected_exclusions
+        );
         assert!(service
             .review_action("user", "spotify", 1, Some(&[]), "exclude", "Artist", "",)
             .await
