@@ -10168,9 +10168,11 @@ mod tests {
         assert!(saved.decisions[&rows[0].stable_id].excluded);
         assert!(saved.decisions[&rows[1].stable_id].excluded);
         assert!(!default_decision(&saved, &rows[2].stable_id).excluded);
+        let expected_exclusions =
+            BTreeSet::from([rows[0].stable_id.clone(), rows[1].stable_id.clone()]);
         assert_eq!(
             service.export_mappings().await.mappings.excluded_tracks,
-            BTreeSet::from([rows[0].stable_id.clone(), rows[1].stable_id.clone()])
+            expected_exclusions
         );
         let queue = service
             .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
@@ -10185,16 +10187,27 @@ mod tests {
         assert!(reloaded_session.decisions[&rows[1].stable_id].excluded);
         assert_eq!(
             reloaded.export_mappings().await.mappings.excluded_tracks,
-            BTreeSet::from([rows[0].stable_id.clone(), rows[1].stable_id.clone()])
+            expected_exclusions
         );
 
-        let mut reset = saved;
+        let mut reset = saved.clone();
         reset.decisions.clear();
         service.save(reset.clone()).await.unwrap();
         assert!(service
             .review_action("user", "spotify", 1, Some(&[]), "exclude", "Artist", "",)
             .await
             .is_err());
+        assert!(!service
+            .snapshot()
+            .await
+            .unwrap()
+            .decisions
+            .values()
+            .any(|decision| decision.excluded));
+        assert_eq!(
+            service.export_mappings().await.mappings.excluded_tracks,
+            expected_exclusions
+        );
         assert!(service
             .review_action(
                 "user",
@@ -10214,6 +10227,10 @@ mod tests {
             .decisions
             .values()
             .any(|decision| decision.excluded));
+        assert_eq!(
+            service.export_mappings().await.mappings.excluded_tracks,
+            expected_exclusions
+        );
 
         let mut nonreviewable = reset;
         nonreviewable.decisions.insert(
@@ -10236,9 +10253,49 @@ mod tests {
             )
             .await
             .is_err());
-        assert!(
-            !default_decision(&service.snapshot().await.unwrap(), &rows[0].stable_id,).excluded
+        assert!(!service
+            .snapshot()
+            .await
+            .unwrap()
+            .decisions
+            .values()
+            .any(|decision| decision.excluded));
+        assert_eq!(
+            service.export_mappings().await.mappings.excluded_tracks,
+            expected_exclusions
         );
+
+        reloaded
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some(&[rows[0].stable_id.clone(), rows[1].stable_id.clone()]),
+                "undo-exclude",
+                "Artist",
+                "",
+            )
+            .await
+            .unwrap();
+        let undone = reloaded.snapshot().await.unwrap();
+        assert!(!undone.decisions[&rows[0].stable_id].excluded);
+        assert!(!undone.decisions[&rows[1].stable_id].excluded);
+        assert!(reloaded
+            .export_mappings()
+            .await
+            .mappings
+            .excluded_tracks
+            .is_empty());
+        let reloaded_after_undo = Service::new(dir.path());
+        let undone_after_reload = reloaded_after_undo.snapshot().await.unwrap();
+        assert!(!undone_after_reload.decisions[&rows[0].stable_id].excluded);
+        assert!(!undone_after_reload.decisions[&rows[1].stable_id].excluded);
+        assert!(reloaded_after_undo
+            .export_mappings()
+            .await
+            .mappings
+            .excluded_tracks
+            .is_empty());
     }
 
     fn receipt(
