@@ -3977,11 +3977,28 @@ impl Service {
         username: &str,
         spotify_account_id: &str,
         batch_id: u32,
-        id: Option<&str>,
+        ids: Option<&[String]>,
         action: &str,
         artist: &str,
         album: &str,
     ) -> Result<(), String> {
+        let ids = if matches!(action, "exclude" | "undo-exclude") {
+            let ids =
+                ids.ok_or_else(|| "A source row ID is required for this action.".to_string())?;
+            let mut deduped = Vec::with_capacity(ids.len());
+            let mut seen = BTreeSet::new();
+            for id in ids {
+                if seen.insert(id) {
+                    deduped.push(id.clone());
+                }
+            }
+            if deduped.is_empty() {
+                return Err("A source row ID is required for this action.".into());
+            }
+            Some(deduped)
+        } else {
+            None
+        };
         self.mutate_owned_session(
             username,
             spotify_account_id,
@@ -3992,15 +4009,21 @@ impl Service {
                 };
                 match action {
                     "exclude" | "undo-exclude" => {
-                        let id = id.ok_or_else(|| {
-                            "A source row ID is required for this action.".to_string()
-                        })?;
-                        if !batch.source_ids.iter().any(|source_id| source_id == id) {
+                        let ids = ids.as_ref().expect("exclude actions require row IDs");
+                        if ids
+                            .iter()
+                            .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
+                        {
                             return Err(
                                 "The source row does not belong to this review batch.".into()
                             );
                         }
-                        exclude_row(&mut session, id, action == "exclude");
+                        if ids.iter().any(|id| !is_reviewable(&session, id)) {
+                            return Err("The source row is not reviewable.".into());
+                        }
+                        for id in ids {
+                            exclude_row(&mut session, id, action == "exclude");
+                        }
                     }
                     "ignore-album" => {
                         for source_id in album_source_ids(&session, artist, album) {
@@ -4049,24 +4072,33 @@ impl Service {
             },
         )
         .await?;
-        let mapping_track_id = if let Some(id) = id {
-            self.snapshot()
-                .await
-                .and_then(|session| session.incremental_source_keys.get(id).cloned())
-                .or_else(|| Some(id.to_owned()))
+        let mapping_track_ids = if let Some(ids) = ids.as_ref() {
+            let session = self.snapshot().await;
+            Some(
+                ids.iter()
+                    .map(|id| {
+                        session
+                            .as_ref()
+                            .and_then(|session| session.incremental_source_keys.get(id).cloned())
+                            .unwrap_or_else(|| id.clone())
+                    })
+                    .collect::<Vec<_>>(),
+            )
         } else {
             None
         };
         let mut mappings = self.mappings_for(username, Some(spotify_account_id)).await;
         match action {
             "exclude" => {
-                if let Some(id) = mapping_track_id.as_deref() {
-                    mappings.excluded_tracks.insert(id.to_owned());
+                if let Some(ids) = mapping_track_ids.as_ref() {
+                    mappings.excluded_tracks.extend(ids.iter().cloned());
                 }
             }
             "undo-exclude" => {
-                if let Some(id) = mapping_track_id.as_deref() {
-                    mappings.excluded_tracks.remove(id);
+                if let Some(ids) = mapping_track_ids.as_ref() {
+                    for id in ids {
+                        mappings.excluded_tracks.remove(id);
+                    }
                 }
             }
             "ignore-album" => {
@@ -8461,7 +8493,7 @@ async fn ensure_review_mutable(service: &Service) -> Result<(), String> {
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
     batch_id: u32,
-    id: Option<String>,
+    ids: Option<Vec<String>>,
     action: String,
     artist: String,
     album: String,
@@ -8477,7 +8509,7 @@ pub(crate) async fn lastfm_import_review(
             &username,
             &spotify_account_id,
             batch_id,
-            id.as_deref(),
+            ids.as_deref(),
             &action,
             &artist,
             &album,
@@ -10090,6 +10122,122 @@ mod tests {
                 .incremental_source_keys
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_exclusion_is_atomic_and_persists_reusable_mappings() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let rows = [
+            collection_test_row("One"),
+            collection_test_row("Two"),
+            collection_test_row("Three"),
+        ];
+        let mut session = collection_session(&rows);
+        session.batches = vec![
+            ImportBatch {
+                page: 1,
+                source_ids: vec![rows[0].stable_id.clone(), rows[1].stable_id.clone()],
+            },
+            ImportBatch {
+                page: 2,
+                source_ids: vec![rows[2].stable_id.clone()],
+            },
+        ];
+        service.save(session.clone()).await.unwrap();
+
+        let ids = vec![
+            rows[0].stable_id.clone(),
+            rows[1].stable_id.clone(),
+            rows[0].stable_id.clone(),
+        ];
+        service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some(ids.as_slice()),
+                "exclude",
+                "Artist",
+                "",
+            )
+            .await
+            .unwrap();
+        let saved = service.snapshot().await.unwrap();
+        assert!(saved.decisions[&rows[0].stable_id].excluded);
+        assert!(saved.decisions[&rows[1].stable_id].excluded);
+        assert!(!default_decision(&saved, &rows[2].stable_id).excluded);
+        assert_eq!(
+            service.export_mappings().await.mappings.excluded_tracks,
+            BTreeSet::from([rows[0].stable_id.clone(), rows[1].stable_id.clone()])
+        );
+        let queue = service
+            .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap();
+        assert_eq!(queue.items[0].status, Some(QueueStatus::Excluded));
+        assert!(!queue.items[0].remaining);
+
+        let reloaded = Service::new(dir.path());
+        let reloaded_session = reloaded.snapshot().await.unwrap();
+        assert!(reloaded_session.decisions[&rows[0].stable_id].excluded);
+        assert!(reloaded_session.decisions[&rows[1].stable_id].excluded);
+        assert_eq!(
+            reloaded.export_mappings().await.mappings.excluded_tracks,
+            BTreeSet::from([rows[0].stable_id.clone(), rows[1].stable_id.clone()])
+        );
+
+        let mut reset = saved;
+        reset.decisions.clear();
+        service.save(reset.clone()).await.unwrap();
+        assert!(service
+            .review_action("user", "spotify", 1, Some(&[]), "exclude", "Artist", "",)
+            .await
+            .is_err());
+        assert!(service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some(&[rows[0].stable_id.clone(), rows[2].stable_id.clone()]),
+                "exclude",
+                "Artist",
+                "",
+            )
+            .await
+            .is_err());
+        assert!(!service
+            .snapshot()
+            .await
+            .unwrap()
+            .decisions
+            .values()
+            .any(|decision| decision.excluded));
+
+        let mut nonreviewable = reset;
+        nonreviewable.decisions.insert(
+            rows[1].stable_id.clone(),
+            RowDecision {
+                status: RowStatus::Done,
+                excluded: false,
+            },
+        );
+        service.save(nonreviewable).await.unwrap();
+        assert!(service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                Some(&[rows[0].stable_id.clone(), rows[1].stable_id.clone()]),
+                "exclude",
+                "Artist",
+                "",
+            )
+            .await
+            .is_err());
+        assert!(
+            !default_decision(&service.snapshot().await.unwrap(), &rows[0].stable_id,).excluded
         );
     }
 
@@ -16052,12 +16200,13 @@ mod tests {
         session.phase = ImportPhase::Review;
         service.save(session.clone()).await.unwrap();
         for row in &session.rows {
+            let ids = vec![row.stable_id.clone()];
             service
                 .review_action(
                     "lastfm-user",
                     "spotify-user",
                     1,
-                    Some(row.stable_id.as_str()),
+                    Some(ids.as_slice()),
                     "exclude",
                     "A",
                     "Album",
@@ -16095,7 +16244,7 @@ mod tests {
                 "user",
                 "spotify",
                 1,
-                Some("not-in-batch"),
+                Some(&["not-in-batch".to_owned()]),
                 "exclude",
                 "Artist",
                 "Album",
@@ -16173,7 +16322,7 @@ mod tests {
                 "user",
                 "spotify",
                 1,
-                Some("id"),
+                Some(&["id".to_owned()]),
                 "exclude",
                 "Artist",
                 "Album"

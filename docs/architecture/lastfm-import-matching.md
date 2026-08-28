@@ -45,7 +45,11 @@ their raw names, play counts, and timestamps. Review then has two shapes:
 
 Persisted batches are capped at 100 source rows. A large artist/album group can
 span batches without changing its artist-level ignore behavior. The visible
-batch is the unit of lazy Spotify work and review.
+batch is the unit of lazy Spotify work and review. Review exclude/undo actions
+may address one or more source IDs, but every ID must belong to the requested
+batch and remain reviewable; empty, cross-batch, and completed-row requests are
+rejected before any decision changes. A bulk action persists the session and
+reusable mappings once, then performs one backlog sweep.
 
 ## Search and cache boundary
 
