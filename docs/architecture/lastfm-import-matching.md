@@ -37,7 +37,11 @@ their raw names, play counts, and timestamps. Review then has two shapes:
 
 - A non-empty Last.fm album is **release-shaped**. Retune searches for an album,
   compares the source track set with each Spotify release, and may select one
-  release for the batch.
+  release for the batch. Review retains `Change Album…` and also offers
+  `Add Album…`; choosing it switches that batch to collection matching using
+  the cached release candidate, without another Spotify request. The source
+  album label remains visible, but the batch thereafter uses the collection
+  album controls and cannot use whole-album mode.
 - An empty Last.fm album is **collection-shaped** and displayed as `Singles`.
   Retune matches each source row against individual tracks. The user may build a
   set of Spotify albums whose track union constrains and improves those matches.
@@ -162,6 +166,16 @@ visible suggestion, not an automatic decision. Multiple strongest target URIs
 remain ambiguous and are shown with album labels. The UI may recommend an album
 only when its projected matched and unique coverage strictly outranks the other
 choices.
+
+Switching a release-shaped batch into collection matching is an explicit,
+idempotent persisted mutation. It seeds the selected release into the cached
+album set, clears only the release-level selected URI and persisted
+whole-album option, and reranks through the same collection matcher. Accepted
+mappings and explicit track choices are retained. The actual non-empty source
+album is used for every subsequent collection command, so adding or removing
+albums and revisiting the page remain scoped to that batch. Empty-album
+collection batches and untouched release-shaped batches keep their existing
+behavior.
 
 Adding or removing an album reranks unresolved automatic rows locally while
 preserving accepted mappings and explicit manual choices. Coverage summaries
