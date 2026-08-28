@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, automaticCollectionAlbumContributors, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, automaticCollectionAlbumContributors, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, excludeImportRows, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -55,6 +55,31 @@ test('Last.fm review state preserves unchecked rows, cascades ignores, and count
   assert.equal(remainingImportCount(state), 0)
   const excluded = excludeImportRow(defaultReviewState(importRows()), 'b')
   assert.equal(excluded.decisions.b.excluded, true)
+})
+
+test('Last.fm rejection selection supports plain, Shift, Cmd, and Ctrl gestures', () => {
+  const visible = ['required', 'ordinary', 'other', 'rejected']
+  let selection = selectImportRows(visible, [], null, 'ordinary', {})
+  assert.deepEqual([...selection.ids], ['ordinary'])
+  assert.equal(selection.anchor, 'ordinary')
+  selection = selectImportRows(visible, selection.ids, selection.anchor, 'required', { shiftKey: true })
+  assert.deepEqual([...selection.ids], ['required', 'ordinary'])
+  assert.equal(selection.anchor, 'ordinary')
+  selection = selectImportRows(visible, selection.ids, selection.anchor, 'rejected', { metaKey: true })
+  assert.deepEqual([...selection.ids], ['required', 'ordinary', 'rejected'])
+  assert.equal(selection.anchor, 'rejected')
+  selection = selectImportRows(visible, selection.ids, selection.anchor, 'rejected', { ctrlKey: true })
+  assert.deepEqual([...selection.ids], ['required', 'ordinary'])
+})
+
+test('Last.fm exclusion projection handles multiple IDs and stable rejected ordering', () => {
+  const rows = [...importRows(), { ...importRows()[0], stableId: 'c', track: 'Three' }]
+  const state = defaultReviewState(rows)
+  const excluded = excludeImportRows(state, ['b', 'b', 'c'])
+  assert.equal(excluded.decisions.b.excluded, true)
+  assert.equal(excluded.decisions.c.excluded, true)
+  assert.deepEqual(stablePartitionImportRows(rows, ['b'], (row) => row.stableId, ['c']).map((row) => row.stableId), ['b', 'a', 'c'])
+  assert.equal(excludeImportRow(excluded, 'b', false).decisions.b.excluded, false)
 })
 
 test('Last.fm Accept & Next commits current choices and requests advancement', () => {
@@ -502,7 +527,7 @@ test('Last.fm collection review explains individual matching and keeps release U
   assert.match(importer, /<summary><strong>\{automaticCollectionAlbums\.length\} automatic · \{selectedCollectionUris\.length\} added/)
   assert.match(importer, /<small>\{collectionCoverageStatus\(collectionMatches\.coverage\)\}<\/small><\/summary>/)
   assert.doesNotMatch(importer, /<details key=\{uri\} className="import-selected-album"/)
-  assert.match(importer, /stablePartitionImportRows\(page\.rows, requiredMatchIds/)
+  assert.match(importer, /stablePartitionImportRows\(projectedRows, requiredMatchIds/)
   assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
   assert.match(importerCss, /\.import-selected-album-cards summary \{[^}]*list-style: disclosure-closed/)
   assert.match(importer, /Use \{suggestedMatches\.length\} Suggestions/)
@@ -529,6 +554,9 @@ test('Last.fm queue selection restores focus after loading and retains native bu
   assert.match(importer, /focusQueueAfterOpen\.current = focusQueue/)
   assert.match(importer, /openQueueItem\(next, activeImportQueue\(orderedSnapshot\), focusQueue\)/)
   assert.match(importer, /onOpen=\{\(item\) => void openQueueItem\(item, activeQueue, true\)\}/)
+  assert.match(importer, /const \[pageMutationRunning, setPageMutationRunning\] = useState\(false\)/)
+  assert.match(importer, /disabled=\{interactionBusy \|\| state\.applyingAll\}/)
+  assert.match(importer, /setPageMutationRunning\(running\)/)
   assert.doesNotMatch(importer, /<VirtualQueue[^>]*disabled=\{busy \|\| pageLoading\}/)
   assert.match(importer, /event\.key === 'Enter' && !busy && query\.trim\(\)[\s\S]*onSearch\(query\)/)
   assert.match(importer, /onMutation\(true\)[\s\S]*lastfm_import_apply/)

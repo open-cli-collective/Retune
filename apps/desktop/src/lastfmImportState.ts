@@ -213,9 +213,41 @@ export function collectionSuggestion<T extends ImportCollectionSuggestionCandida
   return candidates.size === 1 ? candidates.values().next().value ?? null : null
 }
 
-export function stablePartitionImportRows<T>(rows: T[], requiredIds: Iterable<string>, id: (row: T) => string): T[] {
+export type ImportRowSelection = { ids: Set<string>; anchor: string | null }
+
+export function selectImportRows(
+  visibleIds: string[],
+  selectedIds: Iterable<string>,
+  anchor: string | null,
+  id: string,
+  modifiers: Partial<Pick<ImportShortcutContext, 'shiftKey' | 'metaKey' | 'ctrlKey'>> = {},
+): ImportRowSelection {
+  const visible = new Set(visibleIds)
+  const selected = new Set([...selectedIds].filter((selectedId) => visible.has(selectedId)))
+  const clicked = visibleIds.indexOf(id)
+  const anchorIndex = anchor === null ? -1 : visibleIds.indexOf(anchor)
+  if (clicked < 0) return { ids: selected, anchor }
+  if (modifiers.shiftKey && anchorIndex >= 0) {
+    for (const rangeId of visibleIds.slice(Math.min(anchorIndex, clicked), Math.max(anchorIndex, clicked) + 1)) selected.add(rangeId)
+  } else if (modifiers.metaKey || modifiers.ctrlKey) {
+    if (!selected.delete(id)) selected.add(id)
+    anchor = id
+  } else {
+    selected.clear()
+    selected.add(id)
+    anchor = id
+  }
+  return { ids: new Set(visibleIds.filter((visibleId) => selected.has(visibleId))), anchor: anchorIndex >= 0 && modifiers.shiftKey ? anchor : id }
+}
+
+export function stablePartitionImportRows<T>(rows: T[], requiredIds: Iterable<string>, id: (row: T) => string, rejectedIds: Iterable<string> = []): T[] {
   const required = new Set(requiredIds)
-  return [...rows.filter((row) => required.has(id(row))), ...rows.filter((row) => !required.has(id(row)))]
+  const rejected = new Set(rejectedIds)
+  return [
+    ...rows.filter((row) => required.has(id(row)) && !rejected.has(id(row))),
+    ...rows.filter((row) => !required.has(id(row)) && !rejected.has(id(row))),
+    ...rows.filter((row) => rejected.has(id(row))),
+  ]
 }
 
 export type CollectionAlbumProjection = { uri: string }
@@ -382,9 +414,13 @@ export function setWholeAlbumImport(state: ReviewState, wholeAlbum: boolean): Re
   return { ...state, wholeAlbum, checked }
 }
 
+export function excludeImportRows(state: ReviewState, ids: Iterable<string>, excluded = true): ReviewState {
+  const reviewableIds = [...new Set(ids)].filter((id) => reviewable(state, id))
+  return reviewableIds.length ? withDecision(state, reviewableIds, { excluded }) : state
+}
+
 export function excludeImportRow(state: ReviewState, id: string, excluded = true): ReviewState {
-  if (!reviewable(state, id)) return state
-  return withDecision(state, [id], { excluded })
+  return excludeImportRows(state, [id], excluded)
 }
 
 export function skipImportAlbum(state: ReviewState, artist: string, album: string): ReviewState {
