@@ -3552,6 +3552,22 @@ impl Service {
             {
                 return Err("A match does not belong to this review batch.".into());
             }
+            if session.collection_album_matches.contains_key(&batch_id)
+                && results.iter().any(|result| {
+                    result
+                        .selected_uri
+                        .as_deref()
+                        .is_some_and(|uri| uri.starts_with("spotify:album:"))
+                        || result
+                            .candidates
+                            .iter()
+                            .any(|candidate| candidate.uri.starts_with("spotify:album:"))
+                })
+            {
+                return Err(
+                    "Release matching is unavailable after switching to album matches.".into(),
+                );
+            }
             session.spotify_account_id = Some(spotify_account_id.to_owned());
             for result in results {
                 session.matches.insert(result.source_id.clone(), result);
@@ -6497,6 +6513,15 @@ fn activate_collection_session(
             result.selected_uri = explicit;
         }
     }
+    if is_converted_collection_batch(session, batch_id, album) {
+        for row in &rows {
+            if let Some(result) = session.matches.get_mut(&row.stable_id) {
+                result
+                    .candidates
+                    .retain(|candidate| !candidate.uri.starts_with("spotify:album:"));
+            }
+        }
+    }
     rerank_collection_session(session, batch_id, membership, mappings)?;
     Ok(album.to_owned())
 }
@@ -6928,8 +6953,20 @@ fn ratify_collection_result(
     membership: &CollectionMembership,
     mappings: &LastFmMappings,
 ) -> MatchResult {
+    result
+        .track_matches
+        .retain(|_, uri| uri.starts_with("spotify:track:"));
+    if result
+        .selected_uri
+        .as_deref()
+        .is_some_and(|uri| !uri.starts_with("spotify:track:"))
+    {
+        result.selected_uri = None;
+    }
     rank_collection_candidates(row, &mut result.candidates, membership);
-    if let Some(uri) = collection_mapping_uri(row, mappings) {
+    if let Some(uri) =
+        collection_mapping_uri(row, mappings).filter(|uri| uri.starts_with("spotify:track:"))
+    {
         if !result
             .candidates
             .iter()
@@ -6964,13 +7001,17 @@ fn ratify_collection_result(
         };
         if let Some(candidate) = selected {
             result.confidence = Some(collection_title_confidence(row, candidate));
-            result
-                .track_matches
-                .insert(row.stable_id.clone(), candidate.uri.clone());
+            if candidate.uri.starts_with("spotify:track:") {
+                result
+                    .track_matches
+                    .insert(row.stable_id.clone(), candidate.uri.clone());
+            }
         }
     }
     rank_collection_candidates(row, &mut result.candidates, membership);
-    if let Some(uri) = collection_mapping_uri(row, mappings) {
+    if let Some(uri) =
+        collection_mapping_uri(row, mappings).filter(|uri| uri.starts_with("spotify:track:"))
+    {
         if !result
             .candidates
             .iter()
@@ -7011,6 +7052,16 @@ fn ratify_collection_result_with_selected_albums_and_injected(
     membership: &CollectionMembership,
     mappings: &LastFmMappings,
 ) -> MatchResult {
+    result
+        .track_matches
+        .retain(|_, uri| uri.starts_with("spotify:track:"));
+    if result
+        .selected_uri
+        .as_deref()
+        .is_some_and(|uri| !uri.starts_with("spotify:track:"))
+    {
+        result.selected_uri = None;
+    }
     if albums.is_empty() {
         return ratify_collection_result(
             row,
@@ -7033,7 +7084,9 @@ fn ratify_collection_result_with_selected_albums_and_injected(
     rank_collection_candidates(row, &mut candidates, membership);
     result.candidates = candidates;
 
-    if let Some(uri) = collection_mapping_uri(row, mappings) {
+    if let Some(uri) =
+        collection_mapping_uri(row, mappings).filter(|uri| uri.starts_with("spotify:track:"))
+    {
         if !result
             .candidates
             .iter()
@@ -7049,7 +7102,9 @@ fn ratify_collection_result_with_selected_albums_and_injected(
         return result;
     }
     let supported_selected = collection_best_title_matches(row, &selected_tracks);
-    let selected_candidate = (supported_selected.len() == 1).then(|| supported_selected[0]);
+    let selected_candidate = (supported_selected.len() == 1)
+        .then(|| supported_selected[0])
+        .filter(|candidate| candidate.uri.starts_with("spotify:track:"));
     let selected_track_uri = selected_candidate.map(|candidate| candidate.uri.clone());
     if let Some(selected_uri) = result.selected_uri.clone() {
         // A track picker choice is durable session state and outranks a changed set.
@@ -7114,10 +7169,12 @@ fn ratify_collection_result_with_selected_albums_and_injected(
         None
     };
     if let Some(candidate) = selected {
-        result.confidence = Some(collection_title_confidence(row, candidate));
-        result
-            .track_matches
-            .insert(row.stable_id.clone(), candidate.uri.clone());
+        if candidate.uri.starts_with("spotify:track:") {
+            result.confidence = Some(collection_title_confidence(row, candidate));
+            result
+                .track_matches
+                .insert(row.stable_id.clone(), candidate.uri.clone());
+        }
     }
     result
 }
@@ -7488,13 +7545,18 @@ async fn lazy_match_page(
 }
 
 fn matched_track_uri(result: &MatchResult, source_id: &str) -> Option<String> {
-    result.track_matches.get(source_id).cloned().or_else(|| {
-        result
-            .selected_uri
-            .as_ref()
-            .filter(|uri| uri.starts_with("spotify:track:"))
-            .cloned()
-    })
+    result
+        .track_matches
+        .get(source_id)
+        .filter(|uri| uri.starts_with("spotify:track:"))
+        .cloned()
+        .or_else(|| {
+            result
+                .selected_uri
+                .as_ref()
+                .filter(|uri| uri.starts_with("spotify:track:"))
+                .cloned()
+        })
 }
 
 fn best_candidate(result: &MatchResult) -> Option<&AlbumCandidate> {
@@ -9335,6 +9397,11 @@ pub(crate) async fn lastfm_import_change_album(
         .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
     let batch = requested_batch(&session, batch_id, &row.artist, &row.album)
         .ok_or_else(|| "The source row does not belong to this review batch.".to_string())?;
+    if is_converted_collection_batch(&session, batch_id, &row.album) {
+        return Err(
+            "Changing the Spotify release is unavailable after switching to album matches.".into(),
+        );
+    }
     let rows_by_id = source_row_map(&session);
     let related_rows = batch_rows(&batch, &rows_by_id)
         .into_iter()
@@ -10352,6 +10419,122 @@ mod tests {
         );
         let reloaded = Service::new(directory.path());
         assert_eq!(reloaded.snapshot().await.unwrap(), retried);
+    }
+
+    #[test]
+    fn converted_collection_activation_drops_release_candidates_and_album_targets() {
+        let (mut session, rows, _) = selected_release_session();
+        activate_collection_session(
+            &mut session,
+            1,
+            "Artist",
+            "Release",
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        )
+        .unwrap();
+        assert!(session.matches.values().all(|result| {
+            result
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.uri.starts_with("spotify:album:"))
+        }));
+
+        let source_id = rows[0].stable_id.clone();
+        session
+            .rows
+            .iter_mut()
+            .find(|row| row.stable_id == source_id)
+            .unwrap()
+            .track = "Seed Release".into();
+        session
+            .collection_album_matches
+            .get_mut(&1)
+            .unwrap()
+            .selected_album_uris
+            .clear();
+        let result = session.matches.get_mut(&source_id).unwrap();
+        result.selected_uri = None;
+        result.track_matches.clear();
+        rerank_collection_session(
+            &mut session,
+            1,
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        )
+        .unwrap();
+
+        assert!(session.matches.values().all(|result| {
+            result
+                .track_matches
+                .values()
+                .all(|uri| uri.starts_with("spotify:track:"))
+        }));
+        assert!(session.matches[&source_id].track_matches.is_empty());
+        let options = PageOptions {
+            import_content: true,
+            include_historical_play_counts: true,
+            selected_track_ids: BTreeSet::from([source_id.clone()]),
+            ..PageOptions::default()
+        };
+        assert!(build_apply_plan(
+            &session,
+            "spotify",
+            1,
+            "Artist",
+            "Release",
+            std::slice::from_ref(&source_id),
+            false,
+            options.clone(),
+        )
+        .unwrap_err()
+        .contains("Every selected source track needs a supported Spotify match"));
+
+        session.page_options.insert(batch_options_key(1), options);
+        let batch = session.batches[0].clone();
+        let rows_by_id = source_row_map(&session);
+        let queue_rows = batch_rows(&batch, &rows_by_id);
+        let queue = queue_item(&session, &batch, &queue_rows, &[]).unwrap();
+        assert_eq!(queue.album_entities, 0);
+        assert_eq!(queue.track_entities, 0);
+    }
+
+    #[tokio::test]
+    async fn converted_collection_rejects_release_match_write_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let (session, rows, _) = selected_release_session();
+        service.save(session).await.unwrap();
+        service
+            .activate_collection_batch(
+                "user",
+                "spotify",
+                1,
+                "Artist",
+                "Release",
+                &CollectionMembership::default(),
+                &LastFmMappings::default(),
+            )
+            .await
+            .unwrap();
+        let before = service.snapshot().await.unwrap();
+        let release = before.collection_album_matches[&1].cached_candidates[0]
+            .matching
+            .clone();
+        let result = MatchResult {
+            source_id: rows[0].stable_id.clone(),
+            search_term: album_search_term("Artist", "Release"),
+            confidence: Some(Confidence::Exact),
+            selected_uri: Some(release.uri.clone()),
+            candidates: vec![release],
+            track_matches: BTreeMap::new(),
+        };
+        let error = service
+            .set_matches("user", "spotify", 1, vec![result], None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Release matching is unavailable"));
+        assert_eq!(service.snapshot().await.unwrap(), before);
     }
 
     #[tokio::test]
