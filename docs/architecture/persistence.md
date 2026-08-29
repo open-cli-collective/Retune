@@ -96,6 +96,13 @@ Collection review additionally stores the serde-defaulted, batch-keyed
 URIs in selection order, and serde-defaulted per-source provenance for only the
 candidate URIs injected by a selected-album rerank. Coverage, per-track match
 status, and whole-album readiness are derived projections and are not persisted.
+For a non-empty release-shaped batch, the presence of its map entry is also the
+durable opt-in marker for collection matching. Activation seeds the currently
+selected release from session-cached match data, clears only album-level
+selection and whole-album state, and preserves accepted mappings and explicit
+track choices before reranking. The source album remains the command key; the
+collection projection therefore survives restart with its selected albums and
+mode intact. Converted batches reject whole-album options and apply plans.
 Preview/add/remove mutations use the same serialized read-modify-write and
 atomic replacement path; legacy V2 sessions load an empty collection map and
 treat the new provenance as empty, retaining the existing release-shaped

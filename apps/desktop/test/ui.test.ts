@@ -307,6 +307,18 @@ test('Last.fm collection result rows expose separate accessible actions', () => 
   assert.doesNotMatch(importer, /<button type="button" className="import-picker-option"/)
 })
 
+test('Last.fm release batches opt into the collection controls without losing source context', () => {
+  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
+  assert.match(importer, /const collection = page\.collection !== null/)
+  assert.match(importer, /Change Album…/)
+  assert.match(importer, /Add Album…/)
+  assert.match(importer, /Manage Albums…/)
+  assert.match(importer, /lastfm_import_activate_collection/)
+  assert.match(importer, /const wholeAlbumDisabled = convertedCollection/)
+  assert.match(importer, /if \(collection\) openCollectionAlbums\(\)\n        else openAlbumPicker\(\)/)
+  assert.match(importer, /page\.album \? 'This Last\.fm release started with one Spotify match/)
+})
+
 test('Last.fm content and history intents remain independent and require one choice', () => {
   const state = defaultReviewState(importRows())
   assert.equal(state.importContent, true)
@@ -514,7 +526,7 @@ test('Last.fm collection review explains individual matching and keeps release U
   assert.match(importer, /Search Spotify albums or paste a share link/)
   assert.match(importer, /ALREADY IN YOUR LIBRARY/)
   assert.match(importer, /collection && !collectionAlbumReady/)
-  assert.match(importer, /const collection = page\.album === ''/)
+  assert.match(importer, /const collection = page\.collection !== null/)
   assert.match(importer, /collection \? collectionSuggestion\(item\.source, item\.matchResult, selectedTrackUris\) : null/)
   assert.match(importer, /const displayedSearchTerm = collection && !track \? trackPickerQuery\(item\.source\) : match\?\.searchTerm/)
   assert.match(importerCss, /\.import-library-badge/)

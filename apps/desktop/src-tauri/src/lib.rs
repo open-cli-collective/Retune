@@ -2627,6 +2627,7 @@ pub fn run() {
             lastfm_import::lastfm_import_collection_preview_album,
             lastfm_import::lastfm_import_collection_add_album,
             lastfm_import::lastfm_import_collection_remove_album,
+            lastfm_import::lastfm_import_activate_collection,
             lastfm_import::lastfm_import_change_track,
             lastfm_import::lastfm_import_change_album,
             lastfm_import::lastfm_import_apply,
