@@ -10,6 +10,7 @@ const required = (text, value, message = value) => assert.ok(text.includes(value
 const tauri = JSON.parse(read('apps/desktop/src-tauri/tauri.conf.json'))
 const desktopCargo = read('apps/desktop/src-tauri/Cargo.toml')
 const lock = read('Cargo.lock')
+const autoWorkflow = read('.github/workflows/auto-release.yml')
 const workflow = read('.github/workflows/release.yml')
 const ci = read('.github/workflows/ci.yml')
 const gitignore = read('.gitignore')
@@ -23,10 +24,14 @@ const frontendState = [
 ].join('\n')
 
 const nativeBundleStep = workflow.match(/- name: Build native bundle\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
+const macPackageStep = workflow.match(/- name: Package macOS app\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
+const windowsRenameStep = workflow.match(/- name: Rename Windows NSIS installer\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
+const debRenameStep = workflow.match(/- name: Rename Debian package\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 
 const cargoVersion = desktopCargo.match(/name = "retune-desktop"\s+version = "([^"]+)"/s)?.[1]
 const lockVersion = lock.match(/\[\[package\]\]\s+name = "retune-desktop"\s+version = "([^"]+)"/s)?.[1]
 assert.match(tauri.version, /^\d+\.\d+\.\d+$/)
+assert.match(tauri.version, /^\d+\.\d+\.0$/)
 assert.equal(cargoVersion, tauri.version)
 assert.equal(lockVersion, tauri.version)
 assert.equal(tauri.identifier, 'com.rianjs.retune')
@@ -34,6 +39,22 @@ assert.equal(tauri.bundle.linux.deb.section, 'sound')
 
 required(workflow, 'workflow_dispatch:')
 required(workflow, 'tags:\n      - "v*"')
+required(autoWorkflow, 'push:\n    branches: ["main"]', 'automatic release main trigger')
+required(autoWorkflow, 'workflow_dispatch:', 'automatic release manual trigger')
+required(autoWorkflow, 'fetch-depth: 0')
+required(autoWorkflow, 'fetch-tags: true')
+required(autoWorkflow, 'persist-credentials: false')
+required(autoWorkflow, 'open-cli-collective/.github/actions/auto-release@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706')
+required(autoWorkflow, 'release-paths: apps/**,crates/**,Cargo.toml,Cargo.lock,packaging/**,scripts/**,.github/workflows/release.yml,.github/workflows/auto-release.yml')
+required(autoWorkflow, 'version-file: apps/desktop/src-tauri/tauri.conf.json')
+required(autoWorkflow, 'TAP_GITHUB_TOKEN')
+required(autoWorkflow, 'Same-tag/same-SHA')
+required(autoWorkflow, 'collision')
+required(autoWorkflow, 'if [ "$DRY_RUN" = "true" ]; then', 'automatic release dry-run guard')
+required(autoWorkflow, 'push origin "refs/tags/$TAG"', 'automatic release tag push')
+required(autoWorkflow, 'DRY_RUN: ${{ github.event_name == \'workflow_dispatch\' }}')
+assert.doesNotMatch(autoWorkflow, /dry_run/)
+assert.doesNotMatch(autoWorkflow, /version\.txt|identity\.yml|goreleaser/i)
 required(nativeBundleStep, 'RETUNE_LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}', 'trusted Last.fm API key mapping')
 required(nativeBundleStep, 'RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}', 'trusted Last.fm shared-secret mapping')
 required(nativeBundleStep, "RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET", 'release Last.fm credential presence check')
@@ -68,6 +89,8 @@ for (const asset of [
 ]) required(workflow, asset, `asset contract ${asset}`)
 
 const sharedCommit = '74d24fcd862d7b9cbe8f6fdda31db6a833e3d706'
+required(ci, `open-cli-collective/.github/actions/pr-title@${sharedCommit}`)
+required(ci, 'title: ${{ github.event.pull_request.title }}')
 for (const action of ['macos-codesign-setup', 'homebrew-alias', 'winget-submit']) {
   required(workflow, `open-cli-collective/.github/actions/${action}@${sharedCommit}`)
 }
@@ -99,6 +122,20 @@ assert.doesNotMatch(workflow, /uses:.*notariz/i)
 required(workflow, 'alias-tokens: ""')
 required(workflow, 'fetch-depth: 0')
 required(workflow, 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main', 'release main-branch guard')
+required(workflow, 'release_line="${baseline%.*}"', 'configured release line')
+required(workflow, '[[ ! "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', 'strict release tag')
+required(workflow, 'tag_line="${version%.*}"', 'tag-derived release line')
+required(nativeBundleStep, 'VERSION: ${{ needs.prepare.outputs.version }}', 'tag version environment')
+required(nativeBundleStep, "require('node:fs').writeFileSync('src-tauri/tauri.release.conf.json'", 'Tauri version override config')
+required(nativeBundleStep, 'npx tauri build --config src-tauri/tauri.release.conf.json', 'Tauri version override')
+assert.doesNotMatch(nativeBundleStep, /shell: bash/)
+required(macPackageStep, 'CFBundleShortVersionString', 'macOS package version assertion')
+required(macPackageStep, '/usr/libexec/PlistBuddy', 'macOS package metadata assertion')
+required(macPackageStep, '[ "$actual" = "$VERSION" ]', 'macOS package version match')
+required(windowsRenameStep, 'BaseName -notmatch', 'Windows package version assertion')
+required(windowsRenameStep, 'VERSION', 'Windows package metadata assertion')
+required(debRenameStep, 'dpkg-deb -f', 'Debian package version assertion')
+required(debRenameStep, '[ "$package_version" = "$VERSION" ]', 'Debian package version match')
 required(ci, 'push:\n    branches: ["main"]', 'CI push main-only guard')
 required(workflow, 'bootstrap: true')
 required(workflow, 'x64-marker: Retune-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe')

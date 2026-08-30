@@ -50,11 +50,13 @@ for (const file of ["ARCHITECTURE.md", ...markdown.filter((file) => file.startsW
 
 const install = fs.readFileSync(path.join(root, "docs/INSTALL.md"), "utf8");
 const normalizedInstall = install.replace(/\s+/g, " ");
-const version = JSON.parse(fs.readFileSync(path.join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8")).version;
-for (const match of install.matchAll(/(?:Retune v|Retune-|retune_|\/(?:tag|download)\/v)(\d+\.\d+\.\d+)/g)) {
-  if (match[1] !== version) errors.push(`docs/INSTALL.md: stale version ${match[1]} (expected ${version})`);
-}
 for (const value of [
+  "https://github.com/open-cli-collective/Retune/releases/latest",
+  "Retune-<version>-aarch64.tar.gz",
+  "Retune-<version>-windows-x64-setup.exe",
+  "Retune-<version>-windows-arm64-setup.exe",
+  "retune_<version>_amd64.deb",
+  "retune_<version>_arm64.deb",
   "brew install --cask open-cli-collective/tap/retune",
   "winget install --exact --id OpenCLICollective.Retune",
   "sudo apt install retune",
@@ -69,6 +71,9 @@ for (const value of [
   "checksums.txt",
 ]) {
   if (!install.includes(value)) errors.push(`docs/INSTALL.md: missing contract ${value}`);
+}
+if (/Retune v\d+\.\d+\.\d+|Retune-\d+\.\d+\.\d+|retune_\d+\.\d+\.\d+/.test(install)) {
+  errors.push("docs/INSTALL.md: release instructions must use latest-release and artifact patterns");
 }
 for (const value of [
   "Do **not** register `http://127.0.0.1:8898/login`; `/login` is Retune's separate internal built-in-playback callback.",

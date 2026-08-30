@@ -57,14 +57,36 @@ native credential stores.
 
 ## Release automation
 
-Pushing a tag such as `v0.2.1` runs the native release workflow. It builds and
-publishes exactly these assets: `Retune-<version>-aarch64.tar.gz`,
+Merging a pull request to `main` releases automatically only when the squash
+commit's title passes the pinned conventional-commit check, has the `feat` or
+`fix` conventional type (including scoped forms such as `feat(scope):`), and
+changes a release-worthy path (`apps/**`, `crates/**`, root Cargo files,
+`packaging/**`, `scripts/**`, or a release workflow). Other conventional types
+and unrelated paths skip the release gate. The automatic
+workflow derives `MAJOR.MINOR` from `apps/desktop/src-tauri/tauri.conf.json`
+and creates `v<major>.<minor>.<run-number>`; with the current `0.3.0` baseline,
+the first live tag is expected to be `v0.3.1`.
+
+Pushing a strict tag such as `v0.3.1` runs the native release workflow. The tag
+must match the configured release line and point to a commit reachable from
+`main`. It builds and publishes exactly these assets: `Retune-<version>-aarch64.tar.gz`,
 `Retune-<version>-windows-x64-setup.exe`,
 `Retune-<version>-windows-arm64-setup.exe`,
 `retune_<version>_amd64.deb`, `retune_<version>_arm64.deb`, and
-`checksums.txt`. `workflow_dispatch` is a dry run: it builds, signs, verifies,
-and aggregates the same artifacts without creating a release or dispatching
-package channels.
+`checksums.txt`. The tag version is passed to Tauri through its `--config`
+override so package metadata matches the release tag. The automatic
+workflow's `workflow_dispatch` only evaluates the release gate and reports the
+computed tag; it never builds or pushes. The Release workflow's
+`workflow_dispatch` builds, signs, verifies, and aggregates the same artifacts
+against the selected ref without creating a release or dispatching package
+channels. Before merging, dispatch the existing Release workflow against the
+feature branch for packaging validation. Once this automatic workflow exists
+on `main`, its manual dispatch can validate the gate and computed tag.
+
+To start a new release line, update the checked-in Tauri version, desktop Cargo
+version, and matching `Cargo.lock` package entry together (for example,
+`0.4.0`); do not add a `version.txt` file. The automatic workflow then uses
+that line for subsequent tags.
 
 Run the local release contract check with:
 

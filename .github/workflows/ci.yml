@@ -6,6 +6,14 @@ on:
   pull_request:
 
 jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: open-cli-collective/.github/actions/pr-title@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706
+        with:
+          title: ${{ github.event.pull_request.title }}
+
   rust:
     runs-on: macos-latest
     steps:

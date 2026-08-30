@@ -1,6 +1,6 @@
 # Install and set up Retune
 
-Retune v0.2.1 supports these native packages:
+Retune supports these native packages:
 
 | Platform | Supported architecture |
 | --- | --- |
@@ -14,19 +14,19 @@ published package metadata.
 
 ## Direct downloads
 
-The [v0.2.1 release](https://github.com/open-cli-collective/Retune/releases/tag/v0.2.1)
-provides these fallback downloads:
+The [latest Retune release](https://github.com/open-cli-collective/Retune/releases/latest)
+provides these fallback downloads. Use the version shown on that release page
+in each artifact name:
 
 | Platform | Architecture | Asset |
 | --- | --- | --- |
-| macOS | Apple Silicon | [`Retune-0.2.1-aarch64.tar.gz`](https://github.com/open-cli-collective/Retune/releases/download/v0.2.1/Retune-0.2.1-aarch64.tar.gz) |
-| Windows | x64 | [`Retune-0.2.1-windows-x64-setup.exe`](https://github.com/open-cli-collective/Retune/releases/download/v0.2.1/Retune-0.2.1-windows-x64-setup.exe) |
-| Windows | ARM64 | [`Retune-0.2.1-windows-arm64-setup.exe`](https://github.com/open-cli-collective/Retune/releases/download/v0.2.1/Retune-0.2.1-windows-arm64-setup.exe) |
-| Debian/Ubuntu | amd64 | [`retune_0.2.1_amd64.deb`](https://github.com/open-cli-collective/Retune/releases/download/v0.2.1/retune_0.2.1_amd64.deb) |
-| Debian/Ubuntu | arm64 | [`retune_0.2.1_arm64.deb`](https://github.com/open-cli-collective/Retune/releases/download/v0.2.1/retune_0.2.1_arm64.deb) |
+| macOS | Apple Silicon | `Retune-<version>-aarch64.tar.gz` |
+| Windows | x64 | `Retune-<version>-windows-x64-setup.exe` |
+| Windows | ARM64 | `Retune-<version>-windows-arm64-setup.exe` |
+| Debian/Ubuntu | amd64 | `retune_<version>_amd64.deb` |
+| Debian/Ubuntu | arm64 | `retune_<version>_arm64.deb` |
 
-Download [`checksums.txt`](https://github.com/open-cli-collective/Retune/releases/download/v0.2.1/checksums.txt)
-and verify the matching asset before installing. On macOS, verify the tarball
+Download `checksums.txt` from that same latest release and verify the matching asset before installing. On macOS, verify the tarball
 before clearing quarantine or moving `Retune.app` into `/Applications`. On
 Windows, verify the installer before accepting any unsigned-publisher warning.
 These files support only the targets listed above.
@@ -34,17 +34,18 @@ These files support only the targets listed above.
 After verifying the download, install the matching package:
 
 ```sh
-# macOS
-tar -xzf Retune-0.2.1-aarch64.tar.gz
+# macOS (replace VERSION with the latest release version)
+VERSION=latest-version
+tar -xzf "Retune-${VERSION}-aarch64.tar.gz"
 xattr -dr com.apple.quarantine Retune.app
 sudo mv Retune.app /Applications/
 
 # Debian/Ubuntu amd64 (use the arm64 filename on ARM64)
-sudo apt install ./retune_0.2.1_amd64.deb
+sudo apt install "./retune_${VERSION}_amd64.deb"
 ```
 
 On Windows, run the downloaded `.exe` installer from File Explorer or
-PowerShell, for example `./Retune-0.2.1-windows-x64-setup.exe`.
+PowerShell, for example `./Retune-<version>-windows-x64-setup.exe`.
 
 ## macOS with Homebrew
 

@@ -35,14 +35,25 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
-          if [ "$EVENT_NAME" = push ] && [ "${TAG#v}" != "$version" ]; then
-            echo "::error::tag $TAG does not match tauri.conf.json version $version"
-            exit 1
-          fi
-          if [ "$EVENT_NAME" = push ] && ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::release tags must point to a commit on main"
-            exit 1
+          baseline="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          release_line="${baseline%.*}"
+          if [ "$EVENT_NAME" = push ]; then
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::release tag must be strict vMAJOR.MINOR.PATCH (got $TAG)"
+              exit 1
+            fi
+            version="${TAG#v}"
+            tag_line="${version%.*}"
+            if [ "$tag_line" != "$release_line" ]; then
+              echo "::error::tag $TAG is outside configured release line v$release_line"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::release tags must point to a commit on main"
+              exit 1
+            fi
+          else
+            version="$baseline"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -131,9 +142,11 @@ jobs:
           RETUNE_LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
           RETUNE_SUPPORT_EMAIL: ${{ vars.RETUNE_SUPPORT_EMAIL }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           node --input-type=module -e "for (const name of ['RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET']) if (!process.env[name]?.trim()) throw new Error(name + ' is required for release packaging')"
-          npx tauri build --bundles ${{ matrix.bundle }}
+          node -e "require('node:fs').writeFileSync('src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.VERSION }))"
+          npx tauri build --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundle }}
 
       - name: Configure stable macOS signing
         if: matrix.os == 'macos-15'
@@ -220,7 +233,12 @@ jobs:
         working-directory: apps/desktop
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: tar -czf "Retune-${VERSION}-aarch64.tar.gz" -C ../../target/release/bundle/macos Retune.app
+        run: |
+          set -euo pipefail
+          app="../../target/release/bundle/macos/Retune.app"
+          actual="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          [ "$actual" = "$VERSION" ] || { echo "::error::macOS bundle version $actual does not match $VERSION"; exit 1; }
+          tar -czf "Retune-${VERSION}-aarch64.tar.gz" -C ../../target/release/bundle/macos Retune.app
 
       - name: Rename Windows NSIS installer
         if: startsWith(matrix.os, 'windows-')
@@ -233,6 +251,7 @@ jobs:
           $bundle = Resolve-Path '../../target/release/bundle/nsis'
           $files = @(Get-ChildItem -LiteralPath $bundle -Filter '*-setup.exe' -File)
           if ($files.Count -ne 1) { throw "expected one NSIS setup.exe, found $($files.Count)" }
+          if ($files[0].BaseName -notmatch [regex]::Escape($env:VERSION)) { throw "NSIS source filename does not contain version $env:VERSION: $($files[0].Name)" }
           $destination = Join-Path $bundle "Retune-$env:VERSION-windows-$env:ARCH-setup.exe"
           Move-Item -LiteralPath $files[0].FullName -Destination $destination
 
@@ -247,6 +266,8 @@ jobs:
           bundle=../../target/release/bundle/deb
           files=("$bundle"/*.deb)
           [ "${#files[@]}" -eq 1 ] || { echo "::error::expected one Debian package, found ${#files[@]}"; exit 1; }
+          package_version="$(dpkg-deb -f "${files[0]}" Version)"
+          [ "$package_version" = "$VERSION" ] || { echo "::error::Debian package version $package_version does not match $VERSION"; exit 1; }
           mv "${files[0]}" "$bundle/retune_${VERSION}_${ARCH}.deb"
 
       - name: Upload macOS artifact
