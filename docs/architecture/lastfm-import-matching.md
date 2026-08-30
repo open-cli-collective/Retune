@@ -82,14 +82,24 @@ Release matching issues one bounded Spotify album search using generated
 local comparison. Generated album and track searches elide parenthetical
 annotations. Search results are capped at ten candidates.
 
-Collection-shaped batches do not search Spotify automatically. The user first
-adds likely albums or explicitly changes a track; the selected albums' cached
-track union then drives local matching. Explicit collection-album search accepts
-ordinary user text as well as Spotify field syntax. Search returns album
-summaries; the first Preview or Add obtains the complete album, after which
-preview, add, remove, revisit, and reranking are local. Opening a cached
-collection page never resolves `/me`; if the install-local catalog cannot prove
-the bound account, Retune shows the persisted page without membership reranking.
+Collection-shaped batches with no representative album do not search Spotify
+automatically. A named collection cluster lazily searches its representative
+artist and album once, using only rows from that exact source group to evaluate
+the release rather than requiring one album to cover the entire merged cluster.
+The existing bounded release gate hydrates only the strongest title tier. A sole
+supported release seeds the selected album union and reranks every row in the
+collection locally; absent or ambiguous results remain manual. The attempt and
+hydrated candidates are persisted even when no release is selected, so revisit
+does not search again. No collection path issues automatic per-track searches.
+
+The user can still add likely albums or explicitly change a track; the selected
+albums' cached track union then drives local matching. Explicit collection-album
+search accepts ordinary user text as well as Spotify field syntax. Search
+returns album summaries; the first Preview or Add obtains the complete album,
+after which preview, add, remove, revisit, and reranking are local. Opening a
+cached collection page never resolves `/me`; if the install-local catalog cannot
+prove the bound account, Retune shows the persisted page without membership
+reranking.
 
 Release search hydrates track lists only for summaries in the strongest
 album-title tier whose advertised track count can cover the source rows. At most
