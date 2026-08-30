@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, automaticCollectionAlbumContributors, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, excludeImportRows, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
+import { acceptImportAndNext, acceptImportChanges, activeImportQueue, automaticCollectionAlbumContributors, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, excludeImportRows, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
 import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -21,8 +21,8 @@ const importRows = (): ImportSourceRow[] => [
 ]
 
 const importQueue = (): ImportQueueItem[] => [
-  { page: 1, artist: 'Beta', album: 'Album', playCount: 3, latest: 30, sourceCount: 1, remaining: true, albumEntities: 1, trackEntities: 0 },
-  { page: 2, artist: 'Alpha', album: 'Album', playCount: 2, latest: 40, sourceCount: 2, remaining: true, albumEntities: 0, trackEntities: 2 },
+  { page: 1, artist: 'Beta', album: 'Album', playCount: 3, importedPlayCount: 0, remainingPlayCount: 3, latest: 30, sourceCount: 1, remaining: true, albumEntities: 1, trackEntities: 0 },
+  { page: 2, artist: 'Alpha', album: 'Album', playCount: 2, importedPlayCount: 0, remainingPlayCount: 2, latest: 40, sourceCount: 2, remaining: true, albumEntities: 0, trackEntities: 2 },
 ]
 
 test('Spotify limit countdown is stable and stops at zero', () => {
@@ -154,6 +154,18 @@ test('Last.fm acknowledged apply projects the next queue choice before authorita
   assert.deepEqual(activeImportQueue(projection.queue).map((item) => item.page), [2])
 })
 
+test('Last.fm acknowledged exclusions project queue counts without reloading the queue', () => {
+  const partial = projectImportQueueExclusion(importQueue(), 1, 1, false)
+  assert.equal(partial[0].remainingPlayCount, 1)
+  assert.equal(partial[0].remaining, true)
+  const complete = projectImportQueueExclusion(partial, 1, 0, true)
+  assert.equal(complete[0].remaining, false)
+  assert.equal(complete[0].status, 'excluded')
+  const restored = projectImportQueueExclusion(complete, 1, 3, false)
+  assert.equal(restored[0].remaining, true)
+  assert.equal(restored[0].status, null)
+})
+
 test('Last.fm strong album match advisory accepts exact and supersets but rejects unsafe mappings', () => {
   const exact = { artist: 'The Artist', relation: 'best-match' as const, trackUris: ['spotify:track:one', 'spotify:track:two'] }
   assert.deepEqual(strongImportAlbumMatch('the-artist', exact, [
@@ -245,6 +257,7 @@ test('Last.fm collection album projections preserve match-set order and branch l
     { album: 'Album B', artist: 'Artist', inLibrary: true },
     { album: 'Not saved', artist: 'Artist', inLibrary: false },
     { album: 'Album C', artist: 'Artist', inLibrary: true },
+    { album: '', artist: 'Artist', inLibrary: true },
   ], [{ name: 'Album C', artist: 'Artist' }]), [
     { name: 'Album B', artist: 'Artist', matchCount: 2 },
     { name: 'Album A', artist: 'Artist', matchCount: 1 },
@@ -519,27 +532,45 @@ test('Last.fm collection review explains individual matching and keeps release U
   const importerCss = readFileSync(new URL('../src/lastfmImporter.css', import.meta.url), 'utf8')
   assert.match(importer, /Last\.fm supplied no album metadata\. Tracks are matched individually\./)
   assert.match(importer, /automatically selected/)
+  assert.match(importer, /already imported/)
+  assert.match(importer, /tracks imported/)
+  assert.match(importer, /plays imported/)
   assert.match(importer, /suggested/)
   assert.match(importer, /need review/)
   assert.match(importer, /Use This Track/)
   assert.match(importer, /Search Spotify or paste a share link/)
   assert.match(importer, /Search Spotify albums or paste a share link/)
   assert.match(importer, /ALREADY IN YOUR LIBRARY/)
+  assert.match(importer, /ALREADY IMPORTED/)
+  assert.match(importer, /data-review-status=\{item\.decision\.status\}/)
+  assert.match(importer, /plays to import/)
+  assert.match(importer, /plays already imported/)
+  assert.match(importer, /plays imported · \{queueSummary\.remainingPlays\.toLocaleString\(\)\} remaining/)
   assert.match(importer, /collection && !collectionAlbumReady/)
   assert.match(importer, /const collection = page\.collection !== null/)
   assert.match(importer, /collection \? collectionSuggestion\(item\.source, item\.matchResult, selectedTrackUris\) : null/)
   assert.match(importer, /const displayedSearchTerm = collection && !track \? trackPickerQuery\(item\.source\) : match\?\.searchTerm/)
   assert.match(importerCss, /\.import-library-badge/)
+  assert.match(importerCss, /\.import-track-row\[data-review-status="done"\]/)
+  assert.match(importerCss, /\.import-completed-badge/)
+  assert.match(importerCss, /\.import-queue-count \.plays-to-import/)
+  assert.match(importerCss, /\.import-queue-count \.plays-imported/)
+  assert.doesNotMatch(importerCss, /\.import-collection-summary span:(?:first|nth)-child/)
   assert.match(importerCss, /\.import-suggestion-label/)
   assert.match(importer, /collection && trackConfidence === 'exact'/)
   assert.match(importer, /const \[selectedAlbumsExpanded, setSelectedAlbumsExpanded\] = useState\(true\)/)
   assert.match(importer, /<details ref=\{selectedAlbums\} className="import-selected-album-cards" open=\{selectedAlbumsExpanded\}/)
   assert.match(importer, /automaticCollectionAlbumContributors/)
+  assert.match(importer, /album: candidate\.trackAlbums\[index\] \|\| ''/)
+  assert.doesNotMatch(importer, /album: candidate\.trackAlbums\[index\] \|\| candidate\.name/)
   assert.match(importer, /automatic library \{album\.matchCount === 1 \? 'match' : 'matches'\}/)
   assert.match(importer, /<summary><strong>\{automaticCollectionAlbums\.length\} automatic · \{selectedCollectionUris\.length\} added/)
   assert.match(importer, /<small>\{collectionCoverageStatus\(collectionMatches\.coverage\)\}<\/small><\/summary>/)
   assert.doesNotMatch(importer, /<details key=\{uri\} className="import-selected-album"/)
   assert.match(importer, /stablePartitionImportRows\(projectedRows, requiredMatchIds/)
+  assert.match(importer, /flushSync\(\(\) => \{\s*setReview\(nextReview\)/)
+  assert.match(importer, /queuedRejects\.current\.exclude/)
+  assert.match(importer, /requestAnimationFrame\(\(\) => setTimeout\(\(\) => void flushRejectedRows\(\)\)\)/)
   assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
   assert.match(importerCss, /\.import-selected-album-cards summary \{[^}]*list-style: disclosure-closed/)
   assert.match(importer, /Use \{suggestedMatches\.length\} Suggestions/)

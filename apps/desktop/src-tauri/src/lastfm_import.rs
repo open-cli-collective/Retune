@@ -425,6 +425,8 @@ pub(crate) struct ImportQueueItem {
     pub collection_shaped: bool,
     pub album_label_count: usize,
     pub play_count: u64,
+    pub imported_play_count: u64,
+    pub remaining_play_count: u64,
     pub latest: u64,
     pub source_count: usize,
     pub remaining: bool,
@@ -5479,17 +5481,23 @@ fn select_match_in_session(
     source_id: &str,
     uri: &str,
 ) -> Result<(String, String), String> {
-    let Some((row_artist, row_album)) = session
+    let Some((row_artist, row_album, row_track)) = session
         .rows
         .iter()
         .find(|row| row.stable_id == source_id)
-        .map(|row| (row.artist.clone(), row.album.clone()))
+        .map(|row| (row.artist.clone(), row.album.clone(), row.track.clone()))
     else {
         return Err("Unknown Last.fm import source row.".into());
     };
     let Some(batch) = requested_batch_containing_source(session, batch_id, source_id) else {
         return Err("The source row does not belong to this review batch.".into());
     };
+    let projection = batch_projection_for_session(session, batch_id)
+        .ok_or_else(|| "The source row does not belong to this review batch.".to_string())?;
+    let batch_identity = (
+        projection.representative_artist,
+        projection.representative_album,
+    );
     let collection_shaped = batch_is_collection_shaped_for_id(session, batch_id);
     let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
     let explicit_album = session.matches.get(source_id).is_some_and(|result| {
@@ -5555,9 +5563,17 @@ fn select_match_in_session(
         }
     } else {
         if row_album.is_empty() || collection_shaped {
-            let Some(result) = session.matches.get_mut(source_id) else {
-                return Err("This source row has no Spotify candidates.".into());
-            };
+            let result = session
+                .matches
+                .entry(source_id.to_owned())
+                .or_insert_with(|| MatchResult {
+                    source_id: source_id.to_owned(),
+                    search_term: track_search_term(&row_artist, &row_track),
+                    confidence: None,
+                    selected_uri: None,
+                    candidates: Vec::new(),
+                    track_matches: BTreeMap::new(),
+                });
             if !result
                 .candidates
                 .iter()
@@ -5566,12 +5582,6 @@ fn select_match_in_session(
                 result.candidates.insert(0, candidate.clone());
             }
         }
-        let row_track = session
-            .rows
-            .iter()
-            .find(|row| row.stable_id == source_id)
-            .map(|row| row.track.clone())
-            .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
         let album_uri = session
             .matches
             .get(source_id)
@@ -5607,7 +5617,7 @@ fn select_match_in_session(
             update_selected_match(result, source_id, &row_track, &candidate);
         }
     }
-    Ok((row_artist, row_album))
+    Ok(batch_identity)
 }
 
 fn selected_album_track_candidate(
@@ -7722,9 +7732,17 @@ fn rerank_collection_session(
         .collect::<BTreeSet<_>>();
     let mut next_injected = BTreeMap::new();
     for row in rows {
-        let Some(previous) = session.matches.get(&row.stable_id).cloned() else {
-            continue;
-        };
+        let previous = session.matches.get(&row.stable_id).cloned().or_else(|| {
+            (!selected.is_empty()).then(|| MatchResult {
+                source_id: row.stable_id.clone(),
+                search_term: track_search_term(&row.artist, &row.track),
+                confidence: None,
+                selected_uri: None,
+                candidates: Vec::new(),
+                track_matches: BTreeMap::new(),
+            })
+        });
+        let Some(previous) = previous else { continue };
         let prior_injected = previous_injected
             .get(&row.stable_id)
             .cloned()
@@ -9959,6 +9977,10 @@ async fn ensure_review_mutable(service: &Service) -> Result<(), String> {
     Ok(())
 }
 
+fn review_action_sweeps_backlog(action: &str) -> bool {
+    matches!(action, "ignore-album" | "restore" | "ignore-artist")
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
@@ -9985,10 +10007,7 @@ pub(crate) async fn lastfm_import_review(
             &album,
         )
         .await?;
-    if matches!(
-        action.as_str(),
-        "exclude" | "undo-exclude" | "ignore-album" | "restore" | "ignore-artist"
-    ) {
+    if review_action_sweeps_backlog(&action) {
         state
             .lastfm_import
             .sweep_backlog_with_mappings(&state, &username, &spotify_account_id)
@@ -11092,6 +11111,18 @@ fn queue_item(
         let decision = default_decision(session, &row.stable_id);
         matches!(decision.status, RowStatus::Pending | RowStatus::Skipped) && !decision.excluded
     });
+    let (imported_play_count, remaining_play_count) =
+        rows.iter()
+            .fold((0_u64, 0_u64), |(imported, remaining), row| {
+                let decision = default_decision(session, &row.stable_id);
+                match decision.status {
+                    RowStatus::Done => (imported.saturating_add(row.play_count), remaining),
+                    RowStatus::Pending | RowStatus::Skipped if !decision.excluded => {
+                        (imported, remaining.saturating_add(row.play_count))
+                    }
+                    _ => (imported, remaining),
+                }
+            });
     let selected = rows
         .iter()
         .filter(|row| {
@@ -11144,6 +11175,8 @@ fn queue_item(
             .iter()
             .map(|row| row.play_count)
             .fold(0, u64::saturating_add),
+        imported_play_count,
+        remaining_play_count,
         latest: rows.iter().map(|row| row.latest).max().unwrap_or_default(),
         source_count: batch.source_ids.len(),
         remaining,
@@ -14920,6 +14953,44 @@ mod tests {
         assert!(service.queue_page(first.total + 1, 1).await.is_err());
     }
 
+    #[tokio::test]
+    async fn queue_separates_imported_plays_from_remaining_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[
+                scrobble("Artist", "Album", "Imported", 1),
+                scrobble("Artist", "Album", "Remaining", 2),
+            ],
+        );
+        session.rows.iter_mut().for_each(|row| {
+            row.play_count = if row.track == "Imported" { 3_890 } else { 92 };
+        });
+        let imported_id = session
+            .rows
+            .iter()
+            .find(|row| row.track == "Imported")
+            .unwrap()
+            .stable_id
+            .clone();
+        session.decisions.insert(
+            imported_id,
+            RowDecision {
+                status: RowStatus::Done,
+                excluded: false,
+            },
+        );
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+
+        let item = &service.queue_page(0, 1).await.unwrap().items[0];
+        assert_eq!(item.play_count, 3_982);
+        assert_eq!(item.imported_play_count, 3_890);
+        assert_eq!(item.remaining_play_count, 92);
+    }
+
     #[test]
     fn page_projection_does_not_reenter_whole_session_read_helpers() {
         let source = include_str!("lastfm_import.rs");
@@ -16043,6 +16114,7 @@ mod tests {
                 injected_candidate_uris: BTreeMap::new(),
             },
         );
+        session.batches[0].representative_album = Some("Grouped Release".into());
         let selected = collection_selected_albums(&session, 1);
         let candidates = collection_track_candidates(&selected, &CollectionMembership::default());
         assert_eq!(candidates.len(), 3);
@@ -16067,9 +16139,13 @@ mod tests {
             );
         }
 
-        select_match_in_session(&mut session, 1, &rows[0].stable_id, "spotify:track:shared")
-            .unwrap();
+        session.matches.remove(&rows[0].stable_id);
+        let identity =
+            select_match_in_session(&mut session, 1, &rows[0].stable_id, "spotify:track:shared")
+                .unwrap();
+        assert_eq!(identity, ("Artist".into(), "Grouped Release".into()));
         let result = &session.matches[&rows[0].stable_id];
+        assert_eq!(result.search_term, "track:\"One\" artist:\"Artist\"");
         assert_eq!(
             result
                 .track_matches
@@ -16195,6 +16271,7 @@ mod tests {
         );
         let membership = CollectionMembership::default();
         let mappings = LastFmMappings::default();
+        session.matches.remove(&row.stable_id);
         rerank_collection_session(&mut session, 1, &membership, &mappings).unwrap();
         assert_eq!(
             session.matches[&row.stable_id]
@@ -19211,6 +19288,15 @@ mod tests {
         assert!(session.decisions.values().any(|decision| decision.excluded));
         ignore_album(&mut session, "B", "Album");
         assert_eq!(session.remaining(), 0);
+    }
+
+    #[test]
+    fn track_exclusions_defer_backlog_sweeps() {
+        assert!(!review_action_sweeps_backlog("exclude"));
+        assert!(!review_action_sweeps_backlog("undo-exclude"));
+        assert!(review_action_sweeps_backlog("ignore-album"));
+        assert!(review_action_sweeps_backlog("ignore-artist"));
+        assert!(review_action_sweeps_backlog("restore"));
     }
 
     #[tokio::test]

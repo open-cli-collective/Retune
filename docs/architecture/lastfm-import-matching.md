@@ -62,13 +62,18 @@ row-scoped matches or decisions. Review then has two shapes:
   set of Spotify albums whose track union constrains and improves those matches.
   A literal album actually named `Singles` remains release-shaped.
 
-Persisted batches are capped at 100 source rows. A large artist/album group can
+Persisted batches are capped at 100 source rows. Queue projections report
+imported and remaining play totals separately so a cluster containing completed
+rows does not present its full history as new work. A large artist/album group can
 span batches without changing its artist-level ignore behavior. The visible
 batch is the unit of lazy Spotify work and review. Review exclude/undo actions
 may address one or more source IDs, but every ID must belong to the requested
 batch and remain reviewable; empty, cross-batch, and completed-row requests are
 rejected before any decision changes. A bulk action persists the session and
-reusable mappings once, then performs one backlog sweep.
+reusable mappings once. Track exclusions do not rebuild the incremental backlog
+on the review click path; the normal incremental-sync entrypoint applies those
+durable mappings before fetching more plays. Album and artist cascades still
+sweep applicable backlog immediately.
 
 ## Search and cache boundary
 
@@ -192,6 +197,10 @@ visible suggestion, not an automatic decision. Multiple strongest target URIs
 remain ambiguous and are shown with album labels. The UI may recommend an album
 only when its projected matched and unique coverage strictly outranks the other
 choices.
+
+Rows that skipped automatic Spotify search still receive local match state from
+the selected album union, so a unique exact album-track match does not require a
+manual picker choice.
 
 Switching a release-shaped batch into collection matching is an explicit,
 idempotent persisted mutation. It seeds the selected release into the cached

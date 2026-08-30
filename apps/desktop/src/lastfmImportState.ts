@@ -84,6 +84,8 @@ export type ImportQueueItem = {
   artist: string
   album: string
   playCount: number
+  importedPlayCount: number
+  remainingPlayCount: number
   latest: number
   sourceCount: number
   remaining: boolean
@@ -539,6 +541,10 @@ export function projectAcknowledgedImportApply(items: ImportQueueItem[], applied
   const current = items.find((item) => item.page === appliedPage) ?? null
   const queue = items.map((item) => item.page === appliedPage ? { ...item, remaining: false, status: 'done' as const, error: null } : item)
   return { queue, next: nextRemainingImportQueue(queue, current, sort) }
+}
+
+export function projectImportQueueExclusion(items: ImportQueueItem[], batchId: number, remainingPlayCount: number, allExcluded: boolean): ImportQueueItem[] {
+  return items.map((item) => item.page === batchId ? { ...item, remainingPlayCount, remaining: remainingPlayCount > 0, status: allExcluded ? 'excluded' : item.status === 'excluded' ? null : item.status } : item)
 }
 
 export type ImportQueueVisibleRange = { start: number; end: number; offsetTop: number; contentHeight: number }
