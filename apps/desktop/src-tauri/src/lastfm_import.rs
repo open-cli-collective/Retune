@@ -600,7 +600,8 @@ impl LastFmImportSessionV2 {
                 .iter()
                 .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
                 .collect::<Vec<_>>();
-            options.whole_album = options.import_content && exact_album_match_for_rows(self, &rows);
+            options.whole_album =
+                options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
         }
         if !album.is_empty() && self.collection_album_matches.contains_key(&batch_id) {
             options.whole_album = false;
@@ -610,7 +611,8 @@ impl LastFmImportSessionV2 {
                 .iter()
                 .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
                 .collect::<Vec<_>>();
-            options.whole_album = options.import_content && exact_album_match_for_rows(self, &rows);
+            options.whole_album =
+                options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
         }
         options
     }
@@ -646,12 +648,14 @@ impl LastFmImportSessionV2 {
                 .filter(|row| is_actionable(self, &row.stable_id))
                 .map(|row| row.stable_id.clone())
                 .collect();
-            options.whole_album = options.import_content && exact_album_match_for_rows(self, rows);
+            options.whole_album =
+                options.import_content && exact_album_match_for_rows(self, batch.page, rows);
         }
         if !album.is_empty() && self.collection_album_matches.contains_key(&batch.page) {
             options.whole_album = false;
         } else if album.is_empty() && options.whole_album {
-            options.whole_album = options.import_content && exact_album_match_for_rows(self, rows);
+            options.whole_album =
+                options.import_content && exact_album_match_for_rows(self, batch.page, rows);
         }
         options
     }
@@ -1488,7 +1492,7 @@ fn build_apply_plan(
     }
     if album.is_empty() && options.whole_album {
         let row_refs = rows.iter().collect::<Vec<_>>();
-        if !exact_album_match_for_rows(session, &row_refs) {
+        if !exact_album_match_for_rows(session, batch_id, &row_refs) {
             return Err(
                 "Choose one coherent Spotify album before importing a collection as a whole album."
                     .into(),
@@ -4045,7 +4049,7 @@ impl Service {
                 if album.is_empty() && options.whole_album {
                     let rows_by_id = source_row_map(&session);
                     let rows = batch_rows(&batch, &rows_by_id);
-                    if !exact_album_match_for_rows(&session, &rows) {
+                    if !exact_album_match_for_rows(&session, batch_id, &rows) {
                         return Err(
                             "Choose one coherent Spotify album before importing a collection as a whole album."
                                 .into(),
@@ -6358,7 +6362,7 @@ fn collection_match_view(
             selected_albums,
             previews,
         },
-        whole_album_ready: exact_album_match_for_rows(session, &eligible),
+        whole_album_ready: exact_album_match_for_rows(session, batch_id, &eligible),
     }
 }
 
@@ -7569,7 +7573,11 @@ fn best_candidate(result: &MatchResult) -> Option<&AlbumCandidate> {
         .min_by_key(|candidate| candidate_rank(candidate.relation))
 }
 
-fn exact_album_match_for_rows(session: &LastFmImportSessionV2, rows: &[&SourceRow]) -> bool {
+fn exact_album_match_for_rows(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+    rows: &[&SourceRow],
+) -> bool {
     let rows = rows
         .iter()
         .copied()
@@ -7579,13 +7587,6 @@ fn exact_album_match_for_rows(session: &LastFmImportSessionV2, rows: &[&SourceRo
         })
         .collect::<Vec<_>>();
     let Some(first) = rows.first() else {
-        return false;
-    };
-    let Some(batch_id) = review_batches(session)
-        .into_iter()
-        .find(|batch| batch.source_ids.iter().any(|id| id == &first.stable_id))
-        .map(|batch| batch.page)
-    else {
         return false;
     };
     if session.collection_album_matches.contains_key(&batch_id) {
@@ -13213,6 +13214,13 @@ mod tests {
             .split("fn queue_status(")
             .next()
             .unwrap();
+        let exact_album_match = source
+            .split("fn exact_album_match_for_rows(")
+            .nth(1)
+            .unwrap()
+            .split("fn matched_track_uri_for_row(")
+            .next()
+            .unwrap();
 
         for projection in [queue_page, queue_item] {
             assert!(!projection.contains("options_for_batch("));
@@ -13220,6 +13228,7 @@ mod tests {
             assert!(!projection.contains("source_row_map("));
         }
         assert!(queue_item.contains("options_for_page_batch("));
+        assert!(!exact_album_match.contains("review_batches("));
     }
 
     #[test]
@@ -14933,7 +14942,7 @@ mod tests {
             )]);
         }
         let refs = rows.iter().collect::<Vec<_>>();
-        assert!(exact_album_match_for_rows(&session, &refs));
+        assert!(exact_album_match_for_rows(&session, 1, &refs));
 
         session
             .matches
@@ -14941,7 +14950,7 @@ mod tests {
             .unwrap()
             .track_matches
             .clear();
-        assert!(!exact_album_match_for_rows(&session, &refs));
+        assert!(!exact_album_match_for_rows(&session, 1, &refs));
 
         session
             .matches
@@ -14955,7 +14964,7 @@ mod tests {
             .unwrap()
             .selected_album_uris
             .push("spotify:album:missing".into());
-        assert!(!exact_album_match_for_rows(&session, &refs));
+        assert!(!exact_album_match_for_rows(&session, 1, &refs));
     }
 
     #[test]
