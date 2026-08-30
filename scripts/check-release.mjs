@@ -24,6 +24,7 @@ const frontendState = [
 ].join('\n')
 
 const nativeBundleStep = workflow.match(/- name: Build native bundle\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
+const credentialStep = workflow.match(/- name: Require Last\.fm credentials\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 const macPackageStep = workflow.match(/- name: Package macOS app\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 const windowsRenameStep = workflow.match(/- name: Rename Windows NSIS installer\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 const debRenameStep = workflow.match(/- name: Rename Debian package\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
@@ -55,11 +56,15 @@ required(autoWorkflow, 'push origin "refs/tags/$TAG"', 'automatic release tag pu
 required(autoWorkflow, 'DRY_RUN: ${{ github.event_name == \'workflow_dispatch\' }}')
 assert.doesNotMatch(autoWorkflow, /dry_run/)
 assert.doesNotMatch(autoWorkflow, /version\.txt|identity\.yml|goreleaser/i)
-required(nativeBundleStep, 'RETUNE_LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}', 'trusted Last.fm API key mapping')
+required(credentialStep, 'RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}', 'trusted Last.fm API key variable mapping')
+required(credentialStep, 'RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}', 'trusted Last.fm shared-secret mapping')
+required(credentialStep, "node --input-type=module -e \"for (const name of ['RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET'])", 'release Last.fm credential presence check')
+assert.doesNotMatch(credentialStep, /tauri build|writeFileSync/)
+required(nativeBundleStep, 'RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}', 'native Last.fm API key variable mapping')
 required(nativeBundleStep, 'RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}', 'trusted Last.fm shared-secret mapping')
-required(nativeBundleStep, "RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET", 'release Last.fm credential presence check')
+assert.equal((workflow.match(/vars\.LASTFM_API_KEY/g) ?? []).length, 2)
+assert.equal((workflow.match(/secrets\.LASTFM_API_SECRET/g) ?? []).length, 2)
 assert.doesNotMatch(ci, /LASTFM_API_KEY|LASTFM_API_SECRET|RETUNE_LASTFM/)
-assert.equal((workflow.match(/secrets\.LASTFM_API_(?:KEY|SECRET)/g) ?? []).length, 2)
 required(buildInstall, '.env.lastfm.local')
 required(buildInstall, 'chmod 600')
 required(buildInstall, 'unset RETUNE_LASTFM_API_KEY RETUNE_LASTFM_SHARED_SECRET')

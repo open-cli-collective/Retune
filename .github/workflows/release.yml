@@ -136,15 +136,20 @@ jobs:
           cargo test -p retune-audio --release
           cargo test -p retune-desktop --release local_files_remain_playable_without_playback_authorization
 
+      - name: Require Last.fm credentials
+        env:
+          RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}
+          RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+        run: node --input-type=module -e "for (const name of ['RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET']) if (!process.env[name]?.trim()) throw new Error(name + ' is required for release packaging')"
+
       - name: Build native bundle
         working-directory: apps/desktop
         env:
-          RETUNE_LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}
           RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
           RETUNE_SUPPORT_EMAIL: ${{ vars.RETUNE_SUPPORT_EMAIL }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          node --input-type=module -e "for (const name of ['RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET']) if (!process.env[name]?.trim()) throw new Error(name + ' is required for release packaging')"
           node -e "require('node:fs').writeFileSync('src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.VERSION }))"
           npx tauri build --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundle }}
 

@@ -47,7 +47,9 @@ npm exec tauri dev
 
 If the file is absent or either value is empty, Retune remains usable and shows
 Last.fm as unavailable. Release builds receive the credentials only on the
-trusted native bundle step and fail there if either value is missing.
+trusted native bundle step and fail there if either value is missing. Hosted
+release builds map the repository variable `LASTFM_API_KEY` and repository
+secret `LASTFM_API_SECRET` to those backend-only values; CI receives neither.
 
 Native CI builds the Tauri app bundle on macOS arm64, Windows x64/ARM64, and
 Ubuntu 22.04 amd64/arm64. The Windows and Linux jobs run release Rust tests,
@@ -94,7 +96,8 @@ Run the local release contract check with:
 node scripts/check-release.mjs
 ```
 
-Tag releases require these repository secrets: `MACOS_CERT_P12`,
+Tag releases require the repository variable `LASTFM_API_KEY` and repository
+secret `LASTFM_API_SECRET`, plus these repository secrets: `MACOS_CERT_P12`,
 `MACOS_CERT_PASSWORD`, `MACOS_CERT_CN`, `MACOS_CERT_LEAF_SHA` (exactly
 `42e1afd02aae8666c09c15f171e1639550f301c2`), `TAP_GITHUB_TOKEN`,
 and `WINGET_GITHUB_TOKEN`. `LINUX_PACKAGES_DISPATCH_TOKEN` is optional; when
