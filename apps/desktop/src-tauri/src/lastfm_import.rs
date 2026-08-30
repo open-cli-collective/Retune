@@ -4826,6 +4826,59 @@ impl Service {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn seed_collection_albums(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        batch_id: u32,
+        artist: &str,
+        candidates: Vec<CollectionAlbumCandidate>,
+        selected_uri: Option<String>,
+        membership: &CollectionMembership,
+        mappings: &LastFmMappings,
+    ) -> Result<(), String> {
+        self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |mut session| {
+                requested_collection_batch(&session, batch_id, artist)?;
+                if session.collection_album_matches.contains_key(&batch_id) {
+                    return Ok((session, ()));
+                }
+                if candidates.iter().any(|candidate| {
+                    !candidate.matching.uri.starts_with("spotify:album:")
+                        || candidate.matching.track_uris.is_empty()
+                }) {
+                    return Err("Spotify returned an invalid or empty album match.".into());
+                }
+                let selected_album_uris = match selected_uri {
+                    Some(uri)
+                        if candidates
+                            .iter()
+                            .any(|candidate| candidate.matching.uri == uri) =>
+                    {
+                        vec![uri]
+                    }
+                    Some(_) => return Err("The automatic Spotify album match is invalid.".into()),
+                    None => Vec::new(),
+                };
+                session.collection_album_matches.insert(
+                    batch_id,
+                    CollectionAlbumMatchState {
+                        cached_candidates: candidates,
+                        selected_album_uris,
+                        ..CollectionAlbumMatchState::default()
+                    },
+                );
+                rerank_collection_session(&mut session, batch_id, membership, mappings)?;
+                Ok((session, ()))
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn remove_collection_album(
         &self,
         username: &str,
@@ -8354,6 +8407,37 @@ fn candidate_rank(relation: Option<AlbumRelation>) -> u8 {
     }
 }
 
+async fn automatic_collection_album_seed<T, S>(
+    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    artist: &str,
+    album: &str,
+    rows: &[SourceRow],
+) -> Result<(Vec<CollectionAlbumCandidate>, Option<String>), String>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+{
+    let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
+    let mut candidates = album_candidates(
+        provider,
+        &album_search_term(artist, album),
+        Some(album),
+        Some(artist),
+        &source_track_names,
+    )
+    .await?;
+    classify_album_candidates_for_rows(rows, &mut candidates);
+    let selected_uri = automatic_album_candidate_for_rows(album, rows, &candidates)
+        .map(|candidate| candidate.uri.clone());
+    Ok((
+        candidates
+            .into_iter()
+            .map(collection_album_candidate_from_release)
+            .collect(),
+        selected_uri,
+    ))
+}
+
 async fn match_batch<T, S>(
     provider: &retune_spotify::client::SpotifyClient<T, S>,
     artist: &str,
@@ -8582,6 +8666,64 @@ where
     Ok(service.page(batch_id, artist, album).await)
 }
 
+async fn lazy_seed_collection_page(
+    app: &tauri::AppHandle,
+    service: &Service,
+    batch_id: u32,
+    artist: &str,
+    album: &str,
+) -> Result<Option<ImportPageView>, String> {
+    let state = app.state::<crate::AppState>();
+    let state_ref = &*state;
+    // ponytail: one importer-wide lock; use per-batch locks only if throughput requires it.
+    let _match_guard = service.lazy_match_lock.lock().await;
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    let Some(rows) = collection_album_seed_rows(&session, batch_id, artist, album) else {
+        let _membership_guard = state_ref.spotify_library_gate.lock().await;
+        current_matching_account_locked(state_ref, service).await?;
+        return Ok(service.page(batch_id, artist, album).await);
+    };
+    let initial_account = {
+        let _membership_guard = state_ref.spotify_library_gate.lock().await;
+        current_matching_account_locked(state_ref, service).await?
+    };
+    let provider = crate::provider_from(state_ref)?;
+    let (candidates, selected_uri) =
+        automatic_collection_album_seed(provider.as_ref(), artist, album, &rows).await?;
+    let _membership_guard = state_ref.spotify_library_gate.lock().await;
+    let (username, spotify_account_id) =
+        current_matching_account_locked(state_ref, service).await?;
+    if (username.as_str(), spotify_account_id.as_str())
+        != (initial_account.0.as_str(), initial_account.1.as_str())
+    {
+        service.suspend_for_account_mismatch().await?;
+        return Err(
+            "The connected Spotify account changed while matching; the import is suspended for safety."
+                .into(),
+        );
+    }
+    let membership = collection_membership(state_ref);
+    let mappings = service
+        .mappings_for(&username, Some(&spotify_account_id))
+        .await;
+    service
+        .seed_collection_albums(
+            &username,
+            &spotify_account_id,
+            batch_id,
+            artist,
+            candidates,
+            selected_uri,
+            &membership,
+            &mappings,
+        )
+        .await?;
+    Ok(service.page(batch_id, artist, album).await)
+}
+
 async fn lazy_match_page(
     app: &tauri::AppHandle,
     service: &Service,
@@ -8598,6 +8740,13 @@ async fn lazy_match_page(
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    if collection_album_seed_rows(&initial_session, batch_id, artist, album).is_some() {
+        let page = lazy_seed_collection_page(app, service, batch_id, artist, album).await?;
+        if page.is_some() {
+            let _ = app.emit("lastfm-import-changed", service.state().await);
+        }
+        return Ok(page);
+    }
     let initial_collection_shaped = batch_is_collection_shaped_for_id(&initial_session, batch_id);
     let initial_needs_match =
         !batch_match_plan(&initial_session, Some((batch_id, artist, album))).is_empty();
@@ -8828,6 +8977,33 @@ fn row_needs_match(row: &SourceRow, result: Option<&MatchResult>) -> bool {
     result.is_none()
         || (row.album.is_empty()
             && result.is_some_and(|result| is_album_search_term(&result.search_term)))
+}
+
+fn collection_album_seed_rows(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+    artist: &str,
+    album: &str,
+) -> Option<Vec<SourceRow>> {
+    if album.is_empty() || session.collection_album_matches.contains_key(&batch_id) {
+        return None;
+    }
+    let batch = requested_batch(session, batch_id, artist, album)?;
+    let rows = batch_rows(&batch, &source_row_map(session));
+    let projection = batch_projection(&batch, &rows);
+    if !projection.collection_shaped
+        || !rows
+            .iter()
+            .any(|row| is_actionable(session, &row.stable_id))
+    {
+        return None;
+    }
+    let seed = rows
+        .into_iter()
+        .filter(|row| row.artist == artist && row.album == album)
+        .cloned()
+        .collect::<Vec<_>>();
+    (!seed.is_empty()).then_some(seed)
 }
 
 fn batch_match_plan(
@@ -15549,8 +15725,121 @@ mod tests {
         let matches = match_batch(&client, "Artist", "", true, &rows)
             .await
             .unwrap();
+        let session = collection_session(&rows);
+        assert!(collection_album_seed_rows(&session, 1, "Various Artists", "").is_none());
         assert!(matches.is_empty());
         assert!(client.transport().requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn named_collection_batches_seed_once_from_the_representative_release() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(
+            &mut rows,
+            &[
+                scrobble("John Barry", "Out of Africa", "Main Title", 1),
+                scrobble("John Barry", "Out of Africa", "Main Title", 2),
+                scrobble("John Barry", "Out of Africa", "Safari", 3),
+                scrobble("John Barry", "Out of Africa", "Safari", 4),
+                scrobble(
+                    "John Barry",
+                    "Out of Africa (Soundtrack from the Motion Picture)",
+                    "Main Title",
+                    5,
+                ),
+                scrobble(
+                    "John Barry",
+                    "Out of Africa (Soundtrack from the Motion Picture)",
+                    "Safari",
+                    6,
+                ),
+            ],
+        );
+        let mut session = collection_session(&rows);
+        let batch = review_batches(&session).remove(0);
+        let projection = batch_projection(&batch, &batch_rows(&batch, &source_row_map(&session)));
+        assert!(projection.collection_shaped);
+        assert_eq!(projection.representative_album, "Out of Africa");
+
+        let seed_rows = collection_album_seed_rows(
+            &session,
+            batch.page,
+            &projection.representative_artist,
+            &projection.representative_album,
+        )
+        .unwrap();
+        assert_eq!(seed_rows.len(), 2);
+
+        let client = fake_client(
+            [
+                album_search_response(vec![album_summary_json(
+                    "out-of-africa",
+                    "Out of Africa",
+                    "John Barry",
+                    2,
+                )]),
+                album_response(
+                    "out-of-africa",
+                    "Out of Africa",
+                    "John Barry",
+                    &["Main Title", "Safari"],
+                ),
+            ],
+            "",
+        );
+        let (candidates, selected_uri) = automatic_collection_album_seed(
+            &client,
+            &projection.representative_artist,
+            &projection.representative_album,
+            &seed_rows,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected_uri.as_deref(), Some("spotify:album:out-of-africa"));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(client.transport().requests().len(), 2);
+        assert!(client.transport().requests()[0].url.contains("type=album"));
+        assert!(client
+            .transport()
+            .requests()
+            .iter()
+            .all(|request| !request.url.contains("type=track")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        session.collection_album_matches.clear();
+        service.save(session).await.unwrap();
+        service
+            .seed_collection_albums(
+                "user",
+                "spotify",
+                batch.page,
+                &projection.representative_artist,
+                candidates,
+                selected_uri,
+                &CollectionMembership::default(),
+                &LastFmMappings::default(),
+            )
+            .await
+            .unwrap();
+
+        let seeded = service.snapshot().await.unwrap();
+        assert_eq!(
+            seeded.collection_album_matches[&batch.page].selected_album_uris,
+            vec!["spotify:album:out-of-africa"]
+        );
+        assert!(seeded.rows.iter().all(|row| seeded
+            .matches
+            .get(&row.stable_id)
+            .and_then(|result| matched_track_uri(result, &row.stable_id))
+            .is_some()));
+        assert!(collection_album_seed_rows(
+            &seeded,
+            batch.page,
+            &projection.representative_artist,
+            &projection.representative_album,
+        )
+        .is_none());
     }
 
     #[tokio::test]
