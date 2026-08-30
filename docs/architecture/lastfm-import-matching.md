@@ -33,7 +33,22 @@ The matching boundary preserves these invariants:
 ## Source shapes
 
 Aggregation groups spelling variants into stable source rows while retaining
-their raw names, play counts, and timestamps. Review then has two shapes:
+their raw names, play counts, and timestamps. Review batching is a deterministic
+two-pass projection. Pass one keeps the historical exact `(artist, album)`
+groups. Pass two merges only groups with pairwise support: compatible artist
+credits need either a fuzzy album-title match or at least two matching tracks
+covering 80% of the smaller group; different credits need both fuzzy album-title
+support and at least three matching tracks with the same coverage. Distinct
+numbered series entries never merge, including context-marked Roman numerals.
+An empty-album row joins a named cluster only when its artist and track identify
+exactly one cluster; otherwise it remains in `Singles`.
+
+The highest-play exact group supplies the cluster's representative artist and
+album label. A cluster containing more than one exact group is collection-shaped
+and retains all source album labels for disclosure and album-level review
+actions. Persisted legacy batches with page-scoped choices or queued apply work
+keep their page identity; untouched legacy batches are rebuilt without losing
+row-scoped matches or decisions. Review then has two shapes:
 
 - A non-empty Last.fm album is **release-shaped**. Retune searches for an album,
   compares the source track set with each Spotify release, and may select one
@@ -62,10 +77,21 @@ Release matching issues one bounded Spotify album search using generated
 local comparison. Generated album and track searches elide parenthetical
 annotations. Search results are capped at ten candidates.
 
-Collection rows use bounded track searches. Explicit collection-album search
-accepts ordinary user text as well as Spotify field syntax. Search returns album
+Collection-shaped batches do not search Spotify automatically. The user first
+adds likely albums or explicitly changes a track; the selected albums' cached
+track union then drives local matching. Explicit collection-album search accepts
+ordinary user text as well as Spotify field syntax. Search returns album
 summaries; the first Preview or Add obtains the complete album, after which
-preview, add, remove, revisit, and reranking are local.
+preview, add, remove, revisit, and reranking are local. Opening a cached
+collection page never resolves `/me`; if the install-local catalog cannot prove
+the bound account, Retune shows the persisted page without membership reranking.
+
+Release search hydrates track lists only for summaries in the strongest
+album-title tier whose advertised track count can cover the source rows. At most
+three such summaries are hydrated, in deterministic title/count/artist/provider
+order. Exact artist credits precede loose compatible credits, which precede
+unrelated credits. An explicit album query may hydrate the requested result even when the
+automatic summary gate would reject it.
 
 Search and album/track observations also enrich the shared materialized Spotify
 catalog. The import session separately persists the candidates and explicit

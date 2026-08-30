@@ -333,6 +333,15 @@ pub(crate) struct RetryableError {
 pub(crate) struct ImportBatch {
     pub page: u32,
     pub source_ids: Vec<String>,
+    /// `None` identifies batches written before source clustering was persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_shaped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representative_artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representative_album: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub album_labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -413,6 +422,8 @@ pub(crate) struct ImportQueueItem {
     pub page: u32,
     pub artist: String,
     pub album: String,
+    pub collection_shaped: bool,
+    pub album_label_count: usize,
     pub play_count: u64,
     pub latest: u64,
     pub source_count: usize,
@@ -455,6 +466,8 @@ pub(crate) struct ImportPageView {
     pub batch_id: u32,
     pub artist: String,
     pub album: String,
+    pub collection_shaped: bool,
+    pub album_label_count: usize,
     pub page_number: usize,
     pub page_count: usize,
     pub rows: Vec<ImportPageItem>,
@@ -586,12 +599,9 @@ impl LastFmImportSessionV2 {
                 .iter()
                 .filter(|id| {
                     let id = (*id).as_str();
-                    self.rows.iter().any(|row| {
-                        row.stable_id == id
-                            && row.artist == artist
-                            && row.album == album
-                            && is_actionable(self, &row.stable_id)
-                    })
+                    self.rows
+                        .iter()
+                        .any(|row| row.stable_id == id && is_actionable(self, &row.stable_id))
                 })
                 .cloned()
                 .collect();
@@ -603,14 +613,18 @@ impl LastFmImportSessionV2 {
             options.whole_album =
                 options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
         }
-        if !album.is_empty() && self.collection_album_matches.contains_key(&batch_id) {
+        let rows = batch
+            .source_ids
+            .iter()
+            .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
+            .collect::<Vec<_>>();
+        let collection_shaped = batch_is_collection_shaped(self, &batch, &rows);
+        let has_collection_match = self.collection_album_matches.contains_key(&batch_id);
+        if (collection_shaped && !has_collection_match)
+            || (!album.is_empty() && has_collection_match)
+        {
             options.whole_album = false;
         } else if album.is_empty() && options.whole_album {
-            let rows = batch
-                .source_ids
-                .iter()
-                .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
-                .collect::<Vec<_>>();
             options.whole_album =
                 options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
         }
@@ -651,7 +665,11 @@ impl LastFmImportSessionV2 {
             options.whole_album =
                 options.import_content && exact_album_match_for_rows(self, batch.page, rows);
         }
-        if !album.is_empty() && self.collection_album_matches.contains_key(&batch.page) {
+        let collection_shaped = batch_is_collection_shaped(self, batch, rows);
+        let has_collection_match = self.collection_album_matches.contains_key(&batch.page);
+        if (collection_shaped && !has_collection_match)
+            || (!album.is_empty() && has_collection_match)
+        {
             options.whole_album = false;
         } else if album.is_empty() && options.whole_album {
             options.whole_album =
@@ -938,26 +956,1019 @@ fn batch_options_key(batch_id: u32) -> String {
     format!("batch:{batch_id}")
 }
 
-fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
-    let mut grouped = BTreeMap::<(String, String), Vec<String>>::new();
-    for row in rows {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceGroup {
+    artist: String,
+    album: String,
+    row_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceCluster {
+    group_indices: Vec<usize>,
+    row_indices: Vec<usize>,
+    collection_shaped: bool,
+    representative_artist: String,
+    representative_album: String,
+    album_labels: Vec<String>,
+}
+
+fn source_album_support(left: &str, right: &str) -> bool {
+    let left_compact = normalize_for_match(left);
+    let right_compact = normalize_for_match(right);
+    if left_compact.is_empty() || right_compact.is_empty() {
+        return false;
+    }
+    if left_compact == right_compact {
+        return true;
+    }
+    let left_numbers = numbered_title_tokens(left);
+    let right_numbers = numbered_title_tokens(right);
+    if !left_numbers.is_empty() && !right_numbers.is_empty() && left_numbers != right_numbers {
+        return false;
+    }
+    if has_series_number(left) != has_series_number(right) {
+        let (numbered, unnumbered) = if has_series_number(left) {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        if !significant_title_tokens(unnumbered).is_subset(&significant_title_tokens(numbered)) {
+            return false;
+        }
+    }
+    let left_words = normalized_word_sequences(left);
+    let right_words = normalized_word_sequences(right);
+    if left_words == right_words || titles_share_contained_words(left, right) {
+        return true;
+    }
+    let left_tokens = significant_title_tokens(left);
+    let right_tokens = significant_title_tokens(right);
+    let shorter = left_tokens.len().min(right_tokens.len());
+    shorter > 0 && left_tokens.intersection(&right_tokens).count() * 5 >= shorter * 4
+}
+
+fn numbered_title_tokens(value: &str) -> BTreeSet<String> {
+    let words = normalized_word_sequences(value);
+    words
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| {
+            if word.chars().all(|character| character.is_ascii_digit()) {
+                return word.parse::<u64>().ok().map(|number| number.to_string());
+            }
+            index
+                .checked_sub(1)
+                .and_then(|previous| series_number_marker(&words[previous]).then_some(()))
+                .and_then(|_| small_roman_numeral(word))
+                .map(|number| number.to_string())
+        })
+        .collect()
+}
+
+fn series_number_marker(word: &str) -> bool {
+    matches!(
+        word,
+        "episode"
+            | "part"
+            | "volume"
+            | "vol"
+            | "chapter"
+            | "book"
+            | "season"
+            | "symphony"
+            | "disc"
+            | "disk"
+    )
+}
+
+fn has_series_number(value: &str) -> bool {
+    normalized_word_sequences(value).windows(2).any(|pair| {
+        series_number_marker(&pair[0])
+            && (pair[1].chars().all(|character| character.is_ascii_digit())
+                || small_roman_numeral(&pair[1]).is_some())
+    })
+}
+
+fn small_roman_numeral(word: &str) -> Option<u8> {
+    [
+        "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv",
+        "xv", "xvi", "xvii", "xviii", "xix", "xx",
+    ]
+    .iter()
+    .position(|candidate| candidate == &word)
+    .map(|index| index as u8 + 1)
+}
+
+fn source_artists_compatible(left: &str, right: &str) -> bool {
+    let left_compact = normalize_catalog_text(left);
+    let right_compact = normalize_catalog_text(right);
+    !left_compact.is_empty()
+        && !right_compact.is_empty()
+        && (left_compact == right_compact || titles_share_contained_words(left, right))
+}
+
+fn source_track_match_count(left: &SourceGroup, right: &SourceGroup, rows: &[SourceRow]) -> usize {
+    let (source, target) = match left.row_indices.len().cmp(&right.row_indices.len()) {
+        std::cmp::Ordering::Less => (left, right),
+        std::cmp::Ordering::Greater => (right, left),
+        std::cmp::Ordering::Equal => {
+            if source_group_sort_key(left) <= source_group_sort_key(right) {
+                (left, right)
+            } else {
+                (right, left)
+            }
+        }
+    };
+    let targets = target
+        .row_indices
+        .iter()
+        .map(|index| rows[*index].track.clone())
+        .collect::<Vec<_>>();
+    source
+        .row_indices
+        .iter()
+        .filter_map(|index| release_track_match_index(&rows[*index], &targets))
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn source_groups_support(left: &SourceGroup, right: &SourceGroup, rows: &[SourceRow]) -> bool {
+    let album_support = source_album_support(&left.album, &right.album);
+    let artist_support = source_artists_compatible(&left.artist, &right.artist);
+    if artist_support && album_support {
+        return true;
+    }
+    if !artist_support && !album_support {
+        return false;
+    }
+    let matches = source_track_match_count(left, right, rows);
+    let smaller = left.row_indices.len().min(right.row_indices.len());
+    let track_support = matches * 5 >= smaller * 4;
+    if artist_support {
+        matches >= 2 && track_support
+    } else {
+        matches >= 3 && track_support
+    }
+}
+
+fn source_group_plays(group: &SourceGroup, rows: &[SourceRow]) -> u64 {
+    group
+        .row_indices
+        .iter()
+        .map(|index| rows[*index].play_count)
+        .fold(0, u64::saturating_add)
+}
+
+fn source_group_sort_key(group: &SourceGroup) -> (&str, &str) {
+    (group.artist.as_str(), group.album.as_str())
+}
+
+#[derive(Default)]
+struct SourceCandidateIndex {
+    artist_buckets: BTreeMap<String, Vec<usize>>,
+    track_buckets: BTreeMap<String, Vec<usize>>,
+    artist_keys: Vec<Vec<String>>,
+    artist_query_keys: Vec<Vec<String>>,
+    album_keys: Vec<Vec<String>>,
+    album_query_keys: Vec<Vec<String>>,
+    track_keys: Vec<Vec<String>>,
+    track_query_keys: Vec<Vec<String>>,
+    typo_availability: SourceTypoAvailability,
+}
+
+#[derive(Default)]
+struct SourceTypoAvailability {
+    full: HashSet<(String, usize)>,
+    deleted: HashSet<(String, usize)>,
+}
+
+impl SourceCandidateIndex {
+    fn new(groups: &[SourceGroup], named: &[usize], rows: &[SourceRow]) -> Self {
+        let typo_availability = source_typo_availability(groups, named, rows);
+        let mut index = Self {
+            artist_keys: vec![Vec::new(); groups.len()],
+            artist_query_keys: vec![Vec::new(); groups.len()],
+            album_keys: vec![Vec::new(); groups.len()],
+            album_query_keys: vec![Vec::new(); groups.len()],
+            track_keys: vec![Vec::new(); groups.len()],
+            track_query_keys: vec![Vec::new(); groups.len()],
+            ..Self::default()
+        };
+        for &group_index in named {
+            let group = &groups[group_index];
+            let (artist_keys, artist_query_keys) =
+                source_artist_index_data(&group.artist, &typo_availability);
+            let (album_keys, album_query_keys) =
+                source_album_index_data(&group.album, &typo_availability);
+            let (track_keys, track_query_keys) =
+                source_group_track_index_data(group, rows, &typo_availability);
+            for key in &artist_keys {
+                index
+                    .artist_buckets
+                    .entry(key.clone())
+                    .or_default()
+                    .push(group_index);
+            }
+            if group.row_indices.len() >= 3 {
+                for key in &track_keys {
+                    index
+                        .track_buckets
+                        .entry(key.clone())
+                        .or_default()
+                        .push(group_index);
+                }
+            }
+            index.artist_keys[group_index] = artist_keys;
+            index.artist_query_keys[group_index] = artist_query_keys;
+            index.album_keys[group_index] = album_keys;
+            index.album_query_keys[group_index] = album_query_keys;
+            index.track_keys[group_index] = track_keys;
+            index.track_query_keys[group_index] = track_query_keys;
+        }
+        index.typo_availability = typo_availability;
+        index
+    }
+
+    fn artist_candidates(
+        &self,
+        artist: &str,
+        candidate_bucket_visits: &mut usize,
+    ) -> BTreeSet<usize> {
+        let mut candidates = BTreeSet::new();
+        let (_, query_keys) = source_artist_index_data(artist, &self.typo_availability);
+        for key in query_keys {
+            if let Some(bucket) = self.artist_buckets.get(&key) {
+                *candidate_bucket_visits = candidate_bucket_visits.saturating_add(bucket.len());
+                candidates.extend(bucket.iter().copied());
+            }
+        }
+        candidates
+    }
+
+    fn group_neighbors(
+        &self,
+        group_index: usize,
+        groups: &[SourceGroup],
+        candidate_bucket_visits: &mut usize,
+    ) -> BTreeSet<usize> {
+        let mut neighbors = self
+            .artist_candidates(&groups[group_index].artist, candidate_bucket_visits)
+            .into_iter()
+            .filter(|candidate| {
+                source_artists_compatible(&groups[group_index].artist, &groups[*candidate].artist)
+                    && (source_index_keys_intersect(
+                        &self.album_query_keys[group_index],
+                        &self.album_keys[*candidate],
+                    ) || source_index_keys_intersect(
+                        &self.track_query_keys[group_index],
+                        &self.track_keys[*candidate],
+                    ))
+            })
+            .collect::<BTreeSet<_>>();
+        if groups[group_index].row_indices.len() >= 3 {
+            for key in &self.track_query_keys[group_index] {
+                let Some(bucket) = self.track_buckets.get(key) else {
+                    continue;
+                };
+                *candidate_bucket_visits = candidate_bucket_visits.saturating_add(bucket.len());
+                neighbors.extend(bucket.iter().copied().filter(|candidate| {
+                    !source_artists_compatible(
+                        &groups[group_index].artist,
+                        &groups[*candidate].artist,
+                    ) && source_index_keys_intersect(
+                        &self.album_query_keys[group_index],
+                        &self.album_keys[*candidate],
+                    )
+                }));
+            }
+        }
+        neighbors.remove(&group_index);
+        neighbors
+    }
+}
+
+fn source_index_keys_intersect(query: &[String], indexed: &[String]) -> bool {
+    query.iter().any(|key| indexed.binary_search(key).is_ok())
+}
+
+fn source_typo_availability(
+    groups: &[SourceGroup],
+    named: &[usize],
+    rows: &[SourceRow],
+) -> SourceTypoAvailability {
+    let mut availability = SourceTypoAvailability::default();
+    for &group_index in named {
+        source_add_typo_availability(&mut availability, &groups[group_index].artist);
+        source_add_typo_availability(&mut availability, &groups[group_index].album);
+        for &row_index in &groups[group_index].row_indices {
+            let row = &rows[row_index];
+            source_add_typo_availability(&mut availability, &row.track);
+            let title = without_known_source_suffix(&row.track, &row.artist, &row.album);
+            if title != row.track {
+                source_add_typo_availability(&mut availability, &title);
+            }
+        }
+    }
+    availability
+}
+
+fn source_add_typo_availability(availability: &mut SourceTypoAvailability, title: &str) {
+    for token in normalized_word_sequences(title)
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    {
+        let characters = token.chars().collect::<Vec<_>>();
+        if characters.len() < 5 {
+            continue;
+        }
+        let length = characters.len();
+        availability.full.insert((token.clone(), length));
+        for index in 0..characters.len() {
+            let mut deletion = String::with_capacity(token.len());
+            for (position, character) in characters.iter().enumerate() {
+                if position != index {
+                    deletion.push(*character);
+                }
+            }
+            availability.deleted.insert((deletion, length));
+        }
+    }
+}
+
+fn source_typo_token_has_neighbor(token: &str, availability: &SourceTypoAvailability) -> bool {
+    let characters = token.chars().collect::<Vec<_>>();
+    let length = characters.len();
+    if length < 5 {
+        return false;
+    }
+    if availability
+        .deleted
+        .contains(&(token.to_owned(), length + 1))
+    {
+        return true;
+    }
+    if length > 5 {
+        for index in 0..characters.len() {
+            let mut deletion = String::with_capacity(token.len());
+            for (position, character) in characters.iter().enumerate() {
+                if position != index {
+                    deletion.push(*character);
+                }
+            }
+            if availability.full.contains(&(deletion, length - 1)) {
+                return true;
+            }
+        }
+    }
+    for index in 0..characters.len().saturating_sub(1) {
+        let mut swapped = characters.clone();
+        swapped.swap(index, index + 1);
+        if swapped != characters
+            && availability
+                .full
+                .contains(&(swapped.into_iter().collect(), length))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn source_index_pair_keys(prefix: &str, tokens: &BTreeSet<String>) -> BTreeSet<String> {
+    let tokens = tokens.iter().collect::<Vec<_>>();
+    let mut keys = BTreeSet::new();
+    for left in 0..tokens.len() {
+        for right in (left + 1)..tokens.len() {
+            keys.insert(format!("{prefix}:{}|{}", tokens[left], tokens[right]));
+        }
+    }
+    keys
+}
+
+fn source_index_typo_index_keys(
+    tokens: &BTreeSet<String>,
+    availability: &SourceTypoAvailability,
+) -> BTreeSet<String> {
+    let tokens = tokens.iter().collect::<Vec<_>>();
+    let mut keys = BTreeSet::new();
+    for typo_index in 0..tokens.len() {
+        let typo = tokens[typo_index];
+        let characters = typo.chars().collect::<Vec<_>>();
+        if !source_typo_token_has_neighbor(typo, availability) {
+            continue;
+        }
+        let context = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| (index != typo_index).then_some(token.as_str()))
+            .collect::<Vec<_>>()
+            .join("|");
+        let length = characters.len();
+        keys.insert(format!("typo-token:{typo}|len:{length}|context:{context}"));
+        for index in 0..characters.len() {
+            let mut deletion = String::with_capacity(typo.len());
+            for (position, character) in characters.iter().enumerate() {
+                if position != index {
+                    deletion.push(*character);
+                }
+            }
+            keys.insert(format!(
+                "typo-delete:{deletion}|len:{length}|context:{context}"
+            ));
+        }
+    }
+    keys
+}
+
+fn source_index_typo_query_keys(
+    tokens: &BTreeSet<String>,
+    availability: &SourceTypoAvailability,
+) -> BTreeSet<String> {
+    let tokens = tokens.iter().collect::<Vec<_>>();
+    let mut keys = BTreeSet::new();
+    for typo_index in 0..tokens.len() {
+        let typo = tokens[typo_index];
+        let characters = typo.chars().collect::<Vec<_>>();
+        if !source_typo_token_has_neighbor(typo, availability) {
+            continue;
+        }
+        let context = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| (index != typo_index).then_some(token.as_str()))
+            .collect::<Vec<_>>()
+            .join("|");
+        let length = characters.len();
+        keys.insert(format!(
+            "typo-delete:{typo}|len:{}|context:{context}",
+            length + 1
+        ));
+        if length > 5 {
+            for index in 0..characters.len() {
+                let mut deletion = String::with_capacity(typo.len());
+                for (position, character) in characters.iter().enumerate() {
+                    if position != index {
+                        deletion.push(*character);
+                    }
+                }
+                keys.insert(format!(
+                    "typo-token:{deletion}|len:{}|context:{context}",
+                    length - 1
+                ));
+            }
+        }
+        for index in 0..characters.len().saturating_sub(1) {
+            let mut swapped = characters.clone();
+            swapped.swap(index, index + 1);
+            if swapped == characters {
+                continue;
+            }
+            let swapped = swapped.into_iter().collect::<String>();
+            keys.insert(format!(
+                "typo-token:{swapped}|len:{length}|context:{context}"
+            ));
+        }
+    }
+    keys
+}
+
+fn source_title_index_data(
+    title: &str,
+    typo_availability: &SourceTypoAvailability,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut index_keys = BTreeSet::new();
+    let mut query_keys = BTreeSet::new();
+    let words = normalized_word_sequences(title)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if words.len() == 1 {
+        index_keys.extend(words.iter().map(|word| format!("word-single:{word}")));
+        query_keys.extend(words.iter().map(|word| format!("word-single:{word}")));
+        query_keys.extend(words.iter().map(|word| format!("word-contains:{word}")));
+    } else if words.len() >= 2 {
+        index_keys.extend(words.iter().map(|word| format!("word-contains:{word}")));
+        index_keys.extend(source_index_pair_keys("word-pair", &words));
+        query_keys.extend(source_index_pair_keys("word-pair", &words));
+    }
+
+    let significant = significant_title_tokens(title);
+    if significant.len() == 1 {
+        index_keys.extend(
+            significant
+                .iter()
+                .map(|token| format!("significant-single:{token}")),
+        );
+        query_keys.extend(
+            significant
+                .iter()
+                .map(|token| format!("significant-single:{token}")),
+        );
+        query_keys.extend(
+            significant
+                .iter()
+                .map(|token| format!("significant-contains:{token}")),
+        );
+    } else if significant.len() >= 2 {
+        index_keys.extend(
+            significant
+                .iter()
+                .map(|token| format!("significant-contains:{token}")),
+        );
+        index_keys.extend(source_index_pair_keys("significant-pair", &significant));
+        query_keys.extend(source_index_pair_keys("significant-pair", &significant));
+    }
+
+    index_keys.extend(source_index_typo_index_keys(&words, typo_availability));
+    query_keys.extend(source_index_typo_query_keys(&words, typo_availability));
+    (index_keys, query_keys)
+}
+
+fn source_artist_index_data(
+    artist: &str,
+    typo_availability: &SourceTypoAvailability,
+) -> (Vec<String>, Vec<String>) {
+    let (mut index_keys, mut query_keys) = source_title_index_data(artist, typo_availability);
+    let compact = normalize_catalog_text(artist);
+    if !compact.is_empty() {
+        let key = format!("compact:{compact}");
+        index_keys.insert(key.clone());
+        query_keys.insert(key);
+    }
+    (
+        index_keys.into_iter().collect(),
+        query_keys.into_iter().collect(),
+    )
+}
+
+fn source_album_index_data(
+    album: &str,
+    typo_availability: &SourceTypoAvailability,
+) -> (Vec<String>, Vec<String>) {
+    let (mut index_keys, mut query_keys) = source_title_index_data(album, typo_availability);
+    let numbers = numbered_title_tokens(album);
+    if !numbers.is_empty() {
+        let suffix = numbers.into_iter().collect::<Vec<_>>().join("|");
+        index_keys.extend(
+            index_keys
+                .iter()
+                .map(|key| format!("{key}|numbers:{suffix}"))
+                .collect::<Vec<_>>(),
+        );
+        query_keys = query_keys
+            .into_iter()
+            .map(|key| format!("{key}|numbers:{suffix}"))
+            .collect();
+    }
+    let compact = normalize_for_match(album);
+    if !compact.is_empty() {
+        let key = format!("compact:{compact}");
+        index_keys.insert(key.clone());
+        query_keys.insert(key);
+    }
+    (
+        index_keys.into_iter().collect(),
+        query_keys.into_iter().collect(),
+    )
+}
+
+fn source_track_index_data(
+    row: &SourceRow,
+    typo_availability: &SourceTypoAvailability,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut index_keys = BTreeSet::new();
+    let mut query_keys = BTreeSet::new();
+    let mut titles = vec![row.track.clone()];
+    let title = without_known_source_suffix(&row.track, &row.artist, &row.album);
+    if title != row.track {
+        titles.push(title);
+    }
+    for title in titles {
+        let (title_index_keys, title_query_keys) =
+            source_title_index_data(&title, typo_availability);
+        index_keys.extend(title_index_keys);
+        query_keys.extend(title_query_keys);
+        let compact = normalize_catalog_text(&title);
+        if !compact.is_empty() {
+            let key = format!("compact:{compact}");
+            index_keys.insert(key.clone());
+            query_keys.insert(key);
+        }
+    }
+    (index_keys, query_keys)
+}
+
+fn source_group_track_index_data(
+    group: &SourceGroup,
+    rows: &[SourceRow],
+    typo_availability: &SourceTypoAvailability,
+) -> (Vec<String>, Vec<String>) {
+    let (index_keys, query_keys) = group
+        .row_indices
+        .iter()
+        .map(|index| source_track_index_data(&rows[*index], typo_availability))
+        .fold(
+            (BTreeSet::new(), BTreeSet::new()),
+            |(mut index_keys, mut query_keys), (row_index_keys, row_query_keys)| {
+                index_keys.extend(row_index_keys);
+                query_keys.extend(row_query_keys);
+                (index_keys, query_keys)
+            },
+        );
+    (
+        index_keys.into_iter().collect(),
+        query_keys.into_iter().collect(),
+    )
+}
+
+fn source_cluster_rows(cluster: &SourceCluster, groups: &[SourceGroup]) -> Vec<usize> {
+    let mut indices = cluster
+        .group_indices
+        .iter()
+        .flat_map(|index| groups[*index].row_indices.iter().copied())
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices
+}
+
+fn source_row_matches_cluster(
+    row: &SourceRow,
+    cluster: &SourceCluster,
+    groups: &[SourceGroup],
+    rows: &[SourceRow],
+) -> bool {
+    let targets = cluster
+        .group_indices
+        .iter()
+        .flat_map(|index| groups[*index].row_indices.iter())
+        .map(|index| rows[*index].track.clone())
+        .collect::<Vec<_>>();
+    release_track_match_index(row, &targets).is_some()
+}
+
+fn source_cluster_for_empty_row(
+    row: &SourceRow,
+    artist_candidates: &BTreeSet<usize>,
+    cluster_for_group: &[usize],
+    clusters: &[SourceCluster],
+    groups: &[SourceGroup],
+    rows: &[SourceRow],
+) -> Option<usize> {
+    let mut matches = BTreeSet::new();
+    for group_index in artist_candidates {
+        if !source_artists_compatible(&row.artist, &groups[*group_index].artist) {
+            continue;
+        }
+        let cluster_index = cluster_for_group[*group_index];
+        if source_row_matches_cluster(row, &clusters[cluster_index], groups, rows) {
+            matches.insert(cluster_index);
+        }
+    }
+    (matches.len() == 1).then(|| *matches.first().expect("one match was inserted"))
+}
+
+fn source_clusters(rows: &[SourceRow]) -> Vec<SourceCluster> {
+    source_clusters_with_comparison_count(rows).0
+}
+
+fn source_clusters_with_comparison_count(rows: &[SourceRow]) -> (Vec<SourceCluster>, usize) {
+    let (clusters, comparisons, _) = source_clusters_with_stats(rows);
+    (clusters, comparisons)
+}
+
+fn source_clusters_with_stats(rows: &[SourceRow]) -> (Vec<SourceCluster>, usize, usize) {
+    let mut grouped = BTreeMap::<(String, String), Vec<usize>>::new();
+    for (index, row) in rows.iter().enumerate() {
         grouped
             .entry((row.artist.clone(), row.album.clone()))
             .or_default()
-            .push(row.stable_id.clone());
+            .push(index);
     }
+    let mut groups = grouped
+        .into_iter()
+        .map(|((artist, album), row_indices)| SourceGroup {
+            artist,
+            album,
+            row_indices,
+        })
+        .collect::<Vec<_>>();
+    let named = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(index, group)| (!group.album.is_empty()).then_some(index))
+        .collect::<Vec<_>>();
+    let index = SourceCandidateIndex::new(&groups, &named, rows);
+    let mut candidate_bucket_visits = 0;
+    let mut candidate_neighbors = vec![BTreeSet::new(); groups.len()];
+    for &group_index in &named {
+        for neighbor in index.group_neighbors(group_index, &groups, &mut candidate_bucket_visits) {
+            candidate_neighbors[group_index].insert(neighbor);
+            candidate_neighbors[neighbor].insert(group_index);
+        }
+    }
+    let initial_clusters = named
+        .iter()
+        .copied()
+        .map(|index| SourceCluster {
+            group_indices: vec![index],
+            row_indices: Vec::new(),
+            collection_shaped: false,
+            representative_artist: String::new(),
+            representative_album: String::new(),
+            album_labels: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut active = initial_clusters.into_iter().map(Some).collect::<Vec<_>>();
+    let mut cluster_for_group = vec![usize::MAX; groups.len()];
+    for (cluster_index, group_index) in groups
+        .iter()
+        .enumerate()
+        .filter_map(|(index, group)| (!group.album.is_empty()).then_some(index))
+        .enumerate()
+    {
+        cluster_for_group[group_index] = cluster_index;
+    }
+
+    let mut comparisons = 0;
+    let mut support_cache = HashMap::new();
+    for left in 0..active.len() {
+        while active[left].is_some() {
+            let candidate_clusters = active[left]
+                .as_ref()
+                .expect("left cluster is active")
+                .group_indices
+                .iter()
+                .flat_map(|group_index| candidate_neighbors[*group_index].iter().copied())
+                .filter_map(|group_index| {
+                    let cluster_index = cluster_for_group[group_index];
+                    (cluster_index > left && active[cluster_index].is_some())
+                        .then_some(cluster_index)
+                })
+                .collect::<BTreeSet<_>>();
+            let mut merged = false;
+            for right in candidate_clusters {
+                let can_merge = {
+                    let left_cluster = active[left].as_ref().expect("left cluster is active");
+                    let right_cluster = active[right].as_ref().expect("right cluster is active");
+                    left_cluster.group_indices.iter().all(|left_group| {
+                        right_cluster.group_indices.iter().all(|right_group| {
+                            let pair = if left_group < right_group {
+                                (*left_group, *right_group)
+                            } else {
+                                (*right_group, *left_group)
+                            };
+                            *support_cache.entry(pair).or_insert_with(|| {
+                                comparisons += 1;
+                                source_groups_support(
+                                    &groups[*left_group],
+                                    &groups[*right_group],
+                                    rows,
+                                )
+                            })
+                        })
+                    })
+                };
+                if can_merge {
+                    let right_groups = active[right]
+                        .take()
+                        .expect("right cluster is active")
+                        .group_indices;
+                    let left_cluster = active[left].as_mut().expect("left cluster is active");
+                    left_cluster
+                        .group_indices
+                        .extend(right_groups.iter().copied());
+                    left_cluster.group_indices.sort_unstable();
+                    for group_index in right_groups {
+                        cluster_for_group[group_index] = left;
+                    }
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged {
+                break;
+            }
+        }
+    }
+
+    let mut stable_to_compact = vec![usize::MAX; active.len()];
+    let mut clusters = Vec::new();
+    for (stable_index, cluster) in active.into_iter().enumerate() {
+        let Some(cluster) = cluster else {
+            continue;
+        };
+        stable_to_compact[stable_index] = clusters.len();
+        clusters.push(cluster);
+    }
+    for stable_index in &mut cluster_for_group {
+        if *stable_index != usize::MAX {
+            *stable_index = stable_to_compact[*stable_index];
+        }
+    }
+
+    let empty_group_indices = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(index, group)| group.album.is_empty().then_some(index))
+        .collect::<Vec<_>>();
+    for empty_group_index in empty_group_indices {
+        let group = groups[empty_group_index].clone();
+        let artist_candidates =
+            index.artist_candidates(&group.artist, &mut candidate_bucket_visits);
+        let mut residual = Vec::new();
+        for row_index in group.row_indices {
+            let Some(cluster_index) = source_cluster_for_empty_row(
+                &rows[row_index],
+                &artist_candidates,
+                &cluster_for_group,
+                &clusters,
+                &groups,
+                rows,
+            ) else {
+                residual.push(row_index);
+                continue;
+            };
+            let attached_group_index = groups.len();
+            groups.push(SourceGroup {
+                artist: group.artist.clone(),
+                album: String::new(),
+                row_indices: vec![row_index],
+            });
+            clusters[cluster_index]
+                .group_indices
+                .push(attached_group_index);
+            clusters[cluster_index].group_indices.sort_unstable();
+            clusters[cluster_index].collection_shaped = true;
+        }
+        if !residual.is_empty() {
+            let residual_group_index = groups.len();
+            groups.push(SourceGroup {
+                artist: group.artist,
+                album: String::new(),
+                row_indices: residual,
+            });
+            clusters.push(SourceCluster {
+                group_indices: vec![residual_group_index],
+                row_indices: Vec::new(),
+                collection_shaped: true,
+                representative_artist: String::new(),
+                representative_album: String::new(),
+                album_labels: Vec::new(),
+            });
+        }
+    }
+    for cluster in &mut clusters {
+        cluster.row_indices = source_cluster_rows(cluster, &groups);
+        cluster.collection_shaped |= cluster.group_indices.len() > 1;
+        let has_named_group = cluster
+            .group_indices
+            .iter()
+            .any(|index| !groups[*index].album.is_empty());
+        let representative = cluster
+            .group_indices
+            .iter()
+            .map(|index| &groups[*index])
+            .filter(|group| group.album.is_empty() != has_named_group)
+            .max_by(|left, right| {
+                source_group_plays(left, rows)
+                    .cmp(&source_group_plays(right, rows))
+                    .then_with(|| source_group_sort_key(left).cmp(&source_group_sort_key(right)))
+            })
+            .expect("source clusters always contain a group");
+        cluster.representative_artist = representative.artist.clone();
+        cluster.representative_album = representative.album.clone();
+        cluster.album_labels = cluster
+            .group_indices
+            .iter()
+            .map(|index| groups[*index].album.clone())
+            .filter(|album| !album.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    }
+    (clusters, comparisons, candidate_bucket_visits)
+}
+
+fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
     let mut page = 1;
     let mut batches = Vec::new();
-    for source_ids in grouped.into_values() {
+    for cluster in source_clusters(rows) {
+        let source_ids = cluster
+            .row_indices
+            .iter()
+            .map(|index| rows[*index].stable_id.clone())
+            .collect::<Vec<_>>();
         for chunk in source_ids.chunks(LASTFM_REVIEW_BATCH_SIZE) {
             batches.push(ImportBatch {
                 page,
                 source_ids: chunk.to_vec(),
+                collection_shaped: Some(cluster.collection_shaped),
+                representative_artist: Some(cluster.representative_artist.clone()),
+                representative_album: Some(cluster.representative_album.clone()),
+                album_labels: cluster.album_labels.clone(),
             });
             page += 1;
         }
     }
     batches
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BatchProjection {
+    collection_shaped: bool,
+    representative_artist: String,
+    representative_album: String,
+    album_labels: Vec<String>,
+}
+
+fn derived_batch_projection(rows: &[&SourceRow]) -> BatchProjection {
+    let representative = rows.iter().copied().max_by(|left, right| {
+        left.play_count.cmp(&right.play_count).then_with(|| {
+            (
+                right.artist.as_str(),
+                right.album.as_str(),
+                right.track.as_str(),
+            )
+                .cmp(&(
+                    left.artist.as_str(),
+                    left.album.as_str(),
+                    left.track.as_str(),
+                ))
+        })
+    });
+    let album_labels = rows
+        .iter()
+        .map(|row| row.album.clone())
+        .filter(|album| !album.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    BatchProjection {
+        collection_shaped: album_labels.len() > 1 || rows.iter().any(|row| row.album.is_empty()),
+        representative_artist: representative
+            .map(|row| row.artist.clone())
+            .unwrap_or_default(),
+        representative_album: representative
+            .map(|row| row.album.clone())
+            .unwrap_or_default(),
+        album_labels,
+    }
+}
+
+fn batch_projection(batch: &ImportBatch, rows: &[&SourceRow]) -> BatchProjection {
+    let derived = derived_batch_projection(rows);
+    BatchProjection {
+        collection_shaped: batch.collection_shaped.unwrap_or(derived.collection_shaped),
+        representative_artist: batch
+            .representative_artist
+            .clone()
+            .unwrap_or(derived.representative_artist),
+        representative_album: batch
+            .representative_album
+            .clone()
+            .unwrap_or(derived.representative_album),
+        album_labels: if batch.album_labels.is_empty() {
+            derived.album_labels
+        } else {
+            batch.album_labels.clone()
+        },
+    }
+}
+
+fn batch_is_collection_shaped(
+    session: &LastFmImportSessionV2,
+    batch: &ImportBatch,
+    rows: &[&SourceRow],
+) -> bool {
+    batch_projection(batch, rows).collection_shaped
+        || session.collection_album_matches.contains_key(&batch.page)
+}
+
+fn batch_projection_for_session(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+) -> Option<BatchProjection> {
+    let rows = source_row_map(session);
+    let batch = review_batches(session)
+        .into_iter()
+        .find(|batch| batch.page == batch_id)?;
+    Some(batch_projection(&batch, &batch_rows(&batch, &rows)))
+}
+
+fn batch_is_collection_shaped_for_id(session: &LastFmImportSessionV2, batch_id: u32) -> bool {
+    batch_projection_for_session(session, batch_id)
+        .is_some_and(|projection| projection.collection_shaped)
+        || session.collection_album_matches.contains_key(&batch_id)
+}
+
+fn requested_batch_containing_source(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+    source_id: &str,
+) -> Option<ImportBatch> {
+    review_batches(session)
+        .into_iter()
+        .find(|batch| batch.page == batch_id && batch.source_ids.iter().any(|id| id == source_id))
 }
 
 fn review_batches(session: &LastFmImportSessionV2) -> Vec<ImportBatch> {
@@ -975,6 +1986,86 @@ fn review_batches_for_read(session: &LastFmImportSessionV2) -> Cow<'_, [ImportBa
     } else {
         Cow::Borrowed(&session.batches)
     }
+}
+
+fn legacy_batch_is_protected(
+    session: &LastFmImportSessionV2,
+    batch: &ImportBatch,
+    apply_queue: &[ReviewApplyJob],
+) -> bool {
+    session
+        .page_options
+        .contains_key(&batch_options_key(batch.page))
+        || session.collection_album_matches.contains_key(&batch.page)
+        || apply_queue.iter().any(|job| {
+            job.plan.session_id == session.cache_id
+                && job.plan.batch_id == batch.page
+                && matches!(
+                    job.status,
+                    ApplyJobStatus::Queued | ApplyJobStatus::Running | ApplyJobStatus::Failed
+                )
+        })
+}
+
+fn upgrade_legacy_pending_batches(
+    session: &mut LastFmImportSessionV2,
+    apply_queue: &[ReviewApplyJob],
+) -> bool {
+    let legacy = session
+        .batches
+        .iter()
+        .any(|batch| batch.collection_shaped.is_none());
+    if !legacy || !review_phase_allowed(session.phase) {
+        return false;
+    }
+    let rows_by_id = source_row_map(session);
+    let mut protected_batches = Vec::new();
+    let mut pending_rows = Vec::new();
+    let mut reserved_pages = BTreeSet::new();
+    for batch in &session.batches {
+        let rows = batch_rows(batch, &rows_by_id);
+        if batch.collection_shaped.is_some()
+            || legacy_batch_is_protected(session, batch, apply_queue)
+        {
+            let mut preserved = batch.clone();
+            if preserved.collection_shaped.is_none() {
+                let projection = batch_projection(&preserved, &rows);
+                preserved.collection_shaped = Some(projection.collection_shaped);
+                preserved.representative_artist = Some(projection.representative_artist);
+                preserved.representative_album = Some(projection.representative_album);
+                preserved.album_labels = projection.album_labels;
+            }
+            reserved_pages.insert(preserved.page);
+            protected_batches.push(preserved);
+        } else {
+            pending_rows.extend(rows.into_iter().cloned());
+        }
+    }
+    if pending_rows.is_empty() {
+        let changed = protected_batches != session.batches;
+        if changed {
+            protected_batches.sort_by_key(|batch| batch.page);
+            session.batches = protected_batches;
+        }
+        return changed;
+    }
+    let mut next_page = 1;
+    let mut upgraded = build_review_batches(&pending_rows);
+    for batch in &mut upgraded {
+        while reserved_pages.contains(&next_page) {
+            next_page += 1;
+        }
+        batch.page = next_page;
+        reserved_pages.insert(next_page);
+        next_page += 1;
+    }
+    protected_batches.extend(upgraded);
+    protected_batches.sort_by_key(|batch| batch.page);
+    let changed = protected_batches != session.batches;
+    if changed {
+        session.batches = protected_batches;
+    }
+    changed
 }
 
 fn source_row_map(session: &LastFmImportSessionV2) -> HashMap<&str, &SourceRow> {
@@ -1014,11 +2105,15 @@ fn requested_batch(
 ) -> Option<ImportBatch> {
     let rows = source_row_map(session);
     review_batches(session).into_iter().find(|batch| {
-        batch.page == batch_id
-            && batch_rows(batch, &rows).len() == batch.source_ids.len()
-            && batch_rows(batch, &rows)
-                .iter()
-                .all(|row| row.artist == artist && row.album == album)
+        if batch.page != batch_id {
+            return false;
+        }
+        let batch_rows = batch_rows(batch, &rows);
+        if batch_rows.len() != batch.source_ids.len() {
+            return false;
+        }
+        let projection = batch_projection(batch, &batch_rows);
+        projection.representative_artist == artist && projection.representative_album == album
     })
 }
 
@@ -1035,18 +2130,17 @@ fn requested_collection_batch_with_album(
         return Err("Unknown Last.fm import review batch.".into());
     };
     let batch_rows = batch_rows(&batch, &rows);
-    let Some(source_album) = batch_rows.first().map(|row| row.album.clone()) else {
-        return Err("Album matching is available only for collection batches.".into());
-    };
-    if batch_rows.iter().any(|row| {
-        row.artist != artist
-            || row.album != source_album
-            || (!source_album.is_empty()
-                && !session.collection_album_matches.contains_key(&batch_id))
-    }) {
+    if batch_rows.len() != batch.source_ids.len() {
         return Err("Album matching is available only for collection batches.".into());
     }
-    Ok((batch, source_album))
+    let projection = batch_projection(&batch, &batch_rows);
+    if projection.representative_artist != artist
+        || (!projection.collection_shaped
+            && !session.collection_album_matches.contains_key(&batch_id))
+    {
+        return Err("Album matching is available only for collection batches.".into());
+    }
+    Ok((batch, projection.representative_album))
 }
 
 fn requested_collection_batch(
@@ -1469,9 +2563,24 @@ fn build_apply_plan(
     let Some(batch) = requested_batch(session, batch_id, artist, album) else {
         return Err("Unknown Last.fm import review batch.".into());
     };
+    let rows_by_id = source_row_map(session);
+    let all_batch_rows = batch_rows(&batch, &rows_by_id);
+    let collection_shaped = batch_is_collection_shaped(session, &batch, &all_batch_rows);
     let converted_collection = is_converted_collection_batch(session, batch_id, album);
     if converted_collection && options.whole_album {
         return Err("Whole-album import is unavailable after switching to album matches.".into());
+    }
+    if collection_shaped
+        && options.whole_album
+        && !session.collection_album_matches.contains_key(&batch_id)
+    {
+        let row_refs = all_batch_rows.clone();
+        if !exact_album_match_for_rows(session, batch_id, &row_refs) {
+            return Err(
+                "Choose one supported Spotify album match before importing a collection as a whole album."
+                    .into(),
+            );
+        }
     }
     let selected = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
     if selected_ids
@@ -1480,7 +2589,6 @@ fn build_apply_plan(
     {
         return Err("A selected source row does not belong to this review batch.".into());
     }
-    let rows_by_id = source_row_map(session);
     let rows = batch_rows(&batch, &rows_by_id)
         .into_iter()
         .filter(|row| selected.contains(&row.stable_id))
@@ -1490,7 +2598,7 @@ fn build_apply_plan(
     if rows.is_empty() {
         return Err("Select at least one actionable source row before accepting.".into());
     }
-    if album.is_empty() && options.whole_album {
+    if collection_shaped && options.whole_album {
         let row_refs = rows.iter().collect::<Vec<_>>();
         if !exact_album_match_for_rows(session, batch_id, &row_refs) {
             return Err(
@@ -1503,7 +2611,7 @@ fn build_apply_plan(
     let mut target_by_source = BTreeMap::<String, String>::new();
     for row in &rows {
         if let Some(result) = session.matches.get(&row.stable_id) {
-            if let Some(uri) = matched_track_uri_for_row(result, row, converted_collection) {
+            if let Some(uri) = matched_track_uri_for_row(result, row, collection_shaped) {
                 target_by_source.insert(row.stable_id.clone(), uri);
             }
         }
@@ -1521,47 +2629,21 @@ fn build_apply_plan(
 
     let mut metadata_uris = target_by_source.values().cloned().collect::<BTreeSet<_>>();
     let membership = if options.import_content && options.whole_album {
-        if album.is_empty() {
-            if session.collection_album_matches.contains_key(&batch_id) {
-                let candidate = selected_collection_album(session, batch_id).ok_or_else(|| {
+        if collection_shaped {
+            let row_refs = rows.iter().collect::<Vec<_>>();
+            let candidate = selected_collection_album_for_rows(session, batch_id, &row_refs)
+                .ok_or_else(|| {
                     "Choose one supported Spotify album match before accepting.".to_string()
                 })?;
-                let album_uri =
-                    membership_uris_for_import(true, true, Some(&candidate.matching.uri), &[])
-                        .and_then(|uris| uris.into_iter().next())
-                        .ok_or_else(|| {
-                            "Expected a Spotify album URI for the import.".to_string()
-                        })?;
-                metadata_uris.extend(candidate.matching.track_uris.iter().cloned());
-                ApplyMembership::Album {
-                    uri: album_uri,
-                    name: candidate.matching.name.clone(),
-                    artist: candidate.matching.artist.clone(),
-                }
-            } else {
-                let (result, album_uri) = rows
-                    .iter()
-                    .filter_map(|row| session.matches.get(&row.stable_id))
-                    .filter_map(|result| Some((result, result.selected_uri.as_deref()?)))
-                    .find(|(_, uri)| uri.starts_with("spotify:album:"))
-                    .ok_or_else(|| {
-                        "Choose a supported Spotify album match before accepting.".to_string()
-                    })?;
-                let album_uri = membership_uris_for_import(true, true, Some(album_uri), &[])
+            let album_uri =
+                membership_uris_for_import(true, true, Some(&candidate.matching.uri), &[])
                     .and_then(|uris| uris.into_iter().next())
                     .ok_or_else(|| "Expected a Spotify album URI for the import.".to_string())?;
-                if let Some(candidate) = result
-                    .candidates
-                    .iter()
-                    .find(|candidate| candidate.uri == album_uri)
-                {
-                    metadata_uris.extend(candidate.track_uris.iter().cloned());
-                }
-                ApplyMembership::Album {
-                    uri: album_uri,
-                    name: album.to_owned(),
-                    artist: artist.to_owned(),
-                }
+            metadata_uris.extend(candidate.matching.track_uris.iter().cloned());
+            ApplyMembership::Album {
+                uri: album_uri,
+                name: candidate.matching.name.clone(),
+                artist: candidate.matching.artist.clone(),
             }
         } else {
             let (result, album_uri) = rows
@@ -1645,8 +2727,18 @@ fn build_apply_plan(
                 album: row.album.clone(),
                 track: row.track.clone(),
                 target_uri,
-                album_uri: if converted_collection || (album.is_empty() && !options.whole_album) {
+                album_uri: if converted_collection
+                    || (collection_shaped && !options.whole_album)
+                    || (album.is_empty() && !options.whole_album)
+                {
                     None
+                } else if collection_shaped && options.whole_album {
+                    selected_collection_album_for_rows(
+                        session,
+                        batch_id,
+                        &rows.iter().collect::<Vec<_>>(),
+                    )
+                    .map(|candidate| candidate.matching.uri)
                 } else if album.is_empty() && options.whole_album {
                     selected_collection_album(session, batch_id)
                         .map(|candidate| candidate.matching.uri.clone())
@@ -2385,7 +3477,7 @@ impl Service {
         let incremental_store = IncrementalStore::new(&app_data_dir);
         let mappings_store = MappingsStore::new(&app_data_dir);
         let mut load_problems = Vec::new();
-        let session = match store.load() {
+        let mut session = match store.load() {
             Ok(mut session) => {
                 if let Some(session) = session.as_mut() {
                     refresh_cached_album_matches(session);
@@ -2419,6 +3511,13 @@ impl Service {
                 }
             }
         };
+        if let Some(session) = session.as_mut() {
+            if upgrade_legacy_pending_batches(session, &sync_state.apply_queue) {
+                if let Err(error) = store.save(session) {
+                    log::warn!("Could not persist upgraded Last.fm review batches: {error}");
+                }
+            }
+        }
         if !load_problems.is_empty() {
             let problem = load_problems.join(" ");
             sync_state.sync_problem = Some(match sync_state.sync_problem.take() {
@@ -2860,17 +3959,15 @@ impl Service {
                 continue;
             };
             let batch_id = source_batches.get(&row.stable_id).copied();
-            let converted_collection = batch_id.is_some_and(|batch_id| {
-                is_converted_collection_batch(&session, batch_id, &row.album)
-            });
-            let Some(track_uri) = matched_track_uri_for_row(result, row, converted_collection)
-            else {
+            let collection_shaped = batch_id
+                .is_some_and(|batch_id| batch_is_collection_shaped_for_id(&session, batch_id));
+            let Some(track_uri) = matched_track_uri_for_row(result, row, collection_shaped) else {
                 continue;
             };
             mappings
                 .track_mappings
                 .insert(source_key, track_uri.clone());
-            if !converted_collection {
+            if !collection_shaped {
                 if let Some(album_uri) = result
                     .selected_uri
                     .as_deref()
@@ -3922,13 +5019,14 @@ impl Service {
             .map(|row| (row.stable_id.as_str(), row))
             .collect::<HashMap<_, _>>();
         let rows = batch_rows(batch, &rows_by_id);
-        if rows.len() != batch.source_ids.len()
-            || rows
-                .iter()
-                .any(|row| row.artist != artist || row.album != album)
-        {
+        if rows.len() != batch.source_ids.len() {
             return None;
         }
+        let projection = batch_projection(batch, &rows);
+        if projection.representative_artist != artist || projection.representative_album != album {
+            return None;
+        }
+        let collection_shaped = batch_is_collection_shaped(session, batch, &rows);
         let page_number = batches
             .iter()
             .position(|candidate| candidate.page == batch_id)?
@@ -4002,7 +5100,7 @@ impl Service {
             .into_iter()
             .filter(|(target, _)| visible_targets.contains(target))
             .collect();
-        let collection = (album.is_empty()
+        let collection = (collection_shaped
             || session.collection_album_matches.contains_key(&batch_id))
         .then(|| collection_match_view(session, batch_id, &rows));
         Some(ImportPageView {
@@ -4010,6 +5108,8 @@ impl Service {
             batch_id,
             artist: artist.to_owned(),
             album: album.to_owned(),
+            collection_shaped,
+            album_label_count: projection.album_labels.len(),
             page_number,
             page_count: batches.len(),
             rows: items,
@@ -4040,21 +5140,29 @@ impl Service {
                 let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
                     return Err("Unknown Last.fm import review batch.".into());
                 };
+                let rows_by_id = source_row_map(&session);
+                let rows = batch_rows(&batch, &rows_by_id);
+                let collection_shaped = batch_is_collection_shaped(&session, &batch, &rows);
                 if is_converted_collection_batch(&session, batch_id, album) && options.whole_album {
                     return Err(
                         "Whole-album import is unavailable after switching to album matches."
                             .into(),
                     );
                 }
-                if album.is_empty() && options.whole_album {
-                    let rows_by_id = source_row_map(&session);
-                    let rows = batch_rows(&batch, &rows_by_id);
-                    if !exact_album_match_for_rows(&session, batch_id, &rows) {
+                if collection_shaped
+                    && options.whole_album
+                    && !exact_album_match_for_rows(&session, batch_id, &rows)
+                {
+                    if !session.collection_album_matches.contains_key(&batch_id) {
                         return Err(
-                            "Choose one coherent Spotify album before importing a collection as a whole album."
+                            "Choose one supported Spotify album match before importing a collection as a whole album."
                                 .into(),
                         );
                     }
+                    return Err(
+                        "Choose one coherent Spotify album before importing a collection as a whole album."
+                            .into(),
+                    );
                 }
                 session
                     .page_options
@@ -4098,79 +5206,84 @@ impl Service {
         } else {
             None
         };
-        self.mutate_owned_session(
-            username,
-            spotify_account_id,
-            review_phase_allowed,
-            |mut session| {
-                let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
-                    return Err("Unknown Last.fm import review batch.".into());
-                };
-                match action {
-                    "exclude" | "undo-exclude" => {
-                        let ids = ids.as_ref().expect("exclude actions require row IDs");
-                        if ids
-                            .iter()
-                            .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
-                        {
-                            return Err(
-                                "The source row does not belong to this review batch.".into()
-                            );
-                        }
-                        if ids.iter().any(|id| !is_reviewable(&session, id)) {
-                            return Err("The source row is not reviewable.".into());
-                        }
-                        for id in ids {
-                            exclude_row(&mut session, id, action == "exclude");
-                        }
-                    }
-                    "ignore-album" => {
-                        for source_id in album_source_ids(&session, artist, album) {
-                            if is_actionable(&session, &source_id) {
-                                session.decisions.insert(
-                                    source_id,
-                                    RowDecision {
-                                        status: RowStatus::IgnoredAlbum,
-                                        excluded: false,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    "ignore-artist" => ignore_artist(&mut session, artist),
-                    "skip-album" => {
-                        for source_id in album_source_ids(&session, artist, album) {
-                            if is_actionable(&session, &source_id) {
-                                session.decisions.insert(
-                                    source_id,
-                                    RowDecision {
-                                        status: RowStatus::Skipped,
-                                        excluded: false,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    "restore" => {
-                        for source_id in album_source_ids(&session, artist, album) {
-                            let decision = default_decision(&session, &source_id);
-                            if !decision.excluded
-                                && matches!(
-                                    decision.status,
-                                    RowStatus::IgnoredAlbum | RowStatus::Skipped
-                                )
+        let mapping_album_keys = self
+            .mutate_owned_session(
+                username,
+                spotify_account_id,
+                review_phase_allowed,
+                |mut session| {
+                    let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
+                        return Err("Unknown Last.fm import review batch.".into());
+                    };
+                    let scoped_ids = batch_scope_source_ids(&session, &batch);
+                    let mapping_album_keys = source_album_keys_for_ids(&session, &scoped_ids);
+                    match action {
+                        "exclude" | "undo-exclude" => {
+                            let ids = ids.as_ref().expect("exclude actions require row IDs");
+                            if ids
+                                .iter()
+                                .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
                             {
-                                session.decisions.insert(source_id, RowDecision::default());
+                                return Err(
+                                    "The source row does not belong to this review batch.".into()
+                                );
+                            }
+                            if ids.iter().any(|id| !is_reviewable(&session, id)) {
+                                return Err("The source row is not reviewable.".into());
+                            }
+                            for id in ids {
+                                exclude_row(&mut session, id, action == "exclude");
                             }
                         }
+                        "ignore-album" => {
+                            for source_id in &scoped_ids {
+                                if is_actionable(&session, source_id) {
+                                    session.decisions.insert(
+                                        source_id.clone(),
+                                        RowDecision {
+                                            status: RowStatus::IgnoredAlbum,
+                                            excluded: false,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "ignore-artist" => ignore_artist(&mut session, artist),
+                        "skip-album" => {
+                            for source_id in &scoped_ids {
+                                if is_actionable(&session, source_id) {
+                                    session.decisions.insert(
+                                        source_id.clone(),
+                                        RowDecision {
+                                            status: RowStatus::Skipped,
+                                            excluded: false,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "restore" => {
+                            for source_id in &scoped_ids {
+                                let decision = default_decision(&session, source_id);
+                                if !decision.excluded
+                                    && matches!(
+                                        decision.status,
+                                        RowStatus::IgnoredAlbum | RowStatus::Skipped
+                                    )
+                                {
+                                    session
+                                        .decisions
+                                        .insert(source_id.clone(), RowDecision::default());
+                                }
+                            }
+                        }
+                        _ => return Err("Unknown Last.fm import review action.".into()),
                     }
-                    _ => return Err("Unknown Last.fm import review action.".into()),
-                }
-                update_review_phase(&mut session);
-                Ok((session, ()))
-            },
-        )
-        .await?;
+                    update_review_phase(&mut session);
+                    Ok((session, mapping_album_keys))
+                },
+            )
+            .await?;
         let mapping_track_ids = if let Some(ids) = ids.as_ref() {
             let session = self.snapshot().await;
             Some(
@@ -4201,14 +5314,12 @@ impl Service {
                 }
             }
             "ignore-album" => {
-                mappings
-                    .ignored_albums
-                    .insert(source_album_key(artist, album));
+                mappings.ignored_albums.extend(mapping_album_keys);
             }
             "restore" => {
-                mappings
-                    .ignored_albums
-                    .remove(&source_album_key(artist, album));
+                for key in mapping_album_keys {
+                    mappings.ignored_albums.remove(&key);
+                }
             }
             "ignore-artist" => {
                 mappings.ignored_artists.insert(normalize_for_match(artist));
@@ -4376,9 +5487,10 @@ fn select_match_in_session(
     else {
         return Err("Unknown Last.fm import source row.".into());
     };
-    let Some(batch) = requested_batch(session, batch_id, &row_artist, &row_album) else {
+    let Some(batch) = requested_batch_containing_source(session, batch_id, source_id) else {
         return Err("The source row does not belong to this review batch.".into());
     };
+    let collection_shaped = batch_is_collection_shaped_for_id(session, batch_id);
     let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
     let explicit_album = session.matches.get(source_id).is_some_and(|result| {
         spotify_share_uri(&result.search_term, "album")
@@ -4442,7 +5554,7 @@ fn select_match_in_session(
             }
         }
     } else {
-        if row_album.is_empty() {
+        if row_album.is_empty() || collection_shaped {
             let Some(result) = session.matches.get_mut(source_id) else {
                 return Err("This source row has no Spotify candidates.".into());
             };
@@ -4505,7 +5617,7 @@ fn selected_album_track_candidate(
     row_album: &str,
     uri: &str,
 ) -> Option<AlbumCandidate> {
-    if row_album.is_empty() || is_converted_collection_batch(session, batch_id, row_album) {
+    if row_album.is_empty() || batch_is_collection_shaped_for_id(session, batch_id) {
         return collection_selected_albums(session, batch_id)
             .into_iter()
             .find_map(|album| album_track_candidate(&album.matching, uri, false));
@@ -5951,7 +7063,7 @@ fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
         let Some(first) = rows.first() else {
             continue;
         };
-        if first.album.is_empty() {
+        if first.album.is_empty() || batch_is_collection_shaped(session, batch, &rows) {
             continue;
         }
         let Some(mut candidates) = batch
@@ -6112,6 +7224,32 @@ fn selected_collection_album(
 ) -> Option<&CollectionAlbumCandidate> {
     let selected = collection_selected_albums(session, batch_id);
     (selected.len() == 1).then(|| selected[0])
+}
+
+fn selected_collection_album_for_rows(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+    rows: &[&SourceRow],
+) -> Option<CollectionAlbumCandidate> {
+    if let Some(candidate) = selected_collection_album(session, batch_id) {
+        return Some(candidate.clone());
+    }
+    let selected_uri = rows.iter().find_map(|row| {
+        session
+            .matches
+            .get(&row.stable_id)
+            .and_then(|result| result.selected_uri.as_deref())
+            .filter(|uri| uri.starts_with("spotify:album:"))
+    })?;
+    let candidate = rows.iter().find_map(|row| {
+        session.matches.get(&row.stable_id).and_then(|result| {
+            result
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == selected_uri)
+        })
+    })?;
+    Some(collection_album_candidate_from_release(candidate.clone()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6454,15 +7592,17 @@ fn activate_collection_session(
     let Some(batch) = requested_batch(session, batch_id, artist, album) else {
         return Err("Unknown Last.fm import review batch.".into());
     };
-    if album.is_empty() {
-        return Err("Multi-album matching is available only for release batches.".into());
-    }
     let rows = batch_rows(&batch, &source_row_map(session))
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
+    let collection_shaped =
+        batch_is_collection_shaped(session, &batch, &rows.iter().collect::<Vec<_>>());
+    if !collection_shaped && album.is_empty() {
+        return Err("Multi-album matching is available only for release batches.".into());
+    }
     let was_converted = session.collection_album_matches.contains_key(&batch_id);
-    let release = (!was_converted)
+    let release = (!was_converted && !collection_shaped)
         .then(|| selected_release_candidate_for_activation(session, &batch, &rows))
         .transpose()?;
     if let Some(release) = release.as_ref() {
@@ -6517,7 +7657,11 @@ fn activate_collection_session(
             result.selected_uri = explicit;
         }
     }
-    if is_converted_collection_batch(session, batch_id, album) {
+    // Release-shaped batches become collection sessions as soon as this action
+    // succeeds.  Remove the release candidates even on the first conversion;
+    // otherwise the old album target remains selectable beside the injected
+    // collection tracks.
+    if !collection_shaped {
         for row in &rows {
             if let Some(result) = session.matches.get_mut(&row.stable_id) {
                 result
@@ -6547,9 +7691,9 @@ fn rerank_collection_session(
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    if rows.iter().any(|row| !row.album.is_empty())
-        && !session.collection_album_matches.contains_key(&batch_id)
-    {
+    let collection_shaped =
+        batch_is_collection_shaped(session, &batch, &rows.iter().collect::<Vec<_>>());
+    if !collection_shaped && !session.collection_album_matches.contains_key(&batch_id) {
         return Err("Album matching is available only for collection batches.".into());
     }
     let previous_injected = session
@@ -7196,55 +8340,26 @@ async fn match_batch<T, S>(
     provider: &retune_spotify::client::SpotifyClient<T, S>,
     artist: &str,
     album: &str,
+    collection_shaped: bool,
     rows: &[SourceRow],
-    membership: &CollectionMembership,
-    mappings: &LastFmMappings,
 ) -> Result<Vec<MatchResult>, String>
 where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
-    if album.is_empty() {
-        let mut matches = Vec::new();
-        for row in rows {
-            let search_term = track_search_term(artist, &row.track);
-            let results = crate::provider::search_tracks(provider, &search_term).await?;
-            let mut candidates = results
-                .items
-                .into_iter()
-                .map(|track| AlbumCandidate {
-                    uri: track.uri.clone(),
-                    name: track.name.clone(),
-                    artist: track.artist.clone(),
-                    in_library: membership.contains(&track.uri),
-                    track_uris: vec![track.uri.clone()],
-                    track_names: vec![track.name.clone()],
-                    track_artists: vec![track.artist],
-                    track_albums: vec![track.alb],
-                    relation: None,
-                })
-                .collect::<Vec<_>>();
-            let source_track_names = row
-                .variants
-                .iter()
-                .map(|variant| variant.track.clone())
-                .chain(std::iter::once(row.track.clone()))
-                .collect::<Vec<_>>();
-            classify_album_candidates_by_name(&source_track_names, &mut candidates);
-            let result = match_result_for(
-                row.stable_id.clone(),
-                search_term,
-                candidates,
-                &row.track,
-                None,
-            );
-            matches.push(ratify_collection_result(row, result, membership, mappings));
-        }
-        return Ok(matches);
+    if album.is_empty() || collection_shaped {
+        return Ok(Vec::new());
     }
     let search_term = album_search_term(artist, album);
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
-    let mut candidates = album_candidates(provider, &search_term, &source_track_names).await?;
+    let mut candidates = album_candidates(
+        provider,
+        &search_term,
+        Some(album),
+        Some(artist),
+        &source_track_names,
+    )
+    .await?;
     classify_album_candidates_for_rows(rows, &mut candidates);
     let selected_uri = automatic_album_candidate_for_rows(album, rows, &candidates)
         .map(|candidate| candidate.uri.clone());
@@ -7300,12 +8415,12 @@ fn session_account_matches(
 async fn cached_spotify_binding_is_current(
     app: &tauri::AppHandle,
     service: &Service,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     let Some(session) = service.snapshot().await else {
-        return Ok(false);
+        return Ok(Some(false));
     };
     let Some(expected) = session.spotify_account_id.as_deref() else {
-        return Ok(true);
+        return Ok(Some(true));
     };
     let state = app.state::<crate::AppState>();
     let cached = state
@@ -7319,15 +8434,14 @@ async fn cached_spotify_binding_is_current(
                 && lastfm_username(app).await.as_deref()
                     == Ok(session.lastfm_username.as_str()) =>
         {
-            return Ok(true);
+            Ok(Some(true))
         }
-        Some(false) => {
+        Some(_) => {
             service.suspend_for_account_mismatch().await?;
-            return Ok(false);
+            Ok(Some(false))
         }
-        _ => {}
+        None => Ok(None),
     }
-    current_spotify_binding_is_current(app, service, false).await
 }
 
 fn cached_spotify_identity_matches(
@@ -7466,11 +8580,17 @@ async fn lazy_match_page(
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    let initial_collection_shaped = batch_is_collection_shaped_for_id(&initial_session, batch_id);
     let initial_needs_match =
         !batch_match_plan(&initial_session, Some((batch_id, artist, album))).is_empty();
-    if album.is_empty() && !initial_needs_match && initial_session.spotify_account_id.is_some() {
-        if !cached_spotify_binding_is_current(app, service).await? {
-            return Ok(None);
+    if initial_collection_shaped
+        && !initial_needs_match
+        && initial_session.spotify_account_id.is_some()
+    {
+        match cached_spotify_binding_is_current(app, service).await? {
+            Some(false) => return Ok(None),
+            None => return Ok(service.page(batch_id, artist, album).await),
+            Some(true) => {}
         }
         let session = service
             .snapshot()
@@ -7487,40 +8607,16 @@ async fn lazy_match_page(
             .await?;
         return Ok(service.page(batch_id, artist, album).await);
     }
-    let collection_context = if album.is_empty() {
-        let _membership_guard = state_ref.spotify_library_gate.lock().await;
-        let (username, spotify_account_id) =
-            current_matching_account_locked(state_ref, service).await?;
-        let membership = collection_membership(state_ref);
-        let mappings = service
-            .mappings_for(&username, Some(&spotify_account_id))
-            .await;
-        let context = (membership, mappings);
-        service
-            .rerank_collection_batch(batch_id, &context.0, &context.1)
-            .await?;
-        Some(context)
-    } else {
-        None
-    };
     let session = service
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
-        if !cached_spotify_binding_is_current(app, service).await? {
+        if cached_spotify_binding_is_current(app, service).await? == Some(false) {
             return Ok(None);
         }
         return Ok(service.page(batch_id, artist, album).await);
     }
-    let membership = collection_context
-        .as_ref()
-        .map(|context| context.0.clone())
-        .unwrap_or_default();
-    let mappings = collection_context
-        .as_ref()
-        .map(|context| context.1.clone())
-        .unwrap_or_default();
     let page = lazy_match_page_with_search(
         service,
         &state_ref.spotify_library_gate,
@@ -7534,9 +8630,8 @@ async fn lazy_match_page(
                 provider.as_ref(),
                 artist,
                 album,
+                initial_collection_shaped,
                 &rows,
-                &membership,
-                &mappings,
             )
             .await
         },
@@ -7675,7 +8770,6 @@ fn exact_album_match_for_rows(
         return false;
     }
     let mut targets = BTreeSet::new();
-    let converted_collection = is_converted_collection_batch(session, batch_id, &first.album);
     rows.into_iter().all(|row| {
         let Some(result) = session.matches.get(&row.stable_id) else {
             return false;
@@ -7685,7 +8779,7 @@ fn exact_album_match_for_rows(
             .as_deref()
             .filter(|uri| uri.starts_with("spotify:album:"))
             .or_else(|| best_candidate(result).map(|candidate| candidate.uri.as_str()));
-        let Some(target) = matched_track_uri_for_row(result, row, converted_collection) else {
+        let Some(target) = matched_track_uri_for_row(result, row, false) else {
             return false;
         };
         selected_album == Some(candidate.uri.as_str())
@@ -7727,9 +8821,15 @@ fn batch_match_plan(
         .into_iter()
         .filter_map(|batch| {
             let rows = batch_rows(&batch, &rows_by_id);
-            let first = rows.first()?;
+            rows.first()?;
+            let projection = batch_projection(&batch, &rows);
+            if batch_is_collection_shaped(session, &batch, &rows) {
+                return None;
+            }
             let selected = requested.is_some_and(|(requested_page, artist, album)| {
-                requested_page == batch.page && artist == first.artist && album == first.album
+                requested_page == batch.page
+                    && artist == projection.representative_artist
+                    && album == projection.representative_album
             });
             let remaining = requested.is_none()
                 && rows
@@ -7740,7 +8840,11 @@ fn batch_match_plan(
                     .iter()
                     .any(|row| row_needs_match(row, session.matches.get(&row.stable_id)))
             {
-                Some((batch.page, first.artist.clone(), first.album.clone()))
+                Some((
+                    batch.page,
+                    projection.representative_artist,
+                    projection.representative_album,
+                ))
             } else {
                 None
             }
@@ -7754,10 +8858,16 @@ fn accept_all_entity_uris(session: &LastFmImportSessionV2) -> (BTreeSet<String>,
     let rows_by_id = source_row_map(session);
     for batch in review_batches(session) {
         let rows = batch_rows(&batch, &rows_by_id);
-        let Some(first) = rows.first() else {
+        if rows.is_empty() {
             continue;
-        };
-        let options = session.options_for_batch(batch.page, &first.artist, &first.album);
+        }
+        let projection = batch_projection(&batch, &rows);
+        let collection_shaped = batch_is_collection_shaped(session, &batch, &rows);
+        let options = session.options_for_batch(
+            batch.page,
+            &projection.representative_artist,
+            &projection.representative_album,
+        );
         let selected = rows
             .iter()
             .filter(|row| {
@@ -7769,11 +8879,7 @@ fn accept_all_entity_uris(session: &LastFmImportSessionV2) -> (BTreeSet<String>,
             continue;
         }
         if options.whole_album {
-            if is_converted_collection_batch(session, batch.page, &first.album) {
-                continue;
-            }
-            if first.album.is_empty() && session.collection_album_matches.contains_key(&batch.page)
-            {
+            if collection_shaped {
                 if let Some(uri) = selected_collection_album(session, batch.page)
                     .map(|candidate| candidate.matching.uri.clone())
                 {
@@ -7797,13 +8903,11 @@ fn accept_all_entity_uris(session: &LastFmImportSessionV2) -> (BTreeSet<String>,
             }
         } else {
             for row in selected {
-                if let Some(uri) = session.matches.get(&row.stable_id).and_then(|result| {
-                    matched_track_uri_for_row(
-                        result,
-                        row,
-                        is_converted_collection_batch(session, batch.page, &first.album),
-                    )
-                }) {
+                if let Some(uri) = session
+                    .matches
+                    .get(&row.stable_id)
+                    .and_then(|result| matched_track_uri_for_row(result, row, collection_shaped))
+                {
                     track_uris.insert(uri);
                 }
             }
@@ -7870,9 +8974,9 @@ fn historical_counts_for_targets(
             matched_track_uri_for_row(
                 result,
                 row,
-                source_batches.get(&row.stable_id).is_some_and(|batch_id| {
-                    is_converted_collection_batch(session, *batch_id, &row.album)
-                }),
+                source_batches
+                    .get(&row.stable_id)
+                    .is_some_and(|batch_id| batch_is_collection_shaped_for_id(session, *batch_id)),
             )
         }) else {
             continue;
@@ -8445,11 +9549,22 @@ async fn album_candidates<
 >(
     provider: &retune_spotify::client::SpotifyClient<T, S>,
     query: &str,
+    source_album: Option<&str>,
+    source_artist: Option<&str>,
     source_track_names: &[String],
 ) -> Result<Vec<AlbumCandidate>, String> {
     let results = crate::provider::search_albums(provider, query).await?;
+    let albums = match (source_album, source_artist) {
+        (Some(source_album), Some(source_artist)) => supported_album_summaries(
+            results.items,
+            source_album,
+            source_artist,
+            source_track_names,
+        ),
+        _ => results.items.into_iter().take(10).collect(),
+    };
     let mut candidates = Vec::new();
-    for album in results.items.into_iter().take(10) {
+    for album in albums {
         let tracks = crate::provider::album_tracks(provider, &album.uri).await?;
         candidates.push(AlbumCandidate {
             uri: album.uri,
@@ -8465,6 +9580,76 @@ async fn album_candidates<
     }
     classify_album_candidates_by_name(source_track_names, &mut candidates);
     Ok(candidates)
+}
+
+fn album_summary_title_tier(source: &str, candidate: &str) -> Option<u8> {
+    let source_compact = normalize_for_match(source);
+    let candidate_compact = normalize_for_match(candidate);
+    if source_compact.is_empty() || candidate_compact.is_empty() {
+        return None;
+    }
+    if source_compact == candidate_compact {
+        return Some(0);
+    }
+    if normalized_word_sequences(source) == normalized_word_sequences(candidate) {
+        return Some(1);
+    }
+    if titles_share_contained_words(source, candidate) {
+        return Some(2);
+    }
+    let source_tokens = significant_title_tokens(source);
+    let candidate_tokens = significant_title_tokens(candidate);
+    let shorter = source_tokens.len().min(candidate_tokens.len());
+    (shorter > 0 && source_tokens.intersection(&candidate_tokens).count() * 5 >= shorter * 4)
+        .then_some(3)
+}
+
+fn album_summary_track_rank(source_count: usize, candidate_count: u32) -> Option<(u8, u32)> {
+    if source_count > 0 && candidate_count > 0 && (candidate_count as usize) < source_count {
+        return None;
+    }
+    if candidate_count == 0 {
+        Some((1, u32::MAX))
+    } else {
+        Some((0, candidate_count.saturating_sub(source_count as u32)))
+    }
+}
+
+fn supported_album_summaries(
+    summaries: Vec<crate::provider::SearchAlbum>,
+    source_album: &str,
+    source_artist: &str,
+    source_track_names: &[String],
+) -> Vec<crate::provider::SearchAlbum> {
+    let mut supported = summaries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(spotify_order, album)| {
+            let title_tier = album_summary_title_tier(source_album, &album.name)?;
+            let track_rank = album_summary_track_rank(source_track_names.len(), album.track_count)?;
+            let artist_rank =
+                if normalize_catalog_text(source_artist) == normalize_catalog_text(&album.artist) {
+                    0
+                } else if source_artists_compatible(source_artist, &album.artist) {
+                    1
+                } else {
+                    2
+                };
+            Some((title_tier, track_rank, artist_rank, spotify_order, album))
+        })
+        .collect::<Vec<_>>();
+    let Some(strongest_title_tier) = supported.iter().map(|item| item.0).min() else {
+        return Vec::new();
+    };
+    supported.retain(|item| item.0 == strongest_title_tier);
+    supported.sort_by_key(|(title_tier, track_rank, artist_rank, spotify_order, _)| {
+        (*title_tier, *track_rank, *artist_rank, *spotify_order)
+    });
+    supported
+        .into_iter()
+        .take(3)
+        .map(|(_, _, _, _, album)| album)
+        .collect()
 }
 
 fn collection_album_summary(album: crate::provider::SearchAlbum) -> CollectionAlbumCandidate {
@@ -9292,12 +10477,15 @@ pub(crate) async fn lastfm_import_change_track(
         .rows
         .iter()
         .find(|row| row.stable_id == id)
+        .cloned()
         .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
-    if requested_batch(&session, batch_id, &row.artist, &row.album).is_none() {
-        return Err("The source row does not belong to this review batch.".into());
-    }
-    let row_artist = row.artist.clone();
-    let row_album = row.album.clone();
+    let batch = requested_batch_containing_source(&session, batch_id, &row.stable_id)
+        .ok_or_else(|| "The source row does not belong to this review batch.".to_string())?;
+    let rows_by_id = source_row_map(&session);
+    let projection = batch_projection(&batch, &batch_rows(&batch, &rows_by_id));
+    let collection_shaped = batch_is_collection_shaped_for_id(&session, batch_id);
+    let page_artist = projection.representative_artist;
+    let page_album = projection.representative_album;
     let search_term = if query.trim().is_empty() {
         track_search_term(&row.artist, &row.track)
     } else {
@@ -9349,15 +10537,15 @@ pub(crate) async fn lastfm_import_change_track(
             .collect::<Vec<_>>()
     };
     let mut candidates = candidates;
-    if row.album.is_empty() {
-        rank_collection_candidates(row, &mut candidates, &membership);
+    if row.album.is_empty() || collection_shaped {
+        rank_collection_candidates(&row, &mut candidates, &membership);
     } else {
-        classify_album_candidates_for_rows(std::slice::from_ref(row), &mut candidates);
+        classify_album_candidates_for_rows(std::slice::from_ref(&row), &mut candidates);
     }
-    let result = if row.album.is_empty() {
+    let result = if row.album.is_empty() || collection_shaped {
         match_result_for(id.clone(), search_term, candidates, &row.track, None)
     } else {
-        match_result_for_release(row, search_term, candidates, None)
+        match_result_for_release(&row, search_term, candidates, None)
     };
     let result = preserve_match_selection(result, session.matches.get(&id), &id, &row.track);
     let _membership_guard = state.spotify_library_gate.lock().await;
@@ -9369,7 +10557,7 @@ pub(crate) async fn lastfm_import_change_track(
         .await?;
     let page = state
         .lastfm_import
-        .page(batch_id, &row_artist, &row_album)
+        .page(batch_id, &page_artist, &page_album)
         .await;
     drop(_membership_guard);
     emit_import_changed(&app, state.lastfm_import.as_ref()).await?;
@@ -9395,19 +10583,23 @@ pub(crate) async fn lastfm_import_change_album(
         .rows
         .iter()
         .find(|row| row.stable_id == id)
+        .cloned()
         .ok_or_else(|| "Unknown Last.fm import source row.".to_string())?;
-    let batch = requested_batch(&session, batch_id, &row.artist, &row.album)
+    let batch = requested_batch_containing_source(&session, batch_id, &row.stable_id)
         .ok_or_else(|| "The source row does not belong to this review batch.".to_string())?;
-    if is_converted_collection_batch(&session, batch_id, &row.album) {
-        return Err(
-            "Changing the Spotify release is unavailable after switching to album matches.".into(),
-        );
-    }
     let rows_by_id = source_row_map(&session);
     let related_rows = batch_rows(&batch, &rows_by_id)
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
+    let related_row_refs = related_rows.iter().collect::<Vec<_>>();
+    if batch_projection(&batch, &related_row_refs).collection_shaped
+        || is_converted_collection_batch(&session, batch_id, &row.album)
+    {
+        return Err(
+            "Changing the Spotify release is unavailable after switching to album matches.".into(),
+        );
+    }
     let related = related_rows
         .iter()
         .map(|candidate| candidate.track.clone())
@@ -9422,7 +10614,7 @@ pub(crate) async fn lastfm_import_change_album(
         let album = fetch_complete_collection_album(provider.as_ref(), &uri).await?;
         vec![collection_album_candidate(&album, &CollectionMembership::default()).matching]
     } else {
-        album_candidates(provider.as_ref(), &search_term, &related).await?
+        album_candidates(provider.as_ref(), &search_term, None, None, &related).await?
     };
     classify_album_candidates_for_rows(&related_rows, &mut candidates);
     let selected_uri = automatic_album_candidate_for_rows(&row.album, &related_rows, &candidates)
@@ -9603,10 +10795,10 @@ async fn select_best_matches_for_batch(
     let Some(page) = service.page(batch_id, artist, album).await else {
         return Err("Unknown Last.fm import review batch.".into());
     };
-    let converted_collection = service
+    let collection_shaped = service
         .snapshot()
         .await
-        .is_some_and(|session| is_converted_collection_batch(&session, batch_id, album));
+        .is_some_and(|session| batch_is_collection_shaped_for_id(&session, batch_id));
     let mut selected_album_uris = BTreeSet::new();
     for item in page.rows {
         if !page
@@ -9627,7 +10819,7 @@ async fn select_best_matches_for_batch(
         if result.selected_uri.is_some() {
             continue;
         }
-        if album.is_empty() || converted_collection {
+        if collection_shaped {
             // Collection ratification already records only conservative track
             // matches; unresolved candidates must stay unresolved in Accept All.
             continue;
@@ -9890,9 +11082,11 @@ fn queue_item(
     rows: &[&SourceRow],
     apply_queue: &[ReviewApplyJob],
 ) -> Option<ImportQueueItem> {
-    let first = rows.first()?;
-    let artist = first.artist.clone();
-    let album = first.album.clone();
+    rows.first()?;
+    let projection = batch_projection(batch, rows);
+    let artist = projection.representative_artist.clone();
+    let album = projection.representative_album.clone();
+    let collection_shaped = batch_is_collection_shaped(session, batch, rows);
     let options = session.options_for_page_batch(batch, &artist, &album, rows);
     let remaining = rows.iter().any(|row| {
         let decision = default_decision(session, &row.stable_id);
@@ -9911,7 +11105,9 @@ fn queue_item(
     let mut track_uris = BTreeSet::new();
     if options.import_content {
         if options.whole_album {
-            if !is_converted_collection_batch(session, batch.page, &album) {
+            if collection_shaped {
+                album_entities = selected_collection_album(session, batch.page).is_some() as u32;
+            } else if !is_converted_collection_batch(session, batch.page, &album) {
                 album_entities = selected
                     .iter()
                     .filter_map(|row| session.matches.get(&row.stable_id))
@@ -9926,11 +11122,7 @@ fn queue_item(
         } else {
             for row in &selected {
                 if let Some(result) = session.matches.get(&row.stable_id) {
-                    if let Some(uri) = matched_track_uri_for_row(
-                        result,
-                        row,
-                        is_converted_collection_batch(session, batch.page, &album),
-                    ) {
+                    if let Some(uri) = matched_track_uri_for_row(result, row, collection_shaped) {
                         track_uris.insert(uri);
                     }
                 }
@@ -9946,6 +11138,8 @@ fn queue_item(
         page: batch.page,
         artist,
         album,
+        collection_shaped,
+        album_label_count: projection.album_labels.len(),
         play_count: rows
             .iter()
             .map(|row| row.play_count)
@@ -10041,12 +11235,47 @@ fn required_import_match_ids(
         .collect()
 }
 
+#[cfg(test)]
 fn album_source_ids(session: &LastFmImportSessionV2, artist: &str, album: &str) -> Vec<String> {
     session
         .rows
         .iter()
         .filter(|row| row.artist == artist && row.album == album)
         .map(|row| row.stable_id.clone())
+        .collect()
+}
+
+fn batch_scope_source_ids(session: &LastFmImportSessionV2, batch: &ImportBatch) -> Vec<String> {
+    let rows_by_id = source_row_map(session);
+    let target = batch_projection(batch, &batch_rows(batch, &rows_by_id));
+    review_batches_for_read(session)
+        .iter()
+        .filter(|candidate| {
+            let candidate_projection =
+                batch_projection(candidate, &batch_rows(candidate, &rows_by_id));
+            candidate_projection.collection_shaped == target.collection_shaped
+                && candidate_projection.representative_artist == target.representative_artist
+                && candidate_projection.representative_album == target.representative_album
+        })
+        .flat_map(|candidate| candidate.source_ids.iter().cloned())
+        .collect()
+}
+
+fn source_album_keys_for_ids(
+    session: &LastFmImportSessionV2,
+    source_ids: &[String],
+) -> BTreeSet<String> {
+    let rows = source_row_map(session);
+    let identities = source_ids
+        .iter()
+        .filter_map(|id| rows.get(id.as_str()))
+        .map(|row| (row.artist.as_str(), row.album.as_str()))
+        .collect::<BTreeSet<_>>();
+    let has_named_album = identities.iter().any(|(_, album)| !album.is_empty());
+    identities
+        .into_iter()
+        .filter(|(_, album)| !has_named_album || !album.is_empty())
+        .map(|(artist, album)| source_album_key(artist, album))
         .collect()
 }
 
@@ -10124,6 +11353,57 @@ mod tests {
                 "@attr": {"page": "2", "totalPages": "4", "total": "601"}
             }
         })
+    }
+
+    fn album_summary_json(id: &str, name: &str, artist: &str, track_count: u32) -> Value {
+        serde_json::json!({
+            "id": id,
+            "uri": format!("spotify:album:{id}"),
+            "name": name,
+            "artists": [{"id": "artist", "name": artist}],
+            "release_date": "2024",
+            "total_tracks": track_count
+        })
+    }
+
+    fn album_response(id: &str, name: &str, artist: &str, track_names: &[&str]) -> Response {
+        let tracks = track_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                serde_json::json!({
+                    "uri": format!("spotify:track:{id}-{index}"),
+                    "name": name,
+                    // Keep album hydration focused on album requests.  An artist
+                    // id here would make provider enrichment issue an unrelated
+                    // /artists request for every hydrated album.
+                    "artists": [{"id": "", "name": artist}],
+                    "track_number": index + 1,
+                    "duration_ms": 180000
+                })
+            })
+            .collect::<Vec<_>>();
+        Response::json(
+            200,
+            serde_json::json!({
+                "id": id,
+                "uri": format!("spotify:album:{id}"),
+                "name": name,
+                "artists": [{"id": "", "name": artist}],
+                "release_date": "2024",
+                "total_tracks": track_names.len(),
+                "tracks": {"items": tracks, "next": null, "total": track_names.len()}
+            }),
+        )
+    }
+
+    fn album_search_response(items: Vec<Value>) -> Response {
+        Response::json(
+            200,
+            serde_json::json!({
+                "albums": {"items": items, "next": null, "total": 0}
+            }),
+        )
     }
 
     fn scrobble(artist: &str, album: &str, track: &str, timestamp: u64) -> ParsedScrobble {
@@ -10310,6 +11590,10 @@ mod tests {
         session.batches = vec![ImportBatch {
             page: 1,
             source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
+            collection_shaped: Some(false),
+            representative_artist: Some("Artist".into()),
+            representative_album: Some("Release".into()),
+            album_labels: vec!["Release".into()],
         }];
         session.page_options.insert(
             batch_options_key(1),
@@ -10602,6 +11886,10 @@ mod tests {
         session.batches = vec![ImportBatch {
             page: 1,
             source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
         }];
         let album = collection_album(
             "spotify:album:native",
@@ -10735,6 +12023,10 @@ mod tests {
         session.batches = vec![ImportBatch {
             page: 1,
             source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
         }];
         session.collection_album_matches.insert(
             1,
@@ -11199,10 +12491,18 @@ mod tests {
             ImportBatch {
                 page: 1,
                 source_ids: vec![rows[0].stable_id.clone(), rows[1].stable_id.clone()],
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
             },
             ImportBatch {
                 page: 2,
                 source_ids: vec![rows[2].stable_id.clone()],
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
             },
         ];
         service.save(session.clone()).await.unwrap();
@@ -12011,6 +13311,445 @@ mod tests {
         assert_eq!(rows.len(), UNIQUE_SCROBBLES);
         assert_eq!(rows[0].track, "Track 0");
         assert_eq!(rows[UNIQUE_SCROBBLES - 1].track, "Track 49999");
+    }
+
+    fn batches_with_rows(rows: &[SourceRow]) -> Vec<(ImportBatch, Vec<&SourceRow>)> {
+        let rows_by_id = rows
+            .iter()
+            .map(|row| (row.stable_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        build_review_batches(rows)
+            .into_iter()
+            .map(|batch| {
+                let batch_rows = batch_rows(&batch, &rows_by_id);
+                (batch, batch_rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn source_batches_merge_album_aliases_with_the_highest_play_group_label() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(
+            &mut rows,
+            &[
+                scrobble("John Williams", "Greatest Hits", "Theme One", 1),
+                scrobble("John Williams", "Greatest Hits", "Theme One", 2),
+                scrobble(
+                    "John Williams",
+                    "Greatest Hits: The Best Of John Williams",
+                    "Theme One",
+                    3,
+                ),
+                scrobble(
+                    "John Williams",
+                    "John Williams - Greatest Hits",
+                    "Theme One",
+                    4,
+                ),
+            ],
+        );
+
+        let batches = batches_with_rows(&rows);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0.collection_shaped, Some(true));
+        assert_eq!(
+            batches[0].0.representative_artist.as_deref(),
+            Some("John Williams")
+        );
+        assert_eq!(
+            batches[0].0.representative_album.as_deref(),
+            Some("Greatest Hits")
+        );
+        assert_eq!(batches[0].0.album_labels.len(), 3);
+        assert_eq!(batches[0].1.len(), 3);
+    }
+
+    #[test]
+    fn source_album_support_keeps_numbered_series_entries_separate() {
+        assert!(source_album_support(
+            "Star Wars Episode I",
+            "Star Wars Episode 1"
+        ));
+        assert!(!source_album_support(
+            "Star Wars Episode IV",
+            "Star Wars Episode 1"
+        ));
+        assert!(source_album_support(
+            "Star Wars Episode V: The Empire Strikes Back",
+            "Star Wars: The Empire Strikes Back"
+        ));
+        assert!(!source_album_support(
+            "Star Wars Episode I: The Phantom Menace",
+            "Star Wars: A New Hope"
+        ));
+        assert!(!source_album_support(
+            "A State of Trance Episode 652",
+            "A State of Trance Episode 749"
+        ));
+        assert!(source_album_support(
+            "A State of Trance Episode 652",
+            "ASOT 652 - A State of Trance Episode 652"
+        ));
+        assert!(source_album_support(
+            "Greatest Hits 1969-1999",
+            "Greatest Hits: 1969–1999"
+        ));
+    }
+
+    #[test]
+    fn source_batches_require_pairwise_support_and_cross_artist_track_thresholds() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(
+            &mut rows,
+            &[
+                scrobble("Artist A", "Shared Release", "One", 1),
+                scrobble("Artist A", "Shared Release", "Two", 2),
+                scrobble("Artist A", "Shared Release", "Three", 3),
+                scrobble("Artist B", "Shared Release", "One", 4),
+                scrobble("Artist B", "Shared Release", "Two", 5),
+                scrobble("Artist B", "Shared Release", "Three", 6),
+                scrobble("Artist C", "Shared Release", "One", 7),
+                scrobble("Artist C", "Shared Release", "Two", 8),
+                scrobble("Artist C", "Shared Release", "Four", 9),
+            ],
+        );
+
+        let batches = batches_with_rows(&rows);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches
+                .iter()
+                .map(|(batch, _)| batch.collection_shaped)
+                .collect::<Vec<_>>(),
+            vec![Some(true), Some(false)]
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .map(|(_, rows)| rows
+                    .iter()
+                    .map(|row| row.artist.as_str())
+                    .collect::<BTreeSet<_>>())
+                .collect::<Vec<_>>(),
+            vec![
+                BTreeSet::from(["Artist A", "Artist B"]),
+                BTreeSet::from(["Artist C"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_artist_compatibility_preserves_word_boundaries() {
+        assert!(source_artists_compatible(
+            "Sarah Brightman",
+            "Sarah Brightman & Steve Barton"
+        ));
+        assert!(!source_artists_compatible(
+            "Sarah Brightman",
+            "SarahBrightmanX"
+        ));
+    }
+
+    #[test]
+    fn source_track_support_orients_the_smaller_group_as_source() {
+        let rows = vec![
+            SourceRow {
+                stable_id: source_id("Artist", "Larger", "Live Version"),
+                artist: "Artist".into(),
+                album: "Larger".into(),
+                track: "Live Version".into(),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: 1,
+                latest: 1,
+            },
+            SourceRow {
+                stable_id: source_id("Artist", "Larger", "Live Remix"),
+                artist: "Artist".into(),
+                album: "Larger".into(),
+                track: "Live Remix".into(),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: 1,
+                latest: 1,
+            },
+            SourceRow {
+                stable_id: source_id("Artist", "Smaller", "Live"),
+                artist: "Artist".into(),
+                album: "Smaller".into(),
+                track: "Live".into(),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: 1,
+                latest: 1,
+            },
+        ];
+        let larger = SourceGroup {
+            artist: "Artist".into(),
+            album: "Larger".into(),
+            row_indices: vec![0, 1],
+        };
+        let smaller = SourceGroup {
+            artist: "Artist".into(),
+            album: "Smaller".into(),
+            row_indices: vec![2],
+        };
+
+        assert_eq!(source_track_match_count(&larger, &smaller, &rows), 0);
+    }
+
+    #[test]
+    fn source_clustering_bounds_comparisons_for_large_unique_input() {
+        const GROUPS: usize = 23_166;
+        let rows = (0..GROUPS)
+            .map(|index| {
+                let unique = format!("key{index:05}key{index:05}");
+                SourceRow {
+                    stable_id: source_id(
+                        &format!("Artist {unique}"),
+                        &format!("Album {unique}"),
+                        &format!("Track {unique}"),
+                    ),
+                    artist: format!("Artist {unique}"),
+                    album: format!("Album {unique}"),
+                    track: format!("Track {unique}"),
+                    variants: Vec::new(),
+                    play_count: 1,
+                    earliest: index as u64,
+                    latest: index as u64,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let (clusters, comparisons, candidate_bucket_visits) = source_clusters_with_stats(&rows);
+
+        assert_eq!(clusters.len(), GROUPS);
+        assert!(comparisons <= GROUPS);
+        assert!(candidate_bucket_visits <= GROUPS * 16);
+    }
+
+    #[test]
+    fn source_batches_attach_only_uniquely_identifying_empty_album_rows() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(
+            &mut rows,
+            &[
+                scrobble("Artist", "Named Album", "Unique Song", 1),
+                scrobble("Artist", "Other Album", "Shared Song", 2),
+                scrobble("Artist", "Second Album", "Shared Song", 3),
+                scrobble("Artist", "", "Unique Song", 4),
+                scrobble("Artist", "", "Shared Song", 5),
+            ],
+        );
+
+        let batches = batches_with_rows(&rows);
+
+        assert_eq!(batches.len(), 4);
+        let attached = batches
+            .iter()
+            .find(|(_, rows)| {
+                rows.iter()
+                    .any(|row| row.album.is_empty() && row.track == "Unique Song")
+            })
+            .unwrap();
+        assert_eq!(attached.0.collection_shaped, Some(true));
+        assert_eq!(
+            attached.0.representative_album.as_deref(),
+            Some("Named Album")
+        );
+        assert_eq!(attached.0.album_labels, vec!["Named Album"]);
+        let residual = batches
+            .iter()
+            .find(|(_, rows)| {
+                rows.iter()
+                    .any(|row| row.album.is_empty() && row.track == "Shared Song")
+            })
+            .unwrap();
+        assert_eq!(residual.0.collection_shaped, Some(true));
+        assert_eq!(residual.0.representative_album.as_deref(), Some(""));
+        assert!(residual.0.album_labels.is_empty());
+    }
+
+    #[test]
+    fn source_batches_keep_a_literal_singles_album_release_shaped() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(&mut rows, &[scrobble("Artist", "Singles", "Song", 1)]);
+
+        let batches = batches_with_rows(&rows);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0.collection_shaped, Some(false));
+        assert_eq!(
+            batches[0].0.representative_album.as_deref(),
+            Some("Singles")
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_reclusters_only_untouched_batches() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(
+            &mut rows,
+            &[
+                scrobble("Protected Artist", "Protected Release", "Keep", 1),
+                scrobble("Artist", "Release", "One", 2),
+                scrobble("Artist", "Release: Best", "Two", 3),
+            ],
+        );
+        let protected_id = rows[0].stable_id.clone();
+        let pending_ids = rows[1..]
+            .iter()
+            .map(|row| row.stable_id.clone())
+            .collect::<Vec<_>>();
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 100);
+        session.phase = ImportPhase::Review;
+        session.rows = rows;
+        session.batches = vec![
+            ImportBatch {
+                page: 7,
+                source_ids: vec![protected_id.clone()],
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
+            },
+            ImportBatch {
+                page: 9,
+                source_ids: pending_ids.clone(),
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
+            },
+        ];
+        let protected_options = PageOptions {
+            selected_track_ids: BTreeSet::from([protected_id.clone()]),
+            ..PageOptions::default()
+        };
+        session
+            .page_options
+            .insert(batch_options_key(7), protected_options.clone());
+        let protected_match = MatchResult {
+            source_id: protected_id.clone(),
+            search_term: "protected".into(),
+            confidence: Some(Confidence::Exact),
+            selected_uri: Some("spotify:track:protected".into()),
+            candidates: Vec::new(),
+            track_matches: BTreeMap::new(),
+        };
+        session
+            .matches
+            .insert(protected_id.clone(), protected_match.clone());
+        let protected_decision = RowDecision {
+            status: RowStatus::Done,
+            excluded: false,
+        };
+        session
+            .decisions
+            .insert(protected_id.clone(), protected_decision.clone());
+        session
+            .count_modes
+            .insert("spotify:track:protected".into(), CountMode::Overwrite);
+        assert!(upgrade_legacy_pending_batches(&mut session, &[]));
+
+        let protected = session
+            .batches
+            .iter()
+            .find(|batch| batch.page == 7)
+            .unwrap();
+        assert_eq!(protected.source_ids, vec![protected_id.clone()]);
+        assert_eq!(protected.collection_shaped, Some(false));
+        assert_eq!(
+            session.page_options.get(&batch_options_key(7)),
+            Some(&protected_options)
+        );
+        assert_eq!(session.matches.get(&protected_id), Some(&protected_match));
+        assert_eq!(
+            session.decisions.get(&protected_id),
+            Some(&protected_decision)
+        );
+        assert_eq!(
+            session.count_modes.get("spotify:track:protected"),
+            Some(&CountMode::Overwrite)
+        );
+
+        let upgraded = session
+            .batches
+            .iter()
+            .find(|batch| batch.source_ids.iter().any(|id| id == &pending_ids[0]))
+            .unwrap();
+        assert_eq!(upgraded.page, 1);
+        assert_eq!(
+            upgraded.source_ids.iter().collect::<BTreeSet<_>>(),
+            pending_ids.iter().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(upgraded.collection_shaped, Some(true));
+        assert_eq!(
+            upgraded.representative_album.as_deref(),
+            Some("Release: Best")
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_keeps_row_state_without_freezing_old_batch_boundaries() {
+        let mut rows = Vec::new();
+        aggregate_scrobbles(
+            &mut rows,
+            &[
+                scrobble("Artist", "Release", "One", 1),
+                scrobble("Artist", "Release: Best", "Two", 2),
+            ],
+        );
+        let first_id = rows[0].stable_id.clone();
+        let second_id = rows[1].stable_id.clone();
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 100);
+        session.phase = ImportPhase::Review;
+        session.rows = rows;
+        session.batches = vec![
+            ImportBatch {
+                page: 7,
+                source_ids: vec![first_id.clone()],
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
+            },
+            ImportBatch {
+                page: 9,
+                source_ids: vec![second_id.clone()],
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
+            },
+        ];
+        session.matches.insert(
+            first_id.clone(),
+            MatchResult {
+                source_id: first_id.clone(),
+                search_term: "cached".into(),
+                confidence: None,
+                selected_uri: None,
+                candidates: Vec::new(),
+                track_matches: BTreeMap::new(),
+            },
+        );
+
+        assert!(upgrade_legacy_pending_batches(&mut session, &[]));
+
+        assert_eq!(session.batches.len(), 1);
+        assert_eq!(session.batches[0].page, 1);
+        assert_eq!(
+            session.batches[0]
+                .source_ids
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([&first_id, &second_id])
+        );
+        assert!(session.matches.contains_key(&first_id));
     }
 
     #[test]
@@ -13269,6 +15008,10 @@ mod tests {
             .map(|index| ImportBatch {
                 page: index + 1,
                 source_ids: vec![format!("source-{index}")],
+                collection_shaped: None,
+                representative_artist: None,
+                representative_album: None,
+                album_labels: Vec::new(),
             })
             .collect();
         *service.session.lock().await = Some(session);
@@ -13465,7 +15208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collection_cache_refetches_only_legacy_album_search_rows() {
+    async fn collection_page_open_does_not_refetch_legacy_album_search_rows() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
         let mut session =
@@ -13534,11 +15277,8 @@ mod tests {
         .await
         .unwrap();
         assert!(first.is_some());
-        assert_eq!(search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(
-            searched.lock().unwrap().as_slice(),
-            &[String::from("Legacy")]
-        );
+        assert_eq!(search_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(searched.lock().unwrap().is_empty());
 
         let second_searched = Arc::clone(&searched);
         let second_search_calls = Arc::clone(&search_calls);
@@ -13561,11 +15301,31 @@ mod tests {
         .await
         .unwrap();
         assert!(second.is_some());
-        assert_eq!(search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(
-            searched.lock().unwrap().as_slice(),
-            &[String::from("Legacy")]
-        );
+        assert_eq!(search_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(searched.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accept_all_skips_collection_batches_without_automatic_searches() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let rows = [collection_test_row("One"), collection_test_row("Two")];
+        service.save(collection_session(&rows)).await.unwrap();
+        let searches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let summary = prepare_accept_all_batches(&service, {
+            let searches = Arc::clone(&searches);
+            move |_, _, _| {
+                searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(()) }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(searches.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(summary.album_entities, 0);
+        assert_eq!(summary.track_entities, 0);
     }
 
     #[tokio::test]
@@ -13703,29 +15463,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_lazy_batch_uses_only_its_spotify_requests() {
-        let client = retune_spotify::client::fake_client(
-            [retune_spotify::client::Response::json(
-                200,
-                serde_json::json!({
-                    "tracks": {
-                        "items": [{
-                            "uri": "spotify:track:one",
-                            "name": "One",
-                            "artists": [{"id": "artist", "name": "Artist"}],
-                            "album": {
-                                "id": "album",
-                                "uri": "spotify:album:album",
-                                "name": "Album"
-                            }
-                        }],
-                        "next": null,
-                        "total": 1
-                    }
-                }),
-            )],
-            "",
-        );
+    async fn collection_batches_do_not_search_spotify_automatically() {
+        let client = retune_spotify::client::fake_client([], "");
         let rows = vec![SourceRow {
             stable_id: "artist\u{1f}\u{1f}one".into(),
             artist: "Various Artists".into(),
@@ -13736,21 +15475,11 @@ mod tests {
             earliest: 1,
             latest: 1,
         }];
-        let matches = match_batch(
-            &client,
-            "Artist",
-            "",
-            &rows,
-            &CollectionMembership::default(),
-            &LastFmMappings::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(matches.len(), 1);
-        let requests = client.transport().requests();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].url.contains("/search?"));
-        assert!(requests[0].url.contains("type=track"));
+        let matches = match_batch(&client, "Artist", "", true, &rows)
+            .await
+            .unwrap();
+        assert!(matches.is_empty());
+        assert!(client.transport().requests().is_empty());
     }
 
     #[tokio::test]
@@ -14102,16 +15831,9 @@ mod tests {
             earliest: 1,
             latest: 1,
         }];
-        let matches = match_batch(
-            &client,
-            "Artist",
-            "Singles",
-            &rows,
-            &CollectionMembership::default(),
-            &LastFmMappings::default(),
-        )
-        .await
-        .unwrap();
+        let matches = match_batch(&client, "Artist", "Singles", false, &rows)
+            .await
+            .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(
             matches[0].search_term,
@@ -14130,6 +15852,167 @@ mod tests {
         assert!(requests
             .iter()
             .all(|request| !request.url.contains("type=track")));
+    }
+
+    #[tokio::test]
+    async fn unsupported_album_summaries_do_not_hydrate_tracks() {
+        let client = fake_client(
+            [album_search_response(vec![album_summary_json(
+                "unsupported",
+                "Unrelated Release",
+                "Artist",
+                3,
+            )])],
+            "",
+        );
+        let source_tracks = vec!["One".to_owned(), "Two".to_owned()];
+
+        let candidates = album_candidates(
+            &client,
+            "album search",
+            Some("Wanted Release"),
+            Some("Artist"),
+            &source_tracks,
+        )
+        .await
+        .unwrap();
+
+        assert!(candidates.is_empty());
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("type=album"));
+        assert!(!requests[0].url.contains("/albums/"));
+    }
+
+    #[tokio::test]
+    async fn album_summary_gate_uses_strongest_tier_and_hydrates_only_three_in_order() {
+        let summaries = vec![
+            album_summary_json("wrong-artist", "Target", "Other Artist", 3),
+            album_summary_json("compatible-exact", "Target", "Artist", 3),
+            album_summary_json("compatible-larger", "Target", "Artist", 4),
+            album_summary_json("compatible-largest", "Target", "Artist", 5),
+            album_summary_json("contained", "Target Deluxe", "Artist", 3),
+        ];
+        let source_tracks = vec!["One".to_owned(), "Two".to_owned(), "Three".to_owned()];
+        let client = fake_client(
+            [
+                album_search_response(summaries),
+                album_response(
+                    "compatible-exact",
+                    "Target",
+                    "Artist",
+                    &["One", "Two", "Three"],
+                ),
+                album_response(
+                    "wrong-artist",
+                    "Target",
+                    "Other Artist",
+                    &["One", "Two", "Three"],
+                ),
+                album_response(
+                    "compatible-larger",
+                    "Target",
+                    "Artist",
+                    &["One", "Two", "Three"],
+                ),
+            ],
+            "",
+        );
+
+        let candidates = album_candidates(
+            &client,
+            "album search",
+            Some("Target"),
+            Some("Artist"),
+            &source_tracks,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.uri.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "spotify:album:compatible-exact",
+                "spotify:album:wrong-artist",
+                "spotify:album:compatible-larger",
+            ]
+        );
+        assert_eq!(client.transport().requests().len(), 4);
+        assert!(client
+            .transport()
+            .requests()
+            .iter()
+            .skip(1)
+            .all(|request| request.url.contains("/albums/")));
+    }
+
+    #[tokio::test]
+    async fn christmas_album_alias_is_supported_by_summary_title_evidence() {
+        let source_tracks = vec!["Song One".to_owned(), "Song Two".to_owned()];
+        let client = fake_client(
+            [
+                album_search_response(vec![album_summary_json(
+                    "sounds",
+                    "Sounds of Christmas",
+                    "Johnny Mathis",
+                    12,
+                )]),
+                album_response(
+                    "sounds",
+                    "Sounds of Christmas",
+                    "Johnny Mathis",
+                    &["Song One", "Song Two"],
+                ),
+            ],
+            "",
+        );
+
+        let candidates = album_candidates(
+            &client,
+            "album search",
+            Some("For Christmas"),
+            Some("Johnny Mathis"),
+            &source_tracks,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "Sounds of Christmas");
+        assert_eq!(client.transport().requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_album_search_hydrates_an_unsupported_named_summary() {
+        let client = fake_client(
+            [
+                album_search_response(vec![album_summary_json(
+                    "alternate",
+                    "Alternate Release",
+                    "Artist",
+                    1,
+                )]),
+                album_response("alternate", "Alternate Release", "Artist", &["One"]),
+            ],
+            "",
+        );
+
+        let candidates = album_candidates(
+            &client,
+            "alternate release",
+            None,
+            None,
+            &["One".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].uri, "spotify:album:alternate");
+        assert_eq!(client.transport().requests().len(), 2);
     }
 
     #[test]
@@ -17457,6 +19340,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn album_review_actions_cover_every_identity_in_a_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 100);
+        aggregate_scrobbles(
+            &mut session.rows,
+            &[
+                scrobble("Artist", "Release", "One", 1),
+                scrobble("Artist", "Release: Best", "Two", 2),
+            ],
+        );
+        session.phase = ImportPhase::Review;
+        service.save(session).await.unwrap();
+
+        service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                None,
+                "ignore-album",
+                "Artist",
+                "Release: Best",
+            )
+            .await
+            .unwrap();
+        let session = service.snapshot().await.unwrap();
+        assert!(session.rows.iter().all(|row| {
+            default_decision(&session, &row.stable_id).status == RowStatus::IgnoredAlbum
+        }));
+        let mappings = service.mappings_for("user", Some("spotify")).await;
+        assert_eq!(
+            mappings.ignored_albums,
+            BTreeSet::from([
+                source_album_key("Artist", "Release"),
+                source_album_key("Artist", "Release: Best"),
+            ])
+        );
+
+        service
+            .review_action(
+                "user",
+                "spotify",
+                1,
+                None,
+                "restore",
+                "Artist",
+                "Release: Best",
+            )
+            .await
+            .unwrap();
+        let session = service.snapshot().await.unwrap();
+        assert!(session.rows.iter().all(|row| {
+            default_decision(&session, &row.stable_id).status == RowStatus::Pending
+        }));
+        assert!(service
+            .mappings_for("user", Some("spotify"))
+            .await
+            .ignored_albums
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn owned_review_mutations_reject_mismatch_and_suspension() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
@@ -17958,6 +19904,10 @@ mod tests {
                 .iter()
                 .map(|row| row.stable_id.clone())
                 .collect(),
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
         }];
         let candidate = AlbumCandidate {
             uri: "spotify:album:album".into(),
@@ -18463,6 +20413,10 @@ mod tests {
         session.batches = vec![ImportBatch {
             page: 1,
             source_ids: vec!["source".into()],
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
         }];
         session
     }
@@ -18489,6 +20443,10 @@ mod tests {
         session.batches.push(ImportBatch {
             page: 2,
             source_ids: vec!["source-two".into()],
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
         });
         session
     }
