@@ -1,0 +1,103 @@
+name: Automatic release
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      commit_message:
+        description: Conventional commit subject to evaluate during a dry run
+        required: false
+        type: string
+        default: "fix: manual automatic-release dry run"
+
+permissions:
+  contents: read
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Check release contract
+        run: node scripts/check-release.mjs
+
+      - id: version
+        name: Resolve release line
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tauri version must be strict MAJOR.MINOR.PATCH (got $version)"
+            exit 1
+          fi
+          echo "version=${version%.*}" >> "$GITHUB_OUTPUT"
+
+      - id: gate
+        uses: open-cli-collective/.github/actions/auto-release@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706
+        with:
+          release-paths: apps/**,crates/**,Cargo.toml,Cargo.lock,packaging/**,scripts/**,.github/workflows/release.yml,.github/workflows/auto-release.yml
+          version-file: apps/desktop/src-tauri/tauri.conf.json
+          tag-prefix: v
+          version: ${{ steps.version.outputs.version }}
+          run-number: ${{ github.run_number }}
+          before-sha: ${{ github.event.before }}
+          after-sha: ${{ github.sha }}
+          commit-message: ${{ github.event.head_commit.message || inputs.commit_message }}
+
+      - name: Report dry-run tag
+        if: github.event_name == 'workflow_dispatch' && steps.gate.outputs.should-release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.gate.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "::notice::dry-run: would create tag $TAG at $SHA"
+
+      - name: Tag
+        if: github.event_name == 'push' && steps.gate.outputs.should-release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.gate.outputs.tag }}
+          TAG_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Same-tag/same-SHA reruns are safe; a different SHA is a collision.
+          existing="$(git rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            target="$(git rev-parse -q --verify "refs/tags/$TAG^{}" 2>/dev/null || true)"
+            [ -n "$target" ] || target="$existing"
+            if [ "$target" = "$SHA" ]; then
+              echo "::notice::tag $TAG already exists at $SHA — nothing to do"
+              exit 0
+            fi
+            echo "::error::tag $TAG already exists at $target, not $SHA (collision)"
+            exit 1
+          fi
+          if [ -z "$TAG_TOKEN" ]; then
+            echo "::error::TAP_GITHUB_TOKEN is required for a non-dry-run release"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$SHA"
+          # Use the dedicated token so this tag retriggers Release; never use GITHUB_TOKEN.
+          git remote set-url origin "https://github.com/${REPO}.git"
+          # shellcheck disable=SC2016
+          git -c credential.helper= \
+            -c 'credential.helper=!f() { echo username=x-access-token; echo "password=${TAG_TOKEN}"; }; f' \
+            push origin "refs/tags/$TAG"
+          echo "::notice::pushed tag $TAG"
