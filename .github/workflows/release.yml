@@ -257,6 +257,8 @@ jobs:
           $files = @(Get-ChildItem -LiteralPath $bundle -Filter '*-setup.exe' -File)
           if ($files.Count -ne 1) { throw "expected one NSIS setup.exe, found $($files.Count)" }
           if ($files[0].BaseName -notmatch [regex]::Escape($env:VERSION)) { throw "NSIS source filename does not contain version $env:VERSION: $($files[0].Name)" }
+          $productVersion = (Get-Item -LiteralPath $files[0].FullName).VersionInfo.ProductVersion
+          if ($productVersion -ne $env:VERSION) { throw "NSIS ProductVersion $productVersion does not match $env:VERSION" }
           $destination = Join-Path $bundle "Retune-$env:VERSION-windows-$env:ARCH-setup.exe"
           Move-Item -LiteralPath $files[0].FullName -Destination $destination
 

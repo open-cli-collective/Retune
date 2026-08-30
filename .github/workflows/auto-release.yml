@@ -28,6 +28,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Check release contract
+        run: node scripts/check-release.mjs
+
       - id: version
         name: Resolve release line
         shell: bash
@@ -52,21 +55,26 @@ jobs:
           after-sha: ${{ github.sha }}
           commit-message: ${{ github.event.head_commit.message || inputs.commit_message }}
 
-      - name: Tag
-        if: steps.gate.outputs.should-release == 'true'
+      - name: Report dry-run tag
+        if: github.event_name == 'workflow_dispatch' && steps.gate.outputs.should-release == 'true'
         shell: bash
         env:
           TAG: ${{ steps.gate.outputs.tag }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "::notice::dry-run: would create tag $TAG at $SHA"
+
+      - name: Tag
+        if: github.event_name == 'push' && steps.gate.outputs.should-release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.gate.outputs.tag }}
           TAG_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "::notice::dry-run: would create tag $TAG at $SHA"
-            exit 0
-          fi
           # Same-tag/same-SHA reruns are safe; a different SHA is a collision.
           existing="$(git rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || true)"
           if [ -n "$existing" ]; then

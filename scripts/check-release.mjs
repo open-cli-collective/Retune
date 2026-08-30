@@ -28,6 +28,8 @@ const credentialStep = workflow.match(/- name: Require Last\.fm credentials\n[\s
 const macPackageStep = workflow.match(/- name: Package macOS app\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 const windowsRenameStep = workflow.match(/- name: Rename Windows NSIS installer\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 const debRenameStep = workflow.match(/- name: Rename Debian package\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
+const autoDryRunStep = autoWorkflow.match(/- name: Report dry-run tag\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
+const autoTagStep = autoWorkflow.match(/- name: Tag\n[\s\S]*$/)?.[0] ?? ''
 
 const cargoVersion = desktopCargo.match(/name = "retune-desktop"\s+version = "([^"]+)"/s)?.[1]
 const lockVersion = lock.match(/\[\[package\]\]\s+name = "retune-desktop"\s+version = "([^"]+)"/s)?.[1]
@@ -48,12 +50,18 @@ required(autoWorkflow, 'persist-credentials: false')
 required(autoWorkflow, 'open-cli-collective/.github/actions/auto-release@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706')
 required(autoWorkflow, 'release-paths: apps/**,crates/**,Cargo.toml,Cargo.lock,packaging/**,scripts/**,.github/workflows/release.yml,.github/workflows/auto-release.yml')
 required(autoWorkflow, 'version-file: apps/desktop/src-tauri/tauri.conf.json')
-required(autoWorkflow, 'TAP_GITHUB_TOKEN')
-required(autoWorkflow, 'Same-tag/same-SHA')
-required(autoWorkflow, 'collision')
-required(autoWorkflow, 'if [ "$DRY_RUN" = "true" ]; then', 'automatic release dry-run guard')
-required(autoWorkflow, 'push origin "refs/tags/$TAG"', 'automatic release tag push')
-required(autoWorkflow, 'DRY_RUN: ${{ github.event_name == \'workflow_dispatch\' }}')
+const contractIndex = autoWorkflow.indexOf('- name: Check release contract')
+const gateIndex = autoWorkflow.indexOf('- id: gate')
+assert.ok(contractIndex >= 0 && contractIndex < gateIndex, 'release contract must run before automatic release gate')
+required(autoWorkflow, 'run: node scripts/check-release.mjs', 'automatic release contract check')
+required(autoDryRunStep, "if: github.event_name == 'workflow_dispatch' && steps.gate.outputs.should-release == 'true'", 'automatic release dry-run condition')
+assert.doesNotMatch(autoDryRunStep, /TAP_GITHUB_TOKEN|TAG_TOKEN|push origin/, 'automatic release dry-run token/push isolation')
+required(autoTagStep, "if: github.event_name == 'push' && steps.gate.outputs.should-release == 'true'", 'automatic release tag condition')
+required(autoTagStep, 'TAP_GITHUB_TOKEN')
+required(autoTagStep, 'Same-tag/same-SHA')
+required(autoTagStep, 'collision')
+required(autoTagStep, 'push origin "refs/tags/$TAG"', 'automatic release tag push')
+assert.doesNotMatch(autoTagStep, /DRY_RUN|workflow_dispatch/, 'automatic release tag dry-run branch')
 assert.doesNotMatch(autoWorkflow, /dry_run/)
 assert.doesNotMatch(autoWorkflow, /version\.txt|identity\.yml|goreleaser/i)
 required(credentialStep, 'RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}', 'trusted Last.fm API key variable mapping')
@@ -138,7 +146,8 @@ required(macPackageStep, 'CFBundleShortVersionString', 'macOS package version as
 required(macPackageStep, '/usr/libexec/PlistBuddy', 'macOS package metadata assertion')
 required(macPackageStep, '[ "$actual" = "$VERSION" ]', 'macOS package version match')
 required(windowsRenameStep, 'BaseName -notmatch', 'Windows package version assertion')
-required(windowsRenameStep, 'VERSION', 'Windows package metadata assertion')
+required(windowsRenameStep, 'VersionInfo.ProductVersion', 'Windows installer ProductVersion metadata assertion')
+required(windowsRenameStep, '$productVersion -ne $env:VERSION', 'Windows installer ProductVersion match')
 required(debRenameStep, 'dpkg-deb -f', 'Debian package version assertion')
 required(debRenameStep, '[ "$package_version" = "$VERSION" ]', 'Debian package version match')
 required(ci, 'push:\n    branches: ["main"]', 'CI push main-only guard')
