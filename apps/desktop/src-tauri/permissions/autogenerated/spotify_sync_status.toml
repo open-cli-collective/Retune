@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-spotify-sync-status"
+description = "Enables the spotify_sync_status command without any pre-configured scope."
+commands.allow = ["spotify_sync_status"]
+
+[[permission]]
+identifier = "deny-spotify-sync-status"
+description = "Denies the spotify_sync_status command without any pre-configured scope."
+commands.deny = ["spotify_sync_status"]

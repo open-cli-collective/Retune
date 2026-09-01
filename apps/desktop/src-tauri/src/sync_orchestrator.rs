@@ -42,6 +42,10 @@ impl Drop for SyncRun {
 }
 
 impl SyncOrchestrator {
+    pub fn running(&self) -> bool {
+        self.gate.lock().expect("sync gate mutex poisoned").running
+    }
+
     pub fn begin(&self) -> Option<SyncRun> {
         let mut gate = self.gate.lock().expect("sync gate mutex poisoned");
         if gate.running {

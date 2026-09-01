@@ -1622,41 +1622,6 @@ fn remove_snapshot_is_idempotent_and_surfaces_non_directory_targets() {
     assert!(not_a_directory.is_file());
 }
 
-#[tokio::test]
-async fn clear_sync_state_keeps_old_state_when_cache_cleanup_fails() {
-    let directory = tempfile::tempdir().unwrap();
-    let service = Service::new(directory.path());
-    let cache_id = incremental_cache_id("old-user", 10, 20);
-    service
-        .mutate_sync(|state| {
-            state.lastfm_username = Some("old-user".into());
-            state.synced_through = Some(10);
-            state.active = Some(IncrementalRange {
-                cache_id: cache_id.clone(),
-                from: 10,
-                to: 20,
-                next_page: 1,
-                ..IncrementalRange::default()
-            });
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let before = service.sync_snapshot().await;
-    fs::create_dir_all(&service.store.cache_root).unwrap();
-    fs::write(
-        service.store.cache_path(&cache_id).unwrap(),
-        b"not a directory",
-    )
-    .unwrap();
-
-    let error = service.clear_sync_state().await.unwrap_err();
-
-    assert!(error.contains("Could not remove the Last.fm incremental cache"));
-    assert_eq!(service.sync_snapshot().await, before);
-    assert_eq!(Service::new(directory.path()).sync_snapshot().await, before);
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn aborted_sync_state_save_finishes_disk_and_memory_publication() {
     let directory = tempfile::tempdir().unwrap();
@@ -4433,7 +4398,7 @@ async fn named_collection_batches_seed_once_from_the_representative_release() {
             batch.page,
             &projection.representative_artist,
             candidates,
-            selected_uri,
+            None,
             &CollectionMembership::default(),
             &LastFmMappings::default(),
         )
@@ -4459,6 +4424,31 @@ async fn named_collection_batches_seed_once_from_the_representative_release() {
         &projection.representative_album,
     )
     .is_none());
+    service
+        .remove_collection_album(
+            "user",
+            "spotify",
+            batch.page,
+            &projection.representative_artist,
+            "spotify:album:outofafrica",
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        )
+        .await
+        .unwrap();
+    service
+        .rerank_collection_batch(
+            batch.page,
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        )
+        .await
+        .unwrap();
+    let removed = service.snapshot().await.unwrap();
+    assert!(removed.collection_album_matches[&batch.page]
+        .selected_album_uris
+        .is_empty());
+    assert!(removed.collection_album_matches[&batch.page].automatic_selection_disabled);
 }
 
 #[tokio::test]
@@ -5019,7 +5009,7 @@ fn collection_match_set_maps_unique_union_and_deduplicates_track_uris() {
         CollectionAlbumMatchState {
             cached_candidates: vec![first.clone(), second.clone()],
             selected_album_uris: vec![first.matching.uri.clone(), second.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     session.batches[0].representative_album = Some("Grouped Release".into());
@@ -5174,7 +5164,7 @@ fn collection_match_set_recomputes_automatic_rows_on_add_and_remove() {
         CollectionAlbumMatchState {
             cached_candidates: vec![first.clone(), second.clone()],
             selected_album_uris: vec![first.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     let membership = CollectionMembership::default();
@@ -5242,7 +5232,7 @@ fn previewing_unselected_album_preserves_baseline_automatic_match() {
         CollectionAlbumMatchState {
             cached_candidates: vec![preview],
             selected_album_uris: Vec::new(),
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 
@@ -5292,7 +5282,7 @@ fn selected_album_overlap_with_baseline_candidate_preserves_fallback_after_remov
         CollectionAlbumMatchState {
             cached_candidates: vec![selected.clone()],
             selected_album_uris: vec![selected.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 
@@ -5352,7 +5342,7 @@ async fn removing_all_collection_albums_drops_old_automatic_matches_but_keeps_du
         CollectionAlbumMatchState {
             cached_candidates: vec![album.clone()],
             selected_album_uris: vec![album.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     let manual = session.matches.get_mut(&rows[1].stable_id).unwrap();
@@ -5658,7 +5648,7 @@ fn legacy_v2_session_defaults_collection_match_state() {
 }
 
 #[test]
-fn legacy_v2_session_defaults_collection_injected_candidate_provenance() {
+fn legacy_v2_session_defaults_collection_match_metadata() {
     let row = collection_test_row("One");
     let mut session = collection_session(std::slice::from_ref(&row));
     session.collection_album_matches.insert(
@@ -5666,6 +5656,7 @@ fn legacy_v2_session_defaults_collection_injected_candidate_provenance() {
         CollectionAlbumMatchState {
             cached_candidates: Vec::new(),
             selected_album_uris: Vec::new(),
+            automatic_selection_disabled: false,
             injected_candidate_uris: BTreeMap::from([(
                 row.stable_id.clone(),
                 BTreeSet::from(["spotify:track:injected".to_owned()]),
@@ -5673,11 +5664,13 @@ fn legacy_v2_session_defaults_collection_injected_candidate_provenance() {
         },
     );
     let mut value = serde_json::to_value(session).unwrap();
-    value["collectionAlbumMatches"]["1"]
+    let state = value["collectionAlbumMatches"]["1"]
         .as_object_mut()
-        .unwrap()
-        .remove("injectedCandidateUris");
+        .unwrap();
+    state.remove("automaticSelectionDisabled");
+    state.remove("injectedCandidateUris");
     let restored: LastFmImportSessionV2 = serde_json::from_value(value).unwrap();
+    assert!(!restored.collection_album_matches[&1].automatic_selection_disabled);
     assert!(restored.collection_album_matches[&1]
         .injected_candidate_uris
         .is_empty());
@@ -5718,7 +5711,7 @@ fn collection_apply_plan_requires_one_selected_cached_album_and_uses_its_members
         CollectionAlbumMatchState {
             cached_candidates: vec![first.clone(), second],
             selected_album_uris: vec![first.matching.uri.clone(), "spotify:album:second".into()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     let selected_ids = rows
@@ -5793,7 +5786,7 @@ fn collection_whole_album_guard_requires_one_complete_coherent_album() {
         CollectionAlbumMatchState {
             cached_candidates: vec![album.clone()],
             selected_album_uris: vec![album.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     for row in &rows {
@@ -5846,7 +5839,7 @@ fn collection_projection_does_not_enable_whole_album_for_outside_durable_match()
         CollectionAlbumMatchState {
             cached_candidates: vec![album.clone()],
             selected_album_uris: vec![album.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     session
@@ -5891,7 +5884,7 @@ fn collection_projection_reports_per_track_match_status_and_selected_coverage() 
         CollectionAlbumMatchState {
             cached_candidates: vec![first.clone(), second],
             selected_album_uris: vec![first.matching.uri.clone(), "spotify:album:second".into()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
     let refs = rows.iter().collect::<Vec<_>>();
@@ -5965,7 +5958,7 @@ fn collection_projection_coverage_cases_are_authoritative() {
         CollectionAlbumMatchState {
             cached_candidates: vec![aggregate_album.clone()],
             selected_album_uris: vec![aggregate_album.matching.uri.clone()],
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 
@@ -5981,7 +5974,7 @@ fn collection_projection_coverage_cases_are_authoritative() {
         CollectionAlbumMatchState {
             cached_candidates: vec![resolving_album.clone()],
             selected_album_uris: Vec::new(),
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 
@@ -6000,7 +5993,7 @@ fn collection_projection_coverage_cases_are_authoritative() {
         CollectionAlbumMatchState {
             cached_candidates: vec![ambiguous_album.clone()],
             selected_album_uris: Vec::new(),
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 
@@ -6122,7 +6115,7 @@ fn collection_preview_marginal_matches_preserve_existing_fallback() {
         CollectionAlbumMatchState {
             cached_candidates: vec![candidate],
             selected_album_uris: Vec::new(),
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 
@@ -6192,7 +6185,7 @@ fn collection_preview_marginal_matches_count_ambiguity_conversion() {
         CollectionAlbumMatchState {
             cached_candidates: vec![candidate],
             selected_album_uris: Vec::new(),
-            injected_candidate_uris: BTreeMap::new(),
+            ..CollectionAlbumMatchState::default()
         },
     );
 

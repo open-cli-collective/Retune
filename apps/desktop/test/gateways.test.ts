@@ -354,6 +354,7 @@ test('Spotify gateway preserves every command name and camel-case argument', asy
   await spotify.connect()
   await spotify.authorizePlayback()
   await spotify.sync()
+  await spotify.syncStatus()
   await spotify.search('needle', 20)
   await spotify.albumPage(album.uri)
   await spotify.artistPage('artist-id')
@@ -383,6 +384,7 @@ test('Spotify gateway preserves every command name and camel-case argument', asy
     ['connect_spotify', undefined],
     ['authorize_spotify_playback', undefined],
     ['sync_from_spotify', undefined],
+    ['spotify_sync_status', undefined],
     ['spotify_search', { query: 'needle', offset: 20 }],
     ['spotify_album_page', { uri: 'spotify:album:a' }],
     ['spotify_artist_page', { artistId: 'artist-id' }],
@@ -414,6 +416,7 @@ test('Spotify gateway owns the consumed lifecycle event names', () => {
     connectionChanged: 'connection-changed',
     syncProgress: 'sync-progress',
     syncProgressCount: 'sync-progress-count',
+    syncStatusChanged: 'spotify-sync-status-changed',
     playlistsChanged: 'playlists-changed',
   })
 })

@@ -243,10 +243,15 @@ button { color: inherit; }
 .top-tracks { padding-bottom: 12px; }
 .spotify-top-track-row { min-height: 22px; display: grid; grid-template-columns: 27px minmax(120px, 1fr) minmax(120px, 1fr) 42px; align-items: center; gap: 5px; padding: 0 10px 0 15px; }
 .spotify-top-track-row > strong, .spotify-top-track-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-bar { height: 26px; flex: 0 0 26px; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); }
-.status-bar > span { text-align: center; }
+.status-bar { height: 26px; flex: 0 0 26px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 8px; overflow: hidden; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); white-space: nowrap; }
+.status-bar > span, .status-bar > button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .status-import-link { justify-self: center; padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
 .status-import-link:hover, .status-import-link:focus-visible { text-decoration: underline; }
+.status-sync-link { padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.status-sync-link:hover, .status-sync-link:focus-visible { text-decoration: underline; }
+.status-spotify { flex: 0 1 auto; }
+.status-cooldown { color: var(--dim); }
+.status-separator { flex: none; color: var(--dim); }
 .sync-status { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .sync-meter { width: 120px; height: 5px; accent-color: var(--accent); }
 .error-banner { position: absolute; right: 10px; bottom: 30px; max-width: 430px; padding: 5px 8px; border: 1px solid #b33; color: #fff; background: #8d2d2d; }

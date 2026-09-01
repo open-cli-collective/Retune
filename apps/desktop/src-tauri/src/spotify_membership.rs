@@ -230,12 +230,7 @@ pub(crate) fn record_cooldown(
     now: u64,
 ) -> Result<(), String> {
     cooldown_store
-        .update_cooldowns(now, |cooldowns| {
-            cooldowns.insert(
-                retune_spotify::client::endpoint_family(endpoint),
-                store::Cooldown { kind, deadline },
-            );
-        })
+        .record_cooldown(endpoint, kind, deadline, now)
         .map_err(|error| error.to_string())
 }
 

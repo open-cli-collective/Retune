@@ -1,25 +1,45 @@
 //! A small, deterministic materialized catalog of Spotify music metadata.
 //!
-//! The catalog only contains facts that are safe to reuse for entity reads. It
-//! deliberately does not contain search results, saved membership, or any
-//! other query-shaped state.
+//! The catalog contains reusable entity facts plus stable search result
+//! identities. Saved membership and other account state stay out of it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Album, AlbumSummary, Artist, Followers, Image, Page, SimplifiedArtist, Track};
+use crate::client::{
+    Album, AlbumSummary, Artist, Followers, Image, Page, SearchResults, SimplifiedArtist, Track,
+};
 
 pub const CATALOG_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct SpotifyCatalogV1 {
     #[serde(default)]
+    search_account_id: Option<String>,
+    #[serde(default)]
     artists: BTreeMap<String, CatalogArtist>,
     #[serde(default)]
     albums: BTreeMap<String, CatalogAlbum>,
     #[serde(default)]
     tracks: BTreeMap<String, CatalogTrack>,
+    #[serde(default)]
+    searches: BTreeMap<String, CatalogSearchResults>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct CatalogSearchResults {
+    artists: CatalogSearchPage,
+    albums: CatalogSearchPage,
+    tracks: CatalogSearchPage,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct CatalogSearchPage {
+    keys: Vec<String>,
+    has_next: bool,
+    skipped: usize,
+    total: u32,
 }
 
 /// Versioned on-disk wrapper. Maps are BTreeMaps so serialization is stable
@@ -108,6 +128,26 @@ impl SpotifyCatalog {
                 return Err("complete Spotify catalog track is missing fields");
             }
         }
+        for search in self.v1.searches.values() {
+            if search
+                .artists
+                .keys
+                .iter()
+                .any(|key| !self.v1.artists.contains_key(key))
+                || search
+                    .albums
+                    .keys
+                    .iter()
+                    .any(|key| !self.v1.albums.contains_key(key))
+                || search
+                    .tracks
+                    .keys
+                    .iter()
+                    .any(|key| !self.v1.tracks.contains_key(key))
+            {
+                return Err("Spotify catalog search refers to a missing entity");
+            }
+        }
         Ok(())
     }
 
@@ -126,11 +166,23 @@ impl SpotifyCatalog {
     }
 
     pub fn clear(&mut self) {
-        if self.v1.artists.is_empty() && self.v1.albums.is_empty() && self.v1.tracks.is_empty() {
+        if self.v1.search_account_id.is_none()
+            && self.v1.artists.is_empty()
+            && self.v1.albums.is_empty()
+            && self.v1.tracks.is_empty()
+            && self.v1.searches.is_empty()
+        {
             return;
         }
         self.v1 = SpotifyCatalogV1::default();
         self.bump();
+    }
+
+    pub fn bind_searches_to_account(&mut self, account_id: &str) {
+        if self.v1.search_account_id.as_deref() != Some(account_id) {
+            self.v1.search_account_id = Some(account_id.to_owned());
+            self.bump();
+        }
     }
 
     pub fn observe_artist_summary(&mut self, artist: &Artist) {
@@ -350,6 +402,43 @@ impl SpotifyCatalog {
         changed
     }
 
+    pub fn cached_search(&self, key: &str) -> Option<SearchResults> {
+        let search = self.v1.searches.get(&self.search_key(key))?;
+        Some(SearchResults {
+            artists: search
+                .artists
+                .to_page(|key| self.v1.artists.get(key).map(CatalogArtist::to_api))?,
+            albums: search
+                .albums
+                .to_page(|key| self.v1.albums.get(key).map(CatalogAlbum::to_search_api))?,
+            tracks: search
+                .tracks
+                .to_page(|key| self.v1.tracks.get(key).map(CatalogTrack::to_api))?,
+        })
+    }
+
+    pub fn observe_search(&mut self, key: String, results: &SearchResults) {
+        let mut changed = false;
+        for artist in &results.artists.items {
+            changed |= self.observe_artist_summary_inner(artist);
+        }
+        for album in &results.albums.items {
+            changed |= self.observe_album_summary_inner(album);
+        }
+        for track in &results.tracks.items {
+            changed |= self.observe_track_inner(track);
+        }
+        let search = CatalogSearchResults::from(results);
+        let key = self.search_key(&key);
+        if self.v1.searches.get(&key) != Some(&search) {
+            self.v1.searches.insert(key, search);
+            changed = true;
+        }
+        if changed {
+            self.bump();
+        }
+    }
+
     pub fn complete_artist(&self, id: &str) -> Option<Artist> {
         self.v1
             .artists
@@ -407,6 +496,13 @@ impl SpotifyCatalog {
 
     fn bump(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn search_key(&self, query: &str) -> String {
+        format!(
+            "{}\n{query}",
+            self.v1.search_account_id.as_deref().unwrap_or_default()
+        )
     }
 }
 
@@ -738,6 +834,66 @@ impl CatalogAlbum {
                 total: tracks.total,
             }),
         })
+    }
+
+    fn to_search_api(&self) -> Album {
+        Album {
+            id: self.id.clone(),
+            uri: self.uri.clone(),
+            name: self.name.clone(),
+            artists: self
+                .artists
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            images: self
+                .images
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            release_date: self.release_date.clone(),
+            album_type: self.album_type.clone(),
+            total_tracks: self.total_tracks.unwrap_or_default(),
+            tracks: None,
+        }
+    }
+}
+
+impl CatalogSearchPage {
+    fn from_page<T>(page: &Page<T>, key: impl Fn(&T) -> String) -> Self {
+        Self {
+            keys: page.items.iter().map(key).collect(),
+            has_next: page.next.is_some(),
+            skipped: page.skipped,
+            total: page.total,
+        }
+    }
+
+    fn to_page<T>(&self, mut resolve: impl FnMut(&str) -> Option<T>) -> Option<Page<T>> {
+        Some(Page {
+            items: self
+                .keys
+                .iter()
+                .map(|key| resolve(key))
+                .collect::<Option<Vec<_>>>()?,
+            next: self.has_next.then(|| "cached".into()),
+            skipped: self.skipped,
+            total: self.total,
+        })
+    }
+}
+
+impl From<&SearchResults> for CatalogSearchResults {
+    fn from(results: &SearchResults) -> Self {
+        Self {
+            artists: CatalogSearchPage::from_page(&results.artists, |artist| artist.id.clone()),
+            albums: CatalogSearchPage::from_page(&results.albums, |album| album.uri.clone()),
+            tracks: CatalogSearchPage::from_page(&results.tracks, |track| track.uri.clone()),
+        }
     }
 }
 

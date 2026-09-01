@@ -90,6 +90,27 @@ transaction ownership through the blocking library commit.
 The provider records request counts and typed cooldowns by endpoint family; persisted
 cooldowns prevent relaunch from immediately repeating a blocked request.
 
+Spotify library sync is scheduled automatically every 24 hours after each
+completed or partial sync attempt; a connected fatal attempt persists the same
+24-hour fallback before surfacing its error. The next scheduled deadline is
+persisted in `settings.json` as a private field and is not part of the settings
+view or patch contract. A known persisted cooldown is authoritative over that
+daily deadline: a non-empty active cooldown replaces the saved next-sync
+timestamp, an empty cooldown leaves the daily value in place, and an expired
+timestamp is removed. Disconnect and sign-out do not clear either value. Startup
+and the bottom status bar use the same effective deadline, and automatic resume
+uses that exact deadline without additional jitter.
+
+The shared cooldown store keeps one global Development Mode quota record under
+`__global_quota__` plus transient records by endpoint family; legacy per-endpoint
+quota records coalesce to the latest global deadline on load. Every cooldown
+surface reads the effective persisted deadline. A successful network-backed search
+clears only the global quota record; a persistent catalog hit does not. Transient
+endpoint-family rate limits remain until their own deadline. The desktop exposes a
+small `SpotifySyncStatus` snapshot and `spotify-sync-status-changed` event with
+connection, running, last-full-sync, effective-next-sync, and cooldown state so
+the UI can compose Spotify and Last.fm work without duplicating policy.
+
 ## Sync and caching
 
 The composition root creates the shared provider; `spotify_commands` owns the
@@ -188,7 +209,9 @@ track normalization may degrade to unenriched metadata, but the native shell
 logs that degradation with the affected track and artist identities.
 
 The shared client also owns a versioned `SpotifyCatalog` keyed by artist ID and
-album/track URI. Full artist, album, and track reads consult only complete
+album/track URI. It stores exact search result identity by normalized request
+query and immutable Spotify account ID; result pages contain entity keys and
+pagination facts rather than duplicate payloads. Full artist, album, and track reads consult only complete
 catalog records before token loading, request gating, and request counting;
 incomplete records fetch normally and then accrete. Search, saved-library,
 artist-album, album, track, and playlist-track responses write observations
@@ -199,8 +222,11 @@ known-empty. Retired local-hint and observed-URI JSON keys are ignored and have
 no runtime catalog fields. The desktop
 persists this cache as `spotify-catalog.json` with atomic replacement, flushes
 dirty generations every 30 seconds and at exit, and quarantines corrupt or
-unknown versions. It is machine-local and excluded from backup; disconnect,
-OAuth grant replacement, and confirmed account mismatch clear it.
+unknown versions. It is machine-local, excluded from backup, and has no TTL.
+Disconnect and OAuth grant replacement retain it. A successful `/me` response
+selects the search namespace for that immutable account ID, so changing accounts
+cannot reuse the other account's market-dependent results and switching back can
+reuse the earlier namespace. Entity metadata remains shared across namespaces.
 Catalog generations advance only when an observation changes stored facts, and a
 clean flush checks the generation before cloning or writing the catalog.
 Startup constructs the client with an empty catalog and hydrates the persisted
@@ -208,15 +234,16 @@ snapshot on blocking work. Hydration and flush share one gate; the loaded value
 installs only while the initial generation is untouched, so a concurrent client
 observation wins instead of being overwritten. Successful installation
 invalidates the Library projection, while load failure is surfaced by the shell.
-An account-reset/clear intent separately invalidates in-flight hydration even
-when the empty startup catalog has not yet advanced its generation.
 
 ## Search contract
 
 Spotify search keeps one combined `artist,album,track` request and sends an
 explicit offset with a limit of 10. This is the Development Mode maximum; the
 client rejects query text above 4 KiB and offsets above Spotify's current 1,000
-maximum before transport or catalog mutation. The UI paginates later offsets
+maximum before transport or catalog mutation. Before loading tokens or entering
+the request gate, the client returns an exact account-scoped search hit from the
+persistent catalog. Successful result identities, including empty pages, have no
+expiry and survive app restarts and disconnects. The UI paginates later offsets
 through the same `SpotifyClient` request gate, as
 required by Spotify's [current search contract][spotify-search] and [migration
 guidance][spotify-search-migration]. The desktop response exposes each result

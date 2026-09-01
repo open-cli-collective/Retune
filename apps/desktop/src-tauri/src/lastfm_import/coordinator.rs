@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(super) async fn automatic_collection_album_seed<T, S>(
     provider: &retune_spotify::client::SpotifyClient<T, S>,
     artist: &str,
@@ -10,8 +11,30 @@ where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
+    automatic_collection_album_seed_with_source(provider, artist, album, rows)
+        .await
+        .map(|(candidates, selected_uri, _)| (candidates, selected_uri))
+}
+
+pub(super) async fn automatic_collection_album_seed_with_source<T, S>(
+    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    artist: &str,
+    album: &str,
+    rows: &[SourceRow],
+) -> Result<
+    (
+        Vec<CollectionAlbumCandidate>,
+        Option<String>,
+        retune_spotify::client::SearchSource,
+    ),
+    String,
+>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+{
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
-    let mut candidates = album_candidates(
+    let (mut candidates, source) = album_candidates_with_source(
         provider,
         &album_search_term(artist, album),
         Some(album),
@@ -28,9 +51,11 @@ where
             .map(collection_album_candidate_from_release)
             .collect(),
         selected_uri,
+        source,
     ))
 }
 
+#[cfg(test)]
 pub(super) async fn match_batch<T, S>(
     provider: &retune_spotify::client::SpotifyClient<T, S>,
     artist: &str,
@@ -42,12 +67,28 @@ where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
+    match_batch_with_source(provider, artist, album, collection_shaped, rows)
+        .await
+        .map(|(matches, _)| matches)
+}
+
+pub(super) async fn match_batch_with_source<T, S>(
+    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    artist: &str,
+    album: &str,
+    collection_shaped: bool,
+    rows: &[SourceRow],
+) -> Result<(Vec<MatchResult>, retune_spotify::client::SearchSource), String>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+{
     if album.is_empty() || collection_shaped {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), retune_spotify::client::SearchSource::Cache));
     }
     let search_term = album_search_term(artist, album);
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
-    let mut candidates = album_candidates(
+    let (mut candidates, source) = album_candidates_with_source(
         provider,
         &search_term,
         Some(album),
@@ -58,17 +99,19 @@ where
     classify_album_candidates_for_rows(rows, &mut candidates);
     let selected_uri = automatic_album_candidate_for_rows(album, rows, &candidates)
         .map(|candidate| candidate.uri.clone());
-    Ok(rows
-        .iter()
-        .map(|row| {
-            match_result_for_release(
-                row,
-                search_term.clone(),
-                candidates.clone(),
-                selected_uri.as_deref(),
-            )
-        })
-        .collect())
+    Ok((
+        rows.iter()
+            .map(|row| {
+                match_result_for_release(
+                    row,
+                    search_term.clone(),
+                    candidates.clone(),
+                    selected_uri.as_deref(),
+                )
+            })
+            .collect(),
+        source,
+    ))
 }
 
 pub(super) async fn current_matching_account<T, S>(
@@ -159,6 +202,7 @@ pub(super) fn cached_spotify_identity_matches(
     library.is_exact().then_some(library.account_id == expected)
 }
 
+#[cfg(test)]
 pub(super) async fn lazy_match_page_with_search<T, S, F, FFut>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
@@ -174,11 +218,43 @@ where
     F: FnOnce(Vec<SourceRow>) -> FFut,
     FFut: Future<Output = Result<Vec<MatchResult>, String>>,
 {
+    lazy_match_page_with_search_source(
+        service,
+        lastfm,
+        spotify_membership,
+        provider,
+        connection_state,
+        key,
+        |rows| async move {
+            search(rows)
+                .await
+                .map(|matches| (matches, retune_spotify::client::SearchSource::Cache))
+        },
+    )
+    .await
+    .map(|(page, _)| page)
+}
+
+pub(super) async fn lazy_match_page_with_search_source<T, S, F, FFut>(
+    service: &Service,
+    lastfm: &crate::lastfm::Service,
+    spotify_membership: &crate::spotify_membership::SpotifyMembership,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    connection_state: &impl Fn() -> Result<bool, String>,
+    key: &ReviewBatchKey,
+    search: F,
+) -> Result<(Option<ImportPageView>, retune_spotify::client::SearchSource), String>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+    F: FnOnce(Vec<SourceRow>) -> FFut,
+    FFut: Future<Output = Result<(Vec<MatchResult>, retune_spotify::client::SearchSource), String>>,
+{
     let batch_id = key.batch_id;
     let artist = key.artist.as_str();
     let album = key.album.as_str();
     let Some(page) = service.page(batch_id, artist, album).await else {
-        return Ok(None);
+        return Ok((None, retune_spotify::client::SearchSource::Cache));
     };
     let session = service
         .snapshot()
@@ -195,13 +271,13 @@ where
             false,
         )
         .await?;
-        return Ok(Some(page));
+        return Ok((Some(page), retune_spotify::client::SearchSource::Cache));
     }
 
     // ponytail: one importer-wide lock; use per-batch locks only if throughput requires it.
     let _match_guard = service.lazy_match_lock.lock().await;
     let Some(page) = service.page(batch_id, artist, album).await else {
-        return Ok(None);
+        return Ok((None, retune_spotify::client::SearchSource::Cache));
     };
     let session = service
         .snapshot()
@@ -218,7 +294,7 @@ where
             false,
         )
         .await?;
-        return Ok(Some(page));
+        return Ok((Some(page), retune_spotify::client::SearchSource::Cache));
     }
     let initial_account = {
         let membership_guard = spotify_membership.lock().await;
@@ -252,7 +328,7 @@ where
         .iter()
         .map(|row| (row.stable_id.clone(), row.track.clone()))
         .collect::<HashMap<_, _>>();
-    let results = search(rows).await?;
+    let (results, source) = search(rows).await?;
     let results = if album.is_empty() {
         let current_session = service
             .snapshot()
@@ -307,18 +383,20 @@ where
             Some(default_count_mode),
         )
         .await?;
-    Ok(service.page(batch_id, artist, album).await)
+    Ok((service.page(batch_id, artist, album).await, source))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn lazy_seed_collection_page<T, S>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
+    cooldown_store: &crate::store::FsCooldownStore,
     provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     key: &ReviewBatchKey,
-) -> Result<Option<ImportPageView>, String>
+) -> Result<(Option<ImportPageView>, bool), String>
 where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
@@ -343,7 +421,7 @@ where
             false,
         )
         .await?;
-        return Ok(service.page(batch_id, artist, album).await);
+        return Ok((service.page(batch_id, artist, album).await, false));
     };
     let (initial_account, resolved_provider) = {
         let membership_guard = spotify_membership.lock().await;
@@ -357,7 +435,7 @@ where
         )
         .await?
     };
-    let (candidates, selected_uri) = automatic_collection_album_seed(
+    let (candidates, selected_uri, source) = automatic_collection_album_seed_with_source(
         resolved_provider
             .as_ref()
             .expect("collection seeding requires a provider")
@@ -367,6 +445,7 @@ where
         &rows,
     )
     .await?;
+    clear_search_quota(cooldown_store, source)?;
     let membership_guard = spotify_membership.lock().await;
     let current_account = current_matching_account(
         service,
@@ -404,18 +483,23 @@ where
             &mappings,
         )
         .await?;
-    Ok(service.page(batch_id, artist, album).await)
+    Ok((
+        service.page(batch_id, artist, album).await,
+        source == retune_spotify::client::SearchSource::Network,
+    ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn lazy_match_page<T, S>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
+    cooldown_store: &crate::store::FsCooldownStore,
     provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     key: ReviewBatchKey,
-) -> Result<(Option<ImportPageView>, bool), String>
+) -> Result<(Option<ImportPageView>, bool, bool), String>
 where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
@@ -424,25 +508,26 @@ where
     let artist = key.artist.as_str();
     let album = key.album.as_str();
     if service.page(batch_id, artist, album).await.is_none() {
-        return Ok((None, false));
+        return Ok((None, false, false));
     }
     let initial_session = service
         .snapshot()
         .await
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     if collection_album_seed_rows(&initial_session, batch_id, artist, album).is_some() {
-        let page = lazy_seed_collection_page(
+        let (page, network_search) = lazy_seed_collection_page(
             service,
             lastfm,
             spotify_membership,
             library,
+            cooldown_store,
             provider,
             connection_state,
             &key,
         )
         .await?;
         let changed = page.is_some();
-        return Ok((page, changed));
+        return Ok((page, changed, network_search));
     }
     let initial_collection_shaped = batch_is_collection_shaped_for_id(&initial_session, batch_id);
     let initial_needs_match =
@@ -452,8 +537,8 @@ where
         && initial_session.spotify_account_id.is_some()
     {
         match cached_spotify_binding_is_current(service, lastfm, spotify_membership).await? {
-            Some(false) => return Ok((None, false)),
-            None => return Ok((service.page(batch_id, artist, album).await, false)),
+            Some(false) => return Ok((None, false, false)),
+            None => return Ok((service.page(batch_id, artist, album).await, false, false)),
             Some(true) => {}
         }
         let session = service
@@ -469,7 +554,7 @@ where
         service
             .rerank_collection_batch(batch_id, &membership, &mappings)
             .await?;
-        return Ok((service.page(batch_id, artist, album).await, false));
+        return Ok((service.page(batch_id, artist, album).await, false, false));
     }
     let session = service
         .snapshot()
@@ -479,11 +564,11 @@ where
         if cached_spotify_binding_is_current(service, lastfm, spotify_membership).await?
             == Some(false)
         {
-            return Ok((None, false));
+            return Ok((None, false, false));
         }
-        return Ok((service.page(batch_id, artist, album).await, false));
+        return Ok((service.page(batch_id, artist, album).await, false, false));
     }
-    let page = lazy_match_page_with_search(
+    let (page, source) = lazy_match_page_with_search_source(
         service,
         lastfm,
         spotify_membership,
@@ -492,7 +577,7 @@ where
         &key,
         |rows| async move {
             let provider = provider()?;
-            match_batch(
+            match_batch_with_source(
                 provider.as_ref(),
                 artist,
                 album,
@@ -503,8 +588,13 @@ where
         },
     )
     .await?;
+    clear_search_quota(cooldown_store, source)?;
     let changed = page.is_some();
-    Ok((page, changed))
+    Ok((
+        page,
+        changed,
+        source == retune_spotify::client::SearchSource::Network,
+    ))
 }
 
 pub(super) fn matched_track_uri(result: &MatchResult, source_id: &str) -> Option<String> {

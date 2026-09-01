@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::model::{ApplyFailure, ApplyPlan};
+#[cfg(test)]
+use super::model::ImportQueueItem;
+use super::model::{ApplyFailure, ApplyFailureCode, ApplyPlan};
 use super::{
     apply::{apply_frozen_mappings, apply_page, commit_apply_plan, run_apply_upstream_effect},
     apply_history_updates, apply_metadata, current_account_binding,
@@ -71,11 +73,8 @@ where
         }
         view.spotify_limit = self
             .cooldown_store
-            .cooldowns(now)
-            .map_err(|error| error.to_string())?
-            .values()
-            .min_by_key(|cooldown| cooldown.deadline)
-            .copied();
+            .effective_cooldown(now)
+            .map_err(|error| error.to_string())?;
         Ok(view)
     }
 
@@ -95,21 +94,28 @@ where
                 total: 0,
             });
         }
-        self.service.queue_page(cursor, limit).await
+        let mut page = self.service.queue_page(cursor, limit).await?;
+        let cooldown = self
+            .cooldown_store
+            .effective_cooldown(crate::unix_now())
+            .map_err(|error| error.to_string())?;
+        project_authoritative_retry_at(&mut page, cooldown);
+        Ok(page)
     }
 
     pub(super) async fn page(
         &self,
         key: ReviewBatchKey,
-    ) -> Result<(Option<ImportPageView>, bool), String> {
+    ) -> Result<(Option<ImportPageView>, bool, bool), String> {
         if !self.readable().await? {
-            return Ok((None, false));
+            return Ok((None, false, false));
         }
         lazy_match_page(
             self.service,
             self.lastfm,
             self.membership,
             self.library,
+            self.cooldown_store,
             &self.provider,
             &self.connected,
             key,
@@ -210,8 +216,8 @@ where
         batch_id: u32,
         artist: &str,
         query: &str,
-    ) -> Result<Vec<CollectionAlbumCandidate>, String> {
-        super::search_collection_albums(
+    ) -> Result<(Vec<CollectionAlbumCandidate>, bool), String> {
+        let (albums, source) = super::search_collection_albums_with_source(
             self.service,
             self.lastfm,
             self.membership,
@@ -222,7 +228,12 @@ where
             artist,
             query,
         )
-        .await
+        .await?;
+        super::clear_search_quota(self.cooldown_store, source)?;
+        Ok((
+            albums,
+            source == retune_spotify::client::SearchSource::Network,
+        ))
     }
 
     pub(super) async fn preview_or_add_collection_album(
@@ -274,8 +285,8 @@ where
         batch_id: u32,
         id: &str,
         query: &str,
-    ) -> Result<Option<ImportPageView>, String> {
-        super::change_import_track(
+    ) -> Result<(Option<ImportPageView>, bool), String> {
+        let ((page, _), source) = super::change_import_track_with_source(
             self.service,
             self.lastfm,
             self.membership,
@@ -286,8 +297,12 @@ where
             id,
             query,
         )
-        .await
-        .map(|(page, _)| page)
+        .await?;
+        super::clear_search_quota(self.cooldown_store, source)?;
+        Ok((
+            page,
+            source == retune_spotify::client::SearchSource::Network,
+        ))
     }
 
     pub(super) async fn change_album(
@@ -295,8 +310,8 @@ where
         batch_id: u32,
         id: &str,
         query: &str,
-    ) -> Result<ImportStateView, String> {
-        super::change_import_album(
+    ) -> Result<(ImportStateView, bool), String> {
+        let (view, source) = super::change_import_album_with_source(
             self.service,
             self.lastfm,
             self.membership,
@@ -306,7 +321,12 @@ where
             id,
             query,
         )
-        .await
+        .await?;
+        super::clear_search_quota(self.cooldown_store, source)?;
+        Ok((
+            view,
+            source == retune_spotify::client::SearchSource::Network,
+        ))
     }
 
     pub(super) async fn activate_collection(
@@ -493,7 +513,9 @@ where
         Ok(view)
     }
 
-    pub(super) async fn prepare_accept_all(&self) -> Result<(AcceptAllSummary, bool), String> {
+    pub(super) async fn prepare_accept_all(
+        &self,
+    ) -> Result<(AcceptAllSummary, bool, bool), String> {
         if !self.readable().await? {
             return Ok((
                 AcceptAllSummary {
@@ -501,13 +523,16 @@ where
                     track_entities: 0,
                 },
                 false,
+                false,
             ));
         }
         let changed_any = std::sync::atomic::AtomicBool::new(false);
+        let network_search_any = std::sync::atomic::AtomicBool::new(false);
         let summary = prepare_accept_all_batches(self.service, |batch_id, artist, album| {
             let changed_any = &changed_any;
+            let network_search_any = &network_search_any;
             async move {
-                let (_, changed) = self
+                let (_, changed, network_search) = self
                     .page(ReviewBatchKey {
                         batch_id,
                         artist,
@@ -515,6 +540,7 @@ where
                     })
                     .await?;
                 changed_any.fetch_or(changed, std::sync::atomic::Ordering::Relaxed);
+                network_search_any.fetch_or(network_search, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }
         })
@@ -522,6 +548,7 @@ where
         Ok((
             summary,
             changed_any.load(std::sync::atomic::Ordering::Relaxed),
+            network_search_any.load(std::sync::atomic::Ordering::Relaxed),
         ))
     }
 
@@ -690,5 +717,75 @@ where
             }
         }
         Ok(())
+    }
+}
+
+fn project_authoritative_retry_at(
+    page: &mut ImportQueuePage,
+    cooldown: Option<crate::store::Cooldown>,
+) {
+    let retry_at = cooldown.map(|cooldown| cooldown.deadline);
+    for item in &mut page.items {
+        if matches!(
+            item.error_code,
+            Some(ApplyFailureCode::SpotifyRateLimited | ApplyFailureCode::SpotifyQuotaExhausted)
+        ) {
+            item.retry_at = retry_at;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue_item(code: ApplyFailureCode, retry_at: Option<u64>) -> ImportQueueItem {
+        ImportQueueItem {
+            page: 1,
+            artist: "Artist".into(),
+            album: "Album".into(),
+            collection_shaped: false,
+            album_label_count: 0,
+            play_count: 0,
+            imported_play_count: 0,
+            remaining_play_count: 0,
+            latest: 0,
+            source_count: 1,
+            remaining: true,
+            album_entities: 0,
+            track_entities: 0,
+            status: Some(super::super::model::QueueStatus::Failed),
+            error: Some("Spotify rate limited".into()),
+            error_code: Some(code),
+            retry_at,
+        }
+    }
+
+    #[test]
+    fn queue_retry_at_projects_the_authoritative_effective_deadline() {
+        let mut page = ImportQueuePage {
+            items: vec![
+                queue_item(ApplyFailureCode::SpotifyRateLimited, Some(999)),
+                queue_item(ApplyFailureCode::SpotifyQuotaExhausted, Some(888)),
+                queue_item(ApplyFailureCode::ApplyFailed, Some(777)),
+            ],
+            cursor: 0,
+            next_cursor: None,
+            total: 3,
+        };
+        project_authoritative_retry_at(
+            &mut page,
+            Some(crate::store::Cooldown {
+                kind: crate::store::CooldownKind::Quota,
+                deadline: 1_234,
+            }),
+        );
+        assert_eq!(page.items[0].retry_at, Some(1_234));
+        assert_eq!(page.items[1].retry_at, Some(1_234));
+        assert_eq!(page.items[2].retry_at, Some(777));
+
+        project_authoritative_retry_at(&mut page, None);
+        assert_eq!(page.items[0].retry_at, None);
+        assert_eq!(page.items[1].retry_at, None);
     }
 }

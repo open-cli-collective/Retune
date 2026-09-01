@@ -621,7 +621,7 @@ export function downloadAction(phase: ImportPhase | null, retryableError: { retr
 }
 
 export function importEmptyPageMessage(phase: ImportPhase | null, pageLoading: boolean): { title: string; detail: string } {
-  if (pageLoading) return { title: 'Matching this review batch…', detail: 'Searching Spotify for likely matches.' }
+  if (pageLoading) return { title: 'Matching this review batch…', detail: 'Loading and ranking likely matches.' }
   if (phase === 'done') return { title: 'Import complete', detail: 'All review batches are complete.' }
   return { title: 'No review page selected', detail: 'Select an album from the queue.' }
 }

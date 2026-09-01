@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(super) async fn album_candidates<
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
@@ -10,7 +11,28 @@ pub(super) async fn album_candidates<
     source_artist: Option<&str>,
     source_track_names: &[String],
 ) -> Result<Vec<AlbumCandidate>, String> {
-    let results = crate::provider::search_albums(provider, query).await?;
+    album_candidates_with_source(
+        provider,
+        query,
+        source_album,
+        source_artist,
+        source_track_names,
+    )
+    .await
+    .map(|(candidates, _)| candidates)
+}
+
+pub(super) async fn album_candidates_with_source<
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+>(
+    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    query: &str,
+    source_album: Option<&str>,
+    source_artist: Option<&str>,
+    source_track_names: &[String],
+) -> Result<(Vec<AlbumCandidate>, retune_spotify::client::SearchSource), String> {
+    let (results, source) = crate::provider::search_albums_with_source(provider, query).await?;
     let albums = match (source_album, source_artist) {
         (Some(source_album), Some(source_artist)) => supported_album_summaries(
             results.items,
@@ -36,7 +58,7 @@ pub(super) async fn album_candidates<
         });
     }
     classify_album_candidates_by_name(source_track_names, &mut candidates);
-    Ok(candidates)
+    Ok((candidates, source))
 }
 
 pub(super) async fn fetch_complete_collection_album<T, S>(
@@ -493,7 +515,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn search_collection_albums<T, S>(
+pub(super) async fn search_collection_albums_with_source<T, S>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
@@ -503,7 +525,13 @@ pub(super) async fn search_collection_albums<T, S>(
     batch_id: u32,
     artist: &str,
     query: &str,
-) -> Result<Vec<CollectionAlbumCandidate>, String>
+) -> Result<
+    (
+        Vec<CollectionAlbumCandidate>,
+        retune_spotify::client::SearchSource,
+    ),
+    String,
+>
 where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
@@ -511,7 +539,7 @@ where
     ensure_review_mutable(service).await?;
     let query = query.trim();
     if query.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), retune_spotify::client::SearchSource::Cache));
     }
     let direct_uri = spotify_share_uri(query, "album")?;
     let search_term = collection_album_search_term(query);
@@ -544,10 +572,13 @@ where
     } else {
         None
     };
-    let results = if direct_album.is_none() {
-        Some(crate::provider::search_albums(resolved_provider.as_ref(), &search_term).await?)
+    let (results, source) = if direct_album.is_none() {
+        let (results, source) =
+            crate::provider::search_albums_with_source(resolved_provider.as_ref(), &search_term)
+                .await?;
+        (Some(results), source)
     } else {
-        None
+        (None, retune_spotify::client::SearchSource::Cache)
     };
     let guard = spotify_membership.lock().await;
     let current = current_account_binding(
@@ -583,7 +614,7 @@ where
             .collect()
     };
     drop(guard);
-    Ok(output)
+    Ok((output, source))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -788,7 +819,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn change_import_track<T, S>(
+pub(super) async fn change_import_track_with_source<T, S>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
@@ -798,7 +829,13 @@ pub(super) async fn change_import_track<T, S>(
     batch_id: u32,
     id: &str,
     query: &str,
-) -> Result<(Option<ImportPageView>, ImportStateView), String>
+) -> Result<
+    (
+        (Option<ImportPageView>, ImportStateView),
+        retune_spotify::client::SearchSource,
+    ),
+    String,
+>
 where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
@@ -844,7 +881,7 @@ where
     } else {
         query.trim().to_owned()
     };
-    let candidates = if let Some(uri) = spotify_share_uri(&search_term, "track")? {
+    let (candidates, source) = if let Some(uri) = spotify_share_uri(&search_term, "track")? {
         let track = resolved_provider
             .track(crate::provider::spotify_id(&uri, "track")?)
             .await
@@ -859,34 +896,42 @@ where
             .as_ref()
             .map(|album| album.name.clone())
             .unwrap_or_default();
-        vec![AlbumCandidate {
-            uri: track.uri.clone(),
-            name: track.name.clone(),
-            artist: artist.clone(),
-            in_library: membership.contains(&track.uri),
-            track_uris: vec![track.uri],
-            track_names: vec![track.name],
-            track_artists: vec![artist],
-            track_albums: vec![album],
-            relation: None,
-        }]
-    } else {
-        crate::provider::search_tracks(resolved_provider.as_ref(), &search_term)
-            .await?
-            .items
-            .into_iter()
-            .map(|track| AlbumCandidate {
+        (
+            vec![AlbumCandidate {
                 uri: track.uri.clone(),
                 name: track.name.clone(),
-                artist: track.artist.clone(),
+                artist: artist.clone(),
                 in_library: membership.contains(&track.uri),
-                track_uris: vec![track.uri.clone()],
-                track_names: vec![track.name.clone()],
-                track_artists: vec![track.artist],
-                track_albums: vec![track.alb],
+                track_uris: vec![track.uri],
+                track_names: vec![track.name],
+                track_artists: vec![artist],
+                track_albums: vec![album],
                 relation: None,
-            })
-            .collect()
+            }],
+            retune_spotify::client::SearchSource::Cache,
+        )
+    } else {
+        let (results, source) =
+            crate::provider::search_tracks_with_source(resolved_provider.as_ref(), &search_term)
+                .await?;
+        (
+            results
+                .items
+                .into_iter()
+                .map(|track| AlbumCandidate {
+                    uri: track.uri.clone(),
+                    name: track.name.clone(),
+                    artist: track.artist.clone(),
+                    in_library: membership.contains(&track.uri),
+                    track_uris: vec![track.uri.clone()],
+                    track_names: vec![track.name.clone()],
+                    track_artists: vec![track.artist],
+                    track_albums: vec![track.alb],
+                    relation: None,
+                })
+                .collect(),
+            source,
+        )
     };
     let mut candidates = candidates;
     if row.album.is_empty() || collection_shaped {
@@ -930,11 +975,11 @@ where
         .await;
     drop(guard);
     let view = current_import_view(service, lastfm).await?;
-    Ok((page, view))
+    Ok(((page, view), source))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn change_import_album<T, S>(
+pub(super) async fn change_import_album_with_source<T, S>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
@@ -943,7 +988,7 @@ pub(super) async fn change_import_album<T, S>(
     batch_id: u32,
     id: &str,
     query: &str,
-) -> Result<ImportStateView, String>
+) -> Result<(ImportStateView, retune_spotify::client::SearchSource), String>
 where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
@@ -999,16 +1044,19 @@ where
     } else {
         query.trim().to_owned()
     };
-    let mut candidates = if let Some(uri) = spotify_share_uri(&search_term, "album")? {
-        vec![
-            collection_album_candidate(
-                &fetch_complete_collection_album(resolved_provider.as_ref(), &uri).await?,
-                &CollectionMembership::default(),
-            )
-            .matching,
-        ]
+    let (mut candidates, source) = if let Some(uri) = spotify_share_uri(&search_term, "album")? {
+        (
+            vec![
+                collection_album_candidate(
+                    &fetch_complete_collection_album(resolved_provider.as_ref(), &uri).await?,
+                    &CollectionMembership::default(),
+                )
+                .matching,
+            ],
+            retune_spotify::client::SearchSource::Cache,
+        )
     } else {
-        album_candidates(
+        album_candidates_with_source(
             resolved_provider.as_ref(),
             &search_term,
             None,
@@ -1059,5 +1107,5 @@ where
         )
         .await?;
     drop(guard);
-    current_import_view(service, lastfm).await
+    Ok((current_import_view(service, lastfm).await?, source))
 }

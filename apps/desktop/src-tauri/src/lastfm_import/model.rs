@@ -167,6 +167,8 @@ pub(crate) struct CollectionAlbumMatchState {
     pub cached_candidates: Vec<CollectionAlbumCandidate>,
     #[serde(default)]
     pub selected_album_uris: Vec<String>,
+    #[serde(default)]
+    pub automatic_selection_disabled: bool,
     /// Candidate URIs inserted by the selected-album rerank, keyed by source row.
     /// Baseline search/library candidates are deliberately not recorded here.
     #[serde(default)]

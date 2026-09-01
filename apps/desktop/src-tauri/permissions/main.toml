@@ -26,6 +26,7 @@ permissions = [
   "allow-spotify-artist-page",
   "allow-spotify-follow-artist",
   "allow-spotify-artist-albums",
+  "allow-spotify-sync-status",
   "allow-add-spotify-album",
   "allow-remove-spotify-album",
   "allow-add-spotify-track",

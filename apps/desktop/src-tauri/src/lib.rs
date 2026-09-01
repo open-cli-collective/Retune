@@ -64,12 +64,12 @@ use retune_spotify::{
     tokens::{CachedTokenStore, EncryptedFsTokenStore, TokenStore, Tokens},
 };
 use serde::Serialize;
-use spotify_commands::sync_spotify;
 #[cfg(test)]
 use spotify_commands::{
     artist_albums_outcome, mark_album_membership, mark_track_membership, partial_import_message,
     record_full_sync, SyncProgressState,
 };
+use spotify_commands::{effective_sync_deadline, scheduled_sync_deadline, sync_spotify};
 #[cfg(test)]
 use spotify_commands::{
     spotify_item_link, spotify_track_destination, SpotifyDestination, SpotifyNavigation,
@@ -229,7 +229,6 @@ struct AppState {
     spotify_catalog_store: FsSpotifyCatalogStore,
     spotify_catalog_saved_generation: Arc<AtomicU64>,
     spotify_catalog_flush_gate: Arc<Mutex<()>>,
-    spotify_catalog_hydration_epoch: Arc<AtomicU64>,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
@@ -290,7 +289,6 @@ pub(crate) fn test_app_state(
         spotify_catalog_store: FsSpotifyCatalogStore::new(&app_data_dir),
         spotify_catalog_saved_generation: Arc::new(AtomicU64::new(0)),
         spotify_catalog_flush_gate: Arc::new(Mutex::new(())),
-        spotify_catalog_hydration_epoch: Arc::new(AtomicU64::new(0)),
         spotify: Mutex::new(None),
         artwork_cache: Mutex::default(),
         playback: Arc::new(Playback::default()),
@@ -376,10 +374,7 @@ impl ConnectionState {
 #[tauri::command]
 async fn finish_lastfm(app: tauri::AppHandle) -> Result<lastfm::LastFmState, String> {
     let state = app.state::<AppState>();
-    let account_changed = state.lastfm.finish().await?;
-    if account_changed {
-        state.lastfm_import.clear_sync_state().await?;
-    }
+    state.lastfm.finish().await?;
     state.lastfm.activate_connection().await;
     let sync_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -394,9 +389,7 @@ async fn finish_lastfm(app: tauri::AppHandle) -> Result<lastfm::LastFmState, Str
 #[tauri::command]
 async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<lastfm::LastFmState, String> {
     let state = app.state::<AppState>();
-    let result = state.lastfm.disconnect().await?;
-    state.lastfm_import.clear_sync_state().await?;
-    Ok(result)
+    state.lastfm.disconnect().await
 }
 
 async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
@@ -463,23 +456,19 @@ fn spawn_catalog_hydration<E: Send + 'static>(
     catalog: Arc<Mutex<SpotifyCatalog>>,
     saved_generation: Arc<AtomicU64>,
     flush_gate: Arc<Mutex<()>>,
-    hydration_epoch: Arc<AtomicU64>,
     load: impl FnOnce() -> Result<SpotifyCatalog, E> + Send + 'static,
 ) -> tauri::async_runtime::JoinHandle<Result<bool, E>> {
     let baseline = catalog
         .lock()
         .expect("Spotify catalog mutex poisoned")
         .generation();
-    let baseline_epoch = hydration_epoch.load(Ordering::Acquire);
     tauri::async_runtime::spawn_blocking(move || {
         let loaded = load()?;
         let _flush = flush_gate
             .lock()
             .expect("Spotify catalog flush gate poisoned");
         let mut current = catalog.lock().expect("Spotify catalog mutex poisoned");
-        if current.generation() != baseline
-            || hydration_epoch.load(Ordering::Acquire) != baseline_epoch
-        {
+        if current.generation() != baseline {
             return Ok(false);
         }
         let generation = loaded.generation();
@@ -528,30 +517,11 @@ fn flush_spotify_catalog(state: &AppState) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) fn clear_spotify_catalog(state: &AppState) -> Result<(), String> {
     state
-        .spotify_catalog_hydration_epoch
-        .fetch_add(1, Ordering::AcqRel);
-    state
         .spotify_catalog
         .lock()
         .expect("Spotify catalog mutex poisoned")
         .clear();
     flush_spotify_catalog(state)
-}
-
-pub(crate) async fn clear_spotify_catalog_async(app: &tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    state
-        .spotify_catalog_hydration_epoch
-        .fetch_add(1, Ordering::AcqRel);
-    state
-        .spotify_catalog
-        .lock()
-        .expect("Spotify catalog mutex poisoned")
-        .clear();
-    let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || flush_spotify_catalog(&handle.state::<AppState>()))
-        .await
-        .map_err(|error| error.to_string())?
 }
 
 pub(crate) async fn emit_connection_state_async(app: &tauri::AppHandle) -> Result<(), String> {
@@ -566,7 +536,8 @@ pub(crate) async fn emit_connection_state_async(app: &tauri::AppHandle) -> Resul
             .sync_connection(&connection)
             .map_err(|error| error.to_string())?;
     }
-    emit_main(app, "connection-changed", ()).map_err(|error| error.to_string())
+    emit_main(app, "connection-changed", ()).map_err(|error| error.to_string())?;
+    spotify_commands::emit_spotify_sync_status(app)
 }
 
 pub(crate) fn emit_main<R: tauri::Runtime, S: serde::Serialize + Clone>(
@@ -1049,6 +1020,7 @@ pub fn run() {
             spotify_commands::authorize_spotify_playback,
             spotify_commands::disconnect_spotify,
             spotify_commands::sync_from_spotify,
+            spotify_commands::spotify_sync_status,
             spotify_commands::spotify_search,
             spotify_commands::spotify_album_page,
             spotify_commands::spotify_artist_page,
@@ -1163,12 +1135,10 @@ pub fn run() {
             let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
             let spotify_catalog_saved_generation = Arc::new(AtomicU64::new(0));
             let spotify_catalog_flush_gate = Arc::new(Mutex::new(()));
-            let spotify_catalog_hydration_epoch = Arc::new(AtomicU64::new(0));
             let catalog_hydration = spawn_catalog_hydration(
                 Arc::clone(&spotify_catalog),
                 Arc::clone(&spotify_catalog_saved_generation),
                 Arc::clone(&spotify_catalog_flush_gate),
-                Arc::clone(&spotify_catalog_hydration_epoch),
                 {
                     let store = spotify_catalog_store.clone();
                     move || store.load()
@@ -1178,6 +1148,9 @@ pub fn run() {
             let playlists = playlist_store.load()?;
             let settings = settings_store.load()?.unwrap_or_default();
             settings_store.save(&settings)?;
+            let startup_cooldown = cooldown_store
+                .effective_cooldown(unix_now())
+                .map_err(std::io::Error::other)?;
             let menu_checks = install_file_menu(app, &settings)?;
             // Dev builds keep tokens in a 0600 plaintext file. Release keeps
             // only the encryption key in the native credential store.
@@ -1217,6 +1190,7 @@ pub fn run() {
             let startup_client_id = settings.spotify_client_id.clone();
             let startup_auto_connect = settings.auto_connect;
             let startup_last_full_sync = settings.last_full_sync;
+            let startup_next_spotify_sync = settings.next_spotify_sync;
             let startup_backend = settings.playback_backend;
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(
@@ -1275,7 +1249,6 @@ pub fn run() {
                 spotify_catalog_store,
                 spotify_catalog_saved_generation,
                 spotify_catalog_flush_gate,
-                spotify_catalog_hydration_epoch,
                 spotify: Mutex::new(spotify),
                 artwork_cache: Mutex::default(),
                 playback: Arc::clone(&playback),
@@ -1451,8 +1424,22 @@ pub fn run() {
                         &startup_client_id,
                         startup_auto_connect,
                         startup_last_full_sync,
+                        startup_next_spotify_sync,
+                        startup_cooldown,
                         unix_now(),
                     );
+                    if startup_action == StartupAction::Nothing && connection.connected {
+                        if let Some(deadline) = effective_sync_deadline(
+                            scheduled_sync_deadline(
+                                startup_next_spotify_sync,
+                                startup_last_full_sync,
+                            ),
+                            startup_cooldown,
+                            unix_now(),
+                        ) {
+                            spotify_commands::schedule_auto_resume(&handle, deadline);
+                        }
+                    }
                     let activate_local = connection.connected
                         && connection.playback_authorized
                         && startup_backend == PlaybackBackend::Local;
@@ -1554,13 +1541,15 @@ fn startup_action(
     client_id: &str,
     auto_connect: bool,
     last_full_sync: Option<u64>,
+    next_spotify_sync: Option<u64>,
+    cooldown: Option<store::Cooldown>,
     now: u64,
 ) -> StartupAction {
     if connection.connected {
-        if last_full_sync.is_some_and(|last| now.saturating_sub(last) <= 15 * 60) {
-            StartupAction::Nothing
-        } else {
-            StartupAction::Sync
+        let next_sync = scheduled_sync_deadline(next_spotify_sync, last_full_sync);
+        match effective_sync_deadline(next_sync, cooldown, now) {
+            Some(deadline) if deadline > now => StartupAction::Nothing,
+            _ => StartupAction::Sync,
         }
     } else if auto_connect && !client_id.trim().is_empty() {
         StartupAction::Connect
@@ -1643,7 +1632,6 @@ mod tests {
             Arc::new(Mutex::new(SpotifyCatalog::default())),
             Arc::new(AtomicU64::new(0)),
             Arc::new(Mutex::new(())),
-            Arc::new(AtomicU64::new(0)),
             || Ok::<_, std::io::Error>(SpotifyCatalog::default()),
         );
 
@@ -1669,14 +1657,12 @@ mod tests {
         let current = Arc::new(Mutex::new(SpotifyCatalog::default()));
         let saved = Arc::new(AtomicU64::new(0));
         let gate = Arc::new(Mutex::new(()));
-        let epoch = Arc::new(AtomicU64::new(0));
         let (entered, started) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
         let hydration = spawn_catalog_hydration(
             Arc::clone(&current),
             Arc::clone(&saved),
             Arc::clone(&gate),
-            Arc::clone(&epoch),
             move || {
                 entered.send(()).unwrap();
                 released.recv().unwrap();
@@ -1703,7 +1689,6 @@ mod tests {
             Arc::clone(&current),
             Arc::clone(&saved),
             Arc::clone(&gate),
-            Arc::clone(&epoch),
             move || {
                 entered.send(()).unwrap();
                 released.recv().unwrap();
@@ -1728,15 +1713,12 @@ mod tests {
             assert!(snapshot.complete_track("spotify:track:stale").is_none());
         }
 
-        let failed = spawn_catalog_hydration(
-            Arc::clone(&current),
-            Arc::clone(&saved),
-            gate,
-            epoch,
-            || Err::<SpotifyCatalog, _>(std::io::Error::other("broken")),
-        )
-        .await
-        .unwrap();
+        let failed =
+            spawn_catalog_hydration(Arc::clone(&current), Arc::clone(&saved), gate, || {
+                Err::<SpotifyCatalog, _>(std::io::Error::other("broken"))
+            })
+            .await
+            .unwrap();
         assert_eq!(failed.unwrap_err().to_string(), "broken");
         assert!(current
             .lock()
@@ -2187,7 +2169,7 @@ mod tests {
         assert!(error.contains("quota is still exhausted"));
         assert!(client.transport().requests().is_empty());
         assert_eq!(
-            store.cooldowns(100).unwrap()["/artists"].kind,
+            store.cooldowns(100).unwrap()[store::GLOBAL_QUOTA_KEY].kind,
             store::CooldownKind::Quota
         );
     }
@@ -2205,7 +2187,7 @@ mod tests {
         assert!(error.contains("quota is exhausted; try artist albums again"));
         assert!(!error.contains("still exhausted"));
         assert_eq!(
-            store.cooldowns(100).unwrap()["/artists"],
+            store.cooldowns(100).unwrap()[store::GLOBAL_QUOTA_KEY],
             store::Cooldown {
                 kind: store::CooldownKind::Quota,
                 deadline: 220,
@@ -2910,32 +2892,59 @@ mod tests {
             missing_scopes: vec!["playlist-read-private".into()],
         };
         assert_eq!(
-            startup_action(&connected, "", false, None, 1_000),
+            startup_action(&connected, "", false, None, None, None, 1_000),
             StartupAction::Sync
         );
         assert_eq!(
-            startup_action(&connected, "", false, Some(999), 1_000),
+            startup_action(&connected, "", false, Some(999), None, None, 1_000),
             StartupAction::Nothing
         );
         assert_eq!(
-            startup_action(&connected, "", false, Some(99), 1_000),
+            startup_action(&connected, "", false, Some(99), None, None, 1_000),
+            StartupAction::Nothing
+        );
+        assert_eq!(
+            startup_action(&connected, "", false, None, Some(999), None, 1_000),
             StartupAction::Sync
         );
         assert_eq!(
-            startup_action(&disconnected, "client-id", true, None, 1_000),
+            startup_action(&connected, "", false, None, Some(1_001), None, 1_000,),
+            StartupAction::Nothing
+        );
+        assert_eq!(
+            startup_action(
+                &connected,
+                "",
+                false,
+                None,
+                Some(999),
+                Some(store::Cooldown {
+                    kind: store::CooldownKind::Quota,
+                    deadline: 1_200,
+                }),
+                1_000,
+            ),
+            StartupAction::Nothing
+        );
+        assert_eq!(
+            startup_action(&disconnected, "client-id", true, None, None, None, 1_000),
             StartupAction::Connect
         );
         assert_eq!(
-            startup_action(&disconnected, "", true, None, 1_000),
+            startup_action(&disconnected, "", true, None, None, None, 1_000),
             StartupAction::Nothing
         );
         assert_eq!(
-            startup_action(&disconnected, "client-id", false, None, 1_000),
+            startup_action(&disconnected, "client-id", false, None, None, None, 1_000),
             StartupAction::Nothing
         );
         assert_eq!(
-            startup_action(&needs_reauth, "client-id", true, None, 1_000),
+            startup_action(&needs_reauth, "client-id", true, None, None, None, 1_000),
             StartupAction::Sync
+        );
+        assert_eq!(
+            scheduled_sync_deadline(None, Some(1_000)),
+            Some(1_000 + 24 * 60 * 60)
         );
     }
 
@@ -3003,6 +3012,37 @@ mod tests {
         assert!(record_full_sync(&mut settings, false, 42));
         assert_eq!(settings.last_full_sync, Some(42));
         assert!(settings.spotify_sync_completed);
+    }
+
+    #[test]
+    fn sync_schedule_uses_daily_deadline_and_authoritative_cooldown() {
+        let mut settings = Settings::default();
+        assert!(spotify_commands::record_sync_schedule(
+            &mut settings,
+            false,
+            1_000,
+            None
+        ));
+        assert_eq!(settings.next_spotify_sync, Some(1_000 + 24 * 60 * 60));
+
+        let future = settings.next_spotify_sync;
+        assert!(!spotify_commands::record_sync_schedule(
+            &mut settings,
+            true,
+            1_100,
+            None,
+        ));
+        assert_eq!(settings.next_spotify_sync, Some(1_100 + 24 * 60 * 60));
+        assert_ne!(settings.next_spotify_sync, future);
+
+        spotify_commands::record_sync_schedule(&mut settings, true, 1_100, Some(1_200));
+        assert_eq!(settings.next_spotify_sync, Some(1_200));
+        spotify_commands::record_sync_schedule(&mut settings, true, 1_300, Some(1_200));
+        assert_eq!(settings.next_spotify_sync, Some(1_300 + 24 * 60 * 60));
+
+        let mut unscheduled = Settings::default();
+        spotify_commands::record_sync_schedule(&mut unscheduled, true, 2_000, None);
+        assert_eq!(unscheduled.next_spotify_sync, Some(2_000 + 24 * 60 * 60));
     }
 
     #[test]
@@ -3128,6 +3168,7 @@ mod tests {
             spotify_client_id: "exported-machine".into(),
             spotify_sync_completed: true,
             last_full_sync: Some(42),
+            next_spotify_sync: Some(86_442),
             playback_backend: PlaybackBackend::Local,
             repeat: RepeatMode::All,
             shuffle: true,

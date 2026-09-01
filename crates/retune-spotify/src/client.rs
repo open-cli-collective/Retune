@@ -29,6 +29,18 @@ pub use models::{
     SavedAlbum, SavedEpisode, SavedShow, SavedTrack, SearchResults, Show, SimplifiedArtist, Track,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchSource {
+    Cache,
+    Network,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResponse {
+    pub results: SearchResults,
+    pub source: SearchSource,
+}
+
 pub use request::{SpotifyClient, endpoint_family};
 
 pub use transport::{
@@ -275,6 +287,132 @@ mod tests {
         assert!(requests[0].url.contains("type=album"));
         assert!(requests[1].url.contains("type=track"));
         assert_eq!(requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_cache_survives_restart_and_is_scoped_by_account() {
+        let catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
+        let client = SpotifyClient::new_with_catalog(
+            "client",
+            FakeTransport::new([
+                Response::json(
+                    200,
+                    serde_json::json!({"id": "profile-a", "account_id": "account-a"}),
+                ),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "albums": {
+                            "items": [{
+                                "id": "album-a",
+                                "uri": "spotify:album:album-a",
+                                "name": "Closer",
+                                "artists": [{"id": "artist-a", "name": "Better Than Ezra"}],
+                                "total_tracks": 11
+                            }],
+                            "next": null,
+                            "total": 1
+                        }
+                    }),
+                ),
+            ]),
+            tokens(),
+            Arc::clone(&catalog),
+        );
+
+        client.me().await.unwrap();
+        let first_response = client
+            .search_with_types_with_source(
+                "artist:\"Better Than Ezra\" album:\"Closer\"",
+                "album",
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_response.source, SearchSource::Network);
+        let first = first_response.results;
+        let cached = client
+            .search_with_types_with_source(
+                "artist:\"Better Than Ezra\" album:\"Closer\"",
+                "album",
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.source, SearchSource::Cache);
+        assert_eq!(cached.results, first);
+        assert_eq!(
+            client
+                .search_with_types(
+                    "artist:\"Better Than Ezra\" album:\"Closer\"",
+                    "album",
+                    0,
+                    10,
+                )
+                .await
+                .unwrap(),
+            first
+        );
+        assert_eq!(client.transport().requests().len(), 2);
+
+        let restored =
+            serde_json::from_slice(&serde_json::to_vec(&*catalog.lock().unwrap()).unwrap())
+                .unwrap();
+        let restarted_catalog = Arc::new(Mutex::new(restored));
+        let restarted = SpotifyClient::new_with_catalog(
+            "client",
+            FakeTransport::new([]),
+            InMemoryTokenStore::new(None),
+            Arc::clone(&restarted_catalog),
+        );
+        assert_eq!(
+            restarted
+                .search_with_types(
+                    "artist:\"Better Than Ezra\" album:\"Closer\"",
+                    "album",
+                    0,
+                    10,
+                )
+                .await
+                .unwrap(),
+            first
+        );
+        assert!(restarted.transport().requests().is_empty());
+
+        restarted_catalog
+            .lock()
+            .unwrap()
+            .bind_searches_to_account("account-b");
+        assert!(
+            restarted
+                .search_with_types(
+                    "artist:\"Better Than Ezra\" album:\"Closer\"",
+                    "album",
+                    0,
+                    10,
+                )
+                .await
+                .is_err()
+        );
+        restarted_catalog
+            .lock()
+            .unwrap()
+            .bind_searches_to_account("account-a");
+        assert_eq!(
+            restarted
+                .search_with_types(
+                    "artist:\"Better Than Ezra\" album:\"Closer\"",
+                    "album",
+                    0,
+                    10,
+                )
+                .await
+                .unwrap(),
+            first
+        );
+        assert!(restarted.transport().requests().is_empty());
     }
 
     #[tokio::test]
