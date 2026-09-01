@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-player-prev"
+description = "Enables the player_prev command without any pre-configured scope."
+commands.allow = ["player_prev"]
+
+[[permission]]
+identifier = "deny-player-prev"
+description = "Denies the player_prev command without any pre-configured scope."
+commands.deny = ["player_prev"]

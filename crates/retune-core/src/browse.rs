@@ -4,6 +4,11 @@
 
 use crate::model::{Library, SourceId, TrackRecord};
 
+#[cfg(test)]
+thread_local! {
+    static SORT_KEY_CALLS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// The user's current browse position within one source. Invariant, enforced
 /// by the transition methods: a facet can only be set when every broader
 /// facet's implications are respected — selecting a broader level resets the
@@ -101,14 +106,17 @@ pub fn tracks<'a>(
                 && selected(&selection.alb, &track.alb)
         })
         .collect();
-    tracks.sort_by(|left, right| {
-        selection_rank(selection, left)
-            .cmp(&selection_rank(selection, right))
-            .then_with(|| left.art.to_lowercase().cmp(&right.art.to_lowercase()))
-            .then_with(|| left.alb.to_lowercase().cmp(&right.alb.to_lowercase()))
-            .then_with(|| left.disc_no.unwrap_or(1).cmp(&right.disc_no.unwrap_or(1)))
-            .then_with(|| left.track_no.is_none().cmp(&right.track_no.is_none()))
-            .then_with(|| left.track_no.cmp(&right.track_no))
+    tracks.sort_by_cached_key(|track| {
+        #[cfg(test)]
+        SORT_KEY_CALLS.set(SORT_KEY_CALLS.get().map(|calls| calls + 1));
+        (
+            selection_rank(selection, track),
+            track.art.to_lowercase(),
+            track.alb.to_lowercase(),
+            track.disc_no.unwrap_or(1),
+            track.track_no.is_none(),
+            track.track_no,
+        )
     });
     tracks
 }
@@ -340,5 +348,65 @@ mod tests {
             .map(|track| track.uri.as_str())
             .collect();
         assert_eq!(uris, ["d1t1", "d1t2", "implicit-d1t3", "missing", "d2t1"]);
+    }
+
+    #[test]
+    fn tracks_compute_each_sort_key_once_and_keep_equal_keys_stable() {
+        let mut library = Library::new();
+        add(
+            &mut library,
+            SourceId::Music,
+            "first",
+            "Rock",
+            "Alpha",
+            "Album",
+        );
+        add(
+            &mut library,
+            SourceId::Music,
+            "second",
+            "Rock",
+            "alpha",
+            "Album",
+        );
+
+        SORT_KEY_CALLS.set(Some(0));
+        let uris = tracks(&library, SourceId::Music, &Selection::default())
+            .into_iter()
+            .map(|track| track.uri.as_str())
+            .collect::<Vec<_>>();
+        let calls = SORT_KEY_CALLS.replace(None).unwrap();
+
+        assert_eq!(calls, 2);
+        assert_eq!(uris, ["first", "second"]);
+    }
+
+    #[test]
+    fn large_browse_derives_one_sort_key_per_visible_row() {
+        for size in [10_000usize, 20_000, 50_000] {
+            let mut library = Library::new();
+            for index in 0..size {
+                add(
+                    &mut library,
+                    SourceId::Music,
+                    &format!("track:{index:05}"),
+                    "Rock",
+                    "Artist",
+                    "Album",
+                );
+            }
+
+            SORT_KEY_CALLS.set(Some(0));
+            let visible = tracks(&library, SourceId::Music, &Selection::default());
+            let calls = SORT_KEY_CALLS.replace(None).unwrap();
+
+            assert_eq!(calls, size);
+            assert_eq!(visible.len(), size);
+            assert_eq!(visible.first().unwrap().uri, "track:00000");
+            assert_eq!(
+                visible.last().unwrap().uri,
+                format!("track:{:05}", size - 1)
+            );
+        }
     }
 }

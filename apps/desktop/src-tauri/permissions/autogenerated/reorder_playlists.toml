@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reorder-playlists"
+description = "Enables the reorder_playlists command without any pre-configured scope."
+commands.allow = ["reorder_playlists"]
+
+[[permission]]
+identifier = "deny-reorder-playlists"
+description = "Denies the reorder_playlists command without any pre-configured scope."
+commands.deny = ["reorder_playlists"]

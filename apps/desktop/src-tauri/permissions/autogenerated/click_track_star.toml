@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-click-track-star"
+description = "Enables the click_track_star command without any pre-configured scope."
+commands.allow = ["click_track_star"]
+
+[[permission]]
+identifier = "deny-click-track-star"
+description = "Denies the click_track_star command without any pre-configured scope."
+commands.deny = ["click_track_star"]

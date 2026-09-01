@@ -27,8 +27,8 @@ Retune is for people who want to maintain a music library, not just stream one.
 
 | Platform | Package | Supported architecture |
 | --- | --- | --- |
-| macOS | Homebrew | Apple Silicon |
-| Windows 10/11 | Winget | x64, ARM64 |
+| macOS 11+ | Homebrew | Apple Silicon |
+| Windows 10/11 (WebView2 105+) | Winget | x64, ARM64 |
 | Ubuntu 22.04 and compatible Debian/Ubuntu | APT | amd64, arm64 |
 
 macOS:

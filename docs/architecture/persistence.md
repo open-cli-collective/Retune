@@ -1,7 +1,13 @@
 # Persistence
 
 The Tauri shell stores Retune state in the platform application-data directory.
-All JSON state writes use a temporary file followed by atomic rename.
+All JSON state writes use one shared primitive that creates a unique,
+same-directory temporary file without truncating an existing writer, syncs it,
+and atomically renames it into place. Open, write, sync, and rename failures
+leave the previous destination intact and remove only that writer's temporary
+file. Secret temporaries are created with mode 0600 on Unix before any bytes are
+written; legacy secret permissions are repaired through the open descriptor
+before their contents are read.
 
 ## Files
 
@@ -14,6 +20,7 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `artist-genres.json` | Persistent Spotify artist-genre cache |
 | `spotify-catalog.json` | Versioned machine-local Spotify artist, album, and track catalog; excluded from backup |
 | `spotify-library.json` | Account-scoped exact Spotify saved-track and saved-album membership |
+| `spotify-sync-journal.json` | Recoverable membership/library/settings transaction for a successful Spotify sync |
 | `tokens.enc` | Encrypted release OAuth token state |
 | `dev-tokens.json` | Development token state; mode 0600 on Unix |
 | `dev-lastfm-session.json` | Development Last.fm session; mode 0600 on Unix |
@@ -23,6 +30,35 @@ All JSON state writes use a temporary file followed by atomic rename.
 | `lastfm-import-cache/` | Disposable V2 parsed-page cache and authoritative manifests; excluded from backup |
 | `lastfm-mappings.json` | Account-bound reusable track/album mappings and permanent ignore rules; optional in backup |
 | `lastfm-sync.json` | Machine-local incremental checkpoint, active range/cache, backlog/journal, and the account/session-bound review-apply queue; excluded from backup |
+| `lastfm-review-transaction.json` | Temporary redo journal for session/mapping review changes and cross-file Spotify account-ID migration; excluded from backup |
+| `restore-journal.json` | Mode-0600 recoverable multi-file backup replacement journal; removed after completion |
+
+Reads are bounded before JSON allocation. Settings, credentials, tokens, and
+cooldowns are limited to 1 MiB; artist genres to 32 MiB; Last.fm raw cache,
+session, and mappings files to 100 MiB; playlists, Spotify membership, catalog,
+incremental Last.fm state, and the Last.fm review transaction to 256 MiB; the
+library to 512 MiB; and the
+restore journal to 1 GiB. Portable backup input is limited independently to
+128 MiB compressed/plain input and 512 MiB after gzip expansion. Oversized data
+follows the format's malformed/unsupported rejection or quarantine policy and
+is never silently overwritten with defaults.
+The same 1 GiB journal ceiling is enforced before the Applying marker is
+written, so Retune either records a journal it can recover or performs no
+restore writes.
+
+Missing files use each format's documented empty/default state. Corrupt or
+unsupported library, token, Spotify catalog/membership, and Last.fm
+session/mapping/sync files are quarantined when their owner has a safe recovery
+state, with the reset or reconnect condition surfaced to the user. Settings,
+playlist, cooldown, artist-genre, backup, and restore-journal failures are
+reported to their caller or recovery coordinator instead of being silently
+discarded. Quarantine renames the evidence to a unique sibling and never writes
+a replacement over it during the failing load.
+
+`cooldowns.json` and `artist-genres.json` have separate concrete filesystem
+owners. Full Spotify sync receives both; content actions and importer policy
+receive only cooldown persistence. Their filenames and JSON formats are
+unchanged.
 
 The official Tauri window-state plugin manages the main native window's size,
 position, and maximized state in machine-local application state. Its lifecycle
@@ -49,6 +85,36 @@ and never belongs in backup/export.
 Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
 is disposable; library and settings files are not.
 
+Backup export clones the library, settings, and playlist cache under one owner
+lock at a time, releasing each before acquiring the next, then fetches Last.fm
+mappings and performs serialization and atomic replacement off the async
+executor. A failed export preserves an existing destination. Backup replacement
+validates every included component before writing. A versioned journal records the
+exact before and after value for each included component before the first data
+file changes. Startup examines an Applying journal before ordinary loads: every
+current value must equal its recorded before or after value, otherwise recovery
+reports a conflict and writes nothing; a valid mixture rolls forward to all
+after values in the same order. The journal is atomically marked Complete before
+best-effort cleanup, so a leftover completed journal is cleanup-only and cannot
+overwrite later user changes. Missing optional backup components are untouched,
+merge remains library-only, and user-visible change events are delayed until
+all replacement files and the Complete marker are durable. Settings, playlist,
+and library refreshes are then attempted independently, so one shell-side
+notification failure cannot suppress the others or reclassify the durable
+restore as failed.
+
+`backup.rs` owns the portable envelope, native file dialogs, and multi-owner
+runtime coordination. `restore.rs` remains the low-level journal and recovery
+mechanism used by both startup and runtime replacement.
+
+If a runtime replacement fails after the Applying journal is durable, Retune
+immediately rolls the journal forward while the library, settings, playlist,
+and Last.fm mapping owners are still exclusively held, then reconciles their
+live values from the journal without writing them again. If that roll-forward
+also fails, a shared in-process latch rejects later mutations of those four
+owners before they can persist a third value; restarting performs the existing
+startup recovery before constructing fresh mutation owners.
+
 The playlist cache retains Spotify display metadata for every fetched track,
 including disc/track numbers and album release date. Older caches deserialize
 with defaults and are refreshed once before snapshot-based fetch skipping resumes.
@@ -62,16 +128,36 @@ portable backup or restore. Its minimal shape is `SpotifyLibraryState`:
 with the same temporary-file-and-rename atomic replacement as other app data.
 Missing or incomplete state is unknown and does not authorize destructive
 reconciliation until a complete sync establishes the exact account state.
+Its narrow filesystem store is composed with the in-memory state and async
+mutation gate by the Spotify membership owner; cooldown and artist-genre
+persistence remain separately owned.
+
+A successful complete or partial Spotify sync writes a mode-0600
+`spotify-sync-journal.json` containing exact before/after membership, library,
+and settings values before changing any of those files. Each current value must
+match its recorded before or after value during recovery; a valid mixture rolls
+forward to all-after before normal startup loads. Runtime holds the membership,
+library-transaction, and settings gates until the journal is complete, then
+publishes all three live snapshots together. Caller cancellation cannot cancel
+that owned commit. If immediate recovery cannot restore coherence, the shared
+mutation latch rejects later writes until restart recovery succeeds.
 
 `spotify-catalog.json` is a versioned `SpotifyCatalog` V1 wrapper containing
 deterministic artist-ID, album-URI, and track-URI maps. It stores only reusable
 Spotify metadata and complete ordered album-track membership; query results,
 saved membership, ratings, plays, and Last.fm decisions remain elsewhere.
 Unknown versus known-empty collections and entity/relationship completeness are
-explicit. Local text hints are non-identity metadata. The shell loads the
-catalog before constructing the shared client, writes it with atomic replacement
-after dirty generations (at most every 30 seconds and at exit), and quarantines
-corrupt or unsupported files. It is excluded from backup and is cleared on
+explicit; only validated Spotify IDs and URIs form identity. The shell constructs
+the shared client with an empty catalog and loads the persisted catalog on an
+owned blocking hydration task. The loaded snapshot installs only if the live
+catalog generation is still the startup baseline; observations made while disk
+parsing runs therefore win. Account reset also invalidates in-flight hydration
+before clearing, including when the empty startup catalog cannot bump. Hydration installation and periodic/exit flushes
+share the catalog flush gate, and successful installation publishes a Library
+invalidation so catalog-backed projections refresh. Load failures are reported
+without flushing the empty startup value over the source file. Dirty generations
+are written with atomic replacement at most every 30 seconds and at exit, and
+corrupt or unsupported files are quarantined. It is excluded from backup and is cleared on
 disconnect, OAuth grant replacement, or confirmed Spotify account mismatch.
 
 `lastfm-import.json` is `LastFmImportSessionV2`. It stores the immutable
@@ -119,7 +205,10 @@ one logical request after Last.fm's capped internal retry is exhausted and
 return structured outcomes without mutating importer state; the ordered
 coordinator persists one retry attempt and waits at the capped delay before
 re-entering from the failed cursor without advancing it. No raw page is aggregated until the manifest is complete; review
-entry and cache cleanup follow one atomic session write. Session and cache
+entry is committed atomically before best-effort cache cleanup, whose failures
+are logged without misreporting committed work. Account reset or replacement
+deletes the old account cache before committing the new sync identity and
+propagates cleanup failures. Session and cache
 files use mode 0600 on Unix and a 100 MiB safety ceiling. Corrupt or unknown
 session versions are quarantined and never applied. This machine/account state
 is deliberately outside normal backup/restore, like `spotify-library.json` and
@@ -131,6 +220,21 @@ metadata, and timestamp receipts. Reconciliation consumes receipts and remote
 events as multisets; ignored or rejected submissions do not create receipts.
 Receipts are pruned only after the corresponding reconciliation commit.
 
+The connector is composed immediately in an explicit Loading state, then an
+owned startup task hydrates its credential, pending-token, and ledger stores on
+the blocking pool before atomically publishing Ready. Commands project the
+loading state and reject mutations until that publication; hydration completion
+emits the ordinary connector state and starts deferred importer work. This
+deliberately supersedes the older SOLID audit's single-phase-construction wording:
+native credential stores may block, and TAURI-016 requires the main window and
+unrelated startup work to remain responsive while they load. The stable
+`lastfm::Service` facade owns that lifecycle; `lastfm/api.rs` owns signed request
+execution, `lastfm/store.rs` owns credential and ledger persistence, and
+`lastfm/listening.rs` owns generation-scoped eligibility and receipt decoding.
+Fake request executors replace only transport, so authentication, scrobble, HTTP
+status, and JSON tests exercise the same parameter/signature/response path as
+release requests.
+
 `lastfm-mappings.json` is account-bound and stores explicit source-track to
 Spotify-track mappings, source-album mappings with normalized target track
 names, the reusable count-merge default, and permanent excluded-track,
@@ -139,6 +243,14 @@ Explicit track mappings win over album mappings. Skip decisions are not stored
 there. Completed V2 historical sessions idempotently backfill accepted choices.
 Unreadable or unsupported mappings are quarantined with a timestamped sibling
 before fresh mappings are used, and the reset is reported in sync status.
+Review actions and default count-mode changes that update both the import
+session and reusable mappings first write `lastfm-review-transaction.json`,
+then replace both files and remove the journal. Spotify account-ID migration
+uses the same redo record for the session, incremental state, and mappings.
+Startup and the next serialized mutation roll any surviving record forward
+before accepting a third value. Disk work runs on the blocking pool, and an
+owned completion publishes all corresponding in-memory snapshots together even
+if the initiating command is cancelled.
 
 `lastfm-sync.json` stores the Last.fm/Spotify identities, `syncedThrough`,
 `lastSyncedAt`, one fixed padded download range and cache identity, stable
@@ -153,10 +265,31 @@ sync state and receipts but preserves owner-bound mappings; Spotify identity
 mismatches suspend safe application. Unreadable or unsupported sync state is
 quarantined with a timestamped sibling, then reset to a fresh no-checkpoint
 state so the next sync starts at its current activation time.
+Journaled library replacement and snapshot cleanup execute on the blocking pool;
+the library transaction remains owned until the atomic write and memory
+publication finish, so cancellation leaves a recoverable before-or-after state.
 
 `lastfmScrobblingProfile` is persisted in settings and is accepted only when
 its trimmed username is non-empty and `startedAt` is positive. Settings load,
 save, and export restore all validate this boundary.
+
+One native settings owner serializes every runtime mutation from the latest
+in-memory value through normalization, validation, atomic replacement, and the
+memory swap. User-visible changes then emit one `settings-changed` event in the
+same serialized operation; private bookkeeping changes remain eventless.
+Once a settings save starts, an owned completion retains the mutation gate
+through the durable write and memory swap even if the invoking command is
+cancelled.
+Frontend commands send field patches or playback intents instead of persisted
+snapshots. The public settings view omits
+`spotifySyncCompleted`, `lastFullSync`, and `lastfmScrobblingProfile`; those
+remain native bookkeeping in the unchanged `settings.json` format. Secondary
+windows read the narrow appearance payload and subscribe to
+`appearance-changed` rather than loading the settings record.
+The existing lowercase `playbackBackend` and `repeat` bytes are closed enums;
+missing values default to `local` and `off`, while unknown or case-changed
+values are rejected at deserialization. Repeat remains a live playback intent,
+not a generic settings patch.
 
 `settings.json` carries the exportable optional
 `lastfmScrobblingProfile` (`username`, `startedAt`). Missing legacy profiles
@@ -203,14 +336,25 @@ Release builds encrypt `tokens.enc` with authenticated encryption. A random file
 key is stored in the platform-native credential store under service
 `com.rianjs.retune` and account `token-file-key`: macOS Keychain, Windows
 Credential Manager, or Linux Secret Service. A legacy native token entry is
-migrated into the encrypted file and then removed. An in-process cache avoids
-repeated credential prompts. The keyring mock backend is not enabled for release
-targets.
+not migrated; installations that still have only that retired format must
+authenticate again. An in-process cache avoids repeated credential prompts. The
+keyring mock backend is not enabled for release targets.
 
 Debug builds and local bundles built with the `dev-token-store` feature use the
 development token file. On Unix, Retune creates and checks that file with mode
-0600. Ordinary release bundles never enable that feature and retain the
+0600. A legacy file with broader permissions is repaired through its open file
+descriptor before any credential bytes are read; failure to establish mode 0600
+aborts the load. Ordinary release bundles never enable that feature and retain the
 encrypted-file/native credential-store boundary.
+
+Missing token files mean disconnected. Malformed development JSON, truncated
+or invalid encrypted data, and ciphertext that cannot authenticate with the
+current credential-store key are one typed corruption condition, distinct from
+ordinary filesystem or keyring failure. Startup quarantines that token file to
+a timestamped `.corrupt-*` sibling, starts disconnected, and presents a
+reconnect notice without overwriting the evidence. Backing-file and in-process
+cache changes are serialized together; refresh responses commit only while the
+grant they started from remains current.
 
 Last.fm release session keys use the native credential store with service
 `com.rianjs.retune` and account `lastfm-session`; the username is stored beside
@@ -255,6 +399,10 @@ are never exported.
 
 Machine-specific credentials and Spotify client configuration are not portable
 backup data.
+
+Atomic replacement uses `rename` on Unix-like platforms. Windows uses one
+reviewed `MoveFileExW` FFI call with replace-existing and write-through flags;
+the unsafe boundary receives only live, nul-terminated UTF-16 path buffers.
 
 ## Change guidance
 

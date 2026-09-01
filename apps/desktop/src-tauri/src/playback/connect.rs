@@ -6,7 +6,7 @@ use retune_spotify::{
 };
 use tokio::sync::mpsc;
 
-use super::{LiveClient, NeutralEvent, NeutralState, Snapshot, SnapshotTrack};
+use super::{LiveClient, NeutralEvent, NeutralState, RepeatMode, Snapshot, SnapshotTrack};
 
 const MAX_QUEUE_URIS: usize = 200;
 static QUEUE_CAP_WARNING: Once = Once::new();
@@ -28,9 +28,19 @@ pub enum PlaybackDecision {
     DeviceGone,
 }
 
+#[cfg(test)]
 pub fn resolve(prev: PolledState, now: PolledState, expected: &Snapshot) -> PlaybackDecision {
+    resolve_with_wrap(prev, now, expected, false)
+}
+
+fn resolve_with_wrap(
+    prev: PolledState,
+    now: PolledState,
+    expected: &Snapshot,
+    wrap: bool,
+) -> PlaybackDecision {
     let terminal = || {
-        if expected.has_next() {
+        if expected.has_next() || wrap {
             PlaybackDecision::Advance
         } else {
             PlaybackDecision::Stop
@@ -68,7 +78,14 @@ pub fn resolve(prev: PolledState, now: PolledState, expected: &Snapshot) -> Play
 }
 
 fn poll_decision(context: &Context, now: PolledState, epoch: u64) -> Option<PlaybackDecision> {
-    (context.epoch == epoch).then(|| resolve(context.previous.clone(), now, &context.snapshot))
+    (context.epoch == epoch).then(|| {
+        resolve_with_wrap(
+            context.previous.clone(),
+            now,
+            &context.snapshot,
+            context.wrap,
+        )
+    })
 }
 
 struct Context {
@@ -80,17 +97,21 @@ struct Context {
     epoch: u64,
     route_at_end: bool,
     wrap: bool,
+    file_after_segment: bool,
+    file_in_queue: bool,
 }
 
 #[derive(Default)]
 struct State {
     context: Option<Context>,
     generation: u64,
+    revision: u64,
 }
 
 #[derive(Clone)]
 pub(super) struct ConnectBackend {
     state: Arc<tokio::sync::Mutex<State>>,
+    operations: Arc<tokio::sync::Mutex<()>>,
     events: mpsc::UnboundedSender<NeutralEvent>,
     backend_generation: u64,
 }
@@ -102,6 +123,7 @@ impl ConnectBackend {
     ) -> Self {
         Self {
             state: Arc::new(tokio::sync::Mutex::new(State::default())),
+            operations: Arc::new(tokio::sync::Mutex::new(())),
             events,
             backend_generation,
         }
@@ -111,20 +133,14 @@ impl ConnectBackend {
         &self,
         client: Arc<LiveClient>,
         snapshot: Snapshot,
-        repeat: &str,
+        repeat: RepeatMode,
     ) -> Result<(), String> {
-        let event = self.begin(client.as_ref(), snapshot, repeat).await?;
-        let generation = self
-            .state
-            .lock()
-            .await
-            .context
-            .as_ref()
-            .expect("start creates context")
-            .generation;
+        let Some((event, generation)) = self.begin(client.as_ref(), snapshot, repeat).await? else {
+            return Ok(());
+        };
         self.emit(event);
         let playback = self.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             playback.poll(client, generation).await;
         });
         Ok(())
@@ -134,14 +150,25 @@ impl ConnectBackend {
         &self,
         client: &SpotifyClient<T, S>,
         snapshot: Snapshot,
-        repeat: &str,
-    ) -> Result<NeutralState, String> {
-        let (snapshot, route_at_end) = connect_snapshot(snapshot, repeat);
+        repeat: RepeatMode,
+    ) -> Result<Option<(NeutralState, u64)>, String> {
+        let (snapshot, route_at_end, file_after_segment, file_in_queue) =
+            connect_snapshot_parts(snapshot, repeat);
+        let revision = {
+            let mut state = self.state.lock().await;
+            state.revision = state.revision.wrapping_add(1);
+            state.revision
+        };
+        let _operation = self.operations.lock().await;
         let device = select_device(client.devices().await.map_err(|error| error.to_string())?)?;
         let device_id = device.id.expect("selected devices have ids");
         client
             .set_repeat(
-                connect_repeat(if route_at_end { "off" } else { repeat })?,
+                connect_repeat(if route_at_end {
+                    RepeatMode::Off
+                } else {
+                    repeat
+                }),
                 Some(&device_id),
             )
             .await
@@ -154,6 +181,9 @@ impl ConnectBackend {
         )
         .await?;
         let mut state = self.state.lock().await;
+        if state.revision != revision {
+            return Ok(None);
+        }
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
         let event = local_state(&snapshot, 0, true, device.supports_volume);
@@ -170,19 +200,18 @@ impl ConnectBackend {
             generation,
             epoch: 1,
             route_at_end,
-            wrap: repeat == "all" && !route_at_end,
+            wrap: repeat.wraps() && !route_at_end,
+            file_after_segment,
+            file_in_queue,
         });
-        Ok(event)
+        Ok(Some((event, generation)))
     }
 
     async fn toggle_pause<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
     ) -> Result<NeutralState, String> {
-        let mut state = self.state.lock().await;
-        let context = state.context.as_mut().ok_or("Nothing is playing")?;
-        let playing = !context.previous.is_playing;
-        Self::set_context_playing(client, context, playing)
+        self.set_context_playing(client, None)
             .await?
             .ok_or_else(|| "Nothing to toggle".into())
     }
@@ -192,25 +221,44 @@ impl ConnectBackend {
         client: &SpotifyClient<T, S>,
         playing: bool,
     ) -> Result<Option<NeutralState>, String> {
-        let mut state = self.state.lock().await;
-        let context = state.context.as_mut().ok_or("Nothing is playing")?;
-        Self::set_context_playing(client, context, playing).await
+        self.set_context_playing(client, Some(playing)).await
     }
 
     async fn set_context_playing<T: Transport, S: TokenStore>(
+        &self,
         client: &SpotifyClient<T, S>,
-        context: &mut Context,
-        playing: bool,
+        requested: Option<bool>,
     ) -> Result<Option<NeutralState>, String> {
-        if context.previous.is_playing == playing {
-            return Ok(None);
-        }
+        let (revision, generation, device_id, playing) = {
+            let mut state = self.state.lock().await;
+            let context = state.context.as_ref().ok_or("Nothing is playing")?;
+            let playing = requested.unwrap_or(!context.previous.is_playing);
+            if context.previous.is_playing == playing {
+                return Ok(None);
+            }
+            let generation = context.generation;
+            let device_id = context.device_id.clone();
+            state.revision = state.revision.wrapping_add(1);
+            (state.revision, generation, device_id, playing)
+        };
+        let _operation = self.operations.lock().await;
         if playing {
-            client.resume(Some(&context.device_id)).await
+            client.resume(Some(&device_id)).await
         } else {
-            client.pause(Some(&context.device_id)).await
+            client.pause(Some(&device_id)).await
         }
         .map_err(|error| error.to_string())?;
+        let mut state = self.state.lock().await;
+        if state.revision != revision {
+            return Ok(None);
+        }
+        let Some(context) = state
+            .context
+            .as_mut()
+            .filter(|context| context.generation == generation)
+        else {
+            return Ok(None);
+        };
         context.epoch = context.epoch.wrapping_add(1);
         context.previous.is_playing = playing;
         Ok(Some(local_state(
@@ -225,54 +273,90 @@ impl ConnectBackend {
         &self,
         client: &SpotifyClient<T, S>,
         seconds: u64,
-    ) -> Result<NeutralState, String> {
-        let mut state = self.state.lock().await;
-        let context = state.context.as_mut().ok_or("Nothing is playing")?;
-        let seconds = seconds.min(context.snapshot.current().duration_secs);
+    ) -> Result<Option<NeutralState>, String> {
+        let (revision, generation, device_id, seconds) = {
+            let mut state = self.state.lock().await;
+            let context = state.context.as_ref().ok_or("Nothing is playing")?;
+            let seconds = seconds.min(context.snapshot.current().duration_secs);
+            let generation = context.generation;
+            let device_id = context.device_id.clone();
+            state.revision = state.revision.wrapping_add(1);
+            (state.revision, generation, device_id, seconds)
+        };
         let position_ms = u32::try_from(seconds.saturating_mul(1000))
             .map_err(|_| "seek position out of range".to_string())?;
+        let _operation = self.operations.lock().await;
         client
-            .seek(position_ms, Some(&context.device_id))
+            .seek(position_ms, Some(&device_id))
             .await
             .map_err(|error| error.to_string())?;
+        let mut state = self.state.lock().await;
+        if state.revision != revision {
+            return Ok(None);
+        }
+        let context = state
+            .context
+            .as_mut()
+            .filter(|context| context.generation == generation)
+            .ok_or("Nothing is playing")?;
         context.epoch = context.epoch.wrapping_add(1);
         context.previous.elapsed = seconds;
-        Ok(local_state(
+        Ok(Some(local_state(
             &context.snapshot,
             seconds,
             context.previous.is_playing,
             context.volume_supported,
-        ))
+        )))
     }
 
     async fn step_state<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
         direction: i8,
-    ) -> Result<NeutralState, String> {
-        let mut state = self.state.lock().await;
-        let context = state.context.as_mut().ok_or("Nothing is playing")?;
-        let next = if direction < 0 {
-            context.snapshot.index.saturating_sub(1)
-        } else {
-            context.snapshot.index + 1
+    ) -> Result<Option<NeutralState>, String> {
+        let (revision, generation, device_id, snapshot, next) = {
+            let mut state = self.state.lock().await;
+            let context = state.context.as_ref().ok_or("Nothing is playing")?;
+            let next = if direction < 0 {
+                context.snapshot.index.saturating_sub(1)
+            } else {
+                context.snapshot.index + 1
+            };
+            let generation = context.generation;
+            let device_id = context.device_id.clone();
+            let snapshot = context.snapshot.clone();
+            state.revision = state.revision.wrapping_add(1);
+            (state.revision, generation, device_id, snapshot, next)
         };
-        if next >= context.snapshot.len() {
+        let _operation = self.operations.lock().await;
+        if next >= snapshot.len() {
             client
-                .pause(Some(&context.device_id))
+                .pause(Some(&device_id))
                 .await
                 .map_err(|error| error.to_string())?;
+            let mut state = self.state.lock().await;
+            if state.revision != revision
+                || state
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| context.generation != generation)
+            {
+                return Ok(None);
+            }
             state.context = None;
-            return Ok(NeutralState::default());
+            return Ok(Some(NeutralState::default()));
         }
+        play_snapshot(client, &device_id, &snapshot.active_tracks(), next).await?;
+        let mut state = self.state.lock().await;
+        if state.revision != revision {
+            return Ok(None);
+        }
+        let context = state
+            .context
+            .as_mut()
+            .filter(|context| context.generation == generation)
+            .ok_or("Nothing is playing")?;
         context.snapshot.index = next;
-        play_snapshot(
-            client,
-            &context.device_id,
-            &context.snapshot.active_tracks(),
-            context.snapshot.index,
-        )
-        .await?;
         context.epoch = context.epoch.wrapping_add(1);
         context.previous = PolledState {
             track_id: Some(context.snapshot.current().uri.clone()),
@@ -280,12 +364,12 @@ impl ConnectBackend {
             is_playing: true,
             device_present: true,
         };
-        Ok(local_state(
+        Ok(Some(local_state(
             &context.snapshot,
             0,
             true,
             context.volume_supported,
-        ))
+        )))
     }
 
     pub(super) async fn set_volume<T: Transport, S: TokenStore>(
@@ -293,13 +377,20 @@ impl ConnectBackend {
         client: &SpotifyClient<T, S>,
         volume: u8,
     ) -> Result<(), String> {
-        let state = self.state.lock().await;
-        let context = state.context.as_ref().ok_or("Nothing is playing")?;
-        if !context.volume_supported {
+        let (revision, device_id) = {
+            let state = self.state.lock().await;
+            let context = state.context.as_ref().ok_or("Nothing is playing")?;
+            if !context.volume_supported {
+                return Ok(());
+            }
+            (state.revision, context.device_id.clone())
+        };
+        let _operation = self.operations.lock().await;
+        if self.state.lock().await.revision != revision {
             return Ok(());
         }
         client
-            .set_volume(volume, Some(&context.device_id))
+            .set_volume(volume, Some(&device_id))
             .await
             .map_err(|error| error.to_string())
     }
@@ -307,28 +398,60 @@ impl ConnectBackend {
     pub(super) async fn set_repeat_state<T: Transport, S: TokenStore>(
         &self,
         client: &SpotifyClient<T, S>,
-        repeat: &str,
+        repeat: RepeatMode,
     ) -> Result<(), String> {
-        let state = self.state.lock().await;
+        let (revision, generation, device_id, route_at_end, wrap) = {
+            let mut state = self.state.lock().await;
+            let Some(context) = state
+                .context
+                .as_ref()
+                .filter(|context| context.previous.is_playing)
+            else {
+                return Ok(());
+            };
+            let generation = context.generation;
+            let device_id = context.device_id.clone();
+            let route_at_end =
+                context.file_after_segment || (repeat.wraps() && context.file_in_queue);
+            let wrap = repeat.wraps() && !route_at_end;
+            state.revision = state.revision.wrapping_add(1);
+            (state.revision, generation, device_id, route_at_end, wrap)
+        };
+        let _operation = self.operations.lock().await;
+        if self.state.lock().await.revision != revision {
+            return Ok(());
+        }
+        client
+            .set_repeat(
+                connect_repeat(if route_at_end {
+                    RepeatMode::Off
+                } else {
+                    repeat
+                }),
+                Some(&device_id),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut state = self.state.lock().await;
+        if state.revision != revision {
+            return Ok(());
+        }
         let Some(context) = state
             .context
-            .as_ref()
-            .filter(|context| context.previous.is_playing)
+            .as_mut()
+            .filter(|context| context.generation == generation)
         else {
             return Ok(());
         };
-        client
-            .set_repeat(connect_repeat(repeat)?, Some(&context.device_id))
-            .await
-            .map_err(|error| error.to_string())
+        context.route_at_end = route_at_end;
+        context.wrap = wrap;
+        context.epoch = context.epoch.wrapping_add(1);
+        Ok(())
     }
 
-    async fn clear(&self) {
-        self.state.lock().await.context = None;
-    }
-
-    pub(super) async fn update_snapshot(&self, snapshot: Snapshot, repeat: &str) {
-        let (snapshot, route_at_end) = connect_snapshot(snapshot, repeat);
+    pub(super) async fn update_snapshot(&self, snapshot: Snapshot, repeat: RepeatMode) {
+        let (snapshot, route_at_end, file_after_segment, file_in_queue) =
+            connect_snapshot_parts(snapshot, repeat);
         let mut state = self.state.lock().await;
         let Some(context) = state.context.as_mut() else {
             return;
@@ -338,8 +461,11 @@ impl ConnectBackend {
         }
         context.snapshot = snapshot;
         context.route_at_end = route_at_end;
-        context.wrap = repeat == "all" && !route_at_end;
+        context.wrap = repeat.wraps() && !route_at_end;
+        context.file_after_segment = file_after_segment;
+        context.file_in_queue = file_in_queue;
         context.epoch = context.epoch.wrapping_add(1);
+        state.revision = state.revision.wrapping_add(1);
     }
 
     pub(super) async fn toggle(&self, client: &LiveClient) -> Result<(), String> {
@@ -360,29 +486,43 @@ impl ConnectBackend {
     }
 
     pub(super) async fn seek(&self, client: &LiveClient, seconds: u64) -> Result<(), String> {
-        let state = self.seek_state(client, seconds).await?;
-        self.emit(state);
+        if let Some(state) = self.seek_state(client, seconds).await? {
+            self.emit(state);
+        }
         Ok(())
     }
 
     pub(super) async fn step(&self, client: &LiveClient, direction: i8) -> Result<(), String> {
-        let state = self.step_state(client, direction).await?;
-        self.emit(state);
+        if let Some(state) = self.step_state(client, direction).await? {
+            self.emit(state);
+        }
         Ok(())
     }
 
     pub(super) async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        if state.context.is_some() && client.is_none() {
-            return Err(super::missing_spotify());
-        }
-        if let (Some(client), Some(context)) = (client, state.context.as_ref()) {
+        let (revision, device_id) = {
+            let mut state = self.state.lock().await;
+            if state.context.is_some() && client.is_none() {
+                return Err(super::missing_spotify());
+            }
+            let device_id = state
+                .context
+                .as_ref()
+                .map(|context| context.device_id.clone());
+            state.revision = state.revision.wrapping_add(1);
+            (state.revision, device_id)
+        };
+        let _operation = self.operations.lock().await;
+        if let (Some(client), Some(device_id)) = (client, device_id) {
             client
-                .pause(Some(&context.device_id))
+                .pause(Some(&device_id))
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        state.context = None;
+        let mut state = self.state.lock().await;
+        if state.revision == revision {
+            state.context = None;
+        }
         Ok(())
     }
 
@@ -393,12 +533,16 @@ impl ConnectBackend {
         });
     }
 
-    async fn poll(self, client: Arc<LiveClient>, generation: u64) {
+    async fn poll<T: Transport + 'static, S: TokenStore + 'static>(
+        self,
+        client: Arc<SpotifyClient<T, S>>,
+        generation: u64,
+    ) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.tick().await;
         loop {
             interval.tick().await;
-            let epoch = {
+            let (revision, epoch) = {
                 let state = self.state.lock().await;
                 let Some(context) = state
                     .context
@@ -407,33 +551,57 @@ impl ConnectBackend {
                 else {
                     return;
                 };
-                context.epoch
+                (state.revision, context.epoch)
             };
+            let _operation = self.operations.lock().await;
+            if self.state.lock().await.revision != revision {
+                continue;
+            }
             let polled = match client.player().await {
                 Ok(player) => player,
                 Err(error) => {
+                    let mut state = self.state.lock().await;
+                    if state.revision != revision
+                        || state.context.as_ref().is_none_or(|context| {
+                            context.generation != generation || context.epoch != epoch
+                        })
+                    {
+                        continue;
+                    }
+                    state.revision = state.revision.wrapping_add(1);
+                    state.context = None;
+                    drop(state);
                     let _ = self.events.send(NeutralEvent::Error {
                         generation: self.backend_generation,
                         message: error.to_string(),
                     });
-                    self.clear().await;
                     return;
                 }
             };
-            let mut state = self.state.lock().await;
-            let Some(context) = state
-                .context
-                .as_mut()
-                .filter(|context| context.generation == generation)
-            else {
-                return;
-            };
             let now = polled_state(polled.as_ref());
-            let Some(decision) = poll_decision(context, now.clone(), epoch) else {
-                continue;
+            let decision = {
+                let state = self.state.lock().await;
+                let Some(context) = state.context.as_ref().filter(|context| {
+                    context.generation == generation && state.revision == revision
+                }) else {
+                    continue;
+                };
+                let Some(decision) = poll_decision(context, now.clone(), epoch) else {
+                    continue;
+                };
+                decision
             };
             let event = match decision {
                 PlaybackDecision::Tick => {
+                    let mut state = self.state.lock().await;
+                    if state.revision != revision {
+                        continue;
+                    }
+                    let Some(context) = state.context.as_mut().filter(|context| {
+                        context.generation == generation && context.epoch == epoch
+                    }) else {
+                        continue;
+                    };
                     context.previous = now;
                     local_state(
                         &context.snapshot,
@@ -443,54 +611,112 @@ impl ConnectBackend {
                     )
                 }
                 PlaybackDecision::Advance => {
-                    let previous_index = context.snapshot.index;
-                    let polled_index = now
-                        .track_id
-                        .as_ref()
-                        .and_then(|uri| context.snapshot.active_position(uri));
-                    context.snapshot.index = if previous_index + 1 < context.snapshot.len() {
+                    let (mut snapshot, device_id, volume_supported, wrap, polled_index) = {
+                        let state = self.state.lock().await;
+                        if state.revision != revision {
+                            continue;
+                        }
+                        let Some(context) = state.context.as_ref().filter(|context| {
+                            context.generation == generation && context.epoch == epoch
+                        }) else {
+                            continue;
+                        };
+                        let polled_index = now
+                            .track_id
+                            .as_ref()
+                            .and_then(|uri| context.snapshot.active_position(uri));
+                        (
+                            context.snapshot.clone(),
+                            context.device_id.clone(),
+                            context.volume_supported,
+                            context.wrap,
+                            polled_index,
+                        )
+                    };
+                    let previous_index = snapshot.index;
+                    snapshot.index = if previous_index + 1 < snapshot.len() {
                         previous_index + 1
-                    } else if context.wrap {
+                    } else if wrap {
                         0
                     } else {
                         polled_index.unwrap_or(previous_index)
                     };
-                    if polled_index != Some(context.snapshot.index) {
+                    let previous = if polled_index != Some(snapshot.index) {
                         if let Err(error) = play_snapshot(
                             client.as_ref(),
-                            &context.device_id,
-                            &context.snapshot.active_tracks(),
-                            context.snapshot.index,
+                            &device_id,
+                            &snapshot.active_tracks(),
+                            snapshot.index,
                         )
                         .await
                         {
+                            let mut state = self.state.lock().await;
+                            if state.revision != revision
+                                || state.context.as_ref().is_none_or(|context| {
+                                    context.generation != generation || context.epoch != epoch
+                                })
+                            {
+                                continue;
+                            }
+                            state.revision = state.revision.wrapping_add(1);
+                            state.context = None;
+                            drop(state);
                             let _ = self.events.send(NeutralEvent::Error {
                                 generation: self.backend_generation,
                                 message: error,
                             });
-                            state.context = None;
                             return;
                         }
-                        context.previous = PolledState {
-                            track_id: Some(context.snapshot.current().uri.clone()),
+                        PolledState {
+                            track_id: Some(snapshot.current().uri.clone()),
                             elapsed: 0,
                             is_playing: true,
                             device_present: true,
-                        };
+                        }
                     } else {
-                        context.previous = now;
+                        now
+                    };
+                    let mut state = self.state.lock().await;
+                    if state.revision != revision {
+                        continue;
                     }
+                    let Some(context) = state.context.as_mut().filter(|context| {
+                        context.generation == generation && context.epoch == epoch
+                    }) else {
+                        continue;
+                    };
+                    context.snapshot = snapshot;
+                    context.previous = previous;
                     local_state(
                         &context.snapshot,
                         context.previous.elapsed,
                         context.previous.is_playing,
-                        context.volume_supported,
+                        volume_supported,
                     )
                 }
                 PlaybackDecision::Stop => {
-                    let route_at_end = context.route_at_end;
-                    let uri = context.snapshot.current().uri.clone();
-                    let _ = client.pause(Some(&context.device_id)).await;
+                    let (route_at_end, uri, device_id) = {
+                        let state = self.state.lock().await;
+                        if state.revision != revision {
+                            continue;
+                        }
+                        let Some(context) = state.context.as_ref().filter(|context| {
+                            context.generation == generation && context.epoch == epoch
+                        }) else {
+                            continue;
+                        };
+                        (
+                            context.route_at_end,
+                            context.snapshot.current().uri.clone(),
+                            context.device_id.clone(),
+                        )
+                    };
+                    let _ = client.pause(Some(&device_id)).await;
+                    let mut state = self.state.lock().await;
+                    if state.revision != revision {
+                        continue;
+                    }
+                    state.revision = state.revision.wrapping_add(1);
                     state.context = None;
                     drop(state);
                     if route_at_end {
@@ -504,11 +730,15 @@ impl ConnectBackend {
                     return;
                 }
                 PlaybackDecision::Takeover | PlaybackDecision::DeviceGone => {
+                    let mut state = self.state.lock().await;
+                    if state.revision != revision {
+                        continue;
+                    }
+                    state.revision = state.revision.wrapping_add(1);
                     state.context = None;
                     external_state(polled.as_ref())
                 }
             };
-            drop(state);
             self.emit(event);
             if matches!(
                 decision,
@@ -520,16 +750,21 @@ impl ConnectBackend {
     }
 }
 
-fn connect_repeat(repeat: &str) -> Result<&'static str, String> {
+fn connect_repeat(repeat: RepeatMode) -> &'static str {
     match repeat {
-        "off" => Ok("off"),
-        "all" => Ok("context"),
-        "one" => Ok("track"),
-        _ => Err("repeat must be off, all, or one".into()),
+        RepeatMode::Off => "off",
+        RepeatMode::All => "context",
+        RepeatMode::One => "track",
     }
 }
 
-fn connect_snapshot(snapshot: Snapshot, repeat: &str) -> (Snapshot, bool) {
+#[cfg(test)]
+fn connect_snapshot(snapshot: Snapshot, repeat: RepeatMode) -> (Snapshot, bool) {
+    let (snapshot, route_at_end, _, _) = connect_snapshot_parts(snapshot, repeat);
+    (snapshot, route_at_end)
+}
+
+fn connect_snapshot_parts(snapshot: Snapshot, repeat: RepeatMode) -> (Snapshot, bool, bool, bool) {
     let tracks = snapshot.active_tracks();
     let start = tracks[..snapshot.index]
         .iter()
@@ -539,11 +774,14 @@ fn connect_snapshot(snapshot: Snapshot, repeat: &str) -> (Snapshot, bool) {
         .iter()
         .position(|track| track.uri.starts_with("file:"))
         .map_or(tracks.len(), |offset| start + offset);
-    let route_at_end = end < tracks.len()
-        || (repeat == "all" && tracks.iter().any(|track| track.uri.starts_with("file:")));
+    let file_after_segment = end < tracks.len();
+    let file_in_queue = tracks.iter().any(|track| track.uri.starts_with("file:"));
+    let route_at_end = file_after_segment || (repeat.wraps() && file_in_queue);
     (
         Snapshot::new(tracks[start..end].to_vec(), snapshot.index - start),
         route_at_end,
+        file_after_segment,
+        file_in_queue,
     )
 }
 
@@ -656,9 +894,338 @@ impl Default for ConnectBackend {
 
 #[cfg(test)]
 mod tests {
-    use retune_spotify::client::{fake_client, Response};
+    use std::{
+        collections::VecDeque,
+        sync::{atomic::AtomicUsize, Mutex},
+        time::Duration,
+    };
+
+    use retune_spotify::{
+        client::{fake_client, Request, Response, SendFuture},
+        tokens::{InMemoryTokenStore, Tokens},
+        Error,
+    };
+    use tokio::sync::Notify;
 
     use super::*;
+
+    struct DelayedTransport {
+        responses: Mutex<VecDeque<Response>>,
+        requests: Mutex<Vec<Request>>,
+        releases: Vec<Arc<Notify>>,
+        entered: mpsc::UnboundedSender<String>,
+        next: AtomicUsize,
+    }
+
+    impl Transport for DelayedTransport {
+        fn send(&self, request: Request) -> SendFuture<'_> {
+            let index = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.requests.lock().unwrap().push(request.clone());
+            let response = self.responses.lock().unwrap().pop_front();
+            let release = self.releases.get(index).cloned();
+            let _ = self.entered.send(request.url);
+            Box::pin(async move {
+                let release = release.ok_or_else(|| Error::Transport("missing release".into()))?;
+                release.notified().await;
+                response.ok_or_else(|| Error::Transport("missing response".into()))
+            })
+        }
+    }
+
+    fn delayed_client(
+        responses: impl IntoIterator<Item = Response>,
+        releases: Vec<Arc<Notify>>,
+        entered: mpsc::UnboundedSender<String>,
+    ) -> SpotifyClient<DelayedTransport, InMemoryTokenStore> {
+        SpotifyClient::new(
+            "client",
+            DelayedTransport {
+                responses: Mutex::new(responses.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+                releases,
+                entered,
+                next: AtomicUsize::new(0),
+            },
+            InMemoryTokenStore::new(Some(Tokens {
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires_at: u64::MAX,
+                scopes: String::new(),
+                playback_credentials: None,
+            })),
+        )
+    }
+
+    async fn install_context(backend: &ConnectBackend) {
+        let mut state = backend.state.lock().await;
+        state.context = Some(Context {
+            snapshot: Snapshot::new(vec![track(1, 100), track(2, 100)], 0),
+            device_id: "desk".into(),
+            volume_supported: true,
+            previous: polled(Some("spotify:track:1"), 10, true),
+            generation: 1,
+            epoch: 1,
+            route_at_end: false,
+            wrap: false,
+            file_after_segment: false,
+            file_in_queue: false,
+        });
+        state.generation = 1;
+    }
+
+    #[tokio::test]
+    async fn delayed_transport_does_not_block_state_and_stale_completion_cannot_commit() {
+        let backend = ConnectBackend::default();
+        install_context(&backend).await;
+        let release = Arc::new(Notify::new());
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let client = Arc::new(delayed_client(
+            [Response::json(204, serde_json::Value::Null)],
+            vec![Arc::clone(&release)],
+            entered,
+        ));
+        let delayed_backend = backend.clone();
+        let delayed_client = Arc::clone(&client);
+        let delayed = tokio::spawn(async move {
+            delayed_backend
+                .seek_state(delayed_client.as_ref(), 40)
+                .await
+        });
+
+        assert!(entries
+            .recv()
+            .await
+            .unwrap()
+            .contains("/seek?position_ms=40000"));
+        let _guard = tokio::time::timeout(Duration::from_millis(50), backend.state.lock())
+            .await
+            .expect("state reads must not wait for Spotify");
+        drop(_guard);
+        backend.state.lock().await.revision += 1;
+        release.notify_one();
+        assert!(delayed.await.unwrap().unwrap().is_none());
+
+        assert_eq!(
+            backend
+                .state
+                .lock()
+                .await
+                .context
+                .as_ref()
+                .unwrap()
+                .previous
+                .elapsed,
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_end_step_cannot_clear_a_newer_snapshot() {
+        let backend = ConnectBackend::default();
+        install_context(&backend).await;
+        {
+            let mut state = backend.state.lock().await;
+            let context = state.context.as_mut().unwrap();
+            context.snapshot.index = 1;
+            context.previous = polled(Some("spotify:track:2"), 10, true);
+        }
+        let release = Arc::new(Notify::new());
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let client = Arc::new(delayed_client(
+            [Response::json(204, serde_json::Value::Null)],
+            vec![Arc::clone(&release)],
+            entered,
+        ));
+        let delayed_backend = backend.clone();
+        let delayed_client = Arc::clone(&client);
+        let delayed =
+            tokio::spawn(
+                async move { delayed_backend.step_state(delayed_client.as_ref(), 1).await },
+            );
+
+        assert!(entries
+            .recv()
+            .await
+            .unwrap()
+            .contains("/pause?device_id=desk"));
+        backend
+            .update_snapshot(
+                Snapshot::new(vec![track(2, 100), track(3, 100)], 0),
+                RepeatMode::Off,
+            )
+            .await;
+        release.notify_one();
+
+        assert!(delayed.await.unwrap().unwrap().is_none());
+        let state = backend.state.lock().await;
+        assert_eq!(
+            state.context.as_ref().unwrap().snapshot.current().uri,
+            "spotify:track:2"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_and_command_remote_calls_share_one_ordered_gate() {
+        let backend = ConnectBackend::default();
+        install_context(&backend).await;
+        let poll_release = Arc::new(Notify::new());
+        let seek_release = Arc::new(Notify::new());
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let client = Arc::new(delayed_client(
+            [
+                Response::json(204, serde_json::Value::Null),
+                Response::json(204, serde_json::Value::Null),
+            ],
+            vec![Arc::clone(&poll_release), Arc::clone(&seek_release)],
+            entered,
+        ));
+        let poll = tokio::spawn(backend.clone().poll(Arc::clone(&client), 1));
+
+        tokio::time::sleep(Duration::from_millis(1_050)).await;
+        assert!(entries.recv().await.unwrap().ends_with("/me/player"));
+        let command_backend = backend.clone();
+        let command_client = Arc::clone(&client);
+        let command = tokio::spawn(async move {
+            command_backend
+                .seek_state(command_client.as_ref(), 50)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), entries.recv())
+                .await
+                .is_err()
+        );
+
+        poll_release.notify_one();
+        assert!(entries
+            .recv()
+            .await
+            .unwrap()
+            .contains("/seek?position_ms=50000"));
+        seek_release.notify_one();
+        assert!(command.await.unwrap().unwrap().is_some());
+        poll.abort();
+
+        assert_eq!(
+            backend
+                .state
+                .lock()
+                .await
+                .context
+                .as_ref()
+                .unwrap()
+                .previous
+                .elapsed,
+            50
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_poll_failure_does_not_emit_or_clear_current_context() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let backend = ConnectBackend::new(events, 1);
+        install_context(&backend).await;
+        let release = Arc::new(Notify::new());
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let client = Arc::new(delayed_client(
+            [Response::json(500, serde_json::json!({"error": "offline"}))],
+            vec![Arc::clone(&release)],
+            entered,
+        ));
+        let poll = tokio::spawn(backend.clone().poll(client, 1));
+
+        assert!(entries.recv().await.unwrap().ends_with("/me/player"));
+        backend.state.lock().await.revision += 1;
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        poll.abort();
+
+        assert!(receiver.try_recv().is_err());
+        assert!(backend.state.lock().await.context.is_some());
+    }
+
+    #[tokio::test]
+    async fn live_repeat_change_commits_wrap_context_after_transport_completes() {
+        let backend = ConnectBackend::default();
+        install_context(&backend).await;
+        let release = Arc::new(Notify::new());
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let client = Arc::new(delayed_client(
+            [Response::json(204, serde_json::Value::Null)],
+            vec![Arc::clone(&release)],
+            entered,
+        ));
+        let changed = tokio::spawn({
+            let backend = backend.clone();
+            let client = Arc::clone(&client);
+            async move {
+                backend
+                    .set_repeat_state(client.as_ref(), RepeatMode::All)
+                    .await
+            }
+        });
+
+        assert!(entries
+            .recv()
+            .await
+            .unwrap()
+            .contains("/repeat?state=context"));
+        assert!(!backend.state.lock().await.context.as_ref().unwrap().wrap);
+        release.notify_one();
+        changed.await.unwrap().unwrap();
+
+        let state = backend.state.lock().await;
+        let context = state.context.as_ref().unwrap();
+        assert!(context.wrap);
+        assert!(!context.route_at_end);
+        assert_eq!(context.epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn live_repeat_all_keeps_spotify_repeat_off_when_wrap_routes_to_a_file() {
+        let backend = ConnectBackend::default();
+        install_context(&backend).await;
+        backend
+            .state
+            .lock()
+            .await
+            .context
+            .as_mut()
+            .unwrap()
+            .file_in_queue = true;
+        let release = Arc::new(Notify::new());
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let client = Arc::new(delayed_client(
+            [Response::json(204, serde_json::Value::Null)],
+            vec![Arc::clone(&release)],
+            entered,
+        ));
+        let changed = tokio::spawn({
+            let backend = backend.clone();
+            let client = Arc::clone(&client);
+            async move {
+                backend
+                    .set_repeat_state(client.as_ref(), RepeatMode::All)
+                    .await
+            }
+        });
+
+        assert!(entries.recv().await.unwrap().contains("/repeat?state=off"));
+        release.notify_one();
+        changed.await.unwrap().unwrap();
+
+        let state = backend.state.lock().await;
+        let context = state.context.as_ref().unwrap();
+        assert!(context.route_at_end);
+        assert!(!context.wrap);
+    }
+
+    #[test]
+    fn repeat_modes_map_exhaustively_to_connect_values() {
+        assert_eq!(connect_repeat(RepeatMode::Off), "off");
+        assert_eq!(connect_repeat(RepeatMode::All), "context");
+        assert_eq!(connect_repeat(RepeatMode::One), "track");
+    }
 
     fn track(id: u64, duration_secs: u64) -> SnapshotTrack {
         SnapshotTrack {
@@ -734,7 +1301,7 @@ mod tests {
             0,
         );
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
-        let (expected, route_at_end) = connect_snapshot(snapshot, "off");
+        let (expected, route_at_end) = connect_snapshot(snapshot, RepeatMode::Off);
 
         assert!(route_at_end);
         assert_eq!(
@@ -818,6 +1385,8 @@ mod tests {
             epoch: 2,
             route_at_end: false,
             wrap: false,
+            file_after_segment: false,
+            file_in_queue: false,
         };
 
         assert_eq!(
@@ -835,6 +1404,19 @@ mod tests {
                 &snapshot(1),
             ),
             PlaybackDecision::Stop
+        );
+    }
+
+    #[test]
+    fn repeat_all_advances_from_the_end_to_wrap() {
+        assert_eq!(
+            resolve_with_wrap(
+                polled(Some("spotify:track:2"), 99, true),
+                polled(Some("spotify:track:1"), 0, true),
+                &snapshot(1),
+                true,
+            ),
+            PlaybackDecision::Advance
         );
     }
 
@@ -878,7 +1460,7 @@ mod tests {
             },
         ];
 
-        let (snapshot, route_at_end) = connect_snapshot(Snapshot::new(tracks, 0), "all");
+        let (snapshot, route_at_end) = connect_snapshot(Snapshot::new(tracks, 0), RepeatMode::All);
         assert_eq!(
             snapshot
                 .tracks
@@ -911,7 +1493,7 @@ mod tests {
         });
         snapshot.index = 2;
 
-        let (run, route_at_end) = connect_snapshot(snapshot, "all");
+        let (run, route_at_end) = connect_snapshot(snapshot, RepeatMode::All);
 
         assert_eq!(run.current().uri, "spotify:track:2");
         assert_eq!(
@@ -938,6 +1520,8 @@ mod tests {
             epoch: 7,
             route_at_end: false,
             wrap: false,
+            file_after_segment: false,
+            file_in_queue: false,
         });
         let mut snapshot = Snapshot::new(
             vec![
@@ -953,7 +1537,7 @@ mod tests {
         );
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
 
-        backend.update_snapshot(snapshot, "all").await;
+        backend.update_snapshot(snapshot, RepeatMode::All).await;
 
         let state = backend.state.lock().await;
         let context = state.context.as_ref().unwrap();
@@ -1003,10 +1587,12 @@ mod tests {
             .begin(
                 &client,
                 Snapshot::new(vec![track(1, 100), track(2, 100)], 1),
-                "all",
+                RepeatMode::All,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .unwrap()
+            .0;
 
         assert!(event.volume_supported);
         let requests = client.transport().requests();
@@ -1039,7 +1625,11 @@ mod tests {
         );
 
         let error = ConnectBackend::default()
-            .begin(&client, Snapshot::new(vec![track(1, 100)], 0), "off")
+            .begin(
+                &client,
+                Snapshot::new(vec![track(1, 100)], 0),
+                RepeatMode::Off,
+            )
             .await
             .unwrap_err();
         assert_eq!(error, "Open Spotify on your desktop");
@@ -1063,7 +1653,11 @@ mod tests {
         );
         let playback = ConnectBackend::default();
         playback
-            .begin(&client, Snapshot::new(vec![track(1, 100)], 0), "off")
+            .begin(
+                &client,
+                Snapshot::new(vec![track(1, 100)], 0),
+                RepeatMode::Off,
+            )
             .await
             .unwrap();
 
@@ -1090,7 +1684,7 @@ mod tests {
             .begin(
                 &client,
                 Snapshot::new(vec![track(1, 100), track(2, 100)], 0),
-                "off",
+                RepeatMode::Off,
             )
             .await
             .unwrap();
@@ -1112,6 +1706,7 @@ mod tests {
                 .step_state(&client, 1)
                 .await
                 .unwrap()
+                .unwrap()
                 .uri
                 .as_deref(),
             Some("spotify:track:2")
@@ -1120,6 +1715,7 @@ mod tests {
             playback
                 .step_state(&client, -1)
                 .await
+                .unwrap()
                 .unwrap()
                 .uri
                 .as_deref(),
@@ -1131,11 +1727,15 @@ mod tests {
                 .step_state(&client, 1)
                 .await
                 .unwrap()
+                .unwrap()
                 .uri
                 .as_deref(),
             Some("spotify:track:2")
         );
-        assert_eq!(playback.step_state(&client, 1).await.unwrap().uri, None);
+        assert_eq!(
+            playback.step_state(&client, 1).await.unwrap().unwrap().uri,
+            None
+        );
 
         let requests = client.transport().requests();
         assert!(requests[1]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-count-mode"
+description = "Enables the lastfm_import_count_mode command without any pre-configured scope."
+commands.allow = ["lastfm_import_count_mode"]
+
+[[permission]]
+identifier = "deny-lastfm-import-count-mode"
+description = "Denies the lastfm_import_count_mode command without any pre-configured scope."
+commands.deny = ["lastfm_import_count_mode"]

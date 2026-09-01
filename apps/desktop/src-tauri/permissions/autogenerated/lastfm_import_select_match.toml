@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-select-match"
+description = "Enables the lastfm_import_select_match command without any pre-configured scope."
+commands.allow = ["lastfm_import_select_match"]
+
+[[permission]]
+identifier = "deny-lastfm-import-select-match"
+description = "Denies the lastfm_import_select_match command without any pre-configured scope."
+commands.deny = ["lastfm_import_select_match"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-playlist-create"
+description = "Enables the playlist_create command without any pre-configured scope."
+commands.allow = ["playlist_create"]
+
+[[permission]]
+identifier = "deny-playlist-create"
+description = "Denies the playlist_create command without any pre-configured scope."
+commands.deny = ["playlist_create"]

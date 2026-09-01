@@ -11,9 +11,30 @@ They emit neutral events carrying generation/request identity; one reducer
 rejects stale events, updates the snapshot, advances the queue, and persists play
 history.
 
+Load and backend changes are latest-intent-wins. Every prepared load carries its
+generation, request, URI, and intent identity; a late result cannot start,
+publish, count, or advance after a newer intent. A built-in runtime prepared
+asynchronously is discarded if Connect or another backend intent wins before
+installation.
+
+`Playback` owns the controller, reducer, and backend implementations. Application
+composition injects a current-provider resolver and consumes a closed
+`PlaybackEffect` callback for player state, errors/recovery, authorization,
+connection refresh, play completion, and listening facts. `playback/` has no
+Tauri or `AppState` dependency. The shell maps those effects to main-window
+events, media/artwork updates, connection refresh, and durable play/Last.fm
+work. The callback runs on the serialized playback event path and must not
+synchronously re-enter `Playback`; artwork publication remains spawned by the
+shell.
+
 Shuffle permutes only the future suffix and retains the canonical list so turning
 shuffle off restores normal order without losing the current track. Repeat off,
 all, and one are controller policies shared by every backend.
+The persisted and IPC boundaries use closed lowercase `RepeatMode`
+(`off`/`all`/`one`) and `PlaybackBackend` (`connect`/`local`) enums. The
+controller passes repeat by value through reducer, routing, preload, and backend
+translation; its internal runtime-backend state remains separate. Repeat changes
+apply to the live backend before settings persistence.
 
 Ordinary queues omit overlay tracks disabled by the user. Explicitly starting a
 disabled track includes that track for the run while later advancement still skips
@@ -45,17 +66,26 @@ usable while signed out of Last.fm or Spotify.
   are Normal (96 kbps), High (160 kbps), and Very High (320 kbps).
 - Spotify Connect controls the active Spotify device through the Web API and
   polls its state. It distinguishes natural completion, external takeover, and
-  device disappearance. Spotify owns audio download, buffering, quality, and
-  output in this mode; the Spotify desktop app is needed only for this mode.
+  device disappearance. One narrow async operation gate orders command and
+  poll-driven Spotify calls. The backend captures revision/context identity
+  under its state mutex, awaits outside it, and commits only while that identity
+  remains current, so delayed transport never blocks state reads. Spotify owns
+  audio download, buffering, quality, and output in this mode; the Spotify
+  desktop app is needed only for this mode.
 - The local-file engine uses `retune-audio` and routes `file://` tracks there
   regardless of the selected Spotify backend. It decodes the source file through
   rodio and works while signed out; Spotify quality and cache settings do not
-  apply.
+  apply. Clean decoder exhaustion emits natural completion; a late demux or
+  decode failure emits `Unavailable` and never completion.
 
 Mixed queues switch at URI boundaries. Only one execution path is allowed to be
 audible; transitions pause or stop the counterpart before starting the next.
 System Play and Pause commands set an explicit state; only Toggle inverts the
 current state.
+
+Native media controls and backend callbacks enter the same controller as
+neutral play, pause, toggle, next, previous, seek, and volume intents. They do
+not maintain a second state machine or advance the queue in a backend handler.
 
 When built-in playback is selected, missing or rejected playback authorization
 returns a typed outcome before a new queue is committed or the reducer advances
@@ -63,6 +93,10 @@ to the next track. It never falls through to Connect. The shell keeps the
 requested selection outside the controller while it offers separate Spotify
 authorization; Cancel leaves playback stopped. File URIs continue through the
 local-file engine without Spotify playback authorization.
+Authorization prompts carry both the target track ID and URI. React correlates
+the URI with its latest play-intent queue before offering authorization; the ID
+then identifies the matching row to retry. This avoids positional synthetic IDs
+from correlating a stale album or search request with a newer one.
 
 ## Built-in Spotify data path
 
@@ -135,8 +169,17 @@ deleting queued items; reconnecting or re-enabling drains the queue.
 ## Local files
 
 `retune-audio` recursively scans supported audio extensions without following
-directory symlinks, canonicalizes paths, probes decodability, and reads tags and
-artwork. Moving a file changes its identity and leaves the old record unavailable.
+directory symlinks, canonicalizes paths, probes decodability, and imports basic
+tags without materializing embedded pictures. Artwork is read on demand on a
+blocking worker and rejected above 8 MiB, so tag I/O and base64 encoding do not
+stall the async executor. The hard pre-parse ceiling currently covers ID3
+PIC/APIC art in MP3 files, native FLAC PICTURE blocks, and MP4/M4A `covr` data.
+The ceiling applies to the aggregate declared bytes of every embedded picture,
+not only to each picture independently.
+APE-tagged MPEG and comment-encoded FLAC pictures are rejected explicitly, as
+are picture-capable AAC, AIFF, WAV, APE, Musepack, Ogg, Speex, and WavPack
+containers until they have equally bounded parser paths. Moving a file changes
+its identity and leaves the old record unavailable.
 Missing files fail cleanly and playback advances according to controller policy.
 Audiobook chapter playback is not currently supported.
 

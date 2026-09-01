@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
@@ -21,6 +21,33 @@ use crate::{Error, Result};
 const SERVICE: &str = "com.rianjs.retune";
 const KEY_ACCOUNT: &str = "token-file-key";
 const NONCE_LEN: usize = 12;
+const MAX_TOKEN_FILE_BYTES: u64 = 1024 * 1024;
+
+fn read_token_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    if length > MAX_TOKEN_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "encrypted token file is oversized",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(length).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "encrypted token file is oversized",
+        )
+    })?);
+    file.take(MAX_TOKEN_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TOKEN_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "encrypted token file is oversized",
+        ));
+    }
+    Ok(bytes)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackCredentials {
@@ -73,9 +100,12 @@ impl Tokens {
 }
 
 pub trait TokenStore: Send + Sync {
+    /// Returns `Ok(None)` only when no token record exists.
     fn load(&self) -> Result<Option<Tokens>>;
     fn save(&self, tokens: &Tokens) -> Result<()>;
     fn clear(&self) -> Result<()>;
+    /// Replaces the record only when its complete current value matches.
+    fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool>;
 }
 
 impl<S: TokenStore + ?Sized> TokenStore for Arc<S> {
@@ -90,6 +120,10 @@ impl<S: TokenStore + ?Sized> TokenStore for Arc<S> {
     fn clear(&self) -> Result<()> {
         (**self).clear()
     }
+
+    fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+        (**self).replace_if_current(expected, tokens)
+    }
 }
 
 impl<S: TokenStore + ?Sized> TokenStore for Box<S> {
@@ -103,6 +137,10 @@ impl<S: TokenStore + ?Sized> TokenStore for Box<S> {
 
     fn clear(&self) -> Result<()> {
         (**self).clear()
+    }
+
+    fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+        (**self).replace_if_current(expected, tokens)
     }
 }
 
@@ -132,15 +170,27 @@ impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
     }
 
     fn save(&self, tokens: &Tokens) -> Result<()> {
+        let mut cache = self.cache.lock().map_err(token_error)?;
         self.inner.save(tokens)?;
-        *self.cache.lock().map_err(token_error)? = Some(Some(tokens.clone()));
+        *cache = Some(Some(tokens.clone()));
         Ok(())
     }
 
     fn clear(&self) -> Result<()> {
+        let mut cache = self.cache.lock().map_err(token_error)?;
         self.inner.clear()?;
-        *self.cache.lock().map_err(token_error)? = Some(None);
+        *cache = Some(None);
         Ok(())
+    }
+
+    fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+        let mut cache = self.cache.lock().map_err(token_error)?;
+        if !self.inner.replace_if_current(expected, tokens)? {
+            *cache = None;
+            return Ok(false);
+        }
+        *cache = Some(Some(tokens.clone()));
+        Ok(true)
     }
 }
 
@@ -185,7 +235,8 @@ impl KeySource for NativeKeySource {
 pub struct EncryptedFsTokenStore {
     path: PathBuf,
     key_source: Box<dyn KeySource>,
-    key: OnceLock<std::result::Result<[u8; 32], String>>,
+    key: OnceLock<[u8; 32]>,
+    lifecycle: Mutex<()>,
 }
 
 impl EncryptedFsTokenStore {
@@ -201,53 +252,42 @@ impl EncryptedFsTokenStore {
             path: app_data_dir.as_ref().join("tokens.enc"),
             key_source: Box::new(key_source),
             key: OnceLock::new(),
+            lifecycle: Mutex::new(()),
         }
     }
 
     fn key(&self) -> Result<[u8; 32]> {
-        self.key
-            .get_or_init(|| {
-                self.key_source
-                    .load_or_create()
-                    .map_err(|error| error.to_string())
-            })
-            .as_ref()
-            .copied()
-            .map_err(|error| Error::TokenStore(error.clone()))
+        if let Some(key) = self.key.get() {
+            return Ok(*key);
+        }
+        let key = self.key_source.load_or_create()?;
+        let _ = self.key.set(key);
+        Ok(*self.key.get().unwrap_or(&key))
     }
-}
 
-impl TokenStore for EncryptedFsTokenStore {
-    fn load(&self) -> Result<Option<Tokens>> {
-        let bytes = match fs::read(&self.path) {
+    fn load_file(&self) -> Result<Option<Tokens>> {
+        let bytes = match read_token_file(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(token_corrupt(error));
+            }
             Err(error) => return Err(token_error(error)),
         };
         if bytes.len() < NONCE_LEN {
-            log::warn!("Ignoring corrupt encrypted Spotify token file");
-            return Ok(None);
+            return Err(token_corrupt("encrypted token file is truncated"));
         }
 
         let cipher = ChaCha20Poly1305::new((&self.key()?).into());
-        let plaintext =
-            match cipher.decrypt(Nonce::from_slice(&bytes[..NONCE_LEN]), &bytes[NONCE_LEN..]) {
-                Ok(plaintext) => plaintext,
-                Err(_) => {
-                    log::warn!("Ignoring undecryptable Spotify token file");
-                    return Ok(None);
-                }
-            };
-        match serde_json::from_slice(&plaintext) {
-            Ok(tokens) => Ok(Some(tokens)),
-            Err(error) => {
-                log::warn!("Ignoring corrupt Spotify token file: {error}");
-                Ok(None)
-            }
-        }
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&bytes[..NONCE_LEN]), &bytes[NONCE_LEN..])
+            .map_err(|_| token_corrupt("encrypted token authentication failed"))?;
+        serde_json::from_slice(&plaintext)
+            .map(Some)
+            .map_err(token_corrupt)
     }
 
-    fn save(&self, tokens: &Tokens) -> Result<()> {
+    fn save_file(&self, tokens: &Tokens) -> Result<()> {
         let plaintext = serde_json::to_vec(tokens).map_err(token_error)?;
         let mut nonce = [0; NONCE_LEN];
         rand::rng().fill_bytes(&mut nonce);
@@ -261,12 +301,38 @@ impl TokenStore for EncryptedFsTokenStore {
         atomic_write(&self.path, &bytes)
     }
 
-    fn clear(&self) -> Result<()> {
+    fn clear_file(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(token_error(error)),
         }
+    }
+}
+
+impl TokenStore for EncryptedFsTokenStore {
+    fn load(&self) -> Result<Option<Tokens>> {
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        self.load_file()
+    }
+
+    fn save(&self, tokens: &Tokens) -> Result<()> {
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        self.save_file(tokens)
+    }
+
+    fn clear(&self) -> Result<()> {
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        self.clear_file()
+    }
+
+    fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        if self.load_file()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_file(tokens)?;
+        Ok(true)
     }
 }
 
@@ -296,6 +362,10 @@ fn token_error(error: impl std::fmt::Display) -> Error {
     Error::TokenStore(error.to_string())
 }
 
+fn token_corrupt(error: impl std::fmt::Display) -> Error {
+    Error::TokenStoreCorrupt(error.to_string())
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryTokenStore(Mutex<Option<Tokens>>);
 
@@ -319,13 +389,25 @@ impl TokenStore for InMemoryTokenStore {
         *self.0.lock().map_err(token_error)? = None;
         Ok(())
     }
+
+    fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+        let mut current = self.0.lock().map_err(token_error)?;
+        if current.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        *current = Some(tokens.clone());
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        sync::{
+            Barrier,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     #[cfg(unix)]
@@ -361,6 +443,48 @@ mod tests {
             self.clears.fetch_add(1, Ordering::Relaxed);
             *self.tokens.lock().unwrap() = None;
             Ok(())
+        }
+
+        fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+            let mut current = self.tokens.lock().unwrap();
+            if current.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *current = Some(tokens.clone());
+            Ok(true)
+        }
+    }
+
+    struct BlockingSaveStore {
+        tokens: Mutex<Option<Tokens>>,
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl TokenStore for BlockingSaveStore {
+        fn load(&self) -> Result<Option<Tokens>> {
+            Ok(self.tokens.lock().unwrap().clone())
+        }
+
+        fn save(&self, tokens: &Tokens) -> Result<()> {
+            *self.tokens.lock().unwrap() = Some(tokens.clone());
+            self.entered.wait();
+            self.release.wait();
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<()> {
+            *self.tokens.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+            let mut current = self.tokens.lock().unwrap();
+            if current.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *current = Some(tokens.clone());
+            Ok(true)
         }
     }
 
@@ -455,6 +579,56 @@ mod tests {
     }
 
     #[test]
+    fn cached_save_and_clear_commit_backing_and_cache_together() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let inner = Arc::new(BlockingSaveStore {
+            tokens: Mutex::new(Some(tokens("initial"))),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let store = Arc::new(CachedTokenStore::new(Arc::clone(&inner)));
+        assert_eq!(store.load().unwrap(), Some(tokens("initial")));
+
+        let saving = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.save(&tokens("saved")).unwrap())
+        };
+        entered.wait();
+        assert!(store.cache.try_lock().is_err());
+        let clearing = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.clear().unwrap())
+        };
+        release.wait();
+        saving.join().unwrap();
+        clearing.join().unwrap();
+
+        assert_eq!(store.load().unwrap(), None);
+        assert_eq!(inner.load().unwrap(), None);
+    }
+
+    #[test]
+    fn cached_conditional_replace_checks_backing_not_a_stale_cache() {
+        let inner = Arc::new(CountingStore {
+            tokens: Mutex::new(Some(tokens("initial"))),
+            ..Default::default()
+        });
+        let store = CachedTokenStore::new(Arc::clone(&inner));
+        let initial = tokens("initial");
+        assert_eq!(store.load().unwrap(), Some(initial.clone()));
+        inner.save(&tokens("replacement")).unwrap();
+
+        assert!(
+            !store
+                .replace_if_current(&initial, &tokens("stale"))
+                .unwrap()
+        );
+        assert_eq!(store.load().unwrap(), Some(tokens("replacement")));
+        assert_eq!(inner.load().unwrap(), Some(tokens("replacement")));
+    }
+
+    #[test]
     fn legacy_record_defaults_scopes_to_empty() {
         let tokens: Tokens =
             serde_json::from_str(r#"{"access":"access","refresh":"refresh","expires_at":42}"#)
@@ -489,12 +663,11 @@ mod tests {
         assert_eq!(
             tokens.missing_scopes(),
             [
+                "user-read-playback-position",
                 "playlist-read-private",
                 "playlist-read-collaborative",
                 "playlist-modify-public",
                 "playlist-modify-private",
-                "user-follow-read",
-                "user-follow-modify",
             ]
         );
     }
@@ -522,6 +695,21 @@ mod tests {
         fn load_or_create(&self) -> Result<[u8; 32]> {
             self.loads.fetch_add(1, Ordering::Relaxed);
             Ok(self.key)
+        }
+    }
+
+    struct FailOnceKeySource {
+        key: [u8; 32],
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl KeySource for FailOnceKeySource {
+        fn load_or_create(&self) -> Result<[u8; 32]> {
+            if self.loads.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err(Error::TokenStore("credential store unavailable".into()))
+            } else {
+                Ok(self.key)
+            }
         }
     }
 
@@ -571,6 +759,24 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_store_retries_a_transient_key_failure_and_caches_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let store = EncryptedFsTokenStore::with_key_source(
+            dir.path(),
+            FailOnceKeySource {
+                key: [7; 32],
+                loads: Arc::clone(&loads),
+            },
+        );
+
+        assert!(store.save(&tokens("first")).is_err());
+        store.save(&tokens("second")).unwrap();
+        assert_eq!(store.load().unwrap(), Some(tokens("second")));
+        assert_eq!(loads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn encrypted_store_uses_fresh_nonces_and_atomic_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let store = encrypted_store(dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
@@ -589,23 +795,35 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_store_treats_corrupt_or_wrong_key_as_absent() {
+    fn encrypted_store_reports_corrupt_wrong_key_and_io_distinctly() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tokens.enc");
         let store = encrypted_store(dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
 
         fs::write(&path, b"corrupt").unwrap();
-        assert_eq!(store.load().unwrap(), None);
+        assert!(matches!(store.load(), Err(Error::TokenStoreCorrupt(_))));
 
         store.save(&tokens("secret")).unwrap();
         let wrong_key = encrypted_store(dir.path(), [8; 32], Arc::new(AtomicUsize::new(0)));
-        assert_eq!(wrong_key.load().unwrap(), None);
+        assert!(matches!(wrong_key.load(), Err(Error::TokenStoreCorrupt(_))));
 
         let nonce = [1; NONCE_LEN];
         let ciphertext = ChaCha20Poly1305::new((&[7; 32]).into())
             .encrypt(Nonce::from_slice(&nonce), b"not json".as_ref())
             .unwrap();
         fs::write(&path, [nonce.as_slice(), ciphertext.as_slice()].concat()).unwrap();
-        assert_eq!(store.load().unwrap(), None);
+        assert!(matches!(store.load(), Err(Error::TokenStoreCorrupt(_))));
+
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(store.load(), Err(Error::TokenStore(_))));
+
+        fs::remove_dir(&path).unwrap();
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_TOKEN_FILE_BYTES + 1)
+            .unwrap();
+        assert!(matches!(store.load(), Err(Error::TokenStoreCorrupt(_))));
+        assert!(path.exists());
     }
 }

@@ -63,10 +63,8 @@ button { color: inherit; }
 .lcd.external .lcd-copy { opacity: .65; }
 .progress-row { height: 10px; display: grid; grid-template-columns: 34px 1fr 38px; align-items: center; gap: 5px; color: var(--dim); font-size: 9.5px; line-height: 10px; }
 .progress-row time:last-child { text-align: right; }
-.progress-row progress { width: 100%; height: 3px; overflow: hidden; border: 0; border-radius: 2px; accent-color: var(--accent); cursor: pointer; }
-.progress-row progress::-webkit-progress-bar { border-radius: 2px; background: color-mix(in srgb, var(--dim) 30%, transparent); }
-.progress-row progress::-webkit-progress-value { border-radius: 2px; background: var(--accent); }
-.progress-row progress::-moz-progress-bar { border-radius: 2px; background: var(--accent); }
+.progress-row input { width: 100%; height: 10px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.progress-row input:disabled { cursor: default; }
 .search-area { width: 218px; justify-self: end; display: flex; flex-direction: column; align-items: stretch; gap: 3px; min-width: 0; }
 .search-scope { width: 100%; display: flex; align-items: center; }
 .scope-pills { box-sizing: border-box; width: 100%; height: 22px; display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--control) 80%, transparent); }
@@ -190,6 +188,8 @@ button { color: inherit; }
 .spotify-artwork.round { border-radius: 50%; }
 .spotify-artwork img { width: 100%; height: 100%; object-fit: cover; }
 .spotify-copy { min-width: 0; overflow: hidden; }
+.spotify-copy-button { padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; }
+.spotify-copy-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .spotify-copy strong, .spotify-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spotify-copy small { margin-top: 2px; color: var(--dim); font-weight: 400; }
 .spotify-link { padding: 4px 0; border: 0; color: var(--accent); background: transparent; }

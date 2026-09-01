@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connect-lastfm"
+description = "Enables the connect_lastfm command without any pre-configured scope."
+commands.allow = ["connect_lastfm"]
+
+[[permission]]
+identifier = "deny-connect-lastfm"
+description = "Denies the connect_lastfm command without any pre-configured scope."
+commands.deny = ["connect_lastfm"]

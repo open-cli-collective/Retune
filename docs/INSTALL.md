@@ -2,12 +2,12 @@
 
 Retune supports these native packages:
 
-| Platform | Supported architecture |
-| --- | --- |
-| macOS | Apple Silicon |
-| Windows 10/11 | x64, ARM64 |
-| Ubuntu 22.04 | amd64, arm64 |
-| Compatible Debian/Ubuntu systems | amd64, arm64 |
+| Platform | Supported architecture | Minimum runtime |
+| --- | --- | --- |
+| macOS | Apple Silicon | macOS 11 |
+| Windows 10/11 | x64, ARM64 | WebView2 105 (the installer updates older runtimes) |
+| Ubuntu 22.04 | amd64, arm64 | Distribution WebKitGTK 4.1 |
+| Compatible Debian/Ubuntu systems | amd64, arm64 | WebKitGTK 4.1 |
 
 Homebrew, Winget, and APT are recommended because they manage updates and verify
 published package metadata.
@@ -20,15 +20,16 @@ in each artifact name:
 
 | Platform | Architecture | Asset |
 | --- | --- | --- |
-| macOS | Apple Silicon | `Retune-<version>-aarch64.tar.gz` |
+| macOS | Apple Silicon | `Retune-<version>-aarch64.zip` |
 | Windows | x64 | `Retune-<version>-windows-x64-setup.exe` |
 | Windows | ARM64 | `Retune-<version>-windows-arm64-setup.exe` |
 | Debian/Ubuntu | amd64 | `retune_<version>_amd64.deb` |
 | Debian/Ubuntu | arm64 | `retune_<version>_arm64.deb` |
 
-Download `checksums.txt` from that same latest release and verify the matching asset before installing. On macOS, verify the tarball
-before clearing quarantine or moving `Retune.app` into `/Applications`. On
-Windows, verify the installer before accepting any unsigned-publisher warning.
+Download `checksums.txt` from that same latest release and verify the matching
+asset before installing. macOS artifacts are Developer ID-signed and notarized;
+Windows installers and their installed application payloads are
+Authenticode-signed. Checksums remain an independent transport-integrity check.
 These files support only the targets listed above.
 
 After verifying the download, install the matching package:
@@ -36,8 +37,8 @@ After verifying the download, install the matching package:
 ```sh
 # macOS (replace VERSION with the latest release version)
 VERSION=latest-version
-tar -xzf "Retune-${VERSION}-aarch64.tar.gz"
-xattr -dr com.apple.quarantine Retune.app
+/usr/bin/ditto -x -k "Retune-${VERSION}-aarch64.zip" .
+spctl --assess --type execute --verbose=4 Retune.app
 sudo mv Retune.app /Applications/
 
 # Debian/Ubuntu amd64 (use the arm64 filename on ARM64)
@@ -63,12 +64,10 @@ brew upgrade --cask retune
 brew uninstall --cask retune
 ```
 
-The app is stable-signed with the Open CLI Collective's long-lived self-signed
-certificate, but is not Apple-notarized. Homebrew clears quarantine during
-installation. When replacing an older ad-hoc-signed build, the first access to
-stored Spotify credentials may show one Keychain prompt; choose **Always Allow**
-once. Later stable-signed updates keep the same designated requirement and do
-not prompt again.
+The app is signed with the Open CLI Collective's Apple Developer ID identity,
+uses hardened runtime and a secure timestamp, and has an Apple notarization
+ticket stapled before publication. Gatekeeper therefore validates the normal
+download without a quarantine bypass.
 
 ## Windows with Winget
 
@@ -85,12 +84,12 @@ winget upgrade --exact --id OpenCLICollective.Retune
 winget uninstall --exact --id OpenCLICollective.Retune
 ```
 
-The installer is intentionally unsigned, so Windows may show **Unknown
-Publisher** or Microsoft Defender SmartScreen warnings. Winget verifies the
-published installer hash. For a direct download, compare it with the release's
-`checksums.txt` before accepting the warning. New Winget submissions can take
-time to appear while Microsoft publishes the manifest; if Winget reports that
-no package was found, use that verified direct download or retry later.
+The installer and installed Retune executable are Authenticode-signed through
+Microsoft Artifact Signing with SHA-256 RFC 3161 timestamps. Windows should
+show the verified publisher rather than **Unknown Publisher**. Winget also
+verifies the published installer hash. New Winget submissions can take time to
+appear while Microsoft publishes the manifest; if Winget reports that no
+package was found, use the signed direct download or retry later.
 
 ## Debian or Ubuntu with APT
 
@@ -156,12 +155,14 @@ documentation](https://developer.spotify.com/documentation/web-api/concepts/quot
   Premium, add the signing-in Spotify account to the app allowlist, and keep the
   total at five users or fewer. Quota exhaustion must clear at Spotify; repeated
   reconnects do not bypass it.
-- **macOS trust or Keychain prompt:** install through the Homebrew command above.
-  After an older ad-hoc build, choose **Always Allow** once for the stable-signed
-  app.
-- **Windows trust warning:** Winget validates the installer hash even though its
-  publisher is unsigned. For direct downloads, verify `checksums.txt` before
-  proceeding.
+- **macOS trust failure:** verify the checksum, then run
+  `spctl --assess --type execute --verbose=4 Retune.app`. A current published
+  artifact must pass Developer ID and notarization assessment without removing
+  quarantine metadata.
+- **Windows trust failure:** run
+  `Get-AuthenticodeSignature .\Retune-<version>-windows-<arch>-setup.exe` and
+  require `Status` to be `Valid`; do not install an unsigned or mismatched
+  artifact.
 - **Credential-store unavailable:** unlock macOS Keychain, Windows Credential
   Manager, or Linux Secret Service and relaunch. Local-only use remains
   available without stored Spotify credentials.

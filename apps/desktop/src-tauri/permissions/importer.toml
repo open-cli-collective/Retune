@@ -1,0 +1,29 @@
+[[set]]
+identifier = "importer-commands"
+description = "Minimal commands available to the Last.fm importer window."
+permissions = [
+  "allow-get-appearance",
+  "allow-genre-values",
+  "allow-lastfm-import-state",
+  "allow-lastfm-import-queue",
+  "allow-lastfm-import-page",
+  "allow-start-lastfm-import",
+  "allow-lastfm-import-review",
+  "allow-lastfm-import-options",
+  "allow-lastfm-import-count-mode",
+  "allow-lastfm-import-search-terms",
+  "allow-lastfm-import-select-match",
+  "allow-lastfm-import-select-matches",
+  "allow-lastfm-import-collection-search-albums",
+  "allow-lastfm-import-collection-preview-album",
+  "allow-lastfm-import-collection-add-album",
+  "allow-lastfm-import-collection-remove-album",
+  "allow-lastfm-import-activate-collection",
+  "allow-lastfm-import-change-track",
+  "allow-lastfm-import-change-album",
+  "allow-lastfm-import-apply",
+  "allow-lastfm-import-retry-apply",
+  "allow-lastfm-import-prepare-accept-all",
+  "allow-lastfm-import-accept-all",
+  "allow-open-external-destination",
+]

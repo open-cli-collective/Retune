@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-playlist-remove"
+description = "Enables the playlist_remove command without any pre-configured scope."
+commands.allow = ["playlist_remove"]
+
+[[permission]]
+identifier = "deny-playlist-remove"
+description = "Denies the playlist_remove command without any pre-configured scope."
+commands.deny = ["playlist_remove"]

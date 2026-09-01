@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-options"
+description = "Enables the lastfm_import_options command without any pre-configured scope."
+commands.allow = ["lastfm_import_options"]
+
+[[permission]]
+identifier = "deny-lastfm-import-options"
+description = "Denies the lastfm_import_options command without any pre-configured scope."
+commands.deny = ["lastfm_import_options"]

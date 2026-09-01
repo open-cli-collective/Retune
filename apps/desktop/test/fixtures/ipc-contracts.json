@@ -1,0 +1,33 @@
+{
+  "settingsPatch": {
+    "theme": "dark",
+    "browserPanes": {
+      "cat": false,
+      "art": true,
+      "alb": false
+    },
+    "columnOrder": ["name", "artist"],
+    "columnWidths": {
+      "name": 320
+    },
+    "sortColumn": null,
+    "spotifyClientId": "fixture-client",
+    "playbackBackend": "local",
+    "streamingBitrate": 320,
+    "playThresholdPercent": 90,
+    "lastfmScrobbling": false
+  },
+  "importApplyFinished": {
+    "succeeded": {
+      "status": "succeeded",
+      "batchId": 4
+    },
+    "failed": {
+      "status": "failed",
+      "batchId": 4,
+      "code": "spotify-rate-limited",
+      "message": "try later",
+      "retryAt": 8000
+    }
+  }
+}

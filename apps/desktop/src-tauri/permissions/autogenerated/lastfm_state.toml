@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-state"
+description = "Enables the lastfm_state command without any pre-configured scope."
+commands.allow = ["lastfm_state"]
+
+[[permission]]
+identifier = "deny-lastfm-state"
+description = "Denies the lastfm_state command without any pre-configured scope."
+commands.deny = ["lastfm_state"]

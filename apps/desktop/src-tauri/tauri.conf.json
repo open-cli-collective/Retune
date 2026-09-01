@@ -5,13 +5,14 @@
   "identifier": "com.rianjs.retune",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://127.0.0.1:5173",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Retune — Library",
         "width": 1120,
         "height": 720,
@@ -20,15 +21,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' https://i.scdn.co data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+      "capabilities": [
+        "default",
+        "lastfm-importer"
+      ],
+      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; img-src 'self' https://i.scdn.co data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "macOS": {
-      "signingIdentity": "-"
-    },
     "linux": {
       "deb": {
         "section": "sound"

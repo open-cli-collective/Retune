@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 /// Sentinel genre for tracks whose provider metadata carries no genre.
 pub const UNCATEGORIZED: &str = "Uncategorized";
@@ -116,18 +116,74 @@ impl AlbumKey {
 }
 
 /// The user's overlay library: all track records plus album-level ratings.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Library {
     tracks: Vec<TrackRecord>,
-    #[serde(with = "album_rating_serde")]
+    #[serde(serialize_with = "album_rating_serde::serialize")]
     album_ratings: BTreeMap<AlbumKey, Rating>,
     next_id: u64,
+}
+
+#[derive(Deserialize)]
+struct LibraryWire {
+    tracks: Vec<TrackRecord>,
+    album_ratings: Vec<(AlbumKey, Rating)>,
+    next_id: u64,
+}
+
+impl<'de> Deserialize<'de> for Library {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let LibraryWire {
+            tracks,
+            album_ratings,
+            next_id: _stored_next_id,
+        } = LibraryWire::deserialize(deserializer)?;
+        let mut ids = std::collections::HashSet::new();
+        let mut uris = std::collections::HashSet::new();
+        for track in &tracks {
+            if !ids.insert(track.id) {
+                return Err(D::Error::custom(format!(
+                    "duplicate track id {}",
+                    track.id.0
+                )));
+            }
+            if track.uri.is_empty() {
+                return Err(D::Error::custom("track uri must not be empty"));
+            }
+            if !uris.insert(track.uri.as_str()) {
+                return Err(D::Error::custom(format!(
+                    "duplicate track uri {:?}",
+                    track.uri
+                )));
+            }
+        }
+        let next_id = match tracks.iter().map(|track| track.id.0).max() {
+            None => 0,
+            Some(max) => max
+                .checked_add(1)
+                .ok_or_else(|| D::Error::custom(format!("track id {max} exhausts the id space")))?,
+        };
+        let mut ratings = BTreeMap::new();
+        for (key, rating) in album_ratings {
+            if ratings.insert(key, rating).is_some() {
+                return Err(D::Error::custom("duplicate album rating key"));
+            }
+        }
+        Ok(Self {
+            tracks,
+            album_ratings: ratings,
+            next_id,
+        })
+    }
 }
 
 mod album_rating_serde {
     use std::collections::BTreeMap;
 
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Serialize, Serializer};
 
     use super::{AlbumKey, Rating};
 
@@ -140,14 +196,6 @@ mod album_rating_serde {
     {
         ratings.iter().collect::<Vec<_>>().serialize(serializer)
     }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<AlbumKey, Rating>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Vec::<(AlbumKey, Rating)>::deserialize(deserializer)
-            .map(|entries| entries.into_iter().collect())
-    }
 }
 
 impl Library {
@@ -157,10 +205,6 @@ impl Library {
 
     pub fn tracks(&self) -> &[TrackRecord] {
         &self.tracks
-    }
-
-    pub fn tracks_mut(&mut self) -> &mut [TrackRecord] {
-        &mut self.tracks
     }
 
     pub fn get(&self, id: TrackId) -> Option<&TrackRecord> {
@@ -182,6 +226,38 @@ impl Library {
             return track.id;
         }
 
+        self.push(incoming)
+    }
+
+    /// Adds a batch in order, returning how many records were new.
+    pub fn add_all(&mut self, incoming: impl IntoIterator<Item = NewTrack>) -> usize {
+        self.add_all_counted(incoming).0
+    }
+
+    fn add_all_counted(&mut self, incoming: impl IntoIterator<Item = NewTrack>) -> (usize, usize) {
+        let mut uris = self
+            .tracks
+            .iter()
+            .map(|track| track.uri.clone())
+            .collect::<HashSet<_>>();
+        let before = self.tracks.len();
+        #[cfg(test)]
+        let mut index_operations = uris.len();
+        #[cfg(not(test))]
+        let index_operations = 0;
+        for track in incoming {
+            #[cfg(test)]
+            {
+                index_operations += 1;
+            }
+            if uris.insert(track.uri.clone()) {
+                self.push(track);
+            }
+        }
+        (self.tracks.len() - before, index_operations)
+    }
+
+    fn push(&mut self, incoming: NewTrack) -> TrackId {
         let id = self.fresh_id();
         self.tracks.push(TrackRecord {
             id,
@@ -209,29 +285,69 @@ impl Library {
 
     /// Adds a new record or refreshes the provider category of an existing one.
     pub fn upsert(&mut self, incoming: NewTrack) -> TrackId {
-        if let Some(track) = self
+        if let Some(index) = self
             .tracks
-            .iter_mut()
-            .find(|track| track.uri == incoming.uri)
+            .iter()
+            .position(|track| track.uri == incoming.uri)
         {
-            track.track_no = incoming.track_no;
-            track.disc_no = incoming.disc_no;
-            track.kind = incoming.kind;
-            track.bitrate_kbps = incoming.bitrate_kbps;
-            track.release_date = incoming.release_date;
-            track.added_at = match (track.added_at, incoming.added_at) {
-                (Some(existing), Some(discovered)) => Some(existing.min(discovered)),
-                (None, discovered) => discovered,
-                (existing, None) => existing,
-            };
-            if track.orig_cat.is_some() {
-                track.orig_cat = Some(incoming.cat);
-            } else {
-                track.cat = incoming.cat;
-            }
-            return track.id;
+            return Self::update(&mut self.tracks[index], incoming);
         }
-        self.add(incoming)
+        self.push(incoming)
+    }
+
+    /// Upserts a batch in order using one transient URI index.
+    pub fn upsert_all(&mut self, incoming: impl IntoIterator<Item = NewTrack>) {
+        self.upsert_all_counted(incoming);
+    }
+
+    fn upsert_all_counted(&mut self, incoming: impl IntoIterator<Item = NewTrack>) -> usize {
+        let mut indexes = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.uri.clone(), index))
+            .collect::<HashMap<_, _>>();
+        #[cfg(test)]
+        let mut index_operations = indexes.len();
+        #[cfg(not(test))]
+        let index_operations = 0;
+        for track in incoming {
+            #[cfg(test)]
+            {
+                index_operations += 1;
+            }
+            if let Some(&index) = indexes.get(&track.uri) {
+                Self::update(&mut self.tracks[index], track);
+            } else {
+                let uri = track.uri.clone();
+                self.push(track);
+                indexes.insert(uri, self.tracks.len() - 1);
+                #[cfg(test)]
+                {
+                    index_operations += 1;
+                }
+            }
+        }
+        index_operations
+    }
+
+    fn update(track: &mut TrackRecord, incoming: NewTrack) -> TrackId {
+        track.track_no = incoming.track_no;
+        track.disc_no = incoming.disc_no;
+        track.kind = incoming.kind;
+        track.bitrate_kbps = incoming.bitrate_kbps;
+        track.release_date = incoming.release_date;
+        track.added_at = match (track.added_at, incoming.added_at) {
+            (Some(existing), Some(discovered)) => Some(existing.min(discovered)),
+            (None, discovered) => discovered,
+            (existing, None) => existing,
+        };
+        if track.orig_cat.is_some() {
+            track.orig_cat = Some(incoming.cat);
+        } else {
+            track.cat = incoming.cat;
+        }
+        track.id
     }
 
     /// Edits the user-facing fields of one track (Get Info). Setting `cat`
@@ -286,6 +402,68 @@ impl Library {
         Ok(())
     }
 
+    pub fn record_play(&mut self, uri: &str, played_at: u64) -> bool {
+        self.merge_history_additive(uri, 1, None, Some(played_at))
+    }
+
+    pub fn merge_history_additive(
+        &mut self,
+        uri: &str,
+        play_count: u64,
+        earliest: Option<u64>,
+        latest: Option<u64>,
+    ) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|track| track.uri == uri) else {
+            return false;
+        };
+        track.play_count = track
+            .play_count
+            .saturating_add(play_count.min(u32::MAX as u64) as u32);
+        merge_history_times(track, earliest, latest);
+        true
+    }
+
+    pub fn merge_history_absolute(
+        &mut self,
+        uri: &str,
+        play_count: Option<u64>,
+        earliest: Option<u64>,
+        latest: Option<u64>,
+    ) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|track| track.uri == uri) else {
+            return false;
+        };
+        if let Some(play_count) = play_count {
+            track.play_count = track.play_count.max(play_count.min(u32::MAX as u64) as u32);
+        }
+        merge_history_times(track, earliest, latest);
+        true
+    }
+
+    pub fn fill_missing_metadata(
+        &mut self,
+        id: TrackId,
+        added_at: Option<u64>,
+        kind: Option<String>,
+        bitrate_kbps: Option<u32>,
+    ) -> Result<bool, UnknownTrack> {
+        let track = self.track_mut(id)?;
+        let mut changed = false;
+        if track.added_at.is_none() && added_at.is_some() {
+            track.added_at = added_at;
+            changed = true;
+        }
+        if track.kind.is_none() && kind.is_some() {
+            track.kind = kind;
+            changed = true;
+        }
+        if track.bitrate_kbps.is_none() && bitrate_kbps.is_some() {
+            track.bitrate_kbps = bitrate_kbps;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     pub fn set_album_rating(&mut self, key: AlbumKey, rating: Option<Rating>) {
         match rating {
             Some(rating) => {
@@ -319,8 +497,25 @@ impl Library {
     /// and keep their overlay edits; album ratings merge the same way
     /// (existing keys win).
     pub fn merge(&mut self, other: Library) {
+        self.merge_counted(other);
+    }
+
+    fn merge_counted(&mut self, other: Library) -> usize {
+        let mut uris = self
+            .tracks
+            .iter()
+            .map(|track| track.uri.clone())
+            .collect::<HashSet<_>>();
+        #[cfg(test)]
+        let mut index_operations = uris.len();
+        #[cfg(not(test))]
+        let index_operations = 0;
         for mut track in other.tracks {
-            if self.tracks.iter().any(|existing| existing.uri == track.uri) {
+            #[cfg(test)]
+            {
+                index_operations += 1;
+            }
+            if !uris.insert(track.uri.clone()) {
                 continue;
             }
             track.id = self.fresh_id();
@@ -329,62 +524,47 @@ impl Library {
         for (key, rating) in other.album_ratings {
             self.album_ratings.entry(key).or_insert(rating);
         }
+        index_operations
     }
 
     pub fn remove_uris(&mut self, uris: &[String]) -> usize {
-        let uris = uris
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>();
+        let uris = uris.iter().map(String::as_str).collect::<HashSet<_>>();
         let albums = self
             .tracks
             .iter()
             .filter(|track| uris.contains(track.uri.as_str()))
             .map(AlbumKey::of)
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
         let before = self.tracks.len();
         self.tracks
             .retain(|track| !uris.contains(track.uri.as_str()));
-        self.album_ratings.retain(|album, _| {
-            !albums.contains(album)
-                || self
-                    .tracks
-                    .iter()
-                    .any(|track| AlbumKey::of(track) == *album)
-        });
+        let retained_albums = self
+            .tracks
+            .iter()
+            .map(AlbumKey::of)
+            .collect::<BTreeSet<_>>();
+        self.album_ratings
+            .retain(|album, _| !albums.contains(album) || retained_albums.contains(album));
         before - self.tracks.len()
-    }
-
-    /// Restores invariants on a freshly deserialized library. Duplicate ids
-    /// or URIs mean a corrupt or hand-tampered file; `next_id` is recomputed
-    /// so a stale stored value can never mint colliding ids.
-    pub(crate) fn validate_imported(&mut self) -> Result<(), String> {
-        let mut ids = std::collections::HashSet::new();
-        let mut uris = std::collections::HashSet::new();
-        for track in &self.tracks {
-            if !ids.insert(track.id) {
-                return Err(format!("duplicate track id {}", track.id.0));
-            }
-            if !uris.insert(track.uri.as_str()) {
-                return Err(format!("duplicate track uri {:?}", track.uri));
-            }
-        }
-        let past_max = match self.tracks.iter().map(|track| track.id.0).max() {
-            None => 0,
-            Some(max) => max
-                .checked_add(1)
-                .ok_or_else(|| format!("track id {max} exhausts the id space"))?,
-        };
-        // Recomputed outright so deleted ids can be skipped safely and a
-        // hostile stored value like u64::MAX is neutralized.
-        self.next_id = past_max;
-        Ok(())
     }
 
     fn fresh_id(&mut self) -> TrackId {
         let id = TrackId(self.next_id);
         self.next_id = self.next_id.checked_add(1).expect("track ids exhausted");
         id
+    }
+}
+
+fn merge_history_times(track: &mut TrackRecord, earliest: Option<u64>, latest: Option<u64>) {
+    if let Some(earliest) = earliest {
+        track.added_at = Some(track.added_at.map_or(earliest, |known| known.min(earliest)));
+    }
+    if let Some(latest) = latest {
+        track.last_played_at = Some(
+            track
+                .last_played_at
+                .map_or(latest, |known| known.max(latest)),
+        );
     }
 }
 
@@ -537,9 +717,7 @@ mod tests {
         let mut original = track("one", "Rock", "Artist", "Album");
         original.added_at = Some(100);
         let id = library.upsert(original);
-        let existing = &mut library.tracks_mut()[0];
-        existing.play_count = 9;
-        existing.last_played_at = Some(123);
+        assert!(library.merge_history_absolute("one", Some(9), None, Some(123)));
 
         let mut changed = track("one", "Rock", "Artist", "Album");
         changed.added_at = Some(200);
@@ -554,6 +732,120 @@ mod tests {
         assert_eq!(track.release_date.as_deref(), Some("2024-02-03"));
         assert_eq!(track.kind.as_deref(), Some("MPEG audio file"));
         assert_eq!(track.bitrate_kbps, Some(192));
+    }
+
+    #[test]
+    fn bulk_sync_upsert_matches_sequential_semantics_and_has_linear_index_work() {
+        let mut sequential = Library::new();
+        let id = sequential.add(track("same", "Rock", "Artist", "Album"));
+        sequential
+            .edit(
+                id,
+                TrackEdit {
+                    cat: Some("Personal".into()),
+                    ..TrackEdit::default()
+                },
+            )
+            .unwrap();
+        let mut incoming = track("same", "Metal", "Changed", "Changed");
+        incoming.added_at = Some(20);
+        let mut earlier = incoming.clone();
+        earlier.added_at = Some(10);
+        let batch = vec![incoming, track("new", "Jazz", "Artist", "Other"), earlier];
+        let mut bulk = sequential.clone();
+
+        for track in batch.clone() {
+            sequential.upsert(track);
+        }
+        assert_eq!(bulk.upsert_all_counted(batch), 5);
+        assert_eq!(bulk, sequential);
+
+        for size in [10_000usize, 20_000, 50_000] {
+            let mut library = Library::new();
+            let tracks =
+                (0..size).map(|index| track(&format!("track:{index}"), "Rock", "Artist", "Album"));
+            assert_eq!(library.upsert_all_counted(tracks), size * 2);
+            assert_eq!(library.tracks().len(), size);
+        }
+    }
+
+    #[test]
+    fn bulk_import_and_merge_have_linear_index_work_at_expected_sizes() {
+        for size in [10_000usize, 20_000, 50_000] {
+            let incoming = || {
+                (0..size).map(|index| track(&format!("track:{index}"), "Rock", "Artist", "Album"))
+            };
+
+            let mut imported = Library::new();
+            let (added, import_operations) = imported.add_all_counted(incoming());
+            assert_eq!(added, size);
+            assert_eq!(import_operations, size);
+
+            let mut other = Library::new();
+            assert_eq!(other.add_all(incoming()), size);
+            let mut merged = Library::new();
+            let merge_operations = merged.merge_counted(other);
+            assert_eq!(merge_operations, size);
+            assert_eq!(merged.tracks().len(), size);
+        }
+    }
+
+    #[test]
+    fn history_merges_saturate_counts_and_keep_timestamp_extremes() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+
+        assert!(library.merge_history_absolute("one", Some(8), Some(100), Some(200)));
+        assert_eq!(library.get(id).unwrap().play_count, 8);
+        assert!(library.merge_history_absolute("one", Some(3), Some(150), Some(150)));
+        assert_eq!(library.get(id).unwrap().play_count, 8);
+        assert!(library.merge_history_absolute("one", Some(12), Some(50), Some(250)));
+        assert_eq!(library.get(id).unwrap().play_count, 12);
+        assert!(library.merge_history_additive("one", u64::MAX, Some(75), Some(225)));
+
+        let track = library.get(id).unwrap();
+        assert_eq!(track.play_count, u32::MAX);
+        assert_eq!(track.added_at, Some(50));
+        assert_eq!(track.last_played_at, Some(250));
+        assert!(!library.merge_history_additive("missing", 1, None, None));
+        assert!(!library.merge_history_absolute("missing", Some(1), None, None));
+    }
+
+    #[test]
+    fn record_play_saturates_and_never_moves_latest_time_backward() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+        library.merge_history_absolute("one", Some(u32::MAX as u64), None, Some(200));
+
+        assert!(library.record_play("one", 100));
+        assert_eq!(library.get(id).unwrap().play_count, u32::MAX);
+        assert_eq!(library.get(id).unwrap().last_played_at, Some(200));
+        assert!(!library.record_play("missing", 300));
+    }
+
+    #[test]
+    fn technical_metadata_fills_only_missing_fields() {
+        let mut library = Library::new();
+        let id = library.add(track("one", "Rock", "Artist", "Album"));
+
+        assert!(
+            library
+                .fill_missing_metadata(id, Some(10), Some("Spotify".into()), Some(320))
+                .unwrap()
+        );
+        assert!(
+            !library
+                .fill_missing_metadata(id, Some(20), Some("Other".into()), Some(128))
+                .unwrap()
+        );
+        let track = library.get(id).unwrap();
+        assert_eq!(track.added_at, Some(10));
+        assert_eq!(track.kind.as_deref(), Some("Spotify"));
+        assert_eq!(track.bitrate_kbps, Some(320));
+        assert_eq!(
+            library.fill_missing_metadata(TrackId(u64::MAX), None, None, None),
+            Err(UnknownTrack(TrackId(u64::MAX)))
+        );
     }
 
     #[test]
@@ -757,6 +1049,111 @@ mod tests {
                 .map(|track| track.uri.as_str())
                 .collect::<Vec<_>>(),
             ["other"]
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_library_invariants() {
+        fn record(id: u64, uri: &str) -> serde_json::Value {
+            serde_json::json!({
+                "id": id,
+                "uri": uri,
+                "source": "music",
+                "cat": "Rock",
+                "art": "Artist",
+                "alb": "Album",
+                "name": "Track",
+                "duration": {"secs": 1, "nanos": 0},
+                "rating": null,
+                "orig_cat": null
+            })
+        }
+        let album = serde_json::json!({
+            "source": "music",
+            "art": "Artist",
+            "alb": "Album"
+        });
+        let invalid = [
+            (
+                serde_json::json!({
+                    "tracks": [record(1, "one"), record(1, "two")],
+                    "album_ratings": [],
+                    "next_id": 2
+                }),
+                "duplicate track id",
+            ),
+            (
+                serde_json::json!({
+                    "tracks": [record(1, "one"), record(2, "one")],
+                    "album_ratings": [],
+                    "next_id": 3
+                }),
+                "duplicate track uri",
+            ),
+            (
+                serde_json::json!({
+                    "tracks": [record(1, "")],
+                    "album_ratings": [],
+                    "next_id": 2
+                }),
+                "track uri must not be empty",
+            ),
+            (
+                serde_json::json!({
+                    "tracks": [record(u64::MAX, "one")],
+                    "album_ratings": [],
+                    "next_id": 0
+                }),
+                "exhausts the id space",
+            ),
+            (
+                serde_json::json!({
+                    "tracks": [],
+                    "album_ratings": [[album.clone(), 4], [album, 5]],
+                    "next_id": 0
+                }),
+                "duplicate album rating key",
+            ),
+        ];
+
+        for (value, expected) in invalid {
+            let error = serde_json::from_value::<Library>(value).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn embedded_deserialization_recomputes_next_id() {
+        #[derive(Deserialize)]
+        struct Journal {
+            after_library: Library,
+        }
+
+        let mut journal: Journal = serde_json::from_value(serde_json::json!({
+            "after_library": {
+                "tracks": [{
+                    "id": 7,
+                    "uri": "one",
+                    "source": "music",
+                    "cat": "Rock",
+                    "art": "Artist",
+                    "alb": "Album",
+                    "name": "Track",
+                    "duration": {"secs": 1, "nanos": 0},
+                    "rating": null,
+                    "orig_cat": null
+                }],
+                "album_ratings": [],
+                "next_id": u64::MAX
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            journal
+                .after_library
+                .add(track("two", "Rock", "Artist", "Album")),
+            TrackId(8)
         );
     }
 }

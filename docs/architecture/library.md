@@ -26,15 +26,36 @@ same text merges their Retune album group.
   later provider timestamp never moves it forward.
 - Adding or merging deduplicates by URI. Existing overlay values win.
 - Provider refresh preserves each track's playback-enabled overlay value.
+- Shell callers read track records immutably. Core methods record plays, merge
+  history with saturating counts and monotonic timestamps, and fill only missing
+  technical metadata without exposing mutable identity fields.
 - Restoring replaces the library after validating the imported envelope.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
 
+The desktop shell composes the live `Library`, its filesystem store, write
+gate, and long-running transaction exclusion as one concrete `LibraryState`.
+Ordinary changes clone the current library, save the candidate, and only then
+swap live memory. Spotify membership receives a borrowed `LibraryOwner`
+capability for that same boundary; it does not acquire unrelated application
+state. Local import and multi-component restore use narrow owner-held exclusive
+seams so their established transaction and lock ordering remains explicit.
+
+Local import scans supported audio recursively without following directory
+symlinks. Inaccessible or disappearing paths are reported individually while
+supported files from accessible siblings continue through import.
+
 ## Last.fm historical import
 
-Last.fm import is an application-shell boundary in
-`apps/desktop/src-tauri/src/lastfm_import.rs`; `retune-core` remains a pure,
-deterministic mutation target. History is an absolute baseline: resolved source
+Last.fm import is an application-shell boundary behind the `Service` facade in
+`apps/desktop/src-tauri/src/lastfm_import.rs`. The facade re-exports the narrow
+runtime surface; private `service`, `model`, and `store` modules own state and
+persistence; `source` and `clustering` own ingestion and review grouping;
+`matching`, `collection`, and `review` own candidate and page projection;
+`apply`, `incremental`, and `reconciliation` own durable execution; and
+`coordinator` plus `commands` own application orchestration and Tauri adaptation.
+`retune-core` remains
+a pure, deterministic mutation target. History is an absolute baseline: resolved source
 counts use one reusable account-bound Sum, highest-played spelling Overwrite, or
 Zero default across unlocked Spotify targets. Acceptance freezes the strategy
 used by each selected target, then local play count takes the maximum of current and historical
@@ -230,10 +251,21 @@ job at its last stage for safe replay; account changes suspend it without
 applying to another profile. The UI advances from the authoritative queue after
 enqueue and completion events never replace a newer selection.
 
+Apply failures preserve a closed code (`spotify-rate-limited`,
+`spotify-quota-exhausted`, or `apply-failed`), display-only message, and optional
+retry deadline from the typed Spotify response through the persisted job, queue
+view, and completion event. Cooldown persistence is best-effort and does not own
+that classification. Legacy failed jobs without a known code retain their
+message, deadline, frozen plan, stage, and attempt and project as `apply-failed`;
+Retune never derives policy by parsing display text.
+
 Track-mode collection applies materialize missing local records from the
 persisted selected-album preview cache before the Spotify membership write.
 Only targets absent from that cache fall back to individual Spotify metadata
 reads, so retrying a frozen cached job does not repeat `/tracks/{id}` requests.
+Both album- and track-mode applies call the shared Spotify membership owner;
+the importer does not depend on Tauri command implementations. Its account
+identity recheck and remote membership write share the same owner-issued guard.
 
 Spotify saved-track and saved-album memberships are not core-library state.
 The shell keeps those account-scoped memberships separately while materializing

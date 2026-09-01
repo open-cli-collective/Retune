@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-genre-values"
+description = "Enables the genre_values command without any pre-configured scope."
+commands.allow = ["genre_values"]
+
+[[permission]]
+identifier = "deny-genre-values"
+description = "Denies the genre_values command without any pre-configured scope."
+commands.deny = ["genre_values"]

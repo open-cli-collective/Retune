@@ -6,7 +6,7 @@ mod reducer;
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -19,13 +19,40 @@ use rand::seq::SliceRandom;
 use reducer::{EventReducer, ReducerAction};
 use retune_spotify::client::{HttpTransport, SpotifyClient};
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 
 type LiveClient = SpotifyClient<HttpTransport, crate::SharedTokenStore>;
+type ProviderResolver = dyn Fn() -> Result<Arc<LiveClient>, String> + Send + Sync;
+type EffectSink = dyn Fn(PlaybackEffect) + Send + Sync;
 
 const AUDIOBOOK_ERROR: &str = "Audiobook playback isn't supported yet.";
 const RECONNECT_DELAYS: &[u64] = &[0, 1, 2, 4, 8, 15, 30];
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackBackend {
+    Connect,
+    #[default]
+    Local,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl RepeatMode {
+    fn wraps(self) -> bool {
+        match self {
+            Self::Off | Self::One => false,
+            Self::All => true,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +67,9 @@ pub struct PlaybackAuthorizationPrompt {
     reason: PlaybackAuthorizationReason,
     message: String,
     target_track_id: u64,
+    target_track_uri: String,
+    #[serde(skip)]
+    intent: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -49,11 +79,23 @@ pub enum PlayOutcome {
     PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum PlaybackEffect {
+    PlayerState(PlayerStateEvent),
+    OperationError(String),
+    OperationRecovered,
+    ConnectionRefresh,
+    AuthorizationRequired(PlaybackAuthorizationPrompt),
+    TrackCompleted(String),
+    Listening(ListeningFact),
+}
+
 #[derive(Debug)]
 pub(super) enum PlaybackError {
     AuthorizationRequired {
         reason: PlaybackAuthorizationReason,
         target_track_id: Option<u64>,
+        target_track_uri: Option<String>,
     },
     Message(String),
 }
@@ -67,28 +109,43 @@ impl PlaybackError {
         Self::AuthorizationRequired {
             reason,
             target_track_id: None,
+            target_track_uri: None,
         }
     }
 
-    fn with_target(self, target_track_id: u64) -> Self {
+    fn with_target(self, target_track_id: u64, target_track_uri: &str) -> Self {
         match self {
             Self::AuthorizationRequired { reason, .. } => Self::AuthorizationRequired {
                 reason,
                 target_track_id: Some(target_track_id),
+                target_track_uri: Some(target_track_uri.into()),
             },
             error => error,
         }
     }
 
-    fn into_prompt(self, fallback_target_track_id: u64) -> Option<PlaybackAuthorizationPrompt> {
+    fn into_prompt(
+        self,
+        fallback_target_track_id: u64,
+        fallback_target_track_uri: &str,
+        intent: u64,
+    ) -> Option<PlaybackAuthorizationPrompt> {
         match self {
             Self::AuthorizationRequired {
                 reason,
                 target_track_id,
+                target_track_uri,
             } => Some(PlaybackAuthorizationPrompt {
                 reason,
                 message: reason.message().into(),
                 target_track_id: target_track_id.unwrap_or(fallback_target_track_id),
+                target_track_uri: target_track_uri
+                    .or_else(|| {
+                        (!fallback_target_track_uri.is_empty())
+                            .then(|| fallback_target_track_uri.into())
+                    })
+                    .expect("authorization prompts carry a target URI"),
+                intent,
             }),
             Self::Message(_) => None,
         }
@@ -114,8 +171,12 @@ impl std::fmt::Display for PlaybackError {
 impl PlaybackAuthorizationReason {
     fn message(self) -> &'static str {
         match self {
-            Self::Missing => "Spotify playback needs one-time authorization before this track can play.",
-            Self::Rejected => "Spotify rejected the saved playback authorization. Authorize playback again before retrying this track.",
+            Self::Missing => {
+                "Spotify playback needs one-time authorization before this track can play."
+            }
+            Self::Rejected => {
+                "Spotify rejected playback authorization. Spotify Premium is required; authorize playback again before retrying this track."
+            }
         }
     }
 }
@@ -412,7 +473,7 @@ impl PlayerBackend {
         &mut self,
         client: Arc<LiveClient>,
         snapshot: Snapshot,
-        repeat: &str,
+        repeat: RepeatMode,
     ) -> Result<(), String> {
         match self {
             Self::Connect(backend) => backend.play(client, snapshot, repeat).await,
@@ -468,7 +529,7 @@ impl PlayerBackend {
     async fn set_repeat(
         &mut self,
         client: Option<&LiveClient>,
-        repeat: &str,
+        repeat: RepeatMode,
     ) -> Result<(), String> {
         match (self, client) {
             (Self::Connect(backend), Some(client)) => {
@@ -478,7 +539,7 @@ impl PlayerBackend {
         }
     }
 
-    async fn set_shuffle_snapshot(&mut self, snapshot: Option<Snapshot>, repeat: &str) {
+    async fn set_shuffle_snapshot(&mut self, snapshot: Option<Snapshot>, repeat: RepeatMode) {
         if let (Self::Connect(backend), Some(snapshot)) = (self, snapshot) {
             backend.update_snapshot(snapshot, repeat).await;
         }
@@ -496,7 +557,6 @@ impl PlayerBackend {
 }
 
 struct ControllerState {
-    backend: PlayerBackend,
     file: FileEngine,
     generation: u64,
     reducer: EventReducer,
@@ -505,17 +565,21 @@ struct ControllerState {
 
 pub struct Playback {
     state: tokio::sync::Mutex<ControllerState>,
+    backend: tokio::sync::Mutex<PlayerBackend>,
     events: mpsc::UnboundedSender<NeutralEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<NeutralEvent>>>,
     cache_dir: Option<PathBuf>,
     audio: Mutex<AudioSettings>,
     local_requested: AtomicBool,
+    local_active: AtomicBool,
+    backend_intent: AtomicU64,
+    play_intent: AtomicU64,
 }
 
 impl Default for Playback {
     fn default() -> Self {
         Self::new(
-            "off",
+            RepeatMode::Off,
             false,
             100,
             AudioSettings {
@@ -529,8 +593,17 @@ impl Default for Playback {
 }
 
 impl Playback {
+    async fn commit_if_generation<T>(
+        &self,
+        generation: u64,
+        commit: impl FnOnce(&mut ControllerState) -> T,
+    ) -> Option<T> {
+        let mut state = self.state.lock().await;
+        (state.generation == generation).then(|| commit(&mut state))
+    }
+
     pub fn new(
-        repeat: &str,
+        repeat: RepeatMode,
         shuffle: bool,
         play_threshold_percent: u8,
         audio: AudioSettings,
@@ -545,22 +618,50 @@ impl Playback {
         reducer.set_play_threshold_percent(play_threshold_percent);
         Self {
             state: tokio::sync::Mutex::new(ControllerState {
-                backend: PlayerBackend::Connect(ConnectBackend::new(events.clone(), generation)),
                 file: FileEngine::new(events.clone(), generation, 62),
                 generation,
                 reducer,
                 volume: 62,
             }),
+            backend: tokio::sync::Mutex::new(PlayerBackend::Connect(ConnectBackend::new(
+                events.clone(),
+                generation,
+            ))),
             events,
             receiver: Mutex::new(Some(receiver)),
             cache_dir,
             audio: Mutex::new(audio),
             local_requested: AtomicBool::new(false),
+            local_active: AtomicBool::new(false),
+            backend_intent: AtomicU64::new(0),
+            play_intent: AtomicU64::new(0),
         }
     }
 
-    pub fn set_local_requested(&self, requested: bool) {
-        self.local_requested.store(requested, Ordering::Relaxed);
+    pub fn set_requested_backend(&self, backend: PlaybackBackend) -> u64 {
+        self.begin_play_intent();
+        let local = match backend {
+            PlaybackBackend::Connect => false,
+            PlaybackBackend::Local => true,
+        };
+        self.local_requested.store(local, Ordering::Relaxed);
+        self.backend_intent
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    pub(crate) fn begin_play_intent(&self) -> u64 {
+        self.play_intent
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    fn current_play_intent(&self) -> u64 {
+        self.play_intent.load(Ordering::Acquire)
+    }
+
+    fn is_current_play_intent(&self, intent: u64) -> bool {
+        self.current_play_intent() == intent
     }
 
     fn local_requested(&self) -> bool {
@@ -580,6 +681,7 @@ impl Playback {
     }
 
     pub async fn exclude_track(&self, id: u64) {
+        let mut backend = self.backend.lock().await;
         let mut state = self.state.lock().await;
         if !state
             .reducer
@@ -589,16 +691,16 @@ impl Playback {
             return;
         }
         let snapshot = state.reducer.snapshot().cloned();
-        let repeat = state.reducer.repeat().to_owned();
-        state.backend.set_shuffle_snapshot(snapshot, &repeat).await;
+        let repeat = state.reducer.repeat();
+        drop(state);
+        backend.set_shuffle_snapshot(snapshot, repeat).await;
     }
 
     pub fn listen(
         self: &Arc<Self>,
-        app: tauri::AppHandle,
-        on_track_completed: impl Fn(String) + Send + Sync + 'static,
-        on_listening: impl Fn(ListeningFact) + Send + Sync + 'static,
-    ) {
+        resolve_provider: impl Fn() -> Result<Arc<LiveClient>, String> + Send + Sync + 'static,
+        on_effect: impl Fn(PlaybackEffect) + Send + Sync + 'static,
+    ) -> tauri::async_runtime::JoinHandle<()> {
         let mut receiver = self
             .receiver
             .lock()
@@ -606,24 +708,42 @@ impl Playback {
             .take()
             .expect("playback event loop starts once");
         let playback = Arc::clone(self);
+        let resolve_provider: Arc<ProviderResolver> = Arc::new(resolve_provider);
+        let on_effect: Arc<EffectSink> = Arc::new(on_effect);
         tauri::async_runtime::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 playback
-                    .handle_event(&app, event, &on_track_completed, &on_listening)
+                    .handle_event(event, &resolve_provider, &on_effect)
                     .await;
             }
-        });
+        })
     }
 
+    #[cfg(test)]
     pub async fn play(
         &self,
         client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
     ) -> Result<PlayOutcome, String> {
+        let intent = self.begin_play_intent();
+        self.play_for_intent(client, tracks, index, intent).await
+    }
+
+    pub(crate) async fn play_for_intent(
+        &self,
+        client: Option<Arc<LiveClient>>,
+        tracks: Vec<SnapshotTrack>,
+        index: usize,
+        intent: u64,
+    ) -> Result<PlayOutcome, String> {
         let target_track_id = tracks.get(index).map(|track| track.id).unwrap_or(0);
+        let target_track_uri = tracks
+            .get(index)
+            .map(|track| track.uri.clone())
+            .unwrap_or_default();
         match self
-            .play_with(client, tracks, index, |suffix| {
+            .play_with(client, tracks, index, intent, |suffix| {
                 suffix.shuffle(&mut rand::rng())
             })
             .await
@@ -632,7 +752,7 @@ impl Playback {
             Err(error @ PlaybackError::AuthorizationRequired { .. }) => {
                 Ok(PlayOutcome::PlaybackAuthorizationRequired(
                     error
-                        .into_prompt(target_track_id)
+                        .into_prompt(target_track_id, &target_track_uri, intent)
                         .expect("authorization errors produce prompts"),
                 ))
             }
@@ -645,10 +765,14 @@ impl Playback {
         client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
         index: usize,
+        intent: u64,
         permute: impl FnOnce(&mut [usize]),
     ) -> Result<PlayOutcome, PlaybackError> {
         if tracks.is_empty() || index >= tracks.len() {
             return Err("Choose a track to play".into());
+        }
+        if !self.is_current_play_intent(intent) {
+            return Ok(PlayOutcome::Started);
         }
         if reject_chapter(&tracks[index].uri) {
             let generation = self.state.lock().await.generation;
@@ -658,22 +782,27 @@ impl Playback {
             });
             return Ok(PlayOutcome::Started);
         }
-        let mut state = self.state.lock().await;
-        let snapshot = Snapshot::new_with(tracks, index, state.reducer.shuffle(), permute);
+        let mut backend = self.backend.lock().await;
+        let shuffle = self.state.lock().await.reducer.shuffle();
+        let snapshot = Snapshot::new_with(tracks, index, shuffle, permute);
         if self.local_requested() && !is_file_uri(&snapshot.current().uri) {
             let client = require_spotify(client.as_deref())?;
-            if let Err(error) = self.ensure_local_backend(&mut state, client).await {
+            if let Err(error) = self.ensure_local_backend(&mut backend, client).await {
                 log_authorization_required("load", &snapshot.current().uri, &error);
-                return Err(error.with_target(snapshot.current().id));
+                return Err(error.with_target(snapshot.current().id, &snapshot.current().uri));
             }
         }
-        state.reducer.set_snapshot(Some(snapshot));
-        self.load_current_locked(&mut state, client, true, 0)
+        if !self.is_current_play_intent(intent) {
+            return Ok(PlayOutcome::Started);
+        }
+        self.state.lock().await.reducer.set_snapshot(Some(snapshot));
+        self.load_current_locked(&mut backend, client, true, 0, intent)
             .await
             .map(|_| PlayOutcome::Started)
     }
 
     pub async fn toggle(&self, client: Option<&LiveClient>) -> Result<(), String> {
+        let mut backend = self.backend.lock().await;
         let mut state = self.state.lock().await;
         if state.file.is_active() {
             return state.file.toggle();
@@ -682,8 +811,9 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_player(&mut state, client).await?;
-        state.backend.toggle(client).await
+        drop(state);
+        self.ensure_player(&mut backend, client).await?;
+        backend.toggle(client).await
     }
 
     pub async fn set_playing(
@@ -691,6 +821,7 @@ impl Playback {
         client: Option<&LiveClient>,
         playing: bool,
     ) -> Result<(), String> {
+        let mut backend = self.backend.lock().await;
         let mut state = self.state.lock().await;
         if state.file.is_active() {
             return state.file.set_playing(playing);
@@ -699,35 +830,51 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_player(&mut state, client).await?;
-        state.backend.set_playing(client, playing).await
+        drop(state);
+        self.ensure_player(&mut backend, client).await?;
+        backend.set_playing(client, playing).await
     }
 
     pub async fn next(&self, client: Option<Arc<LiveClient>>) -> Result<PlayOutcome, String> {
-        self.step(client, 1)
+        let intent = self.begin_play_intent();
+        self.step_for_intent(client, 1, intent)
             .await
             .map(|_| PlayOutcome::Started)
-            .or_else(play_outcome_from_error)
+            .or_else(|error| play_outcome_from_error(error, intent))
     }
 
     pub async fn prev(&self, client: Option<Arc<LiveClient>>) -> Result<PlayOutcome, String> {
-        self.step(client, -1)
+        let intent = self.begin_play_intent();
+        self.step_for_intent(client, -1, intent)
             .await
             .map(|_| PlayOutcome::Started)
-            .or_else(play_outcome_from_error)
+            .or_else(|error| play_outcome_from_error(error, intent))
     }
 
+    #[cfg(test)]
     async fn step(
         &self,
         client: Option<Arc<LiveClient>>,
         direction: i8,
     ) -> Result<(), PlaybackError> {
-        let mut state = self.state.lock().await;
-        self.step_locked(&mut state, client, direction).await
+        let intent = self.begin_play_intent();
+        self.step_for_intent(client, direction, intent).await
+    }
+
+    pub(crate) async fn step_for_intent(
+        &self,
+        client: Option<Arc<LiveClient>>,
+        direction: i8,
+        intent: u64,
+    ) -> Result<(), PlaybackError> {
+        let mut backend = self.backend.lock().await;
+        self.step_locked(&mut backend, client, direction, intent)
+            .await
     }
 
     pub async fn seek(&self, client: Option<&LiveClient>, seconds: u64) -> Result<(), String> {
-        let mut state = self.state.lock().await;
+        let mut backend = self.backend.lock().await;
+        let state = self.state.lock().await;
         if state.file.is_active() {
             return state.file.seek(seconds);
         }
@@ -735,14 +882,16 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_player(&mut state, client).await?;
-        state.backend.seek(client, seconds).await
+        drop(state);
+        self.ensure_player(&mut backend, client).await?;
+        backend.seek(client, seconds).await
     }
 
     pub async fn set_volume(&self, client: Option<&LiveClient>, volume: u8) -> Result<(), String> {
         if volume > 100 {
             return Err("volume must be between 0 and 100".into());
         }
+        let mut backend = self.backend.lock().await;
         let mut state = self.state.lock().await;
         if state.file.is_active() {
             state.file.set_volume(volume);
@@ -750,23 +899,25 @@ impl Playback {
             return Ok(());
         }
         let client = require_spotify(client)?;
-        self.ensure_player(&mut state, client).await?;
-        state.backend.set_volume(client, volume).await?;
-        state.volume = volume;
+        let generation = state.generation;
+        drop(state);
+        self.ensure_player(&mut backend, client).await?;
+        backend.set_volume(client, volume).await?;
+        self.commit_if_generation(generation, |state| state.volume = volume)
+            .await;
         Ok(())
     }
 
     pub async fn set_repeat(
         &self,
         client: Option<&LiveClient>,
-        repeat: &str,
+        repeat: RepeatMode,
     ) -> Result<(), String> {
-        if !matches!(repeat, "off" | "all" | "one") {
-            return Err("repeat must be off, all, or one".into());
-        }
-        let mut state = self.state.lock().await;
-        state.backend.set_repeat(client, repeat).await?;
-        state.reducer.set_repeat(repeat);
+        let mut backend = self.backend.lock().await;
+        let generation = self.state.lock().await.generation;
+        backend.set_repeat(client, repeat).await?;
+        self.commit_if_generation(generation, |state| state.reducer.set_repeat(repeat))
+            .await;
         Ok(())
     }
 
@@ -780,38 +931,46 @@ impl Playback {
         shuffle: bool,
         permute: impl FnOnce(&mut [usize]),
     ) -> PlayerStateEvent {
+        let mut backend = self.backend.lock().await;
         let mut state = self.state.lock().await;
         state.reducer.set_shuffle_with(shuffle, permute);
         let snapshot = state.reducer.snapshot().cloned();
-        let repeat = state.reducer.repeat().to_owned();
-        state.backend.set_shuffle_snapshot(snapshot, &repeat).await;
-        state.reducer.state().clone()
+        let repeat = state.reducer.repeat();
+        let event = state.reducer.state().clone();
+        drop(state);
+        backend.set_shuffle_snapshot(snapshot, repeat).await;
+        event
     }
 
     pub async fn stop(&self, client: Option<&LiveClient>) -> Result<(), String> {
+        self.begin_play_intent();
+        let mut backend = self.backend.lock().await;
         let mut state = self.state.lock().await;
         if state.file.is_active() {
             state.file.stop();
         }
-        state.backend.stop(client).await?;
-        state.reducer.set_snapshot(None);
+        let generation = state.generation;
+        drop(state);
+        backend.stop(client).await?;
+        self.commit_if_generation(generation, |state| state.reducer.set_snapshot(None))
+            .await;
         Ok(())
     }
 
     pub(crate) async fn stop_for_authorization(
         &self,
-        app: &tauri::AppHandle,
+        client: Option<&LiveClient>,
         prompt: PlaybackAuthorizationPrompt,
-    ) {
-        let mut state = self.state.lock().await;
-        self.report_authorization_required(app, &mut state, prompt)
-            .await;
+    ) -> Vec<PlaybackEffect> {
+        let mut backend = self.backend.lock().await;
+        self.authorization_effects(&mut backend, client, prompt)
+            .await
     }
 
     pub async fn switch_to_local(&self, client: &LiveClient, volume: u8) -> Result<(), String> {
-        self.set_local_requested(true);
+        let intent = self.set_requested_backend(PlaybackBackend::Local);
         let audio = *self.audio.lock().expect("audio settings mutex poisoned");
-        self.switch_to_local_with(Some(client), || async {
+        self.switch_to_local_with(Some(client), intent, || async {
             let state = self.state.lock().await;
             let generation = state.generation.wrapping_add(1);
             drop(state);
@@ -832,49 +991,68 @@ impl Playback {
     async fn switch_to_local_with<F, Fut>(
         &self,
         client: Option<&LiveClient>,
+        intent: u64,
         prepare: F,
     ) -> Result<(), String>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<LocalBackend, String>>,
     {
-        let local = prepare().await?;
+        let mut local = prepare().await?;
         let volume = local.volume();
-        let mut state = self.state.lock().await;
-        if let PlayerBackend::Connect(connect) = &mut state.backend {
+        let mut backend = self.backend.lock().await;
+        let state = self.state.lock().await;
+        if self.backend_intent.load(Ordering::Acquire) != intent {
+            local.teardown();
+            return Ok(());
+        }
+        drop(state);
+        if let PlayerBackend::Connect(connect) = &mut *backend {
             connect.stop(client).await?;
+        }
+        let mut state = self.state.lock().await;
+        if self.backend_intent.load(Ordering::Acquire) != intent {
+            local.teardown();
+            return Ok(());
         }
         state.generation = local.generation();
         let generation = state.generation;
         state.file.set_generation(generation);
         state.reducer.activate(generation);
-        state.backend = PlayerBackend::Local(local);
+        *backend = PlayerBackend::Local(local);
+        self.local_active.store(true, Ordering::Release);
         state.volume = volume;
         Ok(())
     }
 
     pub async fn switch_to_connect(&self) {
-        self.set_local_requested(false);
-        let mut state = self.state.lock().await;
-        state.generation = state.generation.wrapping_add(1);
-        let generation = state.generation;
-        state.file.set_generation(generation);
-        if let PlayerBackend::Local(local) = &mut state.backend {
-            local.teardown();
-        }
-        state.reducer.activate(generation);
-        state.backend =
-            PlayerBackend::Connect(ConnectBackend::new(self.events.clone(), generation));
-    }
-
-    pub async fn invalidate_local(&self) {
-        let mut state = self.state.lock().await;
-        if matches!(state.backend, PlayerBackend::Local(_)) {
+        self.set_requested_backend(PlaybackBackend::Connect);
+        let generation = {
+            let mut state = self.state.lock().await;
             state.generation = state.generation.wrapping_add(1);
             let generation = state.generation;
             state.file.set_generation(generation);
             state.reducer.activate(generation);
-            if let PlayerBackend::Local(local) = &mut state.backend {
+            generation
+        };
+        let mut backend = self.backend.lock().await;
+        if let PlayerBackend::Local(local) = &mut *backend {
+            local.teardown();
+        }
+        *backend = PlayerBackend::Connect(ConnectBackend::new(self.events.clone(), generation));
+        self.local_active.store(false, Ordering::Release);
+    }
+
+    pub async fn invalidate_local(&self) {
+        if self.local_active.load(Ordering::Acquire) {
+            let mut state = self.state.lock().await;
+            state.generation = state.generation.wrapping_add(1);
+            let generation = state.generation;
+            state.file.set_generation(generation);
+            state.reducer.activate(generation);
+            drop(state);
+            let mut backend = self.backend.lock().await;
+            if let PlayerBackend::Local(local) = &mut *backend {
                 local.teardown();
             }
         }
@@ -884,80 +1062,104 @@ impl Playback {
     /// can differ from the persisted setting when activation failed and
     /// playback fell back to Connect.
     pub async fn is_local_active(&self) -> bool {
-        self.state.lock().await.backend.is_local()
+        self.local_active.load(Ordering::Acquire)
     }
 
     /// Recreate an invalidated local player now rather than lazily on the
     /// next command, so playback resumes on its own after a config change.
     pub async fn revalidate(&self, client: &LiveClient) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        if !state.backend.is_local() || state.reducer.snapshot().is_none() {
+        let mut backend = self.backend.lock().await;
+        if !backend.is_local() || self.state.lock().await.reducer.snapshot().is_none() {
             return Ok(());
         }
-        self.ensure_player(&mut state, client)
+        self.ensure_player(&mut backend, client)
             .await
             .map_err(PlaybackError::into_string)
     }
 
     async fn ensure_local_backend(
         &self,
-        state: &mut ControllerState,
+        backend: &mut PlayerBackend,
         client: &LiveClient,
     ) -> Result<(), PlaybackError> {
-        if state.backend.is_local() {
-            self.ensure_session(state, client).await?;
+        if backend.is_local() {
+            self.ensure_session(backend, client).await?;
             return Ok(());
         }
 
-        let generation = state.generation.wrapping_add(1);
+        let (previous_generation, generation, volume) = {
+            let state = self.state.lock().await;
+            (
+                state.generation,
+                state.generation.wrapping_add(1),
+                state.volume,
+            )
+        };
         let audio = *self.audio.lock().expect("audio settings mutex poisoned");
         let local = LocalBackend::activate(
             client,
             self.events.clone(),
             generation,
-            state.volume,
+            volume,
             self.cache_dir.as_deref(),
             audio,
         )
         .await?;
-        if let PlayerBackend::Connect(connect) = &mut state.backend {
+        if let PlayerBackend::Connect(connect) = backend {
             connect.stop(Some(client)).await?;
+        }
+        let mut state = self.state.lock().await;
+        if state.generation != previous_generation || !self.local_requested() {
+            return Ok(());
         }
         state.generation = generation;
         state.file.set_generation(generation);
         state.reducer.activate(generation);
         state.volume = local.volume();
-        state.backend = PlayerBackend::Local(local);
+        *backend = PlayerBackend::Local(local);
+        self.local_active.store(true, Ordering::Release);
         Ok(())
     }
 
     async fn ensure_player(
         &self,
-        state: &mut ControllerState,
+        backend: &mut PlayerBackend,
         client: &LiveClient,
     ) -> Result<(), PlaybackError> {
-        let invalid =
-            matches!(&state.backend, PlayerBackend::Local(local) if local.player_is_invalid());
+        let invalid = matches!(backend, PlayerBackend::Local(local) if local.player_is_invalid());
         if !invalid {
             return Ok(());
         }
         log::info!("Recreating local playback player");
-        let generation = state.generation.wrapping_add(1);
+        let (previous_generation, generation, volume, restore) = {
+            let state = self.state.lock().await;
+            let restore = state.reducer.snapshot().cloned().map(|snapshot| {
+                let playing = state.reducer.state().is_playing;
+                let position_ms = state.reducer.position_ms();
+                (snapshot, playing, position_ms)
+            });
+            (
+                state.generation,
+                state.generation.wrapping_add(1),
+                state.volume,
+                restore,
+            )
+        };
         let audio = *self.audio.lock().expect("audio settings mutex poisoned");
         let mut local = LocalBackend::activate(
             client,
             self.events.clone(),
             generation,
-            state.volume,
+            volume,
             self.cache_dir.as_deref(),
             audio,
         )
         .await?;
-        let restore = state.reducer.snapshot().cloned().map(|snapshot| {
-            let playing = state.reducer.state().is_playing;
-            let position_ms = state.reducer.position_ms();
-            (snapshot, playing, position_ms)
-        });
+        let mut state = self.state.lock().await;
+        if state.generation != previous_generation {
+            local.teardown();
+            return Ok(());
+        }
         state.generation = generation;
         state.file.set_generation(generation);
         state.reducer.activate(generation);
@@ -965,36 +1167,36 @@ impl Playback {
             state.reducer.queue_load(&snapshot.current().uri, playing);
             local.play(snapshot, playing, position_ms)?;
         }
-        state.backend = PlayerBackend::Local(local);
+        *backend = PlayerBackend::Local(local);
+        self.local_active.store(true, Ordering::Release);
         Ok(())
     }
 
     async fn ensure_session(
         &self,
-        state: &mut ControllerState,
+        backend: &mut PlayerBackend,
         client: &LiveClient,
     ) -> Result<(), PlaybackError> {
-        self.ensure_player(state, client).await?;
-        let invalid =
-            matches!(&state.backend, PlayerBackend::Local(local) if local.session_is_invalid());
+        self.ensure_player(backend, client).await?;
+        let invalid = matches!(backend, PlayerBackend::Local(local) if local.session_is_invalid());
         if !invalid {
-            if let PlayerBackend::Local(local) = &state.backend {
+            if let PlayerBackend::Local(local) = backend {
                 local.preflight(client).await?;
             }
             return Ok(());
         }
         log::info!(
             "Refreshing Spotify control session; active player preserved generation={}",
-            state.generation
+            self.state.lock().await.generation
         );
-        if let PlayerBackend::Local(local) = &mut state.backend {
+        if let PlayerBackend::Local(local) = backend {
             local.refresh_session(client).await?;
         }
         log::info!(
             "Spotify control session replaced; active player preserved generation={}",
-            state.generation
+            self.state.lock().await.generation
         );
-        if let PlayerBackend::Local(local) = &state.backend {
+        if let PlayerBackend::Local(local) = backend {
             local.preflight(client).await?;
         }
         Ok(())
@@ -1007,45 +1209,60 @@ impl Playback {
         client: &LiveClient,
         generation: u64,
     ) -> Result<bool, PlaybackError> {
-        let mut state = self.state.lock().await;
+        let mut backend = self.backend.lock().await;
+        let state = self.state.lock().await;
         if state.generation != generation
-            || !state.backend.is_local()
+            || !backend.is_local()
             || state.reducer.snapshot().is_none()
         {
             return Ok(false);
         }
-        let target_track_id = state.reducer.snapshot().unwrap().current().id;
-        self.ensure_player(&mut state, client)
+        let target = state.reducer.snapshot().unwrap().current();
+        let target_track_id = target.id;
+        let target_track_uri = target.uri.clone();
+        drop(state);
+        self.ensure_player(&mut backend, client)
             .await
-            .map_err(|error| error.with_target(target_track_id))?;
+            .map_err(|error| error.with_target(target_track_id, &target_track_uri))?;
         Ok(true)
     }
 
     async fn step_locked(
         &self,
-        state: &mut ControllerState,
+        backend: &mut PlayerBackend,
         client: Option<Arc<LiveClient>>,
         direction: i8,
+        intent: u64,
     ) -> Result<(), PlaybackError> {
-        let wrap = direction > 0 && state.reducer.repeat() == "all";
+        if !self.is_current_play_intent(intent) {
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        let wrap = direction > 0 && state.reducer.repeat().wraps();
         let Some(snapshot) = state.reducer.snapshot() else {
             return Ok(());
         };
+        let current_track_id = snapshot.current().id;
+        let current_uri = snapshot.current().uri.clone();
         let Some(next) = step_index(snapshot.index, snapshot.len(), direction, wrap) else {
             if state.file.is_active() {
                 state.file.stop();
                 return Ok(());
             }
             if self.local_requested() {
-                return Ok(state.backend.stop(client.as_deref()).await?);
+                drop(state);
+                return Ok(backend.stop(client.as_deref()).await?);
             }
             let client = require_spotify(client.as_deref())?;
-            self.ensure_player(state, client).await?;
-            return state
-                .backend
+            drop(state);
+            self.ensure_player(backend, client)
+                .await
+                .map_err(|error| error.with_target(current_track_id, &current_uri))?;
+            return backend
                 .step(client, direction)
                 .await
-                .map_err(PlaybackError::from);
+                .map_err(PlaybackError::from)
+                .map_err(|error| error.with_target(current_track_id, &current_uri));
         };
         if reject_chapter(&snapshot.track_at(next).uri) {
             return Err(AUDIOBOOK_ERROR.into());
@@ -1054,104 +1271,159 @@ impl Playback {
         let next_uri = snapshot.track_at(next).uri.clone();
         if self.local_requested() && !is_file_uri(&next_uri) {
             let client = require_spotify(client.as_deref())?;
-            if let Err(error) = self.ensure_local_backend(state, client).await {
+            drop(state);
+            if let Err(error) = self.ensure_local_backend(backend, client).await {
                 log_authorization_required("advance", &next_uri, &error);
-                return Err(error.with_target(next_track_id));
+                return Err(error.with_target(next_track_id, &next_uri));
             }
+            state = self.state.lock().await;
+        }
+        if !self.is_current_play_intent(intent) {
+            return Ok(());
         }
         state.reducer.snapshot_mut().unwrap().index = next;
-        self.load_current_locked(state, client, true, 0).await
+        drop(state);
+        self.load_current_locked(backend, client, true, 0, intent)
+            .await
     }
 
     async fn load_current_locked(
         &self,
-        state: &mut ControllerState,
+        backend: &mut PlayerBackend,
         client: Option<Arc<LiveClient>>,
         playing: bool,
         position_ms: u32,
+        intent: u64,
     ) -> Result<(), PlaybackError> {
+        if !self.is_current_play_intent(intent) {
+            return Ok(());
+        }
+        let state = self.state.lock().await;
         let snapshot = state
             .reducer
             .snapshot()
             .cloned()
             .ok_or("Nothing is playing")?;
         let uri = snapshot.current().uri.clone();
+        let target_track_id = snapshot.current().id;
+        let generation = state.generation;
+        drop(state);
         if is_file_uri(&uri) {
-            state.backend.stop(client.as_deref()).await?;
+            backend.stop(client.as_deref()).await?;
+            let mut state = self.state.lock().await;
+            if state.generation != generation
+                || !self.is_current_play_intent(intent)
+                || state
+                    .reducer
+                    .snapshot()
+                    .is_none_or(|snapshot| snapshot.current().uri != uri)
+            {
+                return Ok(());
+            }
             state.reducer.queue_load(&uri, playing);
             return Ok(state.file.load(&uri, playing, position_ms)?);
         }
 
-        state.file.stop_silently();
+        self.state.lock().await.file.stop_silently();
         let client = client.ok_or_else(missing_spotify)?;
         if self.local_requested() {
-            if let Err(error) = self.ensure_local_backend(state, client.as_ref()).await {
+            if let Err(error) = self.ensure_local_backend(backend, client.as_ref()).await {
                 log_authorization_required("load", &uri, &error);
-                return Err(error.with_target(snapshot.current().id));
+                return Err(error.with_target(target_track_id, &uri));
             }
         } else {
-            self.ensure_session(state, client.as_ref()).await?;
+            self.ensure_session(backend, client.as_ref())
+                .await
+                .map_err(|error| error.with_target(target_track_id, &uri))?;
+        }
+        let mut state = self.state.lock().await;
+        if state.generation != generation
+            || !self.is_current_play_intent(intent)
+            || state
+                .reducer
+                .snapshot()
+                .is_none_or(|snapshot| snapshot.current().uri != uri)
+        {
+            return Ok(());
         }
         state.reducer.queue_load(&uri, playing);
-        let repeat = state.reducer.repeat().to_owned();
-        Ok(state.backend.play(client, snapshot, &repeat).await?)
+        let repeat = state.reducer.repeat();
+        drop(state);
+        backend
+            .play(client, snapshot, repeat)
+            .await
+            .map_err(PlaybackError::from)
+            .map_err(|error| error.with_target(target_track_id, &uri))
     }
 
-    async fn report_authorization_required(
+    async fn authorization_effects(
         &self,
-        app: &tauri::AppHandle,
-        state: &mut ControllerState,
+        backend: &mut PlayerBackend,
+        client: Option<&LiveClient>,
         prompt: PlaybackAuthorizationPrompt,
-    ) {
+    ) -> Vec<PlaybackEffect> {
+        if !self.is_current_play_intent(prompt.intent) {
+            return Vec::new();
+        }
+        let mut state = self.state.lock().await;
         if state.file.is_active() {
             state.file.stop();
         }
-        let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
-        if let Err(error) = state.backend.stop(client.as_deref()).await {
+        let generation = state.generation;
+        drop(state);
+        if let Err(error) = backend.stop(client).await {
             log::warn!("Could not stop playback after authorization rejection: {error}");
+        }
+        let mut state = self.state.lock().await;
+        if state.generation != generation || !self.is_current_play_intent(prompt.intent) {
+            return Vec::new();
         }
         let shuffle = state.reducer.state().shuffle;
         state.reducer.set_snapshot(None);
-        let _ = app.emit("player-state", empty_event(false, shuffle));
-        let _ = crate::emit_connection_state(app);
-        let _ = app.emit("playback-authorization-required", prompt);
+        vec![
+            PlaybackEffect::PlayerState(empty_event(false, shuffle)),
+            PlaybackEffect::ConnectionRefresh,
+            PlaybackEffect::AuthorizationRequired(prompt),
+        ]
     }
 
     async fn handle_event(
-        &self,
-        app: &tauri::AppHandle,
+        self: &Arc<Self>,
         event: NeutralEvent,
-        on_track_completed: &impl Fn(String),
-        on_listening: &impl Fn(ListeningFact),
+        resolve_provider: &Arc<ProviderResolver>,
+        on_effect: &Arc<EffectSink>,
     ) {
-        let mut state = self.state.lock().await;
-        let actions = state.reducer.handle(event);
-        for fact in state.reducer.take_listening_facts() {
-            on_listening(fact);
+        let (actions, facts) = {
+            let mut state = self.state.lock().await;
+            let actions = state.reducer.handle(event);
+            let facts = state.reducer.take_listening_facts();
+            (actions, facts)
+        };
+        for fact in facts {
+            on_effect(PlaybackEffect::Listening(fact));
         }
         for action in actions {
+            let action = match immediate_effect(action) {
+                ImmediateAction::Effect(effect) => {
+                    on_effect(effect);
+                    continue;
+                }
+                ImmediateAction::Deferred(action) => action,
+            };
             match action {
-                ReducerAction::Emit(event) => {
-                    let _ = app.emit("player-state", &event);
-                    if app.state::<crate::AppState>().media_keys.update(&event)
-                        && event.uri.is_some()
-                    {
-                        tauri::async_runtime::spawn(crate::publish_media_artwork(
-                            app.clone(),
-                            event.clone(),
-                        ));
-                    }
-                }
-                ReducerAction::Error(error) => {
-                    let _ = app.emit("operation-error", error);
-                }
-                ReducerAction::TrackCompleted(uri) => on_track_completed(uri),
                 ReducerAction::PreloadNext => {
-                    let repeat = state.reducer.repeat().to_owned();
-                    let candidate = state.reducer.snapshot().and_then(|snapshot| {
-                        preload_track(snapshot, &repeat)
-                            .map(|track| (snapshot.current().uri.clone(), track.uri.clone()))
-                    });
+                    let (candidate, generation) = {
+                        let state = self.state.lock().await;
+                        let repeat = state.reducer.repeat();
+                        (
+                            state.reducer.snapshot().and_then(|snapshot| {
+                                preload_track(snapshot, repeat).map(|track| {
+                                    (snapshot.current().uri.clone(), track.uri.clone())
+                                })
+                            }),
+                            state.generation,
+                        )
+                    };
                     let Some((current, uri)) = candidate else {
                         continue;
                     };
@@ -1159,15 +1431,19 @@ impl Playback {
                         continue;
                     }
                     log::info!("Preload suggested: current={current} next={uri}");
-                    let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
+                    let client = resolve_provider().ok();
+                    let mut backend = self.backend.lock().await;
                     let result = async {
                         let client = require_spotify(client.as_deref())?;
                         if self.local_requested() {
-                            self.ensure_local_backend(&mut state, client).await?;
+                            self.ensure_local_backend(&mut backend, client).await?;
                         } else {
-                            self.ensure_session(&mut state, client).await?;
+                            self.ensure_session(&mut backend, client).await?;
                         }
-                        Ok(state.backend.preload(&uri)?)
+                        if self.state.lock().await.generation != generation {
+                            return Ok(false);
+                        }
+                        Ok(backend.preload(&uri)?)
                     }
                     .await;
                     match result {
@@ -1177,67 +1453,85 @@ impl Playback {
                             log::warn!(
                                 "Spotify playback authorization failed during speculative preload; current track continues: {error}"
                             );
-                            let _ = crate::emit_connection_state(app);
+                            on_effect(PlaybackEffect::ConnectionRefresh);
                         }
                         Err(error) => log::warn!("Unable to preload {uri}: {error}"),
                     }
                 }
                 ReducerAction::Advance => {
-                    let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
-                    if let Err(error) = self.step_locked(&mut state, client, 1).await {
+                    let client = resolve_provider().ok();
+                    let intent = self.current_play_intent();
+                    if let Err(error) = self.step_for_intent(client, 1, intent).await {
                         match error {
                             error @ PlaybackError::AuthorizationRequired { .. } => {
                                 let prompt = error
-                                    .into_prompt(0)
+                                    .into_prompt(0, "", intent)
                                     .expect("authorization errors produce prompts");
-                                self.report_authorization_required(app, &mut state, prompt)
-                                    .await;
+                                let client = resolve_provider().ok();
+                                let mut backend = self.backend.lock().await;
+                                for effect in self
+                                    .authorization_effects(&mut backend, client.as_deref(), prompt)
+                                    .await
+                                {
+                                    on_effect(effect);
+                                }
                             }
                             error => {
-                                let _ = app.emit("operation-error", error.into_string());
+                                on_effect(PlaybackEffect::OperationError(error.into_string()));
                             }
                         }
                     }
                 }
                 ReducerAction::Reload => {
-                    let client = crate::provider_from(&app.state::<crate::AppState>()).ok();
-                    let result = self.load_current_locked(&mut state, client, true, 0).await;
+                    let client = resolve_provider().ok();
+                    let intent = self.current_play_intent();
+                    let mut backend = self.backend.lock().await;
+                    let result = self
+                        .load_current_locked(&mut backend, client, true, 0, intent)
+                        .await;
                     if let Err(error) = result {
                         match error {
                             error @ PlaybackError::AuthorizationRequired { .. } => {
                                 let prompt = error
-                                    .into_prompt(0)
+                                    .into_prompt(0, "", intent)
                                     .expect("authorization errors produce prompts");
-                                self.report_authorization_required(app, &mut state, prompt)
-                                    .await;
+                                let client = resolve_provider().ok();
+                                for effect in self
+                                    .authorization_effects(&mut backend, client.as_deref(), prompt)
+                                    .await
+                                {
+                                    on_effect(effect);
+                                }
                             }
                             error => {
-                                let _ = app.emit("operation-error", error.into_string());
+                                on_effect(PlaybackEffect::OperationError(error.into_string()));
                             }
                         }
                     }
                 }
                 ReducerAction::Invalidate => {
                     log::info!("Local playback player stopped; will recreate on next use");
+                    let mut backend = self.backend.lock().await;
+                    let mut state = self.state.lock().await;
                     state.generation = state.generation.wrapping_add(1);
                     let generation = state.generation;
                     state.file.set_generation(generation);
                     state.reducer.recover(generation);
-                    if let PlayerBackend::Local(local) = &mut state.backend {
+                    if let PlayerBackend::Local(local) = &mut *backend {
                         local.teardown();
                     }
                 }
                 ReducerAction::Reconnect => {
-                    let generation = state.generation;
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
+                    let generation = self.state.lock().await.generation;
+                    let playback = Arc::clone(self);
+                    let resolve_provider = Arc::clone(resolve_provider);
+                    let on_effect = Arc::clone(on_effect);
+                    tokio::spawn(async move {
                         for (attempt, delay) in RECONNECT_DELAYS.iter().enumerate() {
                             if *delay > 0 {
                                 tokio::time::sleep(Duration::from_secs(*delay)).await;
                             }
-                            let app_state = app.state::<crate::AppState>();
-                            let playback = Arc::clone(&app_state.playback);
-                            let client = match crate::provider_from(&app_state) {
+                            let client = match resolve_provider() {
                                 Ok(client) => client,
                                 Err(error) => {
                                     log::info!("Stopping playback reconnect: {error}");
@@ -1246,7 +1540,7 @@ impl Playback {
                             };
                             match playback.try_reconnect(client.as_ref(), generation).await {
                                 Ok(true) => {
-                                    let _ = app.emit("operation-recovered", ());
+                                    on_effect(PlaybackEffect::OperationRecovered);
                                     log::info!("Local playback session reconnected");
                                     return;
                                 }
@@ -1254,18 +1548,26 @@ impl Playback {
                                     // A user action took over (play, stop, backend
                                     // switch) — the reconnect banner no longer
                                     // describes reality, so clear it.
-                                    let _ = app.emit("operation-recovered", ());
+                                    on_effect(PlaybackEffect::OperationRecovered);
                                     log::debug!("Playback reconnect superseded");
                                     return;
                                 }
                                 Err(error @ PlaybackError::AuthorizationRequired { .. }) => {
-                                    let mut state = playback.state.lock().await;
                                     let prompt = error
-                                        .into_prompt(0)
+                                        .into_prompt(0, "", playback.current_play_intent())
                                         .expect("authorization errors produce prompts");
-                                    playback
-                                        .report_authorization_required(&app, &mut state, prompt)
-                                        .await;
+                                    let client = resolve_provider().ok();
+                                    let mut backend = playback.backend.lock().await;
+                                    for effect in playback
+                                        .authorization_effects(
+                                            &mut backend,
+                                            client.as_deref(),
+                                            prompt,
+                                        )
+                                        .await
+                                    {
+                                        on_effect(effect);
+                                    }
                                     return;
                                 }
                                 Err(error) => {
@@ -1274,29 +1576,52 @@ impl Playback {
                                         attempt + 1
                                     );
                                     if attempt == 0 {
-                                        let _ = app.emit(
-                                            "operation-error",
-                                            "Restarting built-in playback…",
-                                        );
+                                        on_effect(PlaybackEffect::OperationError(
+                                            "Restarting built-in playback…".into(),
+                                        ));
                                     }
                                 }
                             }
                         }
-                        let _ =
-                            app.emit("operation-error", "Built-in playback stopped unexpectedly.");
+                        on_effect(PlaybackEffect::OperationError(
+                            "Built-in playback stopped unexpectedly.".into(),
+                        ));
                     });
+                }
+                ReducerAction::Emit(_)
+                | ReducerAction::Error(_)
+                | ReducerAction::TrackCompleted(_) => {
+                    unreachable!("immediate effects are consumed")
                 }
             }
         }
     }
 }
 
-fn play_outcome_from_error(error: PlaybackError) -> Result<PlayOutcome, String> {
+enum ImmediateAction {
+    Effect(PlaybackEffect),
+    Deferred(ReducerAction),
+}
+
+fn immediate_effect(action: ReducerAction) -> ImmediateAction {
+    match action {
+        ReducerAction::Emit(event) => ImmediateAction::Effect(PlaybackEffect::PlayerState(event)),
+        ReducerAction::Error(error) => {
+            ImmediateAction::Effect(PlaybackEffect::OperationError(error))
+        }
+        ReducerAction::TrackCompleted(uri) => {
+            ImmediateAction::Effect(PlaybackEffect::TrackCompleted(uri))
+        }
+        action => ImmediateAction::Deferred(action),
+    }
+}
+
+fn play_outcome_from_error(error: PlaybackError, intent: u64) -> Result<PlayOutcome, String> {
     match error {
         error @ PlaybackError::AuthorizationRequired { .. } => {
             Ok(PlayOutcome::PlaybackAuthorizationRequired(
                 error
-                    .into_prompt(0)
+                    .into_prompt(0, "", intent)
                     .expect("authorization errors produce prompts"),
             ))
         }
@@ -1322,11 +1647,13 @@ fn step_index(index: usize, len: usize, direction: i8, wrap: bool) -> Option<usi
     }
 }
 
-fn preload_track<'a>(snapshot: &'a Snapshot, repeat: &str) -> Option<&'a SnapshotTrack> {
-    if repeat == "one" {
-        return None;
-    }
-    let next = step_index(snapshot.index, snapshot.len(), 1, repeat == "all")?;
+fn preload_track(snapshot: &Snapshot, repeat: RepeatMode) -> Option<&SnapshotTrack> {
+    let wrap = match repeat {
+        RepeatMode::Off => false,
+        RepeatMode::All => true,
+        RepeatMode::One => return None,
+    };
+    let next = step_index(snapshot.index, snapshot.len(), 1, wrap)?;
     Some(snapshot.track_at(next))
 }
 
@@ -1388,6 +1715,131 @@ pub fn empty_event(external: bool, shuffle: bool) -> PlayerStateEvent {
 mod tests {
     use super::*;
     use retune_spotify::tokens::{CachedTokenStore, InMemoryTokenStore, TokenStore};
+
+    #[test]
+    fn listener_starts_without_a_current_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let playback = Arc::new(Playback::default());
+        let listener = playback.listen(|| Err("offline".into()), |_| {});
+
+        listener.abort();
+    }
+
+    async fn delayed_backend_effect(
+        playback: Arc<Playback>,
+        id: u8,
+        entered: mpsc::UnboundedSender<u8>,
+        release: Arc<tokio::sync::Notify>,
+        generation: u64,
+        volume: u8,
+    ) {
+        let _backend = playback.backend.lock().await;
+        entered.send(id).unwrap();
+        release.notified().await;
+        playback
+            .commit_if_generation(generation, |state| state.volume = volume)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn delayed_backend_effects_are_ordered_without_blocking_controller_state() {
+        let playback = Arc::new(Playback::default());
+        let generation = playback.state.lock().await.generation;
+        let (entered, mut entries) = mpsc::unbounded_channel();
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let second_release = Arc::new(tokio::sync::Notify::new());
+        let first = tokio::spawn(delayed_backend_effect(
+            Arc::clone(&playback),
+            1,
+            entered.clone(),
+            Arc::clone(&first_release),
+            generation,
+            25,
+        ));
+        assert_eq!(entries.recv().await, Some(1));
+        let second = tokio::spawn(delayed_backend_effect(
+            Arc::clone(&playback),
+            2,
+            entered,
+            Arc::clone(&second_release),
+            generation,
+            50,
+        ));
+
+        let _ = tokio::time::timeout(Duration::from_millis(50), playback.state.lock())
+            .await
+            .expect("controller reads must not wait for a remote effect");
+        assert!(
+            entries.try_recv().is_err(),
+            "remote effects must stay ordered"
+        );
+
+        playback.state.lock().await.generation = generation.wrapping_add(1);
+        first_release.notify_one();
+        assert_eq!(entries.recv().await, Some(2));
+        second_release.notify_one();
+        first.await.unwrap();
+        second.await.unwrap();
+
+        let state = playback.state.lock().await;
+        assert_eq!(state.volume, 62, "stale effects must not commit");
+    }
+
+    #[test]
+    fn immediate_reducer_actions_map_to_tauri_free_effects() {
+        let event = empty_event(false, true);
+
+        assert!(matches!(
+            immediate_effect(ReducerAction::Emit(event.clone())),
+            ImmediateAction::Effect(PlaybackEffect::PlayerState(mapped)) if mapped == event
+        ));
+        assert!(matches!(
+            immediate_effect(ReducerAction::Error("offline".into())),
+            ImmediateAction::Effect(PlaybackEffect::OperationError(error)) if error == "offline"
+        ));
+        assert!(matches!(
+            immediate_effect(ReducerAction::TrackCompleted("spotify:track:one".into())),
+            ImmediateAction::Effect(PlaybackEffect::TrackCompleted(uri)) if uri == "spotify:track:one"
+        ));
+        assert!(matches!(
+            immediate_effect(ReducerAction::Advance),
+            ImmediateAction::Deferred(ReducerAction::Advance)
+        ));
+    }
+
+    #[test]
+    fn playback_setting_enums_use_exact_lowercase_wire_values() {
+        for (backend, wire) in [
+            (PlaybackBackend::Connect, "connect"),
+            (PlaybackBackend::Local, "local"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&backend).unwrap(),
+                format!("\"{wire}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<PlaybackBackend>(&format!("\"{wire}\"")).unwrap(),
+                backend
+            );
+        }
+        for (repeat, wire) in [
+            (RepeatMode::Off, "off"),
+            (RepeatMode::All, "all"),
+            (RepeatMode::One, "one"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&repeat).unwrap(),
+                format!("\"{wire}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<RepeatMode>(&format!("\"{wire}\"")).unwrap(),
+                repeat
+            );
+        }
+        assert!(!RepeatMode::Off.wraps());
+        assert!(RepeatMode::All.wraps());
+        assert!(!RepeatMode::One.wraps());
+    }
 
     fn mixed_tracks() -> Vec<SnapshotTrack> {
         vec![
@@ -1536,8 +1988,9 @@ mod tests {
     async fn enabled_shuffle_constructs_exact_queue_then_event_advance_and_prev_follow_it() {
         let playback = Playback::default();
         playback.set_shuffle_with(true, |_| unreachable!()).await;
+        let intent = playback.begin_play_intent();
         playback
-            .play_with(None, file_tracks(5), 1, |suffix| suffix.reverse())
+            .play_with(None, file_tracks(5), 1, intent, |suffix| suffix.reverse())
             .await
             .unwrap();
         let mut state = playback.state.lock().await;
@@ -1563,10 +2016,33 @@ mod tests {
             [ReducerAction::TrackCompleted(_), ReducerAction::Advance]
         ));
 
-        playback.step_locked(&mut state, None, 1).await.unwrap();
-        assert_eq!(state.reducer.snapshot().unwrap().current().id, 5);
-        playback.step_locked(&mut state, None, -1).await.unwrap();
-        assert_eq!(state.reducer.snapshot().unwrap().current().id, 2);
+        drop(state);
+        playback.step(None, 1).await.unwrap();
+        assert_eq!(
+            playback
+                .state
+                .lock()
+                .await
+                .reducer
+                .snapshot()
+                .unwrap()
+                .current()
+                .id,
+            5
+        );
+        playback.step(None, -1).await.unwrap();
+        assert_eq!(
+            playback
+                .state
+                .lock()
+                .await
+                .reducer
+                .snapshot()
+                .unwrap()
+                .current()
+                .id,
+            2
+        );
     }
 
     #[tokio::test]
@@ -1620,7 +2096,7 @@ mod tests {
         playback
             .set_shuffle_with(true, |suffix| suffix.reverse())
             .await;
-        playback.set_repeat(None, "all").await.unwrap();
+        playback.set_repeat(None, RepeatMode::All).await.unwrap();
 
         playback.next(None).await.unwrap();
         playback.next(None).await.unwrap();
@@ -1701,7 +2177,7 @@ mod tests {
     #[tokio::test]
     async fn missing_playback_authorization_does_not_commit_a_spotify_queue() {
         let playback = Playback::default();
-        playback.set_local_requested(true);
+        playback.set_requested_backend(PlaybackBackend::Local);
         let track = mixed_tracks().pop().unwrap();
         let outcome = playback
             .play(Some(client_without_playback_credentials()), vec![track], 0)
@@ -1713,16 +2189,41 @@ mod tests {
             PlayOutcome::PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt {
                 reason: PlaybackAuthorizationReason::Missing,
                 target_track_id: 2,
+                ref target_track_uri,
                 ..
-            })
+            }) if target_track_uri == "spotify:track:two"
         ));
         assert!(playback.state.lock().await.reducer.snapshot().is_none());
+    }
+
+    #[test]
+    fn play_outcome_wire_shape_matches_the_shared_frontend_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test/fixtures/play-outcomes.json"))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(PlayOutcome::Started).unwrap(),
+            fixture["started"]
+        );
+        assert_eq!(
+            serde_json::to_value(PlayOutcome::PlaybackAuthorizationRequired(
+                PlaybackAuthorizationPrompt {
+                    reason: PlaybackAuthorizationReason::Missing,
+                    message: "Authorize playback.".into(),
+                    target_track_id: 2,
+                    target_track_uri: "spotify:track:two".into(),
+                    intent: 1,
+                }
+            ))
+            .unwrap(),
+            fixture["playbackAuthorizationRequired"]
+        );
     }
 
     #[tokio::test]
     async fn local_files_remain_playable_without_playback_authorization() {
         let playback = Playback::default();
-        playback.set_local_requested(true);
+        playback.set_requested_backend(PlaybackBackend::Local);
 
         assert_eq!(
             playback.play(None, file_tracks(1), 0).await.unwrap(),
@@ -1734,7 +2235,7 @@ mod tests {
     #[tokio::test]
     async fn playback_auth_failure_does_not_advance_from_a_local_file() {
         let playback = Playback::default();
-        playback.set_local_requested(true);
+        playback.set_requested_backend(PlaybackBackend::Local);
         playback.play(None, mixed_tracks(), 0).await.unwrap();
 
         assert!(matches!(
@@ -1745,8 +2246,9 @@ mod tests {
             PlayOutcome::PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt {
                 reason: PlaybackAuthorizationReason::Missing,
                 target_track_id: 2,
+                ref target_track_uri,
                 ..
-            })
+            }) if target_track_uri == "spotify:track:two"
         ));
         let state = playback.state.lock().await;
         assert_eq!(state.reducer.snapshot().unwrap().index, 0);
@@ -1869,7 +2371,7 @@ mod tests {
             playback.play(None, mixed_tracks(), 1).await.unwrap_err(),
             missing_spotify()
         );
-        playback.set_repeat(None, "all").await.unwrap();
+        playback.set_repeat(None, RepeatMode::All).await.unwrap();
 
         playback.next(None).await.unwrap();
         let state = playback.state.lock().await;
@@ -1882,7 +2384,7 @@ mod tests {
         let playback = Playback::default();
         let mut tracks = mixed_tracks();
         tracks[1].uri = "file:///definitely/missing/two.mp3".into();
-        playback.set_repeat(None, "all").await.unwrap();
+        playback.set_repeat(None, RepeatMode::All).await.unwrap();
         playback.play(None, tracks, 1).await.unwrap();
 
         playback.next(None).await.unwrap();
@@ -1926,14 +2428,15 @@ mod tests {
             .take()
             .unwrap();
         playback.set_shuffle_with(true, |_| unreachable!()).await;
+        let intent = playback.begin_play_intent();
         playback
-            .play_with(None, file_tracks(4), 1, |suffix| suffix.reverse())
+            .play_with(None, file_tracks(4), 1, intent, |suffix| suffix.reverse())
             .await
             .unwrap();
         let request = receiver.recv().await.unwrap();
         let mut state = playback.state.lock().await;
         assert!(state.reducer.handle(request).is_empty());
-        state.reducer.set_repeat("one");
+        state.reducer.set_repeat(RepeatMode::One);
         let generation = state.generation;
         assert!(matches!(
             state
@@ -1947,10 +2450,14 @@ mod tests {
             [ReducerAction::TrackCompleted(_), ReducerAction::Reload]
         ));
         let before = state.file.request_id();
+        drop(state);
+        let mut backend = playback.backend.lock().await;
         playback
-            .load_current_locked(&mut state, None, true, 0)
+            .load_current_locked(&mut backend, None, true, 0, intent)
             .await
             .unwrap();
+        drop(backend);
+        let state = playback.state.lock().await;
         let snapshot = state.reducer.snapshot().unwrap();
         assert_eq!(snapshot.order, [0, 1, 3, 2]);
         assert_eq!(snapshot.index, 1);
@@ -1990,14 +2497,12 @@ mod tests {
             [ReducerAction::Error(_), ReducerAction::Advance]
         ));
 
+        drop(state);
         assert_eq!(
-            playback
-                .step_locked(&mut state, None, 1)
-                .await
-                .unwrap_err()
-                .into_string(),
+            playback.step(None, 1).await.unwrap_err().into_string(),
             missing_spotify()
         );
+        let state = playback.state.lock().await;
         assert_eq!(state.reducer.snapshot().unwrap().index, 1);
         assert!(!state.file.is_active());
     }
@@ -2006,23 +2511,26 @@ mod tests {
     async fn active_local_backend_stops_before_file_load_without_client() {
         let playback = Playback::default();
         let tracks = mixed_tracks();
+        let mut backend = playback.backend.lock().await;
         let mut state = playback.state.lock().await;
-        state.backend = PlayerBackend::Local(LocalBackend::with_snapshot_for_test(Snapshot::new(
+        *backend = PlayerBackend::Local(LocalBackend::with_snapshot_for_test(Snapshot::new(
             tracks.clone(),
             1,
         )));
         state.reducer.set_snapshot(Some(Snapshot::new(tracks, 0)));
+        drop(state);
+        let intent = playback.current_play_intent();
 
         playback
-            .load_current_locked(&mut state, None, true, 0)
+            .load_current_locked(&mut backend, None, true, 0, intent)
             .await
             .unwrap();
 
-        let PlayerBackend::Local(local) = &state.backend else {
+        let PlayerBackend::Local(local) = &*backend else {
             panic!("local backend should remain selected");
         };
         assert!(!local.has_snapshot());
-        assert!(state.file.is_active());
+        assert!(playback.state.lock().await.file.is_active());
     }
 
     #[tokio::test]
@@ -2050,7 +2558,9 @@ mod tests {
                 ReducerAction::Advance
             ]
         );
-        playback.step_locked(&mut state, None, 1).await.unwrap();
+        drop(state);
+        playback.step(None, 1).await.unwrap();
+        let mut state = playback.state.lock().await;
         assert_eq!(state.reducer.snapshot().unwrap().index, 1);
         assert!(state.file.is_active());
 
@@ -2072,11 +2582,132 @@ mod tests {
     #[tokio::test]
     async fn failed_switch_keeps_connect_backend() {
         let playback = Playback::default();
+        let intent = playback.set_requested_backend(PlaybackBackend::Local);
         let result = playback
-            .switch_to_local_with(None, || async { Err("preflight failed".into()) })
+            .switch_to_local_with(None, intent, || async { Err("preflight failed".into()) })
             .await;
         assert_eq!(result.unwrap_err(), "preflight failed");
         assert!(!playback.is_local_active().await);
+    }
+
+    #[tokio::test]
+    async fn stale_local_activation_cannot_replace_newer_connect_intent() {
+        let playback = Arc::new(Playback::default());
+        let prepared = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let intent = playback.set_requested_backend(PlaybackBackend::Local);
+        let activation = tokio::spawn({
+            let playback = Arc::clone(&playback);
+            let prepared = Arc::clone(&prepared);
+            let release = Arc::clone(&release);
+            async move {
+                playback
+                    .switch_to_local_with(None, intent, || async move {
+                        prepared.wait().await;
+                        release.wait().await;
+                        Ok(LocalBackend::with_snapshot_for_test(Snapshot::new(
+                            file_tracks(1),
+                            0,
+                        )))
+                    })
+                    .await
+            }
+        });
+
+        prepared.wait().await;
+        playback.switch_to_connect().await;
+        let connect_generation = playback.state.lock().await.generation;
+        release.wait().await;
+        activation.await.unwrap().unwrap();
+
+        assert!(matches!(
+            *playback.backend.lock().await,
+            PlayerBackend::Connect(_)
+        ));
+        assert_eq!(playback.state.lock().await.generation, connect_generation);
+    }
+
+    #[tokio::test]
+    async fn older_prepared_play_cannot_replace_a_newer_play_intent() {
+        let playback = Arc::new(Playback::default());
+        let older = playback.begin_play_intent();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let delayed = tokio::spawn({
+            let playback = Arc::clone(&playback);
+            let release = Arc::clone(&release);
+            async move {
+                release.notified().await;
+                let mut stale = file_tracks(1);
+                stale[0].id = 99;
+                playback
+                    .play_for_intent(None, stale, 0, older)
+                    .await
+                    .unwrap();
+            }
+        });
+        let newer = playback.begin_play_intent();
+
+        playback
+            .play_for_intent(None, file_tracks(1), 0, newer)
+            .await
+            .unwrap();
+        release.notify_one();
+        delayed.await.unwrap();
+
+        assert_eq!(
+            playback
+                .state
+                .lock()
+                .await
+                .reducer
+                .snapshot()
+                .unwrap()
+                .current()
+                .id,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_authorization_cleanup_cannot_stop_a_newer_play() {
+        let playback = Playback::default();
+        let stale_intent = playback.begin_play_intent();
+        let prompt = PlaybackAuthorizationPrompt {
+            reason: PlaybackAuthorizationReason::Missing,
+            message: "Authorize playback.".into(),
+            target_track_id: 99,
+            target_track_uri: "spotify:track:stale".into(),
+            intent: stale_intent,
+        };
+        playback.play(None, file_tracks(1), 0).await.unwrap();
+
+        assert!(playback
+            .stop_for_authorization(None, prompt)
+            .await
+            .is_empty());
+        let state = playback.state.lock().await;
+        assert!(state.file.is_active());
+        assert_eq!(state.reducer.snapshot().unwrap().current().id, 1);
+    }
+
+    #[tokio::test]
+    async fn stop_and_backend_switch_invalidate_a_pending_play() {
+        let playback = Playback::default();
+        let stopped = playback.begin_play_intent();
+        playback.stop(None).await.unwrap();
+        playback
+            .play_for_intent(None, file_tracks(1), 0, stopped)
+            .await
+            .unwrap();
+        assert!(playback.state.lock().await.reducer.snapshot().is_none());
+
+        let switched = playback.begin_play_intent();
+        playback.set_requested_backend(PlaybackBackend::Connect);
+        playback
+            .play_for_intent(None, file_tracks(1), 0, switched)
+            .await
+            .unwrap();
+        assert!(playback.state.lock().await.reducer.snapshot().is_none());
     }
 
     #[tokio::test]
@@ -2115,14 +2746,14 @@ mod tests {
     #[test]
     fn preload_follows_active_order_and_repeat_policy() {
         let mut snapshot = Snapshot::new(file_tracks(3), 0);
-        assert_eq!(preload_track(&snapshot, "off").unwrap().id, 2);
+        assert_eq!(preload_track(&snapshot, RepeatMode::Off).unwrap().id, 2);
 
         snapshot.set_shuffle_with(true, |suffix| suffix.reverse());
-        assert_eq!(preload_track(&snapshot, "off").unwrap().id, 3);
+        assert_eq!(preload_track(&snapshot, RepeatMode::Off).unwrap().id, 3);
 
         snapshot.index = 2;
-        assert!(preload_track(&snapshot, "off").is_none());
-        assert_eq!(preload_track(&snapshot, "all").unwrap().id, 1);
-        assert!(preload_track(&snapshot, "one").is_none());
+        assert!(preload_track(&snapshot, RepeatMode::Off).is_none());
+        assert_eq!(preload_track(&snapshot, RepeatMode::All).unwrap().id, 1);
+        assert!(preload_track(&snapshot, RepeatMode::One).is_none());
     }
 }

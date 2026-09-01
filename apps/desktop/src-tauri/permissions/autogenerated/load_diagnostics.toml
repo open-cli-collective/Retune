@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-diagnostics"
+description = "Enables the load_diagnostics command without any pre-configured scope."
+commands.allow = ["load_diagnostics"]
+
+[[permission]]
+identifier = "deny-load-diagnostics"
+description = "Denies the load_diagnostics command without any pre-configured scope."
+commands.deny = ["load_diagnostics"]

@@ -5,9 +5,14 @@
   "windows": [
     "lastfm-importer"
   ],
+  "platforms": [
+    "linux",
+    "macOS",
+    "windows"
+  ],
   "permissions": [
-    "core:default",
-    "core:window:allow-set-title",
-    "opener:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "importer-commands"
   ]
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-spotify-track"
+description = "Enables the add_spotify_track command without any pre-configured scope."
+commands.allow = ["add_spotify_track"]
+
+[[permission]]
+identifier = "deny-add-spotify-track"
+description = "Denies the add_spotify_track command without any pre-configured scope."
+commands.deny = ["add_spotify_track"]

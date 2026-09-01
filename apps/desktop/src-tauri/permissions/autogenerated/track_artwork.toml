@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-track-artwork"
+description = "Enables the track_artwork command without any pre-configured scope."
+commands.allow = ["track_artwork"]
+
+[[permission]]
+identifier = "deny-track-artwork"
+description = "Denies the track_artwork command without any pre-configured scope."
+commands.deny = ["track_artwork"]

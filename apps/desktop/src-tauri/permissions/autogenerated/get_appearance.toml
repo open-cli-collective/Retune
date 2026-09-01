@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-appearance"
+description = "Enables the get_appearance command without any pre-configured scope."
+commands.allow = ["get_appearance"]
+
+[[permission]]
+identifier = "deny-get-appearance"
+description = "Denies the get_appearance command without any pre-configured scope."
+commands.deny = ["get_appearance"]

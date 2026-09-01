@@ -12,16 +12,20 @@ the behavior you are changing:
 | OAuth, Spotify API, sync, playlists, rate limits | [Spotify](docs/architecture/spotify.md) |
 | Queueing, backends, playback events, play counts | [Playback](docs/architecture/playback.md) |
 | Files, tokens, backup/restore | [Persistence](docs/architecture/persistence.md) |
+| Tauri shell, IPC, capabilities, lifecycle, platform config | [Tauri](docs/tauri.md) |
 | Build, test, run, package, manual validation | [Development](docs/DEVELOPMENT.md) |
 | Install, upgrade, uninstall, Spotify setup | [Installation](docs/INSTALL.md) |
+| Completed SOLID audit evidence | [SOLID audit record](docs/SOLID.md) |
+| Completed Rust audit evidence | [Rust audit record](docs/rust.md) |
 
 ## Invariants
 
 - `retune-core` stays deterministic and free of filesystem, network, async, UI,
   and Tauri concerns.
 - Overlay metadata never writes to Spotify. Explicit content actions may.
-- Spotify requests go through the shared client and its request gate; do not add
-  direct HTTP call paths.
+- Spotify Web API requests go through the shared client and its request gate.
+  OAuth token requests use the shared low-level transport outside that gate; do
+  not add direct HTTP call paths.
 - All playback backends emit neutral events. The controller/reducer owns queue
   advancement and UI-visible playback state.
 - Local files remain usable while signed out of Spotify.

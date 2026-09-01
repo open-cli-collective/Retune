@@ -25,9 +25,10 @@ fn scan_is_sorted_recursive_and_filters_extensions() {
         fs::write(root.join(name), []).unwrap();
     }
 
-    let files = scan_path(&root);
+    let scan = scan_path(&root);
+    assert!(scan.failures.is_empty());
     assert_eq!(
-        files,
+        scan.files,
         [
             root.join("nested/a.flac"),
             root.join("nested/b.MP4"),
@@ -53,13 +54,45 @@ fn scan_skips_hidden_entries_and_directory_symlinks_but_accepts_file_symlinks() 
     fs::write(root.join(".hidden.mp3"), []).unwrap();
     symlink(root.join("real"), root.join("linked-dir")).unwrap();
     symlink(root.join("real/song.mp3"), root.join("linked-song.mp3")).unwrap();
+    let broken = root.join("broken-song.mp3");
+    symlink(root.join("missing.mp3"), &broken).unwrap();
 
+    let scan = scan_path(&root);
     assert_eq!(
-        scan_path(&root),
+        scan.files,
         [root.join("real/song.mp3").canonicalize().unwrap()]
     );
-    assert!(scan_path(&root.join(".hidden.mp3")).is_empty());
-    assert!(scan_path(&root.join(".hidden")).is_empty());
+    assert_eq!(scan.failures.len(), 1);
+    assert_eq!(scan.failures[0].path, broken);
+    assert!(scan_path(&root.join(".hidden.mp3")).files.is_empty());
+    assert!(scan_path(&root.join(".hidden")).files.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_rejects_file_symlink_escapes_and_special_files() {
+    use std::os::unix::{fs::symlink, net::UnixListener};
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let outside = dir.path().join("outside.mp3");
+    fs::write(&outside, []).unwrap();
+    let escape = root.join("escape.mp3");
+    symlink(&outside, &escape).unwrap();
+    let socket = root.join("audio.mp3");
+    let _listener = UnixListener::bind(&socket).unwrap();
+
+    let scan = scan_path(&root);
+
+    assert!(scan.files.is_empty());
+    assert_eq!(scan.failure_count, 2);
+    assert!(scan.failures.iter().any(|failure| {
+        failure.path == escape && failure.error.to_string().contains("escapes selected root")
+    }));
+    assert!(scan.failures.iter().any(|failure| {
+        failure.path == socket && failure.error.to_string().contains("special files")
+    }));
 }
 
 #[test]

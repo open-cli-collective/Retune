@@ -1,31 +1,37 @@
 use std::{
     collections::VecDeque,
-    fs::{self, OpenOptions},
     future::Future,
-    io::Write,
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-use md5::{Digest, Md5};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex;
 use url::Url;
 
-const API_URL: &str = "https://ws.audioscrobbler.com/2.0/";
+mod api;
+mod listening;
+mod store;
+
+#[cfg(test)]
+pub(crate) use api::FakeRequestExecutor;
+#[cfg(test)]
+use api::{collect_response_body_with_limit, error_code, signature, RESPONSE_BODY_LIMIT};
+pub(crate) use api::{credentials_from, Credentials};
+use api::{response_text, Failure, HttpRequestExecutor, RequestExecutor};
+use listening::*;
+pub(crate) use listening::{AcceptedScrobbleReceipt, ScrobbleMetadata};
+use store::*;
+
 const AUTH_URL: &str = "https://www.last.fm/api/auth";
-const USER_AGENT: &str = concat!("Retune/", env!("CARGO_PKG_VERSION"));
-#[cfg(not(test))]
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.rianjs.retune";
-#[cfg(not(test))]
 pub(crate) const SESSION_ACCOUNT: &str = "lastfm-session";
 const RETRY_DELAYS: &[Duration] = &[
     Duration::from_secs(1),
@@ -34,376 +40,7 @@ const RETRY_DELAYS: &[Duration] = &[
     Duration::from_secs(60),
     Duration::from_secs(300),
 ];
-const SCROBBLE_LEDGER_VERSION: u8 = 2;
-
-#[derive(Clone)]
-struct Credentials {
-    api_key: String,
-    shared_secret: String,
-}
-
-fn credentials_from(api_key: Option<&str>, shared_secret: Option<&str>) -> Option<Credentials> {
-    let api_key = api_key?.trim();
-    let shared_secret = shared_secret?.trim();
-    (!api_key.is_empty() && !shared_secret.is_empty()).then(|| Credentials {
-        api_key: api_key.into(),
-        shared_secret: shared_secret.into(),
-    })
-}
-
-fn built_in_credentials() -> Option<Credentials> {
-    let credentials = credentials_from(
-        option_env!("RETUNE_LASTFM_API_KEY"),
-        option_env!("RETUNE_LASTFM_SHARED_SECRET"),
-    );
-    #[cfg(test)]
-    return credentials.or_else(|| {
-        Some(Credentials {
-            api_key: "test-api-key".into(),
-            shared_secret: "test-shared-secret".into(),
-        })
-    });
-    #[cfg(not(test))]
-    credentials
-}
-
-#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LastFmSession {
-    username: String,
-    key: String,
-}
-
-trait SessionStore: Send + Sync {
-    fn load(&self) -> Result<Option<LastFmSession>, String>;
-    fn save(&self, session: &LastFmSession) -> Result<(), String>;
-    fn clear(&self) -> Result<(), String>;
-}
-
-struct FileSessionStore {
-    path: PathBuf,
-}
-
-impl FileSessionStore {
-    fn new(app_data_dir: impl AsRef<Path>) -> Self {
-        Self {
-            path: app_data_dir.as_ref().join("dev-lastfm-session.json"),
-        }
-    }
-}
-
-impl SessionStore for FileSessionStore {
-    fn load(&self) -> Result<Option<LastFmSession>, String> {
-        read_json(&self.path)
-    }
-
-    fn save(&self, session: &LastFmSession) -> Result<(), String> {
-        write_secret_json(&self.path, session)
-    }
-
-    fn clear(&self) -> Result<(), String> {
-        remove_file(&self.path)
-    }
-}
-
-#[cfg(not(test))]
-struct KeyringSessionStore {
-    entry: keyring::Entry,
-}
-
-#[cfg(not(test))]
-impl KeyringSessionStore {
-    fn new() -> Result<Self, String> {
-        keyring::Entry::new(CREDENTIAL_SERVICE, SESSION_ACCOUNT)
-            .map(|entry| Self { entry })
-            .map_err(|_error| "Last.fm credential storage is unavailable.".to_string())
-    }
-}
-
-#[cfg(not(test))]
-impl SessionStore for KeyringSessionStore {
-    fn load(&self) -> Result<Option<LastFmSession>, String> {
-        match self.entry.get_password() {
-            Ok(value) => serde_json::from_str(&value)
-                .map(Some)
-                .map_err(|_| "Stored Last.fm session is invalid.".into()),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err("Last.fm credential storage is unavailable.".into()),
-        }
-    }
-
-    fn save(&self, session: &LastFmSession) -> Result<(), String> {
-        let value = serde_json::to_string(session)
-            .map_err(|_| "Could not save the Last.fm session.".to_string())?;
-        self.entry
-            .set_password(&value)
-            .map_err(|_| "Could not save the Last.fm session.".into())
-    }
-
-    fn clear(&self) -> Result<(), String> {
-        match self.entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err("Could not remove the Last.fm session.".into()),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct PendingTokenStore {
-    path: PathBuf,
-}
-
-impl PendingTokenStore {
-    fn new(app_data_dir: impl AsRef<Path>) -> Self {
-        Self {
-            path: app_data_dir.as_ref().join("lastfm-pending-token.json"),
-        }
-    }
-
-    fn load(&self) -> Result<Option<String>, String> {
-        read_json(&self.path)
-    }
-
-    fn save(&self, token: &str) -> Result<(), String> {
-        write_secret_json(&self.path, &token)
-    }
-
-    fn clear(&self) -> Result<(), String> {
-        remove_file(&self.path)
-    }
-}
-
-#[cfg(test)]
-struct SaveBlocker {
-    entered: std::sync::mpsc::Sender<()>,
-    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-}
-
-#[derive(Clone)]
-struct QueueStore {
-    path: PathBuf,
-    #[cfg(test)]
-    blocker: Option<Arc<SaveBlocker>>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScrobbleLedgerV2 {
-    #[serde(default = "scrobble_ledger_version")]
-    version: u8,
-    pending: VecDeque<Scrobble>,
-    #[serde(default)]
-    accepted: Vec<crate::lastfm_import::AcceptedScrobbleReceipt>,
-    #[serde(default)]
-    owner: Option<String>,
-}
-
-fn scrobble_ledger_version() -> u8 {
-    SCROBBLE_LEDGER_VERSION
-}
-
-impl ScrobbleLedgerV2 {
-    fn empty() -> Self {
-        Self {
-            version: SCROBBLE_LEDGER_VERSION,
-            pending: VecDeque::new(),
-            accepted: Vec::new(),
-            owner: None,
-        }
-    }
-}
-
-impl QueueStore {
-    fn new(app_data_dir: impl AsRef<Path>) -> Self {
-        Self {
-            path: app_data_dir.as_ref().join("lastfm-scrobbles.json"),
-            #[cfg(test)]
-            blocker: None,
-        }
-    }
-
-    fn load_ledger_with_migration(&self) -> Result<(ScrobbleLedgerV2, bool), String> {
-        let Some(value) = read_json::<Value>(&self.path)? else {
-            return Ok((ScrobbleLedgerV2::empty(), false));
-        };
-        let (ledger, migrated) = if value.is_array() {
-            (
-                ScrobbleLedgerV2 {
-                    pending: serde_json::from_value(value)
-                        .map_err(|_| "Could not read the Last.fm scrobble queue.".to_string())?,
-                    ..ScrobbleLedgerV2::empty()
-                },
-                true,
-            )
-        } else if value.is_object() {
-            (
-                serde_json::from_value(value)
-                    .map_err(|_| "Could not read the Last.fm scrobble ledger.".to_string())?,
-                false,
-            )
-        } else {
-            return Err("Could not read the Last.fm scrobble ledger.".into());
-        };
-        if ledger.version != SCROBBLE_LEDGER_VERSION {
-            return Err("The Last.fm scrobble ledger version is unsupported.".into());
-        }
-        Ok((ledger, migrated))
-    }
-
-    #[cfg(test)]
-    fn load(&self) -> Result<VecDeque<Scrobble>, String> {
-        Ok(self.load_ledger_with_migration()?.0.pending)
-    }
-
-    #[cfg(test)]
-    fn save(&self, queue: &VecDeque<Scrobble>) -> Result<(), String> {
-        let mut ledger = ScrobbleLedgerV2::empty();
-        ledger.pending = queue.clone();
-        self.save_ledger(&ledger)
-    }
-
-    fn save_ledger(&self, ledger: &ScrobbleLedgerV2) -> Result<(), String> {
-        #[cfg(test)]
-        if let Some(blocker) = &self.blocker {
-            let _ = blocker.entered.send(());
-            blocker
-                .release
-                .lock()
-                .expect("queue persistence blocker mutex is not poisoned")
-                .recv()
-                .expect("queue persistence blocker release is sent");
-        }
-        let bytes = serde_json::to_vec(ledger)
-            .map_err(|_| "Could not serialize the Last.fm scrobble ledger.".to_string())?;
-        atomic_write(&self.path, &bytes, false)
-    }
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| format!("Could not read {}.", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(format!("Could not read {}.", path.display())),
-    }
-}
-
-fn write_secret_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|_| "Could not serialize a Last.fm credential.".to_string())?;
-    atomic_write(path, &bytes, true)
-}
-
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8], secret: bool) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Last.fm store path has no parent.".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|_| "Could not create the Last.fm store directory.".to_string())?;
-    let temporary = path.with_extension(format!("tmp-{}", rand::random::<u64>()));
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        if secret {
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|_| "Could not open the Last.fm temporary store.".to_string())?;
-        #[cfg(unix)]
-        if secret {
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(|_| "Could not protect the Last.fm temporary store.".to_string())?;
-        }
-        file.write_all(bytes)
-            .map_err(|_| "Could not write the Last.fm store.".to_string())?;
-        file.sync_all()
-            .map_err(|_| "Could not sync the Last.fm store.".to_string())?;
-        fs::rename(&temporary, path).map_err(|_| "Could not replace the Last.fm store.".to_string())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result?;
-    #[cfg(unix)]
-    if secret {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|_| "Could not protect the Last.fm store.".to_string())?;
-    }
-    Ok(())
-}
-
-fn remove_file(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("Could not remove a Last.fm local store.".into()),
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Scrobble {
-    artist: String,
-    track: String,
-    album: Option<String>,
-    duration_secs: u64,
-    timestamp: u64,
-    #[serde(default)]
-    owner: String,
-}
-
-impl Scrobble {
-    fn from_track(track: &super::playback::SnapshotTrack, timestamp: u64) -> Option<Self> {
-        let artist = track.art.trim();
-        let title = track.name.trim();
-        if artist.is_empty() || title.is_empty() || artist.eq_ignore_ascii_case("unknown artist") {
-            return None;
-        }
-        let album = (!track.alb.trim().is_empty()
-            && !track.alb.trim().eq_ignore_ascii_case("unknown album"))
-        .then(|| track.alb.trim().to_owned());
-        Some(Self {
-            artist: artist.into(),
-            track: title.into(),
-            album,
-            duration_secs: track.duration_secs,
-            timestamp,
-            owner: String::new(),
-        })
-    }
-
-    fn now_playing_params(&self) -> Vec<(String, String)> {
-        let mut params = vec![
-            ("artist".into(), self.artist.clone()),
-            ("track".into(), self.track.clone()),
-        ];
-        if let Some(album) = &self.album {
-            params.push(("album".into(), album.clone()));
-        }
-        if self.duration_secs > 0 {
-            params.push(("duration".into(), self.duration_secs.to_string()));
-        }
-        params
-    }
-
-    fn scrobble_params(&self, index: usize) -> Vec<(String, String)> {
-        let mut params = vec![
-            (format!("artist[{index}]"), self.artist.clone()),
-            (format!("track[{index}]"), self.track.clone()),
-            (format!("timestamp[{index}]"), self.timestamp.to_string()),
-        ];
-        if let Some(album) = &self.album {
-            params.push((format!("album[{index}]"), album.clone()));
-        }
-        if self.duration_secs > 0 {
-            params.push((format!("duration[{index}]"), self.duration_secs.to_string()));
-        }
-        params
-    }
-}
+pub(crate) const LASTFM_PAGE_LIMIT: u32 = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -414,14 +51,6 @@ pub(crate) struct LastFmState {
     pub pending: bool,
     pub reconnect_required: bool,
     pub problem: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Failure {
-    Network,
-    Http(u16),
-    Api(u32),
-    Response,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -440,22 +69,10 @@ fn import_recent_tracks_params(
     vec![
         ("user".into(), username.into()),
         ("page".into(), page.to_string()),
-        (
-            "limit".into(),
-            crate::lastfm_import::LASTFM_PAGE_LIMIT.to_string(),
-        ),
+        ("limit".into(), LASTFM_PAGE_LIMIT.to_string()),
         ("from".into(), from.to_string()),
         ("to".into(), to.to_string()),
     ]
-}
-
-impl Failure {
-    fn code(self) -> Option<u32> {
-        match self {
-            Self::Api(code) => Some(code),
-            Self::Network | Self::Http(_) | Self::Response => None,
-        }
-    }
 }
 
 struct Runtime {
@@ -471,265 +88,263 @@ struct Runtime {
     queue_revision: u64,
 }
 
-#[derive(Default)]
-struct ListeningState {
-    generation: Option<u64>,
-    track: Option<super::playback::SnapshotTrack>,
-    started_at: u64,
-    played_ms: u64,
-    discontinuous: bool,
-    scrobbled: bool,
-}
-
-enum ListeningAction {
-    NowPlaying(Scrobble),
-    Enqueue(Scrobble),
-}
-
-impl ListeningState {
-    fn apply(
-        &mut self,
-        fact: super::playback::ListeningFact,
-        started_at: u64,
-    ) -> Vec<ListeningAction> {
-        match fact {
-            super::playback::ListeningFact::Started { generation, track } => {
-                self.generation = Some(generation);
-                self.track = Some(track.clone());
-                self.started_at = started_at;
-                self.played_ms = 0;
-                self.discontinuous = false;
-                self.scrobbled = false;
-                Scrobble::from_track(&track, 0)
-                    .map(ListeningAction::NowPlaying)
-                    .into_iter()
-                    .collect()
-            }
-            super::playback::ListeningFact::Forward {
-                generation,
-                track,
-                played_ms,
-            } => {
-                if !self.matches(generation, &track) {
-                    return Vec::new();
-                }
-                self.played_ms = self.played_ms.max(played_ms);
-                self.scrobble_if_eligible(&track, false)
-            }
-            super::playback::ListeningFact::Discontinuity { generation, track } => {
-                if self.matches(generation, &track) {
-                    self.discontinuous = true;
-                }
-                Vec::new()
-            }
-            super::playback::ListeningFact::Completed { generation, track } => {
-                if !self.matches(generation, &track) {
-                    return Vec::new();
-                }
-                self.scrobble_if_eligible(&track, true)
-            }
-        }
-    }
-
-    fn matches(&self, generation: u64, track: &super::playback::SnapshotTrack) -> bool {
-        self.generation == Some(generation)
-            && self
-                .track
-                .as_ref()
-                .is_some_and(|current| current.uri == track.uri)
-    }
-
-    fn scrobble_if_eligible(
-        &mut self,
-        track: &super::playback::SnapshotTrack,
-        completed: bool,
-    ) -> Vec<ListeningAction> {
-        let threshold = self
-            .track
-            .as_ref()
-            .and_then(|track| scrobble_threshold_ms(track.duration_secs));
-        let eligible = !self.scrobbled
-            && !self.discontinuous
-            && (threshold.is_some_and(|threshold| self.played_ms >= threshold)
-                || (completed && threshold.is_some()));
-        if !eligible {
-            return Vec::new();
-        }
-        self.scrobbled = true;
-        Scrobble::from_track(track, self.started_at)
-            .map(ListeningAction::Enqueue)
-            .into_iter()
-            .collect()
-    }
-}
+const HYDRATION_LOADING: u8 = 0;
+const HYDRATION_READY: u8 = 1;
 
 pub(crate) struct Service {
     credentials: Option<Credentials>,
-    client: Client,
+    request_executor: Arc<dyn RequestExecutor>,
     session_store: Arc<dyn SessionStore>,
     pending_store: PendingTokenStore,
     queue_store: QueueStore,
     runtime: Mutex<Runtime>,
-    accepted_receipts: Mutex<Vec<crate::lastfm_import::AcceptedScrobbleReceipt>>,
+    accepted_receipts: Mutex<Vec<AcceptedScrobbleReceipt>>,
     reconciliation_io: Mutex<()>,
     queue_io: Mutex<()>,
     credential_io: Mutex<()>,
+    flush_changed: tokio::sync::Notify,
+    lifecycle_changed: tokio::sync::Notify,
+    lifecycle_generation: AtomicU64,
+    shutting_down: AtomicBool,
+    flush_task: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     listening: std::sync::Mutex<ListeningState>,
-    app: std::sync::Mutex<Option<tauri::AppHandle>>,
-    #[cfg(test)]
-    test_posts: std::sync::Mutex<Option<VecDeque<Value>>>,
-    #[cfg(test)]
-    #[allow(clippy::type_complexity)]
-    test_requests: std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>,
+    emit: Arc<dyn Fn(LastFmState) + Send + Sync>,
+    hydration: std::sync::atomic::AtomicU8,
+}
+
+type LoadedLastFm = (
+    Option<LastFmSession>,
+    Option<String>,
+    VecDeque<Scrobble>,
+    Vec<AcceptedScrobbleReceipt>,
+    Option<String>,
+    bool,
+);
+
+fn load_persisted_lastfm(
+    credentials_available: bool,
+    session_store: Arc<dyn SessionStore>,
+    pending_store: PendingTokenStore,
+    queue_store: QueueStore,
+) -> LoadedLastFm {
+    let mut storage_problem = false;
+    let session = if credentials_available {
+        match session_store.load() {
+            Ok(session) => session.filter(valid_session),
+            Err(error) => {
+                storage_problem = true;
+                log::error!("Last.fm local persistence failed while loading the session: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let pending = match pending_store.load() {
+        Ok(token) => token.filter(|token| !token.is_empty()),
+        Err(error) => {
+            log::error!(
+                "Last.fm local persistence failed while loading authorization state: {error}"
+            );
+            None
+        }
+    };
+    let (ledger, migrated) = match queue_store.load_ledger_with_migration() {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!(
+                "Last.fm local persistence failed; queued scrobbles may be unavailable: {error}"
+            );
+            (ScrobbleLedgerV2::empty(), false)
+        }
+    };
+    let mut queue = ledger.pending;
+    let mut accepted = ledger.accepted;
+    let mut owner = queue_owner(&queue).map(ToOwned::to_owned).or(ledger.owner);
+    if let Some(session) = session.as_ref() {
+        if (!queue.is_empty() || !accepted.is_empty())
+            && owner.as_deref() != Some(session.username.as_str())
+        {
+            match queue_store.save_ledger(&ScrobbleLedgerV2::empty()) {
+                Ok(()) => {
+                    queue.clear();
+                    accepted.clear();
+                    owner = None;
+                }
+                Err(error) => {
+                    storage_problem = true;
+                    log::error!("Last.fm local persistence failed while isolating queued account state: {error}");
+                }
+            }
+        }
+    }
+    if migrated {
+        let migrated = ScrobbleLedgerV2 {
+            version: SCROBBLE_LEDGER_VERSION,
+            pending: queue.clone(),
+            accepted: accepted.clone(),
+            owner: owner.clone(),
+        };
+        if let Err(error) = queue_store.save_ledger(&migrated) {
+            storage_problem = true;
+            log::error!(
+                "Last.fm local persistence failed while migrating the scrobble queue: {error}"
+            );
+        }
+    }
+    (session, pending, queue, accepted, owner, storage_problem)
 }
 
 impl Service {
-    pub(crate) fn new(app_data_dir: impl AsRef<Path>, dev_store: bool, enabled: bool) -> Arc<Self> {
-        let credentials = built_in_credentials();
-        let (session_store, mut storage_problem): (Arc<dyn SessionStore>, bool) = if dev_store {
+    pub(crate) fn new_unhydrated(
+        app_data_dir: impl AsRef<Path>,
+        dev_store: bool,
+        enabled: bool,
+        credentials: Option<Credentials>,
+        emit: Arc<dyn Fn(LastFmState) + Send + Sync>,
+    ) -> Arc<Self> {
+        Self::new_unhydrated_with_effects(
+            app_data_dir,
+            dev_store,
+            enabled,
+            credentials,
+            Arc::new(HttpRequestExecutor::new()),
+            emit,
+        )
+    }
+
+    fn new_unhydrated_with_effects(
+        app_data_dir: impl AsRef<Path>,
+        dev_store: bool,
+        enabled: bool,
+        credentials: Option<Credentials>,
+        request_executor: Arc<dyn RequestExecutor>,
+        emit: Arc<dyn Fn(LastFmState) + Send + Sync>,
+    ) -> Arc<Self> {
+        let (session_store, storage_problem): (Arc<dyn SessionStore>, bool) = if dev_store {
             (Arc::new(FileSessionStore::new(&app_data_dir)), false)
         } else {
-            #[cfg(not(test))]
-            {
-                match KeyringSessionStore::new() {
-                    Ok(store) => (Arc::new(store), false),
-                    Err(_) => (Arc::new(FailedSessionStore), true),
-                }
-            }
-            #[cfg(test)]
-            {
-                (Arc::new(FileSessionStore::new(&app_data_dir)), false)
+            match KeyringSessionStore::new() {
+                Ok(store) => (Arc::new(store), false),
+                Err(_) => (Arc::new(FailedSessionStore), true),
             }
         };
-        let pending_store = PendingTokenStore::new(&app_data_dir);
-        let queue_store = QueueStore::new(&app_data_dir);
-        let session = if credentials.is_some() {
-            match session_store.load() {
-                Ok(session) => session.filter(valid_session),
-                Err(error) => {
-                    storage_problem = true;
-                    log::error!(
-                        "Last.fm local persistence failed while loading the session: {error}"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let pending = match pending_store.load() {
-            Ok(token) => token.filter(|token| !token.is_empty()),
-            Err(error) => {
-                log::error!(
-                    "Last.fm local persistence failed while loading authorization state: {error}"
-                );
-                None
-            }
-        };
-        let (ledger, migrated_legacy_queue) = match queue_store.load_ledger_with_migration() {
-            Ok(result) => result,
-            Err(error) => {
-                log::error!("Last.fm local persistence failed; queued scrobbles may be unavailable: {error}");
-                (ScrobbleLedgerV2::empty(), false)
-            }
-        };
-        let ScrobbleLedgerV2 {
-            pending: mut queue,
-            accepted: mut accepted_receipts,
-            owner: ledger_owner,
-            ..
-        } = ledger;
-        let mut queue_owner = queue_owner(&queue).map(ToOwned::to_owned);
-        if queue_owner.is_none() {
-            queue_owner = ledger_owner;
-        }
-        if let Some(session) = session.as_ref() {
-            if (!queue.is_empty() || !accepted_receipts.is_empty())
-                && queue_owner.as_deref() != Some(session.username.as_str())
-            {
-                match queue_store.save_ledger(&ScrobbleLedgerV2::empty()) {
-                    Ok(()) => {
-                        queue.clear();
-                        accepted_receipts.clear();
-                        queue_owner = None;
-                    }
-                    Err(error) => {
-                        storage_problem = true;
-                        log::error!(
-                            "Last.fm local persistence failed while isolating queued account state: {error}"
-                        );
-                    }
-                }
-            }
-        }
-        if migrated_legacy_queue {
-            let migrated = ScrobbleLedgerV2 {
-                version: SCROBBLE_LEDGER_VERSION,
-                pending: queue.clone(),
-                accepted: accepted_receipts.clone(),
-                owner: queue_owner.clone(),
-            };
-            if let Err(error) = queue_store.save_ledger(&migrated) {
-                storage_problem = true;
-                log::error!(
-                    "Last.fm local persistence failed while migrating the scrobble queue: {error}"
-                );
-            }
-        }
         Arc::new(Self {
             credentials,
-            client: Client::builder()
-                .timeout(Duration::from_secs(20))
-                .user_agent(USER_AGENT)
-                .build()
-                .expect("Last.fm HTTP client configuration is valid"),
+            request_executor,
             session_store,
-            pending_store,
-            queue_store,
+            pending_store: PendingTokenStore::new(&app_data_dir),
+            queue_store: QueueStore::new(&app_data_dir),
             runtime: Mutex::new(Runtime {
                 enabled,
-                session,
-                pending,
-                queue,
-                queue_owner,
+                session: None,
+                pending: None,
+                queue: VecDeque::new(),
+                queue_owner: None,
                 reconnect_required: false,
                 build_problem: false,
                 storage_problem,
                 flushing: false,
                 queue_revision: 0,
             }),
-            accepted_receipts: Mutex::new(accepted_receipts),
+            accepted_receipts: Mutex::new(Vec::new()),
             reconciliation_io: Mutex::new(()),
             queue_io: Mutex::new(()),
             credential_io: Mutex::new(()),
+            flush_changed: tokio::sync::Notify::new(),
+            lifecycle_changed: tokio::sync::Notify::new(),
+            lifecycle_generation: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
+            flush_task: std::sync::Mutex::new(None),
             listening: std::sync::Mutex::new(ListeningState::default()),
-            app: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            test_posts: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            test_requests: std::sync::Mutex::new(Vec::new()),
+            emit,
+            hydration: std::sync::atomic::AtomicU8::new(HYDRATION_LOADING),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn queue_test_response(&self, response: Value) {
-        self.test_posts
-            .lock()
-            .expect("Last.fm test response mutex poisoned")
-            .get_or_insert_with(VecDeque::new)
-            .push_back(response);
+    pub(crate) async fn hydrate(&self) -> Result<(), String> {
+        let credentials_available = self.credentials.is_some();
+        let session_store = Arc::clone(&self.session_store);
+        let pending_store = self.pending_store.clone();
+        let queue_store = self.queue_store.clone();
+        let (session, pending, queue, accepted, owner, storage_problem) =
+            tauri::async_runtime::spawn_blocking(move || {
+                load_persisted_lastfm(
+                    credentials_available,
+                    session_store,
+                    pending_store,
+                    queue_store,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let _credential_io = self.credential_io.lock().await;
+        let mut runtime = self.runtime.lock().await;
+        runtime.session = session;
+        runtime.pending = pending;
+        runtime.queue = queue;
+        runtime.queue_owner = owner;
+        runtime.storage_problem |= storage_problem;
+        drop(runtime);
+        *self.accepted_receipts.lock().await = accepted;
+        self.hydration.store(HYDRATION_READY, Ordering::Release);
+        self.emit_state().await;
+        Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) fn test_requests(&self) -> Vec<(String, Vec<(String, String)>)> {
-        self.test_requests
-            .lock()
-            .expect("Last.fm test request mutex poisoned")
-            .clone()
+    fn hydrate_for_test(mut service: Arc<Self>) -> Arc<Self> {
+        let (session, pending, queue, accepted, owner, storage_problem) = load_persisted_lastfm(
+            service.credentials.is_some(),
+            Arc::clone(&service.session_store),
+            service.pending_store.clone(),
+            service.queue_store.clone(),
+        );
+        let service_mut = Arc::get_mut(&mut service).expect("test service is not shared yet");
+        let runtime = service_mut.runtime.get_mut();
+        runtime.session = session;
+        runtime.pending = pending;
+        runtime.queue = queue;
+        runtime.queue_owner = owner;
+        runtime.storage_problem |= storage_problem;
+        *service_mut.accepted_receipts.get_mut() = accepted;
+        service_mut
+            .hydration
+            .store(HYDRATION_READY, Ordering::Release);
+        service
     }
 
-    pub(crate) fn attach_app(&self, app: tauri::AppHandle) {
-        *self.app.lock().expect("Last.fm app mutex poisoned") = Some(app);
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        app_data_dir: impl AsRef<Path>,
+        dev_store: bool,
+        enabled: bool,
+    ) -> Arc<Self> {
+        Self::hydrate_for_test(Self::new_unhydrated(
+            app_data_dir,
+            dev_store,
+            enabled,
+            credentials_from(Some("test-api-key"), Some("test-shared-secret")),
+            Arc::new(|_| {}),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_fake_executor(
+        app_data_dir: impl AsRef<Path>,
+        dev_store: bool,
+        enabled: bool,
+    ) -> (Arc<Self>, Arc<FakeRequestExecutor>) {
+        let executor = Arc::new(FakeRequestExecutor::default());
+        let service = Self::hydrate_for_test(Self::new_unhydrated_with_effects(
+            app_data_dir,
+            dev_store,
+            enabled,
+            credentials_from(Some("test-api-key"), Some("test-shared-secret")),
+            executor.clone(),
+            Arc::new(|_| {}),
+        ));
+        (service, executor)
     }
 
     async fn persist_queue(&self, queue: VecDeque<Scrobble>) -> Result<(), String> {
@@ -741,7 +356,7 @@ impl Service {
     async fn persist_ledger(
         &self,
         pending: VecDeque<Scrobble>,
-        accepted: Vec<crate::lastfm_import::AcceptedScrobbleReceipt>,
+        accepted: Vec<AcceptedScrobbleReceipt>,
         owner: Option<String>,
     ) -> Result<(), String> {
         let store = self.queue_store.clone();
@@ -793,6 +408,16 @@ impl Service {
     }
 
     pub(crate) async fn state(&self) -> LastFmState {
+        if self.hydration.load(Ordering::Acquire) != HYDRATION_READY {
+            return LastFmState {
+                available: false,
+                connected: false,
+                username: None,
+                pending: false,
+                reconnect_required: false,
+                problem: Some("Retune is still loading Last.fm state.".into()),
+            };
+        }
         let runtime = self.runtime.lock().await;
         let (available, problem) = if self.credentials.is_none() {
             (
@@ -842,9 +467,7 @@ impl Service {
         }
     }
 
-    pub(crate) async fn accepted_receipts(
-        &self,
-    ) -> Vec<crate::lastfm_import::AcceptedScrobbleReceipt> {
+    pub(crate) async fn accepted_receipts(&self) -> Vec<AcceptedScrobbleReceipt> {
         self.accepted_receipts.lock().await.clone()
     }
 
@@ -854,7 +477,7 @@ impl Service {
 
     pub(crate) async fn prune_accepted_receipts_locked(
         &self,
-        consumed: &[crate::lastfm_import::AcceptedScrobbleReceipt],
+        consumed: &[AcceptedScrobbleReceipt],
         through: Option<u64>,
     ) -> Result<(), String> {
         if consumed.is_empty() && through.is_none() {
@@ -886,7 +509,7 @@ impl Service {
     #[cfg(test)]
     async fn prune_accepted_receipts(
         &self,
-        consumed: &[crate::lastfm_import::AcceptedScrobbleReceipt],
+        consumed: &[AcceptedScrobbleReceipt],
         through: Option<u64>,
     ) -> Result<(), String> {
         let _reconciliation_io = self.reconciliation_guard().await;
@@ -903,16 +526,77 @@ impl Service {
         Fut: Future<Output = Result<T, String>> + Send,
         T: Send,
     {
-        let _runtime = self.runtime.lock().await;
-        if _runtime
+        self.ensure_available().await?;
+        let _credential_io = self.credential_io.lock().await;
+        let owns_import = self
+            .runtime
+            .lock()
+            .await
             .session
             .as_ref()
-            .map(|session| session.username.as_str())
-            != Some(username)
-        {
+            .is_some_and(|session| session.username == username);
+        if !owns_import {
             return Ok(None);
         }
         Ok(Some(operation().await?))
+    }
+
+    pub(crate) fn import_generation(&self) -> u64 {
+        self.lifecycle_generation.load(Ordering::Acquire)
+    }
+
+    fn signal_lifecycle_change(&self) {
+        self.lifecycle_generation.fetch_add(1, Ordering::AcqRel);
+        self.lifecycle_changed.notify_waiters();
+        self.flush_changed.notify_waiters();
+    }
+
+    async fn import_lifecycle_error(
+        &self,
+        username: &str,
+        generation: u64,
+    ) -> Option<ImportFetchError> {
+        let changed = self.import_generation() != generation;
+        let shutting_down = self.shutting_down.load(Ordering::Acquire);
+        let owns_import = self
+            .runtime
+            .lock()
+            .await
+            .session
+            .as_ref()
+            .is_some_and(|session| session.username == username);
+        (changed || shutting_down || !owns_import).then(|| ImportFetchError {
+            message: if shutting_down {
+                "Last.fm stopped while the importer was waiting to retry.".into()
+            } else {
+                "The connected Last.fm account changed; resume the importer after reconnecting."
+                    .into()
+            },
+            retryable: false,
+            account_mismatch: true,
+        })
+    }
+
+    pub(crate) async fn wait_for_import_retry(
+        &self,
+        username: &str,
+        generation: u64,
+        delay: Duration,
+    ) -> Result<(), ImportFetchError> {
+        let notified = self.lifecycle_changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(error) = self.import_lifecycle_error(username, generation).await {
+            return Err(error);
+        }
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = &mut notified => {}
+        }
+        match self.import_lifecycle_error(username, generation).await {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub(crate) async fn set_enabled(self: &Arc<Self>, enabled: bool) {
@@ -921,6 +605,7 @@ impl Service {
             runtime.enabled = enabled;
             flush_ready(&runtime)
         };
+        self.flush_changed.notify_one();
         if should_flush {
             Arc::clone(self).schedule_flush().await;
         }
@@ -935,6 +620,9 @@ impl Service {
             Arc::clone(self).schedule_flush().await;
         }
         loop {
+            let notified = self.flush_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let waiting = {
                 let runtime = self.runtime.lock().await;
                 runtime.flushing || flush_ready(&runtime)
@@ -942,14 +630,11 @@ impl Service {
             if !waiting {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            notified.await;
         }
     }
 
-    pub(crate) async fn connect(
-        self: &Arc<Self>,
-        app: &tauri::AppHandle,
-    ) -> Result<LastFmState, String> {
+    pub(crate) async fn connect(self: &Arc<Self>) -> Result<(Url, LastFmState), String> {
         self.ensure_available().await?;
         let payload = match self.post("auth.getToken", vec![], None).await {
             Ok(payload) => payload,
@@ -976,16 +661,10 @@ impl Service {
                     .as_str(),
             )
             .append_pair("token", &token);
-        app.opener()
-            .open_url(url.to_string(), None::<String>)
-            .map_err(|_| "Could not open Last.fm in the system browser.")?;
-        Ok(self.state().await)
+        Ok((url, self.state().await))
     }
 
-    pub(crate) async fn finish(
-        self: &Arc<Self>,
-        app: &tauri::AppHandle,
-    ) -> Result<LastFmState, String> {
+    pub(crate) async fn finish(self: &Arc<Self>) -> Result<bool, String> {
         self.ensure_available().await?;
         let token = {
             let runtime = self.runtime.lock().await;
@@ -1009,29 +688,34 @@ impl Service {
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "Last.fm did not return a session key.".to_string())?,
         };
-        let previous_username = self
-            .runtime
-            .lock()
-            .await
-            .session
-            .clone()
-            .map(|session| session.username);
-        let _credential_io = self.credential_io.lock().await;
-        self.commit_session(session.clone()).await?;
-        if previous_username.as_deref() != Some(session.username.as_str()) {
-            app.state::<crate::AppState>()
-                .lastfm_import
-                .clear_sync_state()
-                .await?;
-        }
+        self.finish_authentication(session).await
+    }
+
+    pub(crate) async fn activate_connection(self: &Arc<Self>) {
         log::info!("Last.fm connected");
         self.emit_state().await;
         Arc::clone(self).schedule_flush().await;
-        let app = app.clone();
+    }
+
+    async fn finish_authentication(
+        self: &Arc<Self>,
+        session: LastFmSession,
+    ) -> Result<bool, String> {
+        let service = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            let _ = crate::lastfm_import::sync_lastfm_plays(app).await;
-        });
-        Ok(self.state().await)
+            let _credential_io = service.credential_io.lock().await;
+            let previous_username = service
+                .runtime
+                .lock()
+                .await
+                .session
+                .as_ref()
+                .map(|session| session.username.clone());
+            service.commit_session(session.clone()).await?;
+            Ok(previous_username.as_deref() != Some(session.username.as_str()))
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     async fn commit_session(&self, session: LastFmSession) -> Result<(), String> {
@@ -1055,6 +739,7 @@ impl Service {
         runtime.build_problem = false;
         runtime.queue_owner = Some(session.username);
         drop(runtime);
+        self.signal_lifecycle_change();
         if let Err(error) = self.clear_pending().await {
             log::error!(
                 "Last.fm local persistence failed while clearing completed authorization: {error}"
@@ -1063,46 +748,71 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn disconnect(&self) -> Result<LastFmState, String> {
+    pub(crate) async fn disconnect(self: &Arc<Self>) -> Result<LastFmState, String> {
+        self.ensure_available().await?;
+        let service = Arc::clone(self);
+        tauri::async_runtime::spawn(async move { service.disconnect_owned().await })
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
+    async fn disconnect_owned(&self) -> Result<LastFmState, String> {
         let empty = VecDeque::new();
         let _credential_io = self.credential_io.lock().await;
         let _reconciliation_io = self.reconciliation_guard().await;
-        {
-            let _queue_io = self.queue_io.lock().await;
-            let (previous, revision) = {
-                let mut runtime = self.runtime.lock().await;
-                let previous = runtime.queue.clone();
-                runtime.queue.clear();
-                runtime.queue_owner = None;
+        let _queue_io = self.queue_io.lock().await;
+        let (previous_queue, previous_owner, revision) = {
+            let mut runtime = self.runtime.lock().await;
+            let previous_queue = runtime.queue.clone();
+            let previous_owner = runtime.queue_owner.clone();
+            runtime.queue.clear();
+            runtime.queue_owner = None;
+            runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+            (previous_queue, previous_owner, runtime.queue_revision)
+        };
+        let previous_receipts = self.accepted_receipts.lock().await.clone();
+        if let Err(error) = self.persist_ledger(empty.clone(), Vec::new(), None).await {
+            let mut runtime = self.runtime.lock().await;
+            if runtime.queue_revision == revision {
+                runtime.queue = previous_queue;
+                runtime.queue_owner = previous_owner;
                 runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
-                (previous, runtime.queue_revision)
-            };
-            let previous_receipts = self.accepted_receipts.lock().await.clone();
-            if let Err(error) = self.persist_ledger(empty.clone(), Vec::new(), None).await {
-                let mut runtime = self.runtime.lock().await;
-                if runtime.queue_revision == revision {
-                    runtime.queue = previous;
-                    runtime.queue_owner = queue_owner(&runtime.queue).map(ToOwned::to_owned);
-                    runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
-                }
-                *self.accepted_receipts.lock().await = previous_receipts;
-                log::error!(
-                    "Last.fm local persistence failed while disconnecting; session retained"
-                );
-                drop(runtime);
-                self.emit_state().await;
-                return Err(error);
             }
-            self.accepted_receipts.lock().await.clear();
+            *self.accepted_receipts.lock().await = previous_receipts;
+            log::error!("Last.fm local persistence failed while disconnecting; session retained");
+            drop(runtime);
+            self.emit_state().await;
+            return Err(error);
         }
+        self.accepted_receipts.lock().await.clear();
 
         let session_error = self.clear_session().await.err();
         let pending_error = self.clear_pending().await.err();
+        let session_cleared = session_error.is_none();
+        let rollback_error = if session_cleared {
+            None
+        } else {
+            self.persist_ledger(
+                previous_queue.clone(),
+                previous_receipts.clone(),
+                previous_owner.clone(),
+            )
+            .await
+            .err()
+        };
         let mut runtime = self.runtime.lock().await;
-        if session_error.is_none() {
+        let mut restore_receipts = false;
+        if session_cleared {
             runtime.session = None;
             runtime.reconnect_required = false;
             runtime.build_problem = false;
+        } else if rollback_error.is_none() && runtime.queue_revision == revision {
+            runtime.queue = previous_queue;
+            runtime.queue_owner = previous_owner;
+            runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
+            restore_receipts = true;
+        } else {
+            runtime.storage_problem = true;
         }
         if pending_error.is_none() {
             runtime.pending = None;
@@ -1110,8 +820,15 @@ impl Service {
         let errors = session_error
             .into_iter()
             .chain(pending_error)
+            .chain(rollback_error)
             .collect::<Vec<_>>();
         drop(runtime);
+        if restore_receipts {
+            *self.accepted_receipts.lock().await = previous_receipts;
+        }
+        if session_cleared {
+            self.signal_lifecycle_change();
+        }
         if !errors.is_empty() {
             log::error!("Last.fm local persistence failed while disconnecting");
             self.emit_state().await;
@@ -1122,7 +839,13 @@ impl Service {
         Ok(self.state().await)
     }
 
-    pub(crate) fn handle_listening_fact(self: &Arc<Self>, fact: super::playback::ListeningFact) {
+    pub(crate) async fn handle_listening_fact(
+        self: &Arc<Self>,
+        fact: super::playback::ListeningFact,
+    ) {
+        if self.hydration.load(Ordering::Acquire) != HYDRATION_READY {
+            return;
+        }
         let actions = self
             .listening
             .lock()
@@ -1137,11 +860,8 @@ impl Service {
                     });
                 }
                 ListeningAction::Enqueue(scrobble) => {
-                    let service = Arc::clone(self);
-                    tauri::async_runtime::spawn(async move {
-                        log::debug!("Last.fm scrobble eligible");
-                        service.enqueue(scrobble).await;
-                    });
+                    log::debug!("Last.fm scrobble eligible");
+                    self.enqueue(scrobble).await;
                 }
             }
         }
@@ -1159,8 +879,9 @@ impl Service {
     }
 
     pub(crate) async fn import_recent_tracks_page(
-        &self,
+        self: &Arc<Self>,
         username: &str,
+        generation: u64,
         page: u32,
         from: u64,
         to: u64,
@@ -1172,31 +893,27 @@ impl Service {
                 account_mismatch: false,
             });
         }
-        let connected_username = self
-            .runtime
-            .lock()
-            .await
-            .session
-            .as_ref()
-            .map(|session| session.username.clone());
-        if connected_username.as_deref() != Some(username) {
-            return Err(ImportFetchError {
-                message:
-                    "The connected Last.fm account changed; resume the importer after reconnecting."
-                        .into(),
-                retryable: false,
-                account_mismatch: true,
-            });
+        if let Some(error) = self.import_lifecycle_error(username, generation).await {
+            return Err(error);
         }
         let params = import_recent_tracks_params(username, page, from, to);
         for attempt in 0..=RETRY_DELAYS.len() {
+            if let Some(error) = self.import_lifecycle_error(username, generation).await {
+                return Err(error);
+            }
             match self
                 .post("user.getRecentTracks", params.clone(), None)
                 .await
             {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    if let Some(error) = self.import_lifecycle_error(username, generation).await {
+                        return Err(error);
+                    }
+                    return Ok(value);
+                }
                 Err(failure) if is_retryable(failure) && attempt < RETRY_DELAYS.len() => {
-                    tokio::time::sleep(retry_delay(attempt)).await;
+                    self.wait_for_import_retry(username, generation, retry_delay(attempt))
+                        .await?;
                 }
                 Err(failure) => {
                     let retryable = is_retryable(failure);
@@ -1211,7 +928,7 @@ impl Service {
         unreachable!("the Last.fm import retry loop always returns")
     }
 
-    async fn send_now_playing(&self, scrobble: Scrobble) {
+    async fn send_now_playing(self: &Arc<Self>, scrobble: Scrobble) {
         let session = {
             let runtime = self.runtime.lock().await;
             if !runtime.enabled
@@ -1304,6 +1021,9 @@ impl Service {
     }
 
     async fn schedule_flush(self: Arc<Self>) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let should_spawn = {
             let mut runtime = self.runtime.lock().await;
             if !flush_ready(&runtime) || runtime.flushing {
@@ -1316,8 +1036,40 @@ impl Service {
         if !should_spawn {
             return;
         }
+        let mut task_slot = self
+            .flush_task
+            .lock()
+            .expect("Last.fm flush-task mutex poisoned");
+        if self.shutting_down.load(Ordering::Acquire) {
+            drop(task_slot);
+            self.runtime.lock().await.flushing = false;
+            self.flush_changed.notify_waiters();
+            return;
+        }
         let service = Arc::clone(&self);
-        tauri::async_runtime::spawn(async move { service.flush_loop().await });
+        let task = tauri::async_runtime::spawn(async move { service.flush_loop().await });
+        *task_slot = Some(task);
+    }
+
+    async fn wait_for_flush_retry(&self, generation: u64, delay: Duration) -> bool {
+        let notified = self.flush_changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let ready = {
+            let runtime = self.runtime.lock().await;
+            flush_ready(&runtime)
+        };
+        if !ready
+            || self.shutting_down.load(Ordering::Acquire)
+            || self.import_generation() != generation
+        {
+            return false;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = &mut notified => {}
+        }
+        true
     }
 
     async fn flush_loop(self: Arc<Self>) {
@@ -1325,6 +1077,10 @@ impl Service {
         loop {
             let mut stopped = false;
             loop {
+                if self.shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
+                let generation = self.import_generation();
                 match self.flush_once().await {
                     FlushOutcome::Done => break,
                     FlushOutcome::Continue => {
@@ -1332,17 +1088,12 @@ impl Service {
                         continue;
                     }
                     FlushOutcome::Retry => {
-                        let ready = {
-                            let runtime = self.runtime.lock().await;
-                            flush_ready(&runtime)
-                        };
-                        if !ready {
-                            break;
-                        }
                         let delay = retry_delay(attempt);
                         attempt = attempt.saturating_add(1);
                         log::debug!("Last.fm retry scheduled in {}s", delay.as_secs());
-                        tokio::time::sleep(delay).await;
+                        if !self.wait_for_flush_retry(generation, delay).await {
+                            break;
+                        }
                     }
                     FlushOutcome::Stop => {
                         stopped = true;
@@ -1353,14 +1104,17 @@ impl Service {
             let should_restart = {
                 let mut runtime = self.runtime.lock().await;
                 runtime.flushing = false;
-                flush_ready(&runtime)
+                flush_ready(&runtime) && !self.shutting_down.load(Ordering::Acquire)
             };
             if !should_restart || stopped {
                 break;
             }
             let claimed_restart = {
                 let mut runtime = self.runtime.lock().await;
-                if flush_ready(&runtime) && !runtime.flushing {
+                if flush_ready(&runtime)
+                    && !runtime.flushing
+                    && !self.shutting_down.load(Ordering::Acquire)
+                {
                     runtime.flushing = true;
                     true
                 } else {
@@ -1372,9 +1126,24 @@ impl Service {
             }
             attempt = 0;
         }
+        self.flush_changed.notify_waiters();
     }
 
-    async fn flush_once(&self) -> FlushOutcome {
+    pub(crate) async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.signal_lifecycle_change();
+        let task = self
+            .flush_task
+            .lock()
+            .expect("Last.fm flush-task mutex poisoned")
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        self.flush_changed.notify_waiters();
+    }
+
+    async fn flush_once(self: &Arc<Self>) -> FlushOutcome {
         let (batch, session) = {
             let runtime = self.runtime.lock().await;
             if !flush_ready(&runtime) {
@@ -1438,7 +1207,9 @@ impl Service {
                         runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
                     }
                     *self.accepted_receipts.lock().await = original_receipts;
-                    log::error!("Last.fm local persistence failed after scrobble response; queue retained: {error}");
+                    log::error!(
+                        "Last.fm local persistence failed after scrobble response; queue retained: {error}"
+                    );
                     return FlushOutcome::Stop;
                 }
                 for (item, code) in removed {
@@ -1513,7 +1284,9 @@ impl Service {
                         runtime.queue = original;
                         runtime.queue_revision = runtime.queue_revision.wrapping_add(1);
                     }
-                    log::error!("Last.fm local persistence failed after permanent rejection; queue retained: {save_error}");
+                    log::error!(
+                        "Last.fm local persistence failed after permanent rejection; queue retained: {save_error}"
+                    );
                     return FlushOutcome::Stop;
                 }
                 for item in removed {
@@ -1533,9 +1306,16 @@ impl Service {
         }
     }
 
-    async fn invalidate_session(&self, expected: &LastFmSession) -> bool {
-        let _credential_io = self.credential_io.lock().await;
+    async fn invalidate_session(self: &Arc<Self>, expected: &LastFmSession) -> bool {
+        let service = Arc::clone(self);
         let expected = expected.clone();
+        tauri::async_runtime::spawn(async move { service.invalidate_session_owned(expected).await })
+            .await
+            .is_ok_and(|invalidated| invalidated)
+    }
+
+    async fn invalidate_session_owned(&self, expected: LastFmSession) -> bool {
+        let _credential_io = self.credential_io.lock().await;
         let current = self.runtime.lock().await.session.clone();
         if current.as_ref() != Some(&expected) {
             return false;
@@ -1550,6 +1330,8 @@ impl Service {
         }
         runtime.session = None;
         runtime.reconnect_required = true;
+        drop(runtime);
+        self.signal_lifecycle_change();
         if let Some(error) = clear_error {
             log::error!(
                 "Last.fm local persistence failed while clearing an invalid session: {error}"
@@ -1558,67 +1340,7 @@ impl Service {
         true
     }
 
-    async fn post(
-        &self,
-        method: &str,
-        mut params: Vec<(String, String)>,
-        session_key: Option<&str>,
-    ) -> Result<Value, Failure> {
-        #[cfg(test)]
-        {
-            let mut test_posts = self
-                .test_posts
-                .lock()
-                .expect("Last.fm test response mutex poisoned");
-            if let Some(test_posts) = test_posts.as_mut() {
-                self.test_requests
-                    .lock()
-                    .expect("Last.fm test request mutex poisoned")
-                    .push((method.to_owned(), params.clone()));
-                return test_posts.pop_front().ok_or(Failure::Response);
-            }
-        }
-        let credentials = self.credentials.as_ref().ok_or(Failure::Api(10))?;
-        params.push(("api_key".into(), credentials.api_key.clone()));
-        params.push(("method".into(), method.into()));
-        if let Some(session_key) = session_key {
-            params.push(("sk".into(), session_key.into()));
-        }
-        params.push(("format".into(), "json".into()));
-        let api_sig = signature(&params, &credentials.shared_secret);
-        params.push(("api_sig".into(), api_sig));
-        let response = self
-            .client
-            .post(API_URL)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|_| Failure::Network)?;
-        let status = response.status().as_u16();
-        let body = response.bytes().await.map_err(|_| Failure::Network)?;
-        let value: Value = match serde_json::from_slice(&body) {
-            Ok(value) => value,
-            Err(_) if !(200..300).contains(&status) => return Err(Failure::Http(status)),
-            Err(_) => return Err(Failure::Response),
-        };
-        if let Some(code) = error_code(&value) {
-            return Err(Failure::Api(code));
-        }
-        if !(200..300).contains(&status) {
-            return Err(Failure::Http(status));
-        }
-        if let Some(status) = response_text(&value, &["status"])
-            .or_else(|| response_text(&value, &["@status"]))
-            .or_else(|| response_text(&value, &["@attr", "status"]))
-        {
-            if status != "ok" {
-                return Err(Failure::Response);
-            }
-        }
-        Ok(value)
-    }
-
-    async fn handle_failure(&self, failure: Failure) -> String {
+    async fn handle_failure(self: &Arc<Self>, failure: Failure) -> String {
         match failure {
             Failure::Api(10 | 13 | 26) => {
                 let mut runtime = self.runtime.lock().await;
@@ -1680,28 +1402,7 @@ impl Service {
     }
 
     async fn emit_state(&self) {
-        let app = self.app.lock().expect("Last.fm app mutex poisoned").clone();
-        if let Some(app) = app {
-            let _ = app.emit("lastfm-changed", self.state().await);
-        }
-    }
-}
-
-#[cfg(not(test))]
-struct FailedSessionStore;
-
-#[cfg(not(test))]
-impl SessionStore for FailedSessionStore {
-    fn load(&self) -> Result<Option<LastFmSession>, String> {
-        Err("Last.fm credential storage is unavailable.".into())
-    }
-
-    fn save(&self, _session: &LastFmSession) -> Result<(), String> {
-        Err("Last.fm credential storage is unavailable.".into())
-    }
-
-    fn clear(&self) -> Result<(), String> {
-        Err("Last.fm credential storage is unavailable.".into())
+        (self.emit)(self.state().await);
     }
 }
 
@@ -1723,144 +1424,8 @@ fn flush_ready(runtime: &Runtime) -> bool {
         && !runtime.storage_problem
 }
 
-fn queue_owner(queue: &VecDeque<Scrobble>) -> Option<&str> {
-    let owner = queue.front()?.owner.as_str();
-    (!owner.is_empty() && queue.iter().all(|item| item.owner.as_str() == owner)).then_some(owner)
-}
-
-fn next_batch(queue: &VecDeque<Scrobble>) -> Vec<Scrobble> {
-    queue.iter().take(50).cloned().collect()
-}
-
-fn queue_starts_with(queue: &VecDeque<Scrobble>, batch: &[Scrobble]) -> bool {
-    queue.len() >= batch.len() && queue.iter().zip(batch).all(|(queued, item)| queued == item)
-}
-
-struct ScrobbleResult {
-    code: u32,
-    receipt: Option<crate::lastfm_import::AcceptedScrobbleReceipt>,
-}
-
-fn apply_scrobble_results(
-    queue: &mut VecDeque<Scrobble>,
-    batch: &[Scrobble],
-    codes: &[u32],
-) -> Vec<(Scrobble, u32)> {
-    let mut removed = Vec::with_capacity(batch.len());
-    for (item, code) in batch.iter().zip(codes) {
-        if queue.pop_front().is_none() {
-            break;
-        }
-        removed.push((item.clone(), *code));
-    }
-    removed
-}
-
 fn valid_session(session: &LastFmSession) -> bool {
     !session.username.trim().is_empty() && !session.key.trim().is_empty()
-}
-
-fn signature(params: &[(String, String)], shared_secret: &str) -> String {
-    let mut values = params
-        .iter()
-        .filter(|(key, _)| key != "format" && key != "callback" && key != "api_sig")
-        .collect::<Vec<_>>();
-    values.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut input = String::new();
-    for (key, value) in values {
-        input.push_str(key);
-        input.push_str(value);
-    }
-    input.push_str(shared_secret);
-    let digest = Md5::digest(input.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn response_text(value: &Value, path: &[&str]) -> Option<String> {
-    let mut current = value.get("lfm").unwrap_or(value);
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current.as_str().map(ToOwned::to_owned).or_else(|| {
-        current
-            .get("#text")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-    })
-}
-
-fn error_code(value: &Value) -> Option<u32> {
-    let root = value.get("lfm").unwrap_or(value);
-    let error = root.get("error")?;
-    let code = error
-        .get("code")
-        .or_else(|| error.get("@code"))
-        .unwrap_or(error);
-    code.as_u64()
-        .or_else(|| code.as_str()?.parse().ok())
-        .map(|code| code as u32)
-}
-
-#[cfg(test)]
-fn scrobble_codes(value: &Value, expected: usize) -> Option<Vec<u32>> {
-    scrobble_results(value, expected, None)
-        .map(|results| results.into_iter().map(|result| result.code).collect())
-}
-
-fn scrobble_results(
-    value: &Value,
-    expected: usize,
-    submitted: Option<&[Scrobble]>,
-) -> Option<Vec<ScrobbleResult>> {
-    let root = value.get("lfm").unwrap_or(value);
-    let scrobbles = root.get("scrobbles")?;
-    let items = scrobbles.get("scrobble")?;
-    let items = match items {
-        Value::Array(items) => items.clone(),
-        Value::Object(_) => vec![items.clone()],
-        _ => return None,
-    };
-    if items.len() != expected {
-        return None;
-    }
-    Some(
-        items
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let code = item
-                    .get("ignoredMessage")
-                    .and_then(|message| message.get("code").or_else(|| message.get("@code")))
-                    .and_then(|code| code.as_u64().or_else(|| code.as_str()?.parse().ok()))
-                    .unwrap_or(0) as u32;
-                let receipt = (code == 0)
-                    .then(|| submitted.and_then(|batch| batch.get(index)))
-                    .flatten()
-                    .map(|submitted| {
-                        let corrected = crate::lastfm_import::ScrobbleMetadata {
-                            artist: response_text(&item, &["artist"])
-                                .unwrap_or_else(|| submitted.artist.clone()),
-                            album: response_text(&item, &["album"])
-                                .unwrap_or_else(|| submitted.album.clone().unwrap_or_default()),
-                            track: response_text(&item, &["track"])
-                                .unwrap_or_else(|| submitted.track.clone()),
-                        };
-                        crate::lastfm_import::AcceptedScrobbleReceipt {
-                            corrected,
-                            submitted: crate::lastfm_import::ScrobbleMetadata {
-                                artist: submitted.artist.clone(),
-                                album: submitted.album.clone().unwrap_or_default(),
-                                track: submitted.track.clone(),
-                            },
-                            timestamp: response_text(&item, &["timestamp"])
-                                .and_then(|timestamp| timestamp.parse().ok())
-                                .unwrap_or(submitted.timestamp),
-                        }
-                    });
-                ScrobbleResult { code, receipt }
-            })
-            .collect(),
-    )
 }
 
 fn is_build_failure(failure: Failure) -> bool {
@@ -1897,10 +1462,6 @@ pub(crate) fn import_retry_delay(attempt: usize) -> Duration {
     retry_delay(attempt)
 }
 
-pub(crate) fn scrobble_threshold_ms(duration_secs: u64) -> Option<u64> {
-    (duration_secs > 30).then(|| (duration_secs.saturating_mul(500)).min(240_000))
-}
-
 #[tauri::command]
 pub(crate) async fn lastfm_state(
     state: tauri::State<'_, crate::AppState>,
@@ -1910,35 +1471,38 @@ pub(crate) async fn lastfm_state(
 
 #[tauri::command]
 pub(crate) async fn connect_lastfm(app: tauri::AppHandle) -> Result<LastFmState, String> {
-    app.state::<crate::AppState>().lastfm.connect(&app).await
-}
-
-#[tauri::command]
-pub(crate) async fn finish_lastfm(app: tauri::AppHandle) -> Result<LastFmState, String> {
-    let state = app.state::<crate::AppState>();
-    let result = state.lastfm.finish(&app).await?;
-    state.lastfm.set_enabled(true).await;
-    crate::set_lastfm_scrobbling(&app, true).await?;
-    Ok(result)
-}
-
-#[tauri::command]
-pub(crate) async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<LastFmState, String> {
-    let state = app.state::<crate::AppState>();
-    let result = state.lastfm.disconnect().await?;
-    state.lastfm_import.clear_sync_state().await?;
-    Ok(result)
+    let (url, state) = app.state::<crate::AppState>().lastfm.connect().await?;
+    app.opener()
+        .open_url(url.to_string(), None::<String>)
+        .map_err(|_| "Could not open Last.fm in the system browser.")?;
+    Ok(state)
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::thread;
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use crate::playback::SnapshotTrack;
+
+    fn serve(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(&response);
+        });
+        (format!("http://{address}/"), handle)
+    }
 
     fn track(artist: &str, album: &str) -> SnapshotTrack {
         SnapshotTrack {
@@ -1962,6 +1526,103 @@ mod tests {
         }
     }
 
+    struct BlockingSessionStore {
+        inner: FileSessionStore,
+        save_blocker: Option<Arc<SaveBlocker>>,
+        clear_blocker: Option<Arc<SaveBlocker>>,
+    }
+
+    impl SessionStore for BlockingSessionStore {
+        fn load(&self) -> Result<Option<LastFmSession>, String> {
+            self.inner.load()
+        }
+
+        fn save(&self, session: &LastFmSession) -> Result<(), String> {
+            self.inner.save(session)?;
+            if let Some(blocker) = &self.save_blocker {
+                blocker.pause();
+            }
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<(), String> {
+            self.inner.clear()?;
+            if let Some(blocker) = &self.clear_blocker {
+                blocker.pause();
+            }
+            Ok(())
+        }
+    }
+
+    fn save_blocker() -> (
+        Arc<SaveBlocker>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        (
+            Arc::new(SaveBlocker {
+                entered,
+                release: std::sync::Mutex::new(release_rx),
+            }),
+            entered_rx,
+            release,
+        )
+    }
+
+    async fn wait_for_blocker(entered: std::sync::mpsc::Receiver<()>) {
+        tauri::async_runtime::spawn_blocking(move || {
+            entered
+                .recv_timeout(Duration::from_secs(1))
+                .expect("persistence reached its durable-write blocker");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn connector_projects_initializing_and_rejects_mutation_until_hydrated() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new_unhydrated(
+            directory.path(),
+            true,
+            true,
+            credentials_from(Some("test-api-key"), Some("test-shared-secret")),
+            Arc::new(|_| {}),
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = std::sync::mpsc::channel();
+        let hydration = {
+            let service = Arc::clone(&service);
+            let started = Arc::clone(&started);
+            tokio::spawn(async move {
+                tauri::async_runtime::spawn_blocking(move || {
+                    started.notify_one();
+                    released.recv().unwrap();
+                })
+                .await
+                .unwrap();
+                service.hydrate().await
+            })
+        };
+        started.notified().await;
+        let state = service.state().await;
+        assert!(!state.available);
+        assert_eq!(
+            state.problem.as_deref(),
+            Some("Retune is still loading Last.fm state.")
+        );
+        assert_eq!(
+            service.disconnect().await.unwrap_err(),
+            "Retune is still loading Last.fm state."
+        );
+
+        release.send(()).unwrap();
+        hydration.await.unwrap().unwrap();
+        assert!(service.state().await.available);
+    }
+
     struct FailingClearSessionStore;
 
     impl SessionStore for FailingClearSessionStore {
@@ -1974,6 +1635,26 @@ mod tests {
         }
 
         fn clear(&self) -> Result<(), String> {
+            Err("session clear failed".into())
+        }
+    }
+
+    struct FailingClearAndRollbackSessionStore {
+        ledger_path: PathBuf,
+    }
+
+    impl SessionStore for FailingClearAndRollbackSessionStore {
+        fn load(&self) -> Result<Option<LastFmSession>, String> {
+            Ok(None)
+        }
+
+        fn save(&self, _session: &LastFmSession) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<(), String> {
+            fs::remove_file(&self.ledger_path).unwrap();
+            fs::create_dir(&self.ledger_path).unwrap();
             Err("session clear failed".into())
         }
     }
@@ -1997,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_missing_built_in_credentials_disable_integration() {
+    fn credentials_require_a_nonempty_pair() {
         assert!(credentials_from(None, Some("secret")).is_none());
         assert!(credentials_from(Some(""), Some("secret")).is_none());
         assert!(credentials_from(Some("key"), Some(" ")).is_none());
@@ -2005,9 +1686,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_body_limit_accepts_exact_json_and_rejects_plus_one() {
+        const LIMIT: usize = 64;
+        let mut exact = br#"{"ok":true}"#.to_vec();
+        exact.resize(LIMIT, b' ');
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            exact.len()
+        )
+        .into_bytes();
+        let (url, server) = serve([headers, exact].concat());
+        let response = reqwest::get(url).await.unwrap();
+        let body = collect_response_body_with_limit(response, LIMIT)
+            .await
+            .unwrap();
+        serde_json::from_slice::<Value>(&body).unwrap();
+        server.join().unwrap();
+
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            LIMIT + 1
+        )
+        .into_bytes();
+        let (url, server) = serve([headers, vec![b' '; LIMIT + 1]].concat());
+        let response = reqwest::get(url).await.unwrap();
+        assert_eq!(
+            collect_response_body_with_limit(response, LIMIT).await,
+            Err(Failure::Response)
+        );
+        server.join().unwrap();
+
+        let chunk = vec![b' '; LIMIT + 1];
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+            chunk.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&chunk);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (url, server) = serve(response);
+        let response = reqwest::get(url).await.unwrap();
+        assert_eq!(
+            collect_response_body_with_limit(response, LIMIT).await,
+            Err(Failure::Response)
+        );
+        server.join().unwrap();
+
+        assert_eq!(RESPONSE_BODY_LIMIT, 8 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn fake_executor_observes_signed_form_and_shared_response_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        executor.queue_json(serde_json::json!({"lfm": {"status": "ok"}}));
+
+        service
+            .post(
+                "track.updateNowPlaying",
+                vec![("artist".into(), "Artist".into())],
+                Some("session-key"),
+            )
+            .await
+            .unwrap();
+
+        let requests = executor.requests();
+        let params = &requests[0];
+        let value = |key: &str| {
+            params
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("api_key"), Some("test-api-key"));
+        assert_eq!(value("method"), Some("track.updateNowPlaying"));
+        assert_eq!(value("sk"), Some("session-key"));
+        assert_eq!(value("format"), Some("json"));
+        let expected_signature = signature(params, "test-shared-secret");
+        assert_eq!(value("api_sig"), Some(expected_signature.as_str()));
+
+        executor.queue_network_failure();
+        assert_eq!(
+            service.post("test", Vec::new(), None).await,
+            Err(Failure::Network)
+        );
+        executor.queue_response(503, b"unavailable".as_slice());
+        assert_eq!(
+            service.post("test", Vec::new(), None).await,
+            Err(Failure::Http(503))
+        );
+        executor.queue_response(200, b"not json".as_slice());
+        assert_eq!(
+            service.post("test", Vec::new(), None).await,
+            Err(Failure::Response)
+        );
+        executor.queue_json(serde_json::json!({"error": {"code": 9}}));
+        assert_eq!(
+            service.post("test", Vec::new(), None).await,
+            Err(Failure::Api(9))
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_event_callback_receives_current_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let executor = Arc::new(FakeRequestExecutor::default());
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let service = Service::hydrate_for_test(Service::new_unhydrated_with_effects(
+            directory.path(),
+            true,
+            true,
+            credentials_from(Some("test-api-key"), Some("test-shared-secret")),
+            executor,
+            Arc::new(move |state| {
+                captured
+                    .lock()
+                    .expect("Last.fm captured event mutex poisoned")
+                    .push(state);
+            }),
+        ));
+
+        service.emit_state().await;
+
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert!(events.lock().unwrap()[0].available);
+    }
+
+    #[tokio::test]
     async fn import_owner_guard_rejects_a_different_connected_account() {
         let directory = tempfile::tempdir().unwrap();
-        let service = Service::new(directory.path(), true, true);
+        let service = Service::new_for_test(directory.path(), true, true);
         service.runtime.lock().await.session = Some(LastFmSession {
             username: "user".into(),
             key: "session".into(),
@@ -2026,6 +1835,307 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_wakes_import_backoff_without_an_old_generation_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        service.runtime.lock().await.session = Some(LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        });
+        executor.queue_network_failure();
+        executor.queue_json(serde_json::json!({"recenttracks": {"track": []}}));
+        let generation = service.import_generation();
+        let task = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .import_recent_tracks_page("user", generation, 1, 0, 1)
+                    .await
+            })
+        };
+        while executor.requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        service.disconnect().await.unwrap();
+        let error = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("disconnect must wake the long retry")
+            .unwrap()
+            .unwrap_err();
+
+        assert!(error.account_mismatch);
+        assert_eq!(executor.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleared_session_wakes_import_backoff_even_if_pending_cleanup_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        fs::create_dir(&service.pending_store.path).unwrap();
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.session = Some(LastFmSession {
+                username: "user".into(),
+                key: "session".into(),
+            });
+            runtime.pending = Some("pending".into());
+        }
+        executor.queue_network_failure();
+        let generation = service.import_generation();
+        let task = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .import_recent_tracks_page("user", generation, 1, 0, 1)
+                    .await
+            })
+        };
+        while executor.requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(service.disconnect().await.is_err());
+        let error = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("clearing the session must wake the long retry")
+            .unwrap()
+            .unwrap_err();
+
+        assert!(error.account_mismatch);
+        assert_eq!(executor.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_wakes_import_backoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        service.runtime.lock().await.session = Some(LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        });
+        executor.queue_network_failure();
+        let generation = service.import_generation();
+        let task = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .import_recent_tracks_page("user", generation, 1, 0, 1)
+                    .await
+            })
+        };
+        while executor.requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        service.shutdown().await;
+        let error = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("shutdown must wake the long retry")
+            .unwrap()
+            .unwrap_err();
+
+        assert!(error.account_mismatch);
+        assert_eq!(executor.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn import_owner_operation_does_not_hold_the_runtime_guard() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new_for_test(directory.path(), true, true);
+        service.runtime.lock().await.session = Some(LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        });
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task = {
+            let service = Arc::clone(&service);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                service
+                    .with_import_owner("user", || async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok::<_, String>(())
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+
+        tokio::time::timeout(Duration::from_millis(100), service.state())
+            .await
+            .expect("import persistence must not block Last.fm state reads");
+        release.notify_one();
+        assert_eq!(task.await.unwrap().unwrap(), Some(()));
+    }
+
+    #[tokio::test]
+    async fn finish_reports_account_changes_without_application_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        for expected_change in [true, false] {
+            service.runtime.lock().await.pending = Some("token".into());
+            executor.queue_json(serde_json::json!({
+                "session": {"name": "user", "key": "session"}
+            }));
+
+            assert_eq!(service.finish().await.unwrap(), expected_change);
+        }
+        assert_eq!(service.state().await.username.as_deref(), Some("user"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_finish_publishes_the_durable_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        let (blocker, entered, release) = save_blocker();
+        Arc::get_mut(&mut service).unwrap().session_store = Arc::new(BlockingSessionStore {
+            inner: FileSessionStore::new(directory.path()),
+            save_blocker: Some(blocker),
+            clear_blocker: None,
+        });
+        service.runtime.lock().await.pending = Some("token".into());
+        executor.queue_json(serde_json::json!({
+            "session": {"name": "user", "key": "session"}
+        }));
+        let finish = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.finish().await })
+        };
+
+        wait_for_blocker(entered).await;
+        finish.abort();
+        release.send(()).unwrap();
+        assert!(finish.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.state().await.username.as_deref() != Some("user") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            FileSessionStore::new(directory.path())
+                .load()
+                .unwrap()
+                .map(|session| session.username),
+            Some("user".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_disconnect_finishes_ledger_credentials_and_runtime_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut service = Service::new_for_test(directory.path(), true, true);
+        let session = LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        };
+        FileSessionStore::new(directory.path())
+            .save(&session)
+            .unwrap();
+        let (blocker, entered, release) = save_blocker();
+        Arc::get_mut(&mut service).unwrap().queue_store.blocker = Some(blocker);
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.session = Some(session);
+            runtime.pending = Some("pending".into());
+            runtime.queue = VecDeque::from([queued_scrobble(1)]);
+            runtime.queue_owner = Some("user".into());
+        }
+        service.pending_store.save("pending").unwrap();
+        let disconnect = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.disconnect().await })
+        };
+
+        wait_for_blocker(entered).await;
+        disconnect.abort();
+        release.send(()).unwrap();
+        assert!(disconnect.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.state().await.connected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(FileSessionStore::new(directory.path())
+            .load()
+            .unwrap()
+            .is_none());
+        let ledger = service.queue_store.load_ledger_with_migration().unwrap().0;
+        assert!(ledger.pending.is_empty());
+        assert!(ledger.accepted.is_empty());
+        assert!(service.pending_store.load().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_invalidation_publishes_the_durable_clear() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut service = Service::new_for_test(directory.path(), true, true);
+        let session = LastFmSession {
+            username: "user".into(),
+            key: "session".into(),
+        };
+        FileSessionStore::new(directory.path())
+            .save(&session)
+            .unwrap();
+        let (blocker, entered, release) = save_blocker();
+        Arc::get_mut(&mut service).unwrap().session_store = Arc::new(BlockingSessionStore {
+            inner: FileSessionStore::new(directory.path()),
+            save_blocker: None,
+            clear_blocker: Some(blocker),
+        });
+        service.runtime.lock().await.session = Some(session.clone());
+        let invalidate = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.invalidate_session(&session).await })
+        };
+
+        wait_for_blocker(entered).await;
+        invalidate.abort();
+        release.send(()).unwrap();
+        assert!(invalidate.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.runtime.lock().await.session.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(service.runtime.lock().await.reconnect_required);
+        assert!(FileSessionStore::new(directory.path())
+            .load()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_returns_authorization_and_persists_pending_without_tauri() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        executor.queue_json(serde_json::json!({"token": "pending-token"}));
+
+        let (url, state) = service.connect().await.unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://www.last.fm/api/auth?api_key=test-api-key&token=pending-token"
+        );
+        assert!(state.pending);
+        assert!(
+            Service::new_for_test(directory.path(), true, true)
+                .state()
+                .await
+                .pending
         );
     }
 
@@ -2327,7 +2437,7 @@ mod tests {
         assert!(migrated);
         assert_eq!(ledger.pending, queued);
         assert!(ledger.accepted.is_empty());
-        let _service = Service::new(directory.path(), true, true);
+        let _service = Service::new_for_test(directory.path(), true, true);
         let persisted: Value = serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(persisted["version"], SCROBBLE_LEDGER_VERSION);
         assert_eq!(persisted["pending"][0]["timestamp"], 12);
@@ -2336,14 +2446,14 @@ mod tests {
     #[tokio::test]
     async fn accepted_receipts_prune_through_a_checkpoint_as_a_multiset() {
         let directory = tempfile::tempdir().unwrap();
-        let service = Service::new(directory.path(), true, true);
-        let receipt = |timestamp| crate::lastfm_import::AcceptedScrobbleReceipt {
-            corrected: crate::lastfm_import::ScrobbleMetadata {
+        let service = Service::new_for_test(directory.path(), true, true);
+        let receipt = |timestamp| AcceptedScrobbleReceipt {
+            corrected: ScrobbleMetadata {
                 artist: "Artist".into(),
                 album: "Album".into(),
                 track: "Song".into(),
             },
-            submitted: crate::lastfm_import::ScrobbleMetadata {
+            submitted: ScrobbleMetadata {
                 artist: "Artist".into(),
                 album: "Album".into(),
                 track: "Song".into(),
@@ -2398,7 +2508,7 @@ mod tests {
             br#"{"username":"user","key":"session"}"#,
         )
         .unwrap();
-        let service = Service::new(directory.path(), true, true);
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
         {
             let mut runtime = service.runtime.lock().await;
             runtime.queue = (0..51).map(queued_scrobble).collect();
@@ -2416,7 +2526,7 @@ mod tests {
         ];
         response_items
             .extend((2..50).map(|_| serde_json::json!({"ignoredMessage": {"code": "3"}})));
-        service.queue_test_response(serde_json::json!({
+        executor.queue_json(serde_json::json!({
             "lfm": {"status": "ok", "scrobbles": {"scrobble": response_items}}
         }));
 
@@ -2477,11 +2587,147 @@ mod tests {
         assert!(flush_ready(&runtime));
     }
 
+    #[tokio::test]
+    async fn account_change_wakes_a_flush_retry_and_new_session_can_restart_immediately() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("dev-lastfm-session.json"),
+            br#"{"username":"user","key":"session"}"#,
+        )
+        .unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.queue = VecDeque::from([queued_scrobble(1)]);
+            runtime.queue_owner = Some("user".into());
+        }
+        executor.queue_network_failure();
+        Arc::clone(&service).schedule_flush().await;
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while executor.requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("flush entered retry backoff");
+
+        service.runtime.lock().await.session = None;
+        service.signal_lifecycle_change();
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while service.runtime.lock().await.flushing {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("account change must wake retry without waiting for its timer");
+
+        service.runtime.lock().await.session = Some(LastFmSession {
+            username: "user".into(),
+            key: "next-session".into(),
+        });
+        executor.queue_json(serde_json::json!({
+            "scrobbles": {"scrobble": [{"ignoredMessage": {"code": "0"}}]}
+        }));
+        Arc::clone(&service).schedule_flush().await;
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !service.runtime.lock().await.queue.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the current session must restart the sole flush worker immediately");
+        assert_eq!(executor.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn flush_retry_does_not_sleep_after_a_lifecycle_generation_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new_for_test(directory.path(), true, true);
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.session = Some(LastFmSession {
+                username: "user".into(),
+                key: "session".into(),
+            });
+            runtime.queue = VecDeque::from([queued_scrobble(1)]);
+            runtime.queue_owner = Some("user".into());
+        }
+        let generation = service.import_generation();
+        service.signal_lifecycle_change();
+
+        assert!(
+            !service
+                .wait_for_flush_retry(generation, Duration::from_secs(300))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_prevents_a_flush_worker_from_being_started() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.session = Some(LastFmSession {
+                username: "user".into(),
+                key: "session".into(),
+            });
+            runtime.queue = VecDeque::from([queued_scrobble(1)]);
+            runtime.queue_owner = Some("user".into());
+        }
+
+        service.shutdown().await;
+        Arc::clone(&service).schedule_flush().await;
+
+        assert!(executor.requests().is_empty());
+        assert!(!service.runtime.lock().await.flushing);
+        assert!(service.flush_task.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_a_successful_flush_ledger_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut service, executor) = Service::new_with_fake_executor(directory.path(), true, true);
+        let (blocker, entered, release) = save_blocker();
+        Arc::get_mut(&mut service).unwrap().queue_store.blocker = Some(blocker);
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.session = Some(LastFmSession {
+                username: "user".into(),
+                key: "session".into(),
+            });
+            runtime.queue = VecDeque::from([queued_scrobble(1)]);
+            runtime.queue_owner = Some("user".into());
+        }
+        executor.queue_json(serde_json::json!({
+            "scrobbles": {"scrobble": [{"ignoredMessage": {"code": "0"}}]}
+        }));
+        Arc::clone(&service).schedule_flush().await;
+        wait_for_blocker(entered).await;
+        let shutdown = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        let ledger = service.queue_store.load_ledger_with_migration().unwrap().0;
+        assert!(ledger.pending.is_empty());
+        assert_eq!(ledger.accepted.len(), 1);
+        assert!(service.runtime.lock().await.queue.is_empty());
+        assert_eq!(service.accepted_receipts().await.len(), 1);
+    }
+
     #[test]
     fn queue_persistence_does_not_hold_runtime_lock() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let mut service = Service::new(directory.path(), true, true);
+            let mut service = Service::new_for_test(directory.path(), true, true);
             let (entered, entered_rx) = std::sync::mpsc::channel();
             let (release, release_rx) = std::sync::mpsc::channel();
             Arc::get_mut(&mut service).unwrap().queue_store.blocker = Some(Arc::new(SaveBlocker {
@@ -2519,7 +2765,7 @@ mod tests {
     fn invalid_session_requires_reconnect_without_dropping_queue() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let session = LastFmSession {
                 username: "user".into(),
                 key: "session".into(),
@@ -2545,7 +2791,7 @@ mod tests {
     fn same_user_reconnect_preserves_durable_queue() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let queued = VecDeque::from([queued_scrobble(1)]);
             service.queue_store.save(&queued).unwrap();
             {
@@ -2567,7 +2813,7 @@ mod tests {
     fn different_user_reconnect_clears_durable_queue_before_installing() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let mut queued = VecDeque::from([queued_scrobble(1)]);
             queued.front_mut().unwrap().owner = "old-user".into();
             service.queue_store.save(&queued).unwrap();
@@ -2600,7 +2846,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             fs::create_dir(directory.path().join("lastfm-scrobbles.json")).unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let mut queued = VecDeque::from([queued_scrobble(1)]);
             queued.front_mut().unwrap().owner = "old-user".into();
             let old_session = LastFmSession {
@@ -2628,7 +2874,7 @@ mod tests {
     fn api_nine_failure_preserves_queue_and_requires_reconnect() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let session = LastFmSession {
                 username: "user".into(),
                 key: "session".into(),
@@ -2659,7 +2905,7 @@ mod tests {
     fn build_failure_stops_flush_without_dropping_session_or_queue() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let mut service = Service::new(directory.path(), true, true);
+            let mut service = Service::new_for_test(directory.path(), true, true);
             Arc::get_mut(&mut service).unwrap().credentials = Some(Credentials {
                 api_key: "test-key".into(),
                 shared_secret: "test-secret".into(),
@@ -2702,7 +2948,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             fs::create_dir(directory.path().join("lastfm-scrobbles.json")).unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let session = LastFmSession {
                 username: "old-user".into(),
                 key: "old-session".into(),
@@ -2734,30 +2980,82 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_keeps_session_when_credential_clear_fails_after_queue_clear() {
+    fn disconnect_restores_ledger_when_credential_clear_fails() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let mut service = Service::new(directory.path(), true, true);
+            let mut service = Service::new_for_test(directory.path(), true, true);
             Arc::get_mut(&mut service).unwrap().session_store = Arc::new(FailingClearSessionStore);
             let session = LastFmSession {
                 username: "old-user".into(),
                 key: "old-session".into(),
             };
             let queued = VecDeque::from([queued_scrobble(1)]);
+            let receipt = AcceptedScrobbleReceipt {
+                corrected: ScrobbleMetadata {
+                    artist: "Artist".into(),
+                    album: "Album".into(),
+                    track: "Song".into(),
+                },
+                submitted: ScrobbleMetadata {
+                    artist: "Artist".into(),
+                    album: "Album".into(),
+                    track: "Song".into(),
+                },
+                timestamp: 1,
+            };
             {
                 let mut runtime = service.runtime.lock().await;
                 runtime.session = Some(session.clone());
-                runtime.queue = queued;
+                runtime.queue = queued.clone();
+                runtime.queue_owner = Some("old-user".into());
+            }
+            *service.accepted_receipts.lock().await = vec![receipt.clone()];
+
+            assert!(service.disconnect().await.is_err());
+            let (ledger, _) = service.queue_store.load_ledger_with_migration().unwrap();
+            assert_eq!(ledger.pending, queued);
+            assert_eq!(ledger.accepted, vec![receipt.clone()]);
+            assert_eq!(ledger.owner.as_deref(), Some("old-user"));
+            let runtime = service.runtime.lock().await;
+            assert!(runtime
+                .session
+                .as_ref()
+                .is_some_and(|value| value == &session));
+            assert_eq!(runtime.queue, queued);
+            assert_eq!(runtime.queue_owner.as_deref(), Some("old-user"));
+            drop(runtime);
+            assert_eq!(service.accepted_receipts().await, vec![receipt]);
+        });
+    }
+
+    #[test]
+    fn disconnect_marks_storage_unavailable_when_ledger_rollback_fails() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let mut service = Service::new_for_test(directory.path(), true, true);
+            let ledger_path = service.queue_store.path.clone();
+            Arc::get_mut(&mut service).unwrap().session_store =
+                Arc::new(FailingClearAndRollbackSessionStore { ledger_path });
+            let session = LastFmSession {
+                username: "old-user".into(),
+                key: "old-session".into(),
+            };
+            {
+                let mut runtime = service.runtime.lock().await;
+                runtime.session = Some(session.clone());
+                runtime.queue = VecDeque::from([queued_scrobble(1)]);
+                runtime.queue_owner = Some("old-user".into());
             }
 
             assert!(service.disconnect().await.is_err());
-            assert!(service.queue_store.load().unwrap().is_empty());
+
             let runtime = service.runtime.lock().await;
             assert!(runtime
                 .session
                 .as_ref()
                 .is_some_and(|value| value == &session));
             assert!(runtime.queue.is_empty());
+            assert!(runtime.storage_problem);
         });
     }
 
@@ -2765,7 +3063,7 @@ mod tests {
     fn cross_account_completion_commits_new_session_when_pending_clear_fails() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let service = Service::new(directory.path(), true, true);
+            let service = Service::new_for_test(directory.path(), true, true);
             let old_session = LastFmSession {
                 username: "old-user".into(),
                 key: "old-session".into(),
@@ -2810,7 +3108,7 @@ mod tests {
     fn cross_account_completion_keeps_retry_state_when_session_save_fails() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
-            let mut service = Service::new(directory.path(), true, true);
+            let mut service = Service::new_for_test(directory.path(), true, true);
             let old_session = LastFmSession {
                 username: "old-user".into(),
                 key: "old-session".into(),
@@ -2896,26 +3194,5 @@ mod tests {
         assert!(is_retryable(Failure::Response));
         let failure = Failure::Api(13);
         assert_eq!(failure.code(), Some(13));
-    }
-
-    #[test]
-    fn log_messages_do_not_include_request_secrets() {
-        for line in include_str!("lastfm.rs")
-            .lines()
-            .filter(|line| line.contains("log::"))
-        {
-            for secret in [
-                "api_key",
-                "shared_secret",
-                "api_sig",
-                "session.key",
-                "token",
-            ] {
-                assert!(
-                    !line.contains(secret),
-                    "sensitive value in log line: {line}"
-                );
-            }
-        }
     }
 }

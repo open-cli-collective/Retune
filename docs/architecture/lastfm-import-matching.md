@@ -8,12 +8,46 @@ in the React importer and Spotify transport policy belongs in the
 
 ## Ownership and invariants
 
-Matching is owned by `apps/desktop/src-tauri/src/lastfm_import.rs`. The Rust
-service receives compact Last.fm `SourceRow` values, searches through the shared
-Spotify client, persists candidates and choices in the import session, and
-projects an `ImportPageView` to React. `retune-core` receives only resolved
-library mutations and remains free of network, async, filesystem, Tauri, and
-matching concerns.
+Matching is exposed by the `apps/desktop/src-tauri/src/lastfm_import` facade;
+persisted and boundary types live in `model`, filesystem formats in `store`,
+and the serialized runtime owner in `service`. `source` and `clustering` prepare
+source rows and batches; `matching`, `collection`, and `review` own deterministic
+candidate and page projection; `apply`, `incremental`, and `reconciliation` own
+durable execution; `coordinator` owns shared workflows; and `commands` is the
+Tauri adapter. The Rust service
+receives compact Last.fm `SourceRow` values, searches through the shared Spotify
+client, persists candidates and choices in the import session, and projects an
+`ImportPageView` to React. `retune-core` receives only resolved library mutations
+and remains free of network, async, filesystem, Tauri, and matching concerns.
+
+`lastfm_import/commands.rs` is the sole Tauri and `AppState` shell. Each command
+maps IPC values, resolves one importer `UseCases` bundle, makes one application
+call, and adapts its result to typed events or output. The Tauri-free
+`application` module owns review, matching, incremental reconciliation, and
+durable apply orchestration through concrete Last.fm, library,
+Spotify-membership, settings, cooldown, provider, and connection owners plus
+narrow worker/event callbacks. Lower stages never receive `AppHandle` or
+`AppState`.
+
+The Last.fm connector owns recent-track pagination policy and accepted-scrobble
+receipt metadata. The importer depends on those connector models; the connector
+does not depend on importer state. The application shell alone coordinates
+importer clearing and incremental scheduling when authorization finishes or an
+account disconnects.
+
+Snapshot and incremental cache IDs are one non-empty normal path component and,
+when their identity inputs are available, must equal the recomputed ID. Cache
+reads, writes, renames, cleanup, invalidation, and quarantine independently
+reject absolute, parent, root, empty, and symlink targets, so persisted state
+cannot escape `lastfm-import-cache`. Invalid state is quarantined without
+touching the referenced cache. `Service` owns the single runner claim and
+serialized session transition; React observes progress and never starts a
+parallel importer runner. Import and incremental retry waits remain owned by
+that runner and select between their timer and the Last.fm service lifecycle
+signal. Disconnect, reconnect, invalid-session replacement, and application
+shutdown advance the lifecycle generation, wake sleepers, and prevent the old
+generation from issuing another request. Closing the importer window does not
+cancel checkpointed work.
 
 The matching boundary preserves these invariants:
 

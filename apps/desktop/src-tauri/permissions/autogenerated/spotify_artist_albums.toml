@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-spotify-artist-albums"
+description = "Enables the spotify_artist_albums command without any pre-configured scope."
+commands.allow = ["spotify_artist_albums"]
+
+[[permission]]
+identifier = "deny-spotify-artist-albums"
+description = "Denies the spotify_artist_albums command without any pre-configured scope."
+commands.deny = ["spotify_artist_albums"]

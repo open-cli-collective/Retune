@@ -15,11 +15,11 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 22
           cache: npm
@@ -27,6 +27,15 @@ jobs:
 
       - name: Check release contract
         run: node scripts/check-release.mjs
+
+      - name: Require release candidate on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::release candidates must point to a commit on main"
+            exit 1
+          fi
 
       - name: Resolve version
         id: version
@@ -48,10 +57,6 @@ jobs:
               echo "::error::tag $TAG is outside configured release line v$release_line"
               exit 1
             fi
-            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-              echo "::error::release tags must point to a commit on main"
-              exit 1
-            fi
           else
             version="$baseline"
           fi
@@ -59,6 +64,7 @@ jobs:
 
   build:
     needs: prepare
+    environment: release
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -68,28 +74,35 @@ jobs:
           - name: macOS arm64
             os: macos-15
             arch: arm64
+            runner-arch: arm64
             bundle: app
           - name: Windows x64
-            os: windows-2025
+            os: windows-2022
             arch: x64
+            runner-arch: x64
+            target: x86_64-pc-windows-msvc
             bundle: nsis
           - name: Windows ARM64
-            os: windows-11-arm
+            os: windows-2022
             arch: arm64
+            runner-arch: x64
+            target: aarch64-pc-windows-msvc
             bundle: nsis
           - name: Ubuntu 22.04 amd64
             os: ubuntu-22.04
             arch: amd64
+            runner-arch: amd64
             bundle: deb
           - name: Ubuntu 22.04 arm64
             os: ubuntu-22.04-arm
             arch: arm64
+            runner-arch: arm64
             bundle: deb
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 22
           cache: npm
@@ -97,7 +110,7 @@ jobs:
 
       - name: Verify native runner architecture
         env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_ARCH: ${{ matrix.runner-arch }}
         run: |
           node -e "const expected = process.env.EXPECTED_ARCH === 'amd64' ? 'x64' : process.env.EXPECTED_ARCH; if (process.arch !== expected) throw new Error('expected ' + expected + ', got ' + process.arch)"
 
@@ -119,9 +132,15 @@ jobs:
             patchelf \
             wget
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install Windows Rust target
+        if: startsWith(matrix.os, 'windows-')
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       - name: Install frontend dependencies
         working-directory: apps/desktop
@@ -142,70 +161,161 @@ jobs:
           RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
         run: node --input-type=module -e "for (const name of ['RETUNE_LASTFM_API_KEY', 'RETUNE_LASTFM_SHARED_SECRET']) if (!process.env[name]?.trim()) throw new Error(name + ' is required for release packaging')"
 
-      - name: Build native bundle
+      - name: Require Apple distribution credentials
+        if: matrix.os == 'macos-15'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_CERT_CN: ${{ secrets.MACOS_CERT_CN }}
+          MACOS_CERT_LEAF_SHA: ${{ secrets.MACOS_CERT_LEAF_SHA }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD MACOS_CERT_CN MACOS_CERT_LEAF_SHA MACOS_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8_BASE64; do
+            [ -n "${!name:-}" ] || { echo "::error::$name is required for macOS release signing"; exit 1; }
+          done
+          case "$MACOS_CERT_CN" in
+            "Developer ID Application:"*) ;;
+            *) echo "::error::MACOS_CERT_CN must name a Developer ID Application identity"; exit 1 ;;
+          esac
+          case "$MACOS_CERT_CN" in
+            *"($MACOS_TEAM_ID)"*) ;;
+            *) echo "::error::MACOS_CERT_CN does not contain MACOS_TEAM_ID"; exit 1 ;;
+          esac
+          [[ "$MACOS_CERT_LEAF_SHA" =~ ^[[:xdigit:]]{40}$ ]] || { echo "::error::MACOS_CERT_LEAF_SHA must be a SHA-1 certificate fingerprint"; exit 1; }
+
+      - name: Import Developer ID certificate
+        if: matrix.os == 'macos-15'
+        uses: apple-actions/import-codesign-certs@fe74d46e82474f87e1ba79832ad28a4013d0e33a
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_P12 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      - name: Verify imported Developer ID identity
+        if: matrix.os == 'macos-15'
+        env:
+          MACOS_CERT_CN: ${{ secrets.MACOS_CERT_CN }}
+          MACOS_CERT_LEAF_SHA: ${{ secrets.MACOS_CERT_LEAF_SHA }}
+        run: |
+          set -euo pipefail
+          expected_leaf="$(printf '%s' "$MACOS_CERT_LEAF_SHA" | tr '[:lower:]' '[:upper:]')"
+          expected_name="\"$MACOS_CERT_CN\""
+          identity="$(security find-identity -v -p codesigning | grep -F "$expected_leaf" | grep -F "$expected_name" || true)"
+          [ -n "$identity" ] || { echo "::error::imported Developer ID identity does not match MACOS_CERT_CN and MACOS_CERT_LEAF_SHA"; exit 1; }
+
+      - name: Prepare Apple notarization key
+        if: matrix.os == 'macos-15'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          APPLE_API_KEY_PATH="$key_path" node -e "require('node:fs').writeFileSync(process.env.APPLE_API_KEY_PATH, Buffer.from(process.env.APPLE_API_KEY_P8_BASE64, 'base64'), { mode: 0o600 })"
+          [ -s "$key_path" ] || { echo "::error::decoded Apple notarization key is empty"; exit 1; }
+
+      - name: Require Windows Artifact Signing credentials
+        if: startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          WINDOWS_SIGNING_SUBJECT: ${{ secrets.WINDOWS_SIGNING_SUBJECT }}
+        run: |
+          $names = @('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_ARTIFACT_SIGNING_ENDPOINT', 'AZURE_ARTIFACT_SIGNING_ACCOUNT', 'AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE', 'WINDOWS_SIGNING_SUBJECT')
+          foreach ($name in $names) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name is required for Windows release signing" }
+          }
+          $endpoint = [Uri]$env:AZURE_ARTIFACT_SIGNING_ENDPOINT
+          if (-not $endpoint.IsAbsoluteUri -or $endpoint.Scheme -ne 'https' -or -not $endpoint.Host.EndsWith('.codesigning.azure.net')) {
+            throw 'AZURE_ARTIFACT_SIGNING_ENDPOINT must be an HTTPS Azure Artifact Signing endpoint'
+          }
+
+      - name: Write release configuration
+        if: '!startsWith(matrix.os, ''windows-'')'
+        working-directory: apps/desktop
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "require('node:fs').writeFileSync('src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.VERSION }))"
+
+      - name: Install pinned Artifact Signing CLI
+        if: startsWith(matrix.os, 'windows-')
+        run: cargo install artifact-signing-cli --version 0.11.0 --locked
+
+      - name: Write Windows release configuration
+        if: startsWith(matrix.os, 'windows-')
+        working-directory: apps/desktop
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; const signCommand = { cmd: 'artifact-signing-cli', args: ['-e', process.env.AZURE_ARTIFACT_SIGNING_ENDPOINT, '-a', process.env.AZURE_ARTIFACT_SIGNING_ACCOUNT, '-c', process.env.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE, '-d', 'Retune', '--fd', 'SHA256', '--tr', 'http://timestamp.acs.microsoft.com', '--td', 'SHA256', '%1'] }; fs.writeFileSync('src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.VERSION, bundle: { windows: { signCommand } } }))"
+
+      - name: Build macOS bundle
+        if: matrix.os == 'macos-15'
         working-directory: apps/desktop
         env:
           RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}
           RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
           RETUNE_SUPPORT_EMAIL: ${{ vars.RETUNE_SUPPORT_EMAIL }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          node -e "require('node:fs').writeFileSync('src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.VERSION }))"
-          npx tauri build --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundle }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_CERT_CN }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: npx tauri build --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundle }}
 
-      - name: Configure stable macOS signing
-        if: matrix.os == 'macos-15'
-        id: macos-codesign
-        uses: open-cli-collective/.github/actions/macos-codesign-setup@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706
-        with:
-          cert-p12: ${{ secrets.MACOS_CERT_P12 }}
-          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
-          cert-cn: ${{ secrets.MACOS_CERT_CN }}
-          cert-leaf-sha: ${{ secrets.MACOS_CERT_LEAF_SHA }}
-          binary: retune
-
-      - name: Require stable macOS signing
-        if: matrix.os == 'macos-15'
-        env:
-          SIGNING_ENABLED: ${{ steps.macos-codesign.outputs.enabled }}
-          CONFIGURED_LEAF: ${{ secrets.MACOS_CERT_LEAF_SHA }}
-        run: |
-          set -euo pipefail
-          expected_leaf=42e1afd02aae8666c09c15f171e1639550f301c2
-          if [ "$SIGNING_ENABLED" != true ]; then
-            echo "::error::stable macOS signing credentials are required for every release run"
-            exit 1
-          fi
-          if [ "$CONFIGURED_LEAF" != "$expected_leaf" ]; then
-            echo "::error::MACOS_CERT_LEAF_SHA is not the expected stable certificate leaf"
-            exit 1
-          fi
-
-      - name: Stable-sign macOS app
-        if: matrix.os == 'macos-15'
+      - name: Build Linux bundle
+        if: startsWith(matrix.os, 'ubuntu-')
         working-directory: apps/desktop
         env:
-          MACOS_CERT_CN: ${{ secrets.MACOS_CERT_CN }}
+          RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}
+          RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+          RETUNE_SUPPORT_EMAIL: ${{ vars.RETUNE_SUPPORT_EMAIL }}
+        run: npx tauri build --config src-tauri/tauri.release.conf.json --bundles ${{ matrix.bundle }}
+
+      - name: Build and sign Windows bundle
+        if: startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        working-directory: apps/desktop
+        env:
+          WINDOWS_TARGET: ${{ matrix.target }}
+          RETUNE_LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}
+          RETUNE_LASTFM_SHARED_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+          RETUNE_SUPPORT_EMAIL: ${{ vars.RETUNE_SUPPORT_EMAIL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: npx tauri build --target $env:WINDOWS_TARGET --config src-tauri/tauri.release.conf.json --bundles nsis
+
+      - name: Verify Windows signed payload
+        if: startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        env:
+          WINDOWS_TARGET: ${{ matrix.target }}
+          WINDOWS_SIGNING_SUBJECT: ${{ secrets.WINDOWS_SIGNING_SUBJECT }}
         run: |
-          set -euo pipefail
-          app="../../target/release/bundle/macos/Retune.app"
-          executables=()
-          for candidate in "$app/Contents/MacOS"/*; do
-            if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-              executables+=("$candidate")
-            fi
-          done
-          [ "${#executables[@]}" -eq 1 ] || { echo "::error::expected one macOS process executable"; exit 1; }
-          executable="${executables[0]}"
-          requirements='=designated => identifier "com.rianjs.retune" and certificate leaf = H"42e1afd02aae8666c09c15f171e1639550f301c2"'
-          test -d "$app"
-          test -x "$executable"
-          codesign --force --sign "$MACOS_CERT_CN" --identifier com.rianjs.retune --requirements "$requirements" "$executable"
-          codesign --force --sign "$MACOS_CERT_CN" --identifier com.rianjs.retune --requirements "$requirements" "$app"
+          $payload = Resolve-Path "target/$env:WINDOWS_TARGET/release/retune-desktop.exe"
+          $signature = Get-AuthenticodeSignature -LiteralPath $payload
+          if ($signature.Status -ne 'Valid') { throw "payload Authenticode status is $($signature.Status): $($signature.StatusMessage)" }
+          if ($signature.SignerCertificate.Subject -ne $env:WINDOWS_SIGNING_SUBJECT) { throw 'payload signer subject does not match WINDOWS_SIGNING_SUBJECT' }
+          if ($null -eq $signature.TimeStamperCertificate) { throw 'payload has no RFC 3161 timestamp' }
+          signtool verify /pa /all /tw /v $payload
 
       - name: Verify macOS app signature
         if: matrix.os == 'macos-15'
         working-directory: apps/desktop
+        env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
         run: |
           set -euo pipefail
           app="../../target/release/bundle/macos/Retune.app"
@@ -214,24 +324,14 @@ jobs:
           codesign --verify --deep --strict "$app"
           for target in "$executable" "$app"; do
             codesign --verify --strict "$target"
-            requirement="$(codesign -d -r- "$target" 2>&1 | sed -n 's/^designated => //p')"
-            case "$requirement" in
-              *'identifier "com.rianjs.retune"'*'certificate leaf = H"42e1afd02aae8666c09c15f171e1639550f301c2"'*) ;;
-              *) echo "::error::unexpected macOS designated requirement for $target: $requirement"; exit 1 ;;
-            esac
-            case "$requirement" in
-              *cdhash*) echo "::error::macOS designated requirement contains cdhash for $target"; exit 1 ;;
-            esac
+            details="$(codesign -d --verbose=4 "$target" 2>&1)"
+            printf '%s\n' "$details" | grep -F "Authority=Developer ID Application:" >/dev/null
+            printf '%s\n' "$details" | grep -F "TeamIdentifier=$MACOS_TEAM_ID" >/dev/null
+            printf '%s\n' "$details" | grep -E '^Timestamp=.+$' | grep -v '^Timestamp=none$' >/dev/null
+            printf '%s\n' "$details" | grep -E 'flags=.*runtime' >/dev/null
           done
-          details="$(codesign -d --verbose=4 "$app" 2>&1)"
-          if printf '%s\n' "$details" | grep -E 'flags=.*runtime'; then
-            echo "::error::macOS app has hardened-runtime flags"
-            exit 1
-          fi
-          if printf '%s\n' "$details" | grep -E '^Timestamp=' | grep -v '^Timestamp=none$'; then
-            echo "::error::macOS app has a timestamp"
-            exit 1
-          fi
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
 
       - name: Package macOS app
         if: matrix.os == 'macos-15'
@@ -243,24 +343,46 @@ jobs:
           app="../../target/release/bundle/macos/Retune.app"
           actual="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
           [ "$actual" = "$VERSION" ] || { echo "::error::macOS bundle version $actual does not match $VERSION"; exit 1; }
-          tar -czf "Retune-${VERSION}-aarch64.tar.gz" -C ../../target/release/bundle/macos Retune.app
+          archive="Retune-${VERSION}-aarch64.zip"
+          extracted="$(mktemp -d "$RUNNER_TEMP/retune-macos-archive.XXXXXX")"
+          trap 'rm -rf "$extracted"' EXIT
+          /usr/bin/ditto -c -k --keepParent "$app" "$archive"
+          /usr/bin/ditto -x -k "$archive" "$extracted"
+          packaged_app="$extracted/Retune.app"
+          codesign --verify --deep --strict "$packaged_app"
+          xcrun stapler validate "$packaged_app"
+          spctl --assess --type execute --verbose=4 "$packaged_app"
 
-      - name: Rename Windows NSIS installer
+      - name: Verify and rename Windows NSIS installer
         if: startsWith(matrix.os, 'windows-')
         shell: pwsh
         working-directory: apps/desktop
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           ARCH: ${{ matrix.arch }}
+          WINDOWS_TARGET: ${{ matrix.target }}
+          WINDOWS_SIGNING_SUBJECT: ${{ secrets.WINDOWS_SIGNING_SUBJECT }}
         run: |
-          $bundle = Resolve-Path '../../target/release/bundle/nsis'
+          $bundle = Resolve-Path "../../target/$env:WINDOWS_TARGET/release/bundle/nsis"
           $files = @(Get-ChildItem -LiteralPath $bundle -Filter '*-setup.exe' -File)
           if ($files.Count -ne 1) { throw "expected one NSIS setup.exe, found $($files.Count)" }
           if ($files[0].BaseName -notmatch [regex]::Escape($env:VERSION)) { throw "NSIS source filename does not contain version $env:VERSION: $($files[0].Name)" }
           $productVersion = (Get-Item -LiteralPath $files[0].FullName).VersionInfo.ProductVersion
           if ($productVersion -ne $env:VERSION) { throw "NSIS ProductVersion $productVersion does not match $env:VERSION" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $files[0].FullName
+          if ($signature.Status -ne 'Valid') { throw "installer Authenticode status is $($signature.Status): $($signature.StatusMessage)" }
+          if ($signature.SignerCertificate.Subject -ne $env:WINDOWS_SIGNING_SUBJECT) { throw 'installer signer subject does not match WINDOWS_SIGNING_SUBJECT' }
+          if ($null -eq $signature.TimeStamperCertificate) { throw 'installer has no RFC 3161 timestamp' }
+          signtool verify /pa /all /tw /v $files[0].FullName
           $destination = Join-Path $bundle "Retune-$env:VERSION-windows-$env:ARCH-setup.exe"
           Move-Item -LiteralPath $files[0].FullName -Destination $destination
+
+      - name: Remove Apple notarization key
+        if: always() && matrix.os == 'macos-15'
+        run: |
+          if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+            rm -f "$APPLE_API_KEY_PATH"
+          fi
 
       - name: Rename Debian package
         if: startsWith(matrix.os, 'ubuntu-')
@@ -279,37 +401,113 @@ jobs:
 
       - name: Upload macOS artifact
         if: matrix.os == 'macos-15'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: retune-macos-arm64
-          path: apps/desktop/Retune-${{ needs.prepare.outputs.version }}-aarch64.tar.gz
+          path: apps/desktop/Retune-${{ needs.prepare.outputs.version }}-aarch64.zip
           if-no-files-found: error
 
       - name: Upload Windows artifact
         if: startsWith(matrix.os, 'windows-')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: retune-windows-${{ matrix.arch }}
-          path: target/release/bundle/nsis/Retune-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-setup.exe
+          path: target/${{ matrix.target }}/release/bundle/nsis/Retune-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
 
       - name: Upload Debian artifact
         if: startsWith(matrix.os, 'ubuntu-')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: retune-debian-${{ matrix.arch }}
           path: target/release/bundle/deb/retune_${{ needs.prepare.outputs.version }}_${{ matrix.arch }}.deb
           if-no-files-found: error
 
-  aggregate:
+  windows-install-smoke:
     needs: [prepare, build]
+    environment: release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-2022
+            pe-machine: 34404
+          - arch: arm64
+            os: windows-11-arm
+            pe-machine: 43620
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: retune-windows-${{ matrix.arch }}
+          path: dist/windows
+
+      - name: Verify installed Windows payload
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          EXPECTED_PE_MACHINE: ${{ matrix.pe-machine }}
+          WINDOWS_SIGNING_SUBJECT: ${{ secrets.WINDOWS_SIGNING_SUBJECT }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_SUBJECT)) { throw 'WINDOWS_SIGNING_SUBJECT is required for install verification' }
+          $installer = Resolve-Path "dist/windows/Retune-$env:VERSION-windows-$env:ARCH-setup.exe"
+          $installRoot = Join-Path $env:RUNNER_TEMP "retune-install-$env:GITHUB_RUN_ID-$env:ARCH"
+          New-Item -ItemType Directory -Path $installRoot | Out-Null
+
+          function Assert-Signed([string]$Path, [string]$Label) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path
+            if ($signature.Status -ne 'Valid') { throw "$Label Authenticode status is $($signature.Status): $($signature.StatusMessage)" }
+            if ($signature.SignerCertificate.Subject -ne $env:WINDOWS_SIGNING_SUBJECT) { throw "$Label signer subject does not match WINDOWS_SIGNING_SUBJECT" }
+            if ($null -eq $signature.TimeStamperCertificate) { throw "$Label has no RFC 3161 timestamp" }
+            signtool verify /pa /all /tw /v $Path
+            if ($LASTEXITCODE -ne 0) { throw "SignTool rejected $Label" }
+          }
+
+          Assert-Signed $installer 'installer'
+          $installedPayload = $null
+          try {
+            $install = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+            if ($install.ExitCode -ne 0) { throw "silent install exited $($install.ExitCode)" }
+            $payloads = @(Get-ChildItem -LiteralPath $installRoot -Filter '*.exe' -File -Recurse | Where-Object { $_.Name -notmatch '^(?i:uninstall|unins)' })
+            if ($payloads.Count -ne 1) { throw "expected one installed application executable, found $($payloads.Count)" }
+            $installedPayload = $payloads[0].FullName
+            Assert-Signed $installedPayload 'installed payload'
+
+            $bytes = [IO.File]::ReadAllBytes($installedPayload)
+            if ($bytes.Length -lt 64) { throw 'installed payload is too small to be a PE file' }
+            $peOffset = [BitConverter]::ToInt32($bytes, 60)
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length) { throw 'installed payload has an invalid PE header offset' }
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne [int]$env:EXPECTED_PE_MACHINE) { throw "installed payload PE machine $machine does not match expected $env:EXPECTED_PE_MACHINE" }
+          } finally {
+            $uninstallers = @(Get-ChildItem -LiteralPath $installRoot -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(?i:uninstall|unins)' })
+            if ($uninstallers.Count -ne 1) { throw "expected one uninstaller, found $($uninstallers.Count)" }
+            Assert-Signed $uninstallers[0].FullName 'uninstaller'
+            $uninstallerCopy = Join-Path $env:RUNNER_TEMP "retune-uninstall-$env:GITHUB_RUN_ID-$env:ARCH.exe"
+            Copy-Item -LiteralPath $uninstallers[0].FullName -Destination $uninstallerCopy
+            try {
+              $uninstall = Start-Process -FilePath $uninstallerCopy -ArgumentList @('/S', "_?=$installRoot") -Wait -PassThru
+              if ($uninstall.ExitCode -ne 0) { throw "silent uninstall exited $($uninstall.ExitCode)" }
+            } finally {
+              Remove-Item -LiteralPath $uninstallerCopy -Force -ErrorAction SilentlyContinue
+            }
+            if ($null -ne $installedPayload -and (Test-Path -LiteralPath $installedPayload)) { throw 'silent uninstall left the installed payload behind' }
+            if (Test-Path -LiteralPath $installRoot) { throw 'silent uninstall left the installation root behind' }
+          }
+
+  aggregate:
+    needs: [prepare, build, windows-install-smoke]
+    environment: release
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist/incoming
 
@@ -324,7 +522,7 @@ jobs:
           done < <(find dist/incoming -type f)
 
           expected=(
-            "Retune-${VERSION}-aarch64.tar.gz"
+            "Retune-${VERSION}-aarch64.zip"
             "Retune-${VERSION}-windows-x64-setup.exe"
             "Retune-${VERSION}-windows-arm64-setup.exe"
             "retune_${VERSION}_amd64.deb"
@@ -344,7 +542,7 @@ jobs:
           )
 
       - name: Upload aggregated dry-run assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: retune-${{ needs.prepare.outputs.version }}-release-assets
           path: dist/assets
@@ -360,13 +558,12 @@ jobs:
           cat > dist/release-notes.md <<EOF
           Retune $VERSION for macOS Apple Silicon, Windows x64/ARM64, and Ubuntu amd64/arm64.
 
-          macOS is stable-signed with the Open CLI Collective certificate but is not notarized.
-          The first access to stored Spotify credentials after upgrading from an older ad-hoc build
-          may show one macOS Keychain prompt. Choose Always Allow once; later stable-signed updates
-          keep the same identity. Homebrew clears quarantine after installation.
+          macOS is Developer ID-signed, hardened, securely timestamped, notarized, and stapled.
+          Windows application payloads and NSIS installers are Authenticode-signed through
+          Microsoft Artifact Signing with SHA-256 RFC 3161 timestamps.
           EOF
           assets=(
-            "dist/assets/Retune-${VERSION}-aarch64.tar.gz"
+            "dist/assets/Retune-${VERSION}-aarch64.zip"
             "dist/assets/Retune-${VERSION}-windows-x64-setup.exe"
             "dist/assets/Retune-${VERSION}-windows-arm64-setup.exe"
             "dist/assets/retune_${VERSION}_amd64.deb"
@@ -388,11 +585,12 @@ jobs:
   publish-homebrew:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [prepare, aggregate]
+    environment: release
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: retune-${{ needs.prepare.outputs.version }}-release-assets
           path: dist/assets
@@ -402,7 +600,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          checksum="$(awk -v name="Retune-${VERSION}-aarch64.tar.gz" '$2 == name { print $1 }' dist/assets/checksums.txt)"
+          checksum="$(awk -v name="Retune-${VERSION}-aarch64.zip" '$2 == name { print $1 }' dist/assets/checksums.txt)"
           test "${#checksum}" -eq 64
           mkdir -p dist/homebrew
           sed \
@@ -422,6 +620,7 @@ jobs:
   dispatch-linux:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: aggregate
+    environment: release
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
@@ -455,10 +654,11 @@ jobs:
   publish-winget:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [prepare, aggregate]
+    environment: release
     runs-on: windows-2025
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Submit Winget package
         uses: open-cli-collective/.github/actions/winget-submit@74d24fcd862d7b9cbe8f6fdda31db6a833e3d706

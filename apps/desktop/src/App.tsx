@@ -1,16 +1,21 @@
-import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { appliedZoom, browseRequestKey, browseViewForRequest, COLUMN_SPECS, compareTracks, contiguousRange, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentTrack, labels, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resizedColumnWidth, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
-import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, ConnectionState, ImportSummary, LastFmImportState, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlayerState, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, Theme, Track, TrackInfo } from './types.ts'
+import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, LastFmImportState, PlaybackOrigin, PlaybackTrack, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, SettingsPatch, Source, Theme, Track } from './types.ts'
 import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
+import { libraryEvents, libraryGateway } from './libraryGateway.ts'
+import { playbackEvents, playbackGateway } from './playbackGateway.ts'
+import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
+import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers } from './ipc.ts'
+import { appGateway } from './appGateway.ts'
+import { lastfmGateway } from './lastfmGateway.ts'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
@@ -18,11 +23,6 @@ const emptyTracks: Track[] = []
 const ZOOM_MIN = 0.7
 const ZOOM_MAX = 1.8
 const ZOOM_BASE = 1.15
-// Settings persisted by set_repeat / set_audio_settings — excluded from the
-// generic settings-save effect (set_settings also switches playback backends).
-const EXCLUDED = ['repeat', 'streamingBitrate', 'normalizeVolume', 'gapless'] as const
-
-
 function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void) {
   const ref = useRef(handler)
   ref.current = handler
@@ -32,29 +32,50 @@ function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void
   }, [event])
 }
 
+function useTauriInvalidationSnapshot<T>(event: string, snapshot: () => Promise<T>, handler: (payload: T) => void) {
+  const handlerRef = useRef(handler)
+  const snapshotRef = useRef(snapshot)
+  handlerRef.current = handler
+  snapshotRef.current = snapshot
+  useEffect(() => {
+    let active = true
+    const subscription = subscribeInvalidationThenSnapshot(
+      (invalidate) => listen(event, invalidate),
+      () => snapshotRef.current(),
+      (value) => handlerRef.current(value),
+      () => active,
+    )
+    return () => {
+      active = false
+      void subscription.then((stop) => stop())
+    }
+  }, [event])
+}
+
 function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const origin = useRef<PlaybackOrigin | undefined>(undefined)
   const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin; awaitingPlaybackAuthorization: boolean } | null>(null)
-  const starting = useRef<{ id: number; uri: string } | null>(null)
+  const playGeneration = useRef(0)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
   playingRef.current = playing
 
-  useTauriEvent<PlayerState>('player-state', (player) => {
-    if (starting.current?.id === player.trackId && starting.current.uri === player.uri && !player.external) starting.current = null
+  const onState = useCallback((player: import('./types.ts').PlayerState) => {
     if (player.external) origin.current = undefined
     dispatch({ type: 'playerState', player, queue: queue.current, origin: origin.current })
-  })
+  }, [dispatch])
 
-  useTauriEvent<PlaybackAuthorizationPrompt>('playback-authorization-required', (prompt) => {
+  const onAuthorizationRequired = useCallback((prompt: import('./types.ts').PlaybackAuthorizationPrompt) => {
     const id = pendingPlaybackTarget(prompt, queue.current)
-    if (id !== null) pendingPlay.current = { id, tracks: queue.current, origin: origin.current, awaitingPlaybackAuthorization: true }
+    if (id === null) return
+    beginRequestGeneration(playGeneration)
+    pendingPlay.current = { id, tracks: queue.current, origin: origin.current, awaitingPlaybackAuthorization: true }
     dispatch({ type: 'playbackAuthorization', prompt })
-  })
+  }, [dispatch])
 
-  const run = useCallback((command: string, args?: Record<string, unknown>) => {
-    invoke(command, args).catch((error) => dispatch({ type: 'error', error: String(error) }))
+  const run = useCallback((request: () => Promise<unknown>) => {
+    request().catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [dispatch])
 
   const liveBackend = useCallback(() => {
@@ -65,28 +86,28 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin) => {
     const playable = playbackQueue(tracks, id)
     const target = playable.find((track) => track.id === id)
+    const request = beginRequestGeneration(playGeneration)
+    queue.current = playable
+    origin.current = launchOrigin
+    pendingPlay.current = null
+    dispatch({ type: 'playbackAuthorization', prompt: null })
     if (playbackStartAction(target?.uri, connected) === 'connect') {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
       pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: false }
-      run('connect_spotify')
+      run(spotifyGateway.connect)
       return
     }
     if (target?.uri.startsWith('file:') || target?.uri.startsWith('spotify:')) {
-      queue.current = playable
-      origin.current = launchOrigin
-      starting.current = { id, uri: target.uri }
-      invoke<PlayOutcome>('play_tracks', { snapshot: playable, startIndex: playable.findIndex((track) => track.id === id) })
+      playbackGateway.play(playable, playable.findIndex((track) => track.id === id))
         .then((outcome) => {
-          const prompt = playbackAuthorizationPrompt(outcome)
-          if (!prompt) return
-          if (starting.current?.id === id && starting.current.uri === target.uri) starting.current = null
-          pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
-          dispatch({ type: 'playbackAuthorization', prompt })
+          const authorization = currentPlaybackAuthorization(request, playGeneration, outcome, playable)
+          if (!authorization) return
+          pendingPlay.current = { id: authorization.id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
+          dispatch({ type: 'playbackAuthorization', prompt: authorization.prompt })
         })
         .catch((error) => {
-          if (starting.current?.id === id && starting.current.uri === target.uri) starting.current = null
-          dispatch({ type: 'error', error: String(error) })
+          if (isCurrentRequestGeneration(request, playGeneration)) dispatch({ type: 'error', error: String(error) })
         })
       return
     }
@@ -102,13 +123,14 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   }, [connected, playbackAuthorized, start])
 
   const cancelPending = useCallback(() => {
+    beginRequestGeneration(playGeneration)
     pendingPlay.current = null
     dispatch({ type: 'playbackAuthorization', prompt: null })
   }, [dispatch])
 
   const toggle = useCallback(() => {
     if (liveBackend()) {
-      if (playingRef.current && !playingRef.current.external) run('player_toggle')
+      if (playingRef.current && !playingRef.current.external) run(playbackGateway.toggle)
     }
     else dispatch({ type: 'togglePlay' })
   }, [dispatch, liveBackend, run])
@@ -116,7 +138,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   const step = useCallback((direction: number) => {
     const current = playingRef.current
     if (liveBackend()) {
-      if (current && !current.external) run(direction < 0 ? 'player_prev' : 'player_next')
+      if (current && !current.external) run(direction < 0 ? playbackGateway.previous : playbackGateway.next)
       return
     }
     if (!current?.queue.length || current.trackId === null) return
@@ -128,12 +150,12 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   const setVolume = useCallback((volume: number) => {
     if (!liveBackend()) return
     window.clearTimeout(volumeTimer.current)
-    volumeTimer.current = window.setTimeout(() => run('player_set_volume', { volume }), 150)
+    volumeTimer.current = window.setTimeout(() => run(() => playbackGateway.setVolume(volume)), 150)
   }, [liveBackend, run])
 
   const seek = useCallback((seconds: number) => {
     if (liveBackend()) {
-      if (playingRef.current && !playingRef.current.external) run('player_seek', { seconds })
+      if (playingRef.current && !playingRef.current.external) run(() => playbackGateway.seek(seconds))
       return
     }
     dispatch({ type: 'seek', elapsed: seconds })
@@ -141,7 +163,10 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
-  return useMemo(() => ({ start, toggle, step, setVolume, seek, cancelPending }), [cancelPending, seek, setVolume, start, step, toggle])
+  return useMemo(
+    () => ({ start, toggle, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired }),
+    [cancelPending, onAuthorizationRequired, onState, seek, setVolume, start, step, toggle],
+  )
 }
 
 function App() {
@@ -155,9 +180,10 @@ function App() {
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
-  const skipSettingsSave = useRef(false)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef({ buffer: '', timer: 0 })
+  const infoGeneration = useRef(0)
+  const ratingGenerations = useRef(new Map<string, { current: number }>())
   const browseKey = browseRequestKey(state.source, state.sel, state.query, state.scope)
   const view = browseViewForRequest(state.view, state.viewKey, browseKey)
   const tracks = view?.tracks ?? emptyTracks
@@ -170,9 +196,32 @@ function App() {
   const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connection.connected, state.connection.playback_authorized, state.playing, dispatch)
+  const mainEventHandlers = useRef<MainEventHandlers>({
+    playerState: player.onState,
+    playbackAuthorizationRequired: player.onAuthorizationRequired,
+    operationError: (error) => dispatch({ type: 'error', error }),
+    operationRecovered: () => dispatch({ type: 'clear-error' }),
+    localImportComplete: (summary) => dispatch({ type: 'importComplete', summary }),
+    startupNotice: (notice) => dispatch({ type: 'notice', notice }),
+  })
+  mainEventHandlers.current = {
+    playerState: player.onState,
+    playbackAuthorizationRequired: player.onAuthorizationRequired,
+    operationError: (error) => dispatch({ type: 'error', error }),
+    operationRecovered: () => dispatch({ type: 'clear-error' }),
+    localImportComplete: (summary) => dispatch({ type: 'importComplete', summary }),
+    startupNotice: (notice) => dispatch({ type: 'notice', notice }),
+  }
+  const persistSettings = useCallback((patch: SettingsPatch) => {
+    appGateway.updateSettings(patch).catch(fail)
+  }, [fail])
+  const updateSettings = useCallback((patch: SettingsPatch) => {
+    dispatch({ type: 'settings', settings: patch })
+    persistSettings(patch)
+  }, [persistSettings])
   const addToPlaylist = useCallback((id: string, subject: PlaylistSubject) => subject.kind === 'album'
-    ? invoke('playlist_add_album', { id, albumUri: subject.albumUri, albumLabel: subject.label })
-    : invoke('playlist_add', { id, uris: subject.uris }), [])
+    ? spotifyGateway.addAlbumToPlaylist(id, subject.albumUri, subject.label)
+    : spotifyGateway.addToPlaylist(id, subject.uris), [])
   const selectFacet = useCallback((facet: keyof Selection, values: string[], anchor?: string) => {
     facetAnchors.current[facet] = anchor
     if (facet === 'cat') {
@@ -203,35 +252,39 @@ function App() {
       if (!browserPanes[facet]) delete facetAnchors.current[facet]
     }
     dispatch({ type: 'browserPanes', browserPanes })
-  }, [])
+    persistSettings({ browserPanes })
+  }, [persistSettings])
   const toggleBrowser = useCallback(() => {
-    dispatch({ type: 'settings', settings: { browserVisible: !state.settings.browserVisible } })
-  }, [state.settings.browserVisible])
+    updateSettings({ browserVisible: !state.settings.browserVisible })
+  }, [state.settings.browserVisible, updateSettings])
   const toggleBrowserPane = useCallback((facet: keyof BrowserPanes) => {
     const browserPanes = { ...state.settings.browserPanes, [facet]: !state.settings.browserPanes[facet] }
     setBrowserPanes(browserPanes)
     if (!browserPanes[facet]) setActivePane('track')
   }, [setBrowserPanes, state.settings.browserPanes])
   const openInfo = (id?: number) => {
+    cancelTrackInfoLoad(infoGeneration)
     if (selectedTracks.length > 1) {
       dispatch({ type: 'info', info: { kind: 'multiple', tracks: selectedTracks } })
       return
     }
     const target = id ?? selectedTracks[0]?.id
     if (target === undefined) return
-    invoke<TrackInfo>('get_track', { id: target })
-      .then((track) => dispatch({ type: 'info', info: { kind: 'single', track } }))
-      .catch(fail)
+    dispatch({ type: 'info' })
+    void loadCurrentGeneration(infoGeneration,
+      () => libraryGateway.getTrack(target),
+      (track) => dispatch({ type: 'info', info: { kind: 'single', track } }),
+      fail)
+  }
+  const closeInfo = () => {
+    cancelTrackInfoLoad(infoGeneration)
+    dispatch({ type: 'info' })
   }
 
   useEffect(() => {
     let active = true
     const requestKey = browseRequestKey(state.source, state.sel, state.query, state.scope)
-    invoke<BrowseView>('browse', {
-      source: state.source,
-      sel: { cat: state.sel.cat ?? [], art: state.sel.art ?? [], alb: state.sel.alb ?? [] },
-      query: state.scope === 'library' && state.query.trim() ? state.query : undefined,
-    }).then((next) => {
+    libraryGateway.browse(state.source, state.sel, state.scope === 'library' && state.query.trim() ? state.query : undefined).then((next) => {
       if (!active) return
       const fallback = staleSelectionFacet(state.sel, next.facets)
       if (fallback) {
@@ -246,7 +299,7 @@ function App() {
 
   useEffect(() => {
     let active = true
-    invoke<PlaylistListView[]>('playlists_list')
+    spotifyGateway.playlists()
       .then((rows) => active && setPlaylists(rows))
       .catch((error) => active && fail(error))
     return () => { active = false }
@@ -258,62 +311,28 @@ function App() {
     }
   }, [playlists, state.selectedPlaylist])
 
-  useEffect(() => {
-    invoke<Settings>('get_settings')
-      .then((settings) => dispatch({ type: 'hydrateSettings', settings }))
-      .catch(fail)
-    invoke<string | null>('startup_notice')
-      .then((notice) => dispatch({ type: 'notice', notice: notice ?? undefined }))
-      .catch(fail)
-    invoke<ConnectionState>('connection_state')
-      .then((connection) => dispatch({ type: 'connection', connection }))
-      .catch(fail)
-    invoke<LastFmState>('lastfm_state')
-      .then((lastfm) => dispatch({ type: 'lastfm', lastfm }))
-      .catch(fail)
-    invoke<LastFmImportState>('lastfm_import_state')
-      .then((lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
-      .catch(fail)
-  }, [fail])
+  useTauriInvalidationSnapshot('settings-changed', appGateway.settings,
+    (settings) => dispatch({ type: 'hydrateSettings', settings }))
+  useTauriInvalidationSnapshot(spotifyEvents.connectionChanged, spotifyGateway.connectionState,
+    (connection) => dispatch({ type: 'connection', connection }))
+  useTauriInvalidationSnapshot('lastfm-changed', lastfmGateway.accountState,
+    (lastfm) => dispatch({ type: 'lastfm', lastfm }))
+  useTauriInvalidationSnapshot('lastfm-import-changed', lastfmGateway.state,
+    (lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
 
-  const saveKey = useMemo(
-    () => JSON.stringify(state.settings, (key, value: unknown) => (EXCLUDED as readonly string[]).includes(key) ? undefined : value),
-    [state.settings],
-  )
-
-  useEffect(() => {
-    if (!state.settingsHydrated || state.preferences) return
-    if (skipSettingsSave.current) {
-      skipSettingsSave.current = false
-      return
-    }
-    invoke('set_settings', { settings: state.settings })
-      .catch(fail)
-  }, [saveKey, state.settingsHydrated, state.preferences, fail])
+  useEffect(() => subscribeMainEvents(
+    (event) => dispatchMainEvent(event, mainEventHandlers.current),
+    fail,
+  ), [fail])
 
   useTauriEvent('get-info', () => openInfo())
-  useTauriEvent('library-changed', () => dispatch({ type: 'refresh' }))
-  useTauriEvent<string>('operation-error', (error) => dispatch({ type: 'error', error }))
-  useTauriEvent('operation-recovered', () => dispatch({ type: 'clear-error' }))
-  useTauriEvent<ConnectionState>('connection-changed', (connection) => dispatch({ type: 'connection', connection }))
-  useTauriEvent<LastFmState>('lastfm-changed', (lastfm) => dispatch({ type: 'lastfm', lastfm }))
-  useTauriEvent<LastFmImportState>('lastfm-import-changed', (lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
-  useTauriEvent<Settings>('settings-changed', (settings) => dispatch({ type: 'hydrateSettings', settings }))
-  useTauriEvent<string>('sync-progress', (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
-  useTauriEvent<{ tracks: number; fraction: number }>('sync-progress-count', (progress) => dispatch({ type: 'syncProgress', progress }))
-  useTauriEvent('playlists-changed', () => dispatch({ type: 'playlistsRefresh' }))
-  useTauriEvent('local-import-started', () => dispatch({ type: 'importStarted' }))
-  useTauriEvent<ImportSummary>('local-import-complete', (summary) => dispatch({ type: 'importComplete', summary }))
-  useTauriEvent('local-import-failed', () => dispatch({ type: 'importFailed' }))
-
-  useEffect(() => {
-    const unlisten = getCurrentWindow().onDragDropEvent(({ payload }) => {
-      setNativeDragActive((active) => nextNativeDragActive(active, payload))
-      if (payload.type === 'drop' && payload.paths.length) invoke('import_local', { paths: payload.paths })
-        .catch(fail)
-    })
-    return () => { void unlisten.then((stop) => stop()) }
-  }, [fail])
+  useTauriEvent(libraryEvents.changed, () => dispatch({ type: 'refresh' }))
+  useTauriEvent<string>(spotifyEvents.syncProgress, (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
+  useTauriEvent<{ tracks: number; fraction: number }>(spotifyEvents.syncProgressCount, (progress) => dispatch({ type: 'syncProgress', progress }))
+  useTauriEvent(spotifyEvents.playlistsChanged, () => dispatch({ type: 'playlistsRefresh' }))
+  useTauriEvent(libraryEvents.localImportStarted, () => dispatch({ type: 'importStarted' }))
+  useTauriEvent(libraryEvents.localImportFailed, () => dispatch({ type: 'importFailed' }))
+  useTauriEvent<boolean>(libraryEvents.localDragChanged, setNativeDragActive)
 
   useEffect(() => {
     if (!state.importStatus || state.importStatus === 'Importing local files…') return
@@ -330,7 +349,7 @@ function App() {
     dispatch({ type: 'spotifySearching', searching: true })
     let active = true
     const timer = window.setTimeout(() => {
-      invoke<SpotifyResults>('spotify_search', { query, offset: 0 })
+      spotifyGateway.search(query, 0)
         .then((results) => active && dispatch({ type: 'spotifyResults', results }))
         .catch((error) => {
           if (!active) return
@@ -364,52 +383,48 @@ function App() {
   }, [state.source, fail])
 
   useEffect(() => {
-    if (!state.playing?.simulated) return
-    if (!state.playing?.isPlaying) return
-    const currentIndex = playbackTracks.findIndex((track) => track.id === state.playing?.trackId)
-    const current = playbackTracks[currentIndex]
-    if (!current) return
-    const next = playbackTracks[(currentIndex + 1) % playbackTracks.length]
+    const tick = simulatedPlaybackTick(state.playing?.simulated, state.playing?.isPlaying, state.playing?.trackId, playbackTracks)
+    if (!tick) return
     const timer = window.setInterval(() => {
-      dispatch({ type: 'tick', duration: current.durationSecs, nextId: next.id })
+      dispatch({ type: 'tick', ...tick })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [state.connection.connected, state.playing?.trackId, state.playing?.isPlaying, playbackTracks])
+  }, [state.playing?.trackId, state.playing?.isPlaying, state.playing?.simulated, playbackTracks])
 
-  const mutate = (command: string, args: Record<string, unknown>) => {
-    invoke(command, args)
+  const mutate = (mutation: () => Promise<unknown>) => {
+    mutation()
       .then(() => dispatch({ type: 'refresh' }))
       .catch(fail)
   }
-  const navigateSpotify = (track: Track, destination: 'album' | 'artist') => invoke<SpotifyNavEntry>('resolve_spotify_track_destination', { uri: track.uri, destination })
+  const rate = (key: string, mutation: () => Promise<unknown>) => {
+    void loadCurrentGeneration(entityRequestGeneration(ratingGenerations.current, key), mutation, () => dispatch({ type: 'refresh' }), fail)
+  }
+  const navigateSpotify = (track: Track, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
     .then((entry) => dispatch({ type: 'spotifyNavigate', entry }))
     .catch(fail)
-  const setZoom = (zoom: number) => dispatch({
-    type: 'settings',
-    settings: { zoom: normalizeZoom(zoom, ZOOM_MIN, ZOOM_MAX) },
-  })
+  const setZoom = useCallback((zoom: number) => {
+    updateSettings({ zoom: normalizeZoom(zoom, ZOOM_MIN, ZOOM_MAX) })
+  }, [updateSettings])
   const openPreferences = () => {
     preferenceZoom.current = state.settings.zoom
     dispatch({ type: 'preferences', open: true })
   }
   const openLastfmImporter = () => {
-    invoke('open_lastfm_importer').catch(fail)
+    appGateway.openLastFmImporter().catch(fail)
   }
   const syncLastfm = () => {
-    invoke<LastFmImportState>('sync_lastfm_plays')
+    lastfmGateway.syncPlays()
       .then((lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
       .catch(fail)
   }
   const cancelPreferences = () => {
-    skipSettingsSave.current = true
-    setZoom(preferenceZoom.current)
+    dispatch({ type: 'settings', settings: { zoom: preferenceZoom.current } })
     dispatch({ type: 'preferences', open: false })
   }
   const saveSetupClientId = async (spotifyClientId: string) => {
     if (spotifyClientId === state.settings.spotifyClientId) return
-    const settings = { ...state.settings, spotifyClientId }
     dispatch({ type: 'settings', settings: { spotifyClientId } })
-    await invoke('set_settings', { settings })
+    await appGateway.updateSettings({ spotifyClientId })
   }
   const playingTrack = playbackTracks.find((track) => track.id === state.playing?.trackId)
   const selectedAlbum = state.sel.alb?.length === 1 ? state.sel.alb[0] : undefined
@@ -418,11 +433,11 @@ function App() {
     if (payload === 'zoom_in') setZoom(state.settings.zoom + 0.1)
     else if (payload === 'zoom_out') setZoom(state.settings.zoom - 0.1)
     else if (payload === 'actual_size') setZoom(1)
-    else if (payload === 'toggle_zebra') dispatch({ type: 'settings', settings: { zebra: !state.settings.zebra } })
+    else if (payload === 'toggle_zebra') updateSettings({ zebra: !state.settings.zebra })
     else if (payload === 'toggle_browser') toggleBrowser()
-    else if (payload.startsWith('theme_')) dispatch({ type: 'settings', settings: { theme: payload.slice(6) as Theme } })
+    else if (payload.startsWith('theme_')) updateSettings({ theme: payload.slice(6) as Theme })
   })
-  useTauriEvent<string>('player-action', (payload) => {
+  useTauriEvent<string>(playbackEvents.action, (payload) => {
     if (payload === 'play_pause') player.toggle()
     else player.step(payload === 'previous' ? -1 : 1)
   })
@@ -434,16 +449,15 @@ function App() {
     const modalOpen = Boolean(state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject)
     if (event.key === 'Escape' && modalOpen) {
       event.preventDefault()
-      if (state.info) dispatch({ type: 'info' })
+      if (state.info) closeInfo()
       else if (state.preferences) cancelPreferences()
       else if (state.setup) dispatch({ type: 'setup', open: false })
       else if (state.playbackAuthorization) player.cancelPending()
       else setPlaylistSubject(undefined)
       return
     }
-    const target = event.target as HTMLElement | null
-    if (modalOpen || target?.closest('input, textarea, select')) return
     const command = event.metaKey || event.ctrlKey
+    if (modalOpen || !routeGlobalShortcut(event)) return
     if (command && ['=', '+', '-', '0'].includes(event.key)) {
       event.preventDefault()
       setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
@@ -525,7 +539,7 @@ function App() {
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [playlistSubject, state.info, state.playbackAuthorization, state.preferences, state.setup, state.settings.zoom])
+  }, [playlistSubject, setZoom, state.info, state.playbackAuthorization, state.preferences, state.setup, state.settings.zoom])
 
   const selectedPlaylist = playlists?.find((playlist) => playlist.id === state.selectedPlaylist)
   const playlistLayout = playlistLayoutFor(selectedPlaylist?.id, state.settings)
@@ -563,9 +577,9 @@ function App() {
           onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }}
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
           onReorder={setPlaylists}
-          onCollapse={() => dispatch({ type: 'settings', settings: { plCollapsed: !state.settings.plCollapsed } })}
-          onShuffle={(shuffle) => invoke('set_shuffle', { shuffle }).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch(fail)}
-          onRepeat={(repeat) => invoke('set_repeat', { mode: repeat }).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch(fail)}
+          onCollapse={() => updateSettings({ plCollapsed: !state.settings.plCollapsed })}
+          onShuffle={(shuffle) => playbackGateway.setShuffle(shuffle).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch(fail)}
+          onRepeat={(repeat) => playbackGateway.setRepeat(repeat).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch(fail)}
           onDrop={(id, subject) => addToPlaylist(id, subject).catch(fail)}
           onError={(error) => dispatch({ type: 'error', error })}
           artwork={artworkOpen && state.playing?.uri ? <ArtworkPanel
@@ -575,26 +589,28 @@ function App() {
           /> : undefined}
         />
         <section className="content">
-          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => invoke('connect_spotify').catch(fail)}>Reconnect</button></div>}
+          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => spotifyGateway.connect().catch(fail)}>Reconnect</button></div>}
           {spotifySearchActive ? (
-            state.connection.connected ? <SpotifySearch
+            !state.connectionHydrated ? <div className="spotify-stub"><span>Checking Spotify connection…</span></div> : state.connection.connected ? <SpotifySearch
+              key={JSON.stringify([state.query.trim(), state.spotifyNavigation ?? null])}
               query={state.query.trim()}
               searching={state.spotifySearching}
               results={state.spotifyResults}
               navigation={state.spotifyNavigation}
               playingUri={state.playing?.uri ?? null}
-              onAdd={(album) => invoke('add_spotify_album', album)
+              onAdd={(album) => spotifyGateway.addAlbum(album)
                 .catch((error) => { fail(error); throw error })}
-              onAddTrack={(uri) => invoke('add_spotify_track', { uri })
+              onAddTrack={(uri) => spotifyGateway.addTrack(uri)
                 .catch((error) => { fail(error); throw error })}
-              onRemoveTrack={(uri) => invoke('remove_spotify_track', { uri })
+              onRemoveTrack={(uri) => spotifyGateway.removeTrack(uri)
                 .catch((error) => { fail(error); throw error })}
               onPlay={player.start}
               onPlaylist={setPlaylistSubject}
               onClose={() => dispatch({ type: 'scope', scope: 'library' })}
               onError={(error) => dispatch({ type: 'error', error })}
-            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => invoke('connect_spotify').catch(fail)}>Connect to Spotify</button></div>
+            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => spotifyGateway.connect().catch(fail)}>Connect to Spotify</button></div>
           ) : selectedPlaylist ? <PlaylistView
+            key={selectedPlaylist.id}
             playlist={selectedPlaylist}
             backLabel={labels[state.source].name}
             revision={state.playlistRevision}
@@ -605,26 +621,24 @@ function App() {
             hiddenColumns={playlistLayout.hiddenColumns}
             onBack={() => dispatch({ type: 'playlist' })}
             onPlay={(id, tracks) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id })}
-            onRate={(id, stars) => mutate('click_track_star', { id, stars })}
-            onOpen={(target) => invoke('open_spotify_playlist', { id: selectedPlaylist.id, target }).catch(fail)}
+            onRate={(id, stars) => rate(`track:${id}`, () => libraryGateway.clickTrackStar(id, stars))}
+            onOpen={(target) => spotifyGateway.openPlaylist(selectedPlaylist.id, target).catch(fail)}
             onPlaylist={setPlaylistSubject}
             onInfo={(tracks) => {
-              if (tracks.length > 1 || tracks[0]?.id === null) dispatch({ type: 'info', info: { kind: 'multiple', tracks } })
+              if (tracks.length > 1 || tracks[0]?.id === null) {
+                cancelTrackInfoLoad(infoGeneration)
+                dispatch({ type: 'info', info: { kind: 'multiple', tracks } })
+              }
               else openInfo(tracks[0]?.id)
             }}
-            onReorder={(columnOrder) => dispatch({
-              type: 'settings',
-              settings: { playlistColumnOrders: playlistOverride(state.settings.playlistColumnOrders, selectedPlaylist.id, columnOrder, PLAYLIST_DEFAULT_COLUMN_ORDER) },
+            onReorder={(columnOrder) => updateSettings({
+              playlistColumnOrders: playlistOverride(state.settings.playlistColumnOrders, selectedPlaylist.id, columnOrder, PLAYLIST_DEFAULT_COLUMN_ORDER),
             })}
-            onColumnWidths={(columnWidths) => dispatch({
-              type: 'settings',
-              settings: { playlistColumnWidths: playlistOverride(state.settings.playlistColumnWidths, selectedPlaylist.id, columnWidths, {}) },
+            onColumnWidths={(columnWidths) => updateSettings({
+              playlistColumnWidths: playlistOverride(state.settings.playlistColumnWidths, selectedPlaylist.id, columnWidths, {}),
             })}
-            onHiddenColumns={(hiddenColumns) => dispatch({
-              type: 'settings',
-              settings: {
-                playlistHiddenColumns: playlistOverride(state.settings.playlistHiddenColumns, selectedPlaylist.id, hiddenColumns, PLAYLIST_DEFAULT_HIDDEN_COLUMNS),
-              },
+            onHiddenColumns={(hiddenColumns) => updateSettings({
+              playlistHiddenColumns: playlistOverride(state.settings.playlistHiddenColumns, selectedPlaylist.id, hiddenColumns, PLAYLIST_DEFAULT_HIDDEN_COLUMNS),
             })}
             onError={(error) => dispatch({ type: 'error', error })}
           />
@@ -635,12 +649,7 @@ function App() {
                 <AlbumRatingStrip
                   album={selectedAlbum}
                   rating={view?.albumRating ?? null}
-                  onRate={(stars) => mutate('set_album_rating', {
-                    source: state.source,
-                    art: view.albumRatingArtist,
-                    alb: selectedAlbum,
-                    stars,
-                  })}
+                  onRate={(stars) => rate(`album:${state.source}:${view.albumRatingArtist}:${selectedAlbum}`, () => libraryGateway.setAlbumRating(state.source, view.albumRatingArtist!, selectedAlbum, stars))}
                 />
               )}
               {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
@@ -680,16 +689,16 @@ function App() {
                   }
                 }}
                 onPlay={(id) => player.start(id, displayedTracks, { kind: 'library', source: state.source })}
-                onEnabled={(id, enabled) => mutate('set_track_enabled', { id, enabled })}
-                onRate={(id, stars) => mutate('click_track_star', { id, stars })}
+                onEnabled={(id, enabled) => mutate(() => libraryGateway.setTrackEnabled(id, enabled))}
+                onRate={(id, stars) => rate(`track:${id}`, () => libraryGateway.clickTrackStar(id, stars))}
                 onInfo={openInfo}
                 onPlaylist={setPlaylistSubject}
                 onGoToAlbum={(track) => navigateSpotify(track, 'album')}
                 onGoToArtist={(track) => navigateSpotify(track, 'artist')}
-                onReorder={(columnOrder) => dispatch({ type: 'settings', settings: { columnOrder } })}
-                onColumnWidths={(columnWidths) => dispatch({ type: 'settings', settings: { columnWidths } })}
-                onHiddenColumns={(hiddenColumns) => dispatch({ type: 'settings', settings: { hiddenColumns } })}
-                onSort={(sortColumn, sortDesc) => dispatch({ type: 'settings', settings: { sortColumn, sortDesc } })}
+                onReorder={(columnOrder) => updateSettings({ columnOrder })}
+                onColumnWidths={(columnWidths) => updateSettings({ columnWidths })}
+                onHiddenColumns={(hiddenColumns) => updateSettings({ hiddenColumns })}
+                onSort={(sortColumn, sortDesc) => updateSettings({ sortColumn, sortDesc })}
               />
             </>
           )}
@@ -697,30 +706,27 @@ function App() {
           <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} lastfmImport={state.lastfmImport} lastfmRemaining={Math.max(state.lastfmImport.remaining, state.lastfmImport.pendingReview)} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
         </section>
       </div>
-      {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={() => dispatch({ type: 'info' })} onSaved={() => {
-        dispatch({ type: 'info' })
+      {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={closeInfo} onSaved={() => {
+        closeInfo()
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={() => dispatch({ type: 'info' })} onSaved={() => dispatch({ type: 'info' })} onError={(error) => dispatch({ type: 'error', error })} />}
-      {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
-        .then(() => invoke('connect_spotify'))
+      {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={closeInfo} onSaved={closeInfo} onError={(error) => dispatch({ type: 'error', error })} />}
+      {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} connectionHydrated={state.connectionHydrated} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
+        .then(spotifyGateway.connect)
         .catch(fail)} onSync={(clientId) => saveSetupClientId(clientId)
         .then(() => {
           dispatch({ type: 'setup', open: false })
-          return invoke('sync_from_spotify')
+          return spotifyGateway.sync()
         })
         .catch(fail)} />}
-      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={setZoom} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onSave={({ browserPanes, ...settings }) => {
-        const audioChanged = settings.streamingBitrate !== state.settings.streamingBitrate
-          || settings.normalizeVolume !== state.settings.normalizeVolume
-          || settings.gapless !== state.settings.gapless
+      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={(zoom) => dispatch({ type: 'settings', settings: { zoom } })} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onSave={({ browserPanes, ...settings }) => {
+        const patch = { ...settings, browserPanes, zoom: state.settings.zoom }
         dispatch({ type: 'settings', settings })
         dispatch({ type: 'browserPanes', browserPanes })
-        if (audioChanged) invoke('set_audio_settings', { streamingBitrate: settings.streamingBitrate, normalizeVolume: settings.normalizeVolume, gapless: settings.gapless })
-          .catch(fail)
+        persistSettings(patch)
         dispatch({ type: 'preferences', open: false })
       }} />}
-      {state.playbackAuthorization && <PlaybackAuthorization prompt={state.playbackAuthorization} onCancel={player.cancelPending} onAuthorize={() => invoke('authorize_spotify_playback')} />}
+      {state.playbackAuthorization && <PlaybackAuthorization prompt={state.playbackAuthorization} onCancel={player.cancelPending} onAuthorize={spotifyGateway.authorizePlayback} />}
       {playlistSubject && <AddToPlaylist subject={playlistSubject} revision={state.playlistRevision} onAdd={addToPlaylist} onClose={() => setPlaylistSubject(undefined)} onError={(error) => dispatch({ type: 'error', error })} />}
       {nativeDragActive && <div className="native-drop-overlay"><strong>Drop to add to Library</strong><span>Audio files and folders</span></div>}
     </main>
@@ -746,8 +752,6 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
   </div>
 }
 
-const artworkCache = new Map<string, string | null>()
-
 function useArtwork(uri: string | null | undefined, minWidth: number) {
   const [artwork, setArtwork] = useState<string | null>(null)
   useEffect(() => {
@@ -756,20 +760,10 @@ function useArtwork(uri: string | null | undefined, minWidth: number) {
       setArtwork(null)
       return () => { current = false }
     }
-    const key = `${uri}@${minWidth}`
-    if (artworkCache.has(key)) {
-      setArtwork(artworkCache.get(key) ?? null)
-      return () => { current = false }
-    }
     setArtwork(null)
-    invoke<string | null>('track_artwork', { uri, minWidth })
+    loadArtwork(() => spotifyGateway.artwork(uri, minWidth))
       .then((url) => {
-        artworkCache.set(key, url)
         if (current) setArtwork(url)
-      })
-      .catch(() => {
-        artworkCache.set(key, null)
-        if (current) setArtwork(null)
       })
     return () => { current = false }
   }, [minWidth, uri])
@@ -799,7 +793,7 @@ function ArtworkLightbox({ uri, name, onClose }: { uri: string; name: string; on
   </ModalDialog>
 }
 
-function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork }: {
+export function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
@@ -832,7 +826,7 @@ function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery
       aria-label={playing?.origin ? 'Show playing source' : undefined}
       title={playing?.origin ? 'Show playing source' : undefined}
       onClick={(event) => {
-        if (!playing?.origin || (event.target as Element).closest('progress')) return
+        if (!playing?.origin || (event.target as Element).closest('input')) return
         onOrigin()
       }}
       onKeyDown={(event) => {
@@ -845,15 +839,15 @@ function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery
       <div className="lcd-copy">
         <Marquee text={shown?.name ?? 'Retune'} strong />
         <div className="lcd-meta">{shown ? <><span className="lcd-artist">{shown.art}</span><span className="lcd-album"> · {shown.alb}</span></> : 'Not Playing'}</div>
-        <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><progress
+        <div className="progress-row"><time>{shown ? formatTime(elapsed) : '—:—'}</time><input
+          aria-label="Playback position"
+          type="range"
+          min="0"
           max={duration || 1}
-          value={elapsed}
-          onClick={(event) => {
-            if (!shown || !duration) return
-            const bar = event.currentTarget.getBoundingClientRect()
-            const fraction = Math.min(1, Math.max(0, (event.clientX - bar.left) / bar.width))
-            onSeek(Math.round(fraction * duration))
-          }}
+          value={Math.min(elapsed, duration || 1)}
+          disabled={!shown || !duration}
+          style={{ '--progress': `${duration ? Math.min(100, elapsed / duration * 100) : 0}%` } as React.CSSProperties}
+          onInput={(event) => onSeek(Number(event.currentTarget.value))}
         /><time>{shown ? `-${formatTime(Math.max(0, duration - elapsed))}` : ''}</time></div>
       </div>
     </div>
@@ -890,17 +884,23 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   const [menu, setMenu] = useState<{ x: number; y: number; playlist: PlaylistListView }>()
   const [confirming, setConfirming] = useState<PlaylistListView>()
   const [busy, setBusy] = useState(false)
+  const [createBusy, setCreateBusy] = useState(false)
+  const createPending = useRef(new Set<string>())
   const playlistDrag = useRef<{ id: string; pointerId: number; startY: number; moved: boolean } | undefined>(undefined)
   const dragInsertBefore = useRef<number | undefined>(undefined)
   const suppressPlaylistClick = useRef(false)
   const create = async () => {
-    if (!name.trim()) return
+    if (!name.trim() || !beginPendingEntity(createPending.current, 'create')) return
+    setCreateBusy(true)
     try {
-      await invoke('playlist_create', { name })
+      await spotifyGateway.createPlaylist(name)
       setName('')
       setCreating(false)
     } catch (error) {
       onError(String(error))
+    } finally {
+      createPending.current.delete('create')
+      setCreateBusy(false)
     }
   }
   const reorder = async (dragged: string, target: number) => {
@@ -909,7 +909,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
     const reordered = ids.map((id) => playlists.find((playlist) => playlist.id === id)!)
     setInsertBefore(undefined)
     onReorder(reordered)
-    try { await invoke('reorder_playlists', { ids }) }
+    try { await spotifyGateway.reorderPlaylists(ids) }
     catch (error) { onReorder(playlists); onError(String(error)) }
   }
   const cancelPlaylistDrag = () => {
@@ -922,7 +922,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
     if (!confirming) return
     setBusy(true)
     try {
-      await invoke('playlist_unfollow', { id: confirming.id })
+      await spotifyGateway.unfollowPlaylist(confirming.id)
       setConfirming(undefined)
     } catch (error) {
       onError(String(error))
@@ -945,7 +945,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
     </button>)}
     <button className="section-label playlists-label" aria-expanded={!state.settings.plCollapsed} onClick={onCollapse}><span className={`disclosure ${state.settings.plCollapsed ? 'collapsed' : ''}`} aria-hidden="true">▾</span><span>Playlists</span></button>
     <div className="playlist-list">
-    {!state.settings.plCollapsed && creating && <div className="playlist-new-row"><input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
+    {!state.settings.plCollapsed && creating && <div className="playlist-new-row"><input autoFocus aria-label="Playlist name" disabled={createBusy} value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
       if (event.key === 'Enter') void create()
       else if (event.key === 'Escape') { setCreating(false); setName('') }
     }} /></div>}
@@ -1039,9 +1039,10 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   onHiddenColumns: (columns: ColumnKey[]) => void
   onError: (error: string) => void
 }) {
-  const [tracks, setTracks] = useState<PlaylistTrack[]>([])
+  const [trackState, setTrackState] = useState(() => loadingPlaylistRows<PlaylistTrack>(playlist.id))
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [selectionAnchor, setSelectionAnchor] = useState<number>()
+  const [focusedUpstreamIndex, setFocusedUpstreamIndex] = useState<number>()
   const [insertBefore, setInsertBefore] = useState<number>()
   const [mutating, setMutating] = useState(false)
   const [sortColumn, setSortColumn] = useState<ColumnKey | null>(null)
@@ -1056,20 +1057,26 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLButtonElement } | undefined>(undefined)
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
   onErrorRef.current = onError
-  const canChangePlaylist = playlist.owned && tracks.length === playlist.trackCount
+  const tracks = currentPlaylistRows(trackState, playlist.id)
+  const canChangePlaylist = playlist.owned && playlistRowsReady(trackState, playlist.id) && tracks.length === playlist.trackCount
   const canReorder = canChangePlaylist && sortColumn === null
   useEffect(() => setLiveWidths(columnWidths), [columnWidths])
   useEffect(() => {
+    setTrackState(loadingPlaylistRows(playlist.id))
+    setSelected(new Set())
+    setSelectionAnchor(undefined)
+    setFocusedUpstreamIndex(undefined)
     if (!playlist.itemsAvailable) {
-      setTracks([])
       return
     }
     let active = true
-    setSelected(new Set())
-    setSelectionAnchor(undefined)
-    invoke<PlaylistTrack[]>('playlist_tracks', { id: playlist.id })
-      .then((rows) => active && setTracks(rows))
-      .catch((error) => active && onErrorRef.current(String(error)))
+    spotifyGateway.playlistTracks(playlist.id)
+      .then((rows) => active && setTrackState((current) => resolvedPlaylistRows(current, playlist.id, rows)))
+      .catch((error) => {
+        if (!active) return
+        setTrackState((current) => failedPlaylistRows(current, playlist.id))
+        onErrorRef.current(String(error))
+      })
     return () => { active = false }
   }, [playlist.id, playlist.itemsAvailable, revision, libraryRevision])
   useEffect(() => {
@@ -1087,6 +1094,9 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     return () => window.removeEventListener('keydown', selectAll)
   }, [tracks])
   const rows = playlistRows(tracks, sortColumn, sortDesc)
+  const rovingUpstreamIndex = rows.some((row) => row.upstreamIndex === focusedUpstreamIndex)
+    ? focusedUpstreamIndex
+    : rows.find((row) => selected.has(row.upstreamIndex))?.upstreamIndex ?? rows[0]?.upstreamIndex
   const queue: PlaybackTrack[] = rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex }))
   const headings = { ...trackColumnHeadings(labels.music), track: 'Track' }
   const customizableColumns = columnOrder.filter((column) => PLAYLIST_COLUMNS.includes(column))
@@ -1136,7 +1146,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     resize.current = undefined
     setLiveWidths(columnWidths)
   }
-  const select = (upstreamIndex: number, event: React.MouseEvent) => {
+  const select = (upstreamIndex: number, event: Pick<React.MouseEvent | React.KeyboardEvent, 'shiftKey' | 'metaKey' | 'ctrlKey'>) => {
     if (event.shiftKey && selectionAnchor !== undefined) {
       const anchor = rows.findIndex((row) => row.upstreamIndex === selectionAnchor)
       const current = rows.findIndex((row) => row.upstreamIndex === upstreamIndex)
@@ -1167,7 +1177,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     setMutating(true)
     setInsertBefore(undefined)
     try {
-      await invoke('playlist_reorder', { id: playlist.id, rangeStart: range.start, insertBefore: index, rangeLength: range.length })
+      await spotifyGateway.reorderPlaylist(playlist.id, range.start, index, range.length)
     } catch (error) {
       onError(String(error))
     } finally {
@@ -1186,7 +1196,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     if (!indices.length || !window.confirm(`Remove ${indices.length} selected ${indices.length === 1 ? 'track' : 'tracks'} from “${playlist.name}”?`)) return
     setMutating(true)
     try {
-      await invoke('playlist_remove', { id: playlist.id, indices })
+      await spotifyGateway.removeFromPlaylist(playlist.id, indices)
     } catch (error) {
       onError(String(error))
     } finally {
@@ -1201,7 +1211,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     setMenu(undefined)
     setMutating(true)
     try {
-      await invoke('add_spotify_tracks', { uris })
+      await spotifyGateway.addTracks(uris)
     } catch (error) {
       onError(String(error))
     } finally {
@@ -1224,7 +1234,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     <SpotifyPageBack label={backLabel} onBack={onBack} />
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}{sortColumn ? ` · sorted by ${headings[sortColumn]}` : ''}</span>{playlist.owned && <button disabled={!canChangePlaylist || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
     {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify does not allow third-party apps to interact with playlists not owned by you. :-(</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
-    <div className="playlist-track-scroll" onClick={(event) => {
+    <div className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
       if (event.target !== event.currentTarget && !(event.target as Element).closest('.playlist-end-drop')) return
       setSelected(new Set())
       setSelectionAnchor(undefined)
@@ -1253,13 +1263,39 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
       </div>
       {rows.map(({ track, upstreamIndex }, rowIndex) => <div
         key={`${track.uri}-${upstreamIndex}`}
+        role="group"
+        aria-label={`${track.name} by ${track.art}`}
+        data-keyboard-row
+        tabIndex={rovingUpstreamIndex === upstreamIndex ? 0 : -1}
         className={`playlist-track-row track-row ${canReorder && !mutating ? 'reorderable' : ''} ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
         style={{ gridTemplateColumns: columns }}
+        onFocus={() => setFocusedUpstreamIndex(upstreamIndex)}
         onClick={(event) => {
           if (suppressTrackClick.current) { suppressTrackClick.current = false; event.preventDefault(); return }
           select(upstreamIndex, event)
         }}
         onDoubleClick={() => onPlay(queue[rowIndex].id, queue)}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            onPlay(queue[rowIndex].id, queue)
+            return
+          }
+          if (event.key === ' ') {
+            event.preventDefault()
+            select(upstreamIndex, event)
+            return
+          }
+          if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
+          event.preventDefault()
+          const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, rowIndex + (event.key === 'ArrowUp' ? -1 : 1)))
+          const next = rows[nextIndex]
+          if (!next) return
+          select(next.upstreamIndex, event)
+          const rowContainer = event.currentTarget.parentElement
+          window.requestAnimationFrame(() => rowContainer?.querySelectorAll<HTMLElement>('.playlist-track-row')[nextIndex]?.focus())
+        }}
         onPointerDown={canReorder && !mutating ? (event) => {
           if (event.button !== 0) return
           suppressTrackClick.current = false
@@ -1297,6 +1333,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
         onPointerCancel={cancelTrackDrag}
         onContextMenu={(event) => {
           event.preventDefault()
+          event.currentTarget.focus()
           if (!selected.has(upstreamIndex)) select(upstreamIndex, event)
           setMenu({ x: event.clientX, y: event.clientY, upstreamIndex })
         }}
@@ -1325,44 +1362,48 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
 }) {
   const local = hasLocalTracks(subject)
   const [playlists, setPlaylists] = useState<PlaylistListView[]>([])
-  const [busy, setBusy] = useState<string>()
+  const [busy, setBusy] = useState<Set<string>>(new Set())
+  const pending = useRef(new Set<string>())
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
+  const reportError = useEffectEvent(onError)
   useEffect(() => {
     let active = true
-    invoke<PlaylistListView[]>('playlists_list', subject.kind === 'tracks' ? { uris: subject.uris } : undefined)
+    spotifyGateway.playlists(subject.kind === 'tracks' ? subject.uris : undefined)
       .then((rows) => active && setPlaylists(rows))
-      .catch((error) => active && onError(String(error)))
+      .catch((error) => active && reportError(String(error)))
     return () => { active = false }
   }, [revision, subject])
   const add = async (id: string) => {
-    setBusy(id)
+    if (!beginPendingEntity(pending.current, id)) return
+    setBusy(pendingEntities(pending.current))
     try { await onAdd(id, subject) }
     catch (error) { onError(String(error)) }
-    finally { setBusy(undefined) }
+    finally { pending.current.delete(id); setBusy(pendingEntities(pending.current)) }
   }
   const create = async () => {
-    if (!name.trim()) return
-    setBusy('new')
+    if (!name.trim() || !beginPendingEntity(pending.current, 'new')) return
+    setBusy(pendingEntities(pending.current))
     try {
-      const playlist = await invoke<PlaylistListView>('playlist_create', { name })
+      const playlist = await spotifyGateway.createPlaylist(name)
       await onAdd(playlist.id, subject)
       setName('')
       setCreating(false)
     } catch (error) {
       onError(String(error))
     } finally {
-      setBusy(undefined)
+      pending.current.delete('new')
+      setBusy(pendingEntities(pending.current))
     }
   }
   return <ModalDialog className="playlist-popover" labelledBy="add-to-playlist-title" onCancel={onClose} closeOnBackdrop>
       <header><h2 id="add-to-playlist-title">Add to Playlist</h2><span>{subject.label}</span></header>
       {local && <p className="playlist-local-hint">{LOCAL_PLAYLIST_HINT}</p>}
-      <div className="playlist-popover-list">{playlists.map((playlist) => <button type="button" key={playlist.id} disabled={local || !playlist.owned || busy === playlist.id} onClick={() => void add(playlist.id)}>
+      <div className="playlist-popover-list">{playlists.map((playlist) => <button type="button" key={playlist.id} disabled={local || !playlist.owned || busy.has(playlist.id)} onClick={() => void add(playlist.id)}>
         <span>{playlist.contains ? '✓' : ''}</span><span>{playlist.owned ? '' : '🌐'}</span><strong>{playlist.name}</strong>{!playlist.owned && <small>{playlist.owner}</small>}
       </button>)}</div>
       <footer>{creating
-        ? <input autoFocus aria-label="Playlist name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
+        ? <input autoFocus aria-label="Playlist name" disabled={busy.has('new')} value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => {
           if (event.key === 'Enter') void create()
         }} />
         : <button type="button" className="new-playlist-button" disabled={local} onClick={() => setCreating(true)}>+ New Playlist</button>}

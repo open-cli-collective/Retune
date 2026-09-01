@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-play-tracks"
+description = "Enables the play_tracks command without any pre-configured scope."
+commands.allow = ["play_tracks"]
+
+[[permission]]
+identifier = "deny-play-tracks"
+description = "Denies the play_tracks command without any pre-configured scope."
+commands.deny = ["play_tracks"]

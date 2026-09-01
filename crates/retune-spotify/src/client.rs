@@ -1,193 +1,76 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 
-use crate::auth::TokenResponse;
 use crate::catalog::SpotifyCatalog;
 use crate::tokens::{InMemoryTokenStore, TokenStore, Tokens};
 use crate::{Error, Result};
 
+mod endpoints;
+mod models;
+mod request;
+mod transport;
+
+use models::{
+    AddPlaylistTracks, CreatePlaylist, Devices, PlaylistTrackItem, PlaylistTrackUri,
+    RemovePlaylistTracks, ReorderPlaylistTracks, SnapshotResponse,
+};
+use request::{decode, paged, player_path};
+
+#[cfg(test)]
+use request::{retry_after_header_at, token_expired};
+
+pub use models::{
+    Album, AlbumSummary, Artist, Audiobook, Author, Chapter, CreatedPlaylist, Device, Episode,
+    Followers, Image, Page, PlayerState, Playlist, PlaylistOwner, PlaylistTrackCount, Profile,
+    SavedAlbum, SavedEpisode, SavedShow, SavedTrack, SearchResults, Show, SimplifiedArtist, Track,
+};
+
+pub use request::{SpotifyClient, endpoint_family};
+
+pub use transport::{
+    FakeTransport, HttpTransport, Method, Request, Response, SendFuture, Transport,
+};
+
 const API_BASE: &str = "https://api.spotify.com/v1";
-const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
+pub const MAX_LIBRARY_WRITE_URIS: usize = 10_000;
+pub const MAX_SEARCH_OFFSET: u32 = 1_000;
+pub const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const MAX_RATE_LIMIT_RETRIES: usize = 3;
 const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(300);
-#[cfg(not(test))]
 const SERVER_RETRY_BACKOFFS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
-#[cfg(test)]
-const SERVER_RETRY_BACKOFFS: [Duration; 2] = [Duration::ZERO; 2];
 
-pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<Response>> + Send + 'a>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Method {
-    Delete,
-    Get,
-    Put,
-    Post,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Request {
-    pub method: Method,
-    pub url: String,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Response {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
-}
-
-impl Response {
-    pub fn json(status: u16, value: serde_json::Value) -> Self {
-        Self {
-            status,
-            headers: HashMap::new(),
-            body: serde_json::to_vec(&value).expect("JSON value serializes"),
-        }
+fn reject_local_uris(uris: &[String]) -> Result<()> {
+    if uris.iter().any(|uri| uri.starts_with("file:")) {
+        return Err(Error::InvalidRequest(
+            "local file URIs cannot be sent to Spotify".into(),
+        ));
     }
-
-    /// Test double: a 429 with a `retry-after` header and an empty JSON body.
-    pub fn rate_limited(retry_after: &str) -> Self {
-        let mut response = Self::json(429, serde_json::json!({}));
-        response
-            .headers
-            .insert("retry-after".into(), retry_after.into());
-        response
-    }
-
-    /// Test double: a 429 classified as Development Mode quota exhaustion,
-    /// with an optional `retry-after` header in seconds.
-    pub fn quota_exceeded(retry_after_secs: Option<u64>) -> Self {
-        let mut response = Self::json(
-            429,
-            serde_json::json!({"error": {"reason": "QUOTA_EXCEEDED"}}),
-        );
-        if let Some(retry_after_secs) = retry_after_secs {
-            response
-                .headers
-                .insert("retry-after".into(), retry_after_secs.to_string());
-        }
-        response
-    }
+    Ok(())
 }
 
-pub trait Transport: Send + Sync {
-    fn send(&self, request: Request) -> SendFuture<'_>;
+pub fn validate_search_input(query: &str, offset: u32) -> Result<()> {
+    if query.len() > MAX_SEARCH_QUERY_BYTES {
+        return Err(Error::InvalidRequest(format!(
+            "search query exceeds {MAX_SEARCH_QUERY_BYTES} bytes"
+        )));
+    }
+    if offset > MAX_SEARCH_OFFSET {
+        return Err(Error::InvalidRequest(format!(
+            "search offset exceeds {MAX_SEARCH_OFFSET}"
+        )));
+    }
+    Ok(())
 }
 
-#[derive(Clone)]
-pub struct HttpTransport(reqwest::Client);
-
-impl HttpTransport {
-    pub fn new() -> Self {
-        Self(
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
-        )
+fn spotify_path_id<'a>(id: &'a str, kind: &str) -> Result<&'a str> {
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(Error::InvalidRequest(format!("invalid Spotify {kind} ID")));
     }
-}
-
-impl Default for HttpTransport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Transport for HttpTransport {
-    fn send(&self, request: Request) -> SendFuture<'_> {
-        Box::pin(async move {
-            let method = match request.method {
-                Method::Delete => reqwest::Method::DELETE,
-                Method::Get => reqwest::Method::GET,
-                Method::Put => reqwest::Method::PUT,
-                Method::Post => reqwest::Method::POST,
-            };
-            let mut builder = self.0.request(method, request.url);
-            for (name, value) in request.headers {
-                builder = builder.header(name, value);
-            }
-            // Spotify's edge (Google front end) rejects PUT/POST without a
-            // Content-Length header with HTTP 411, and attaching an empty body
-            // does not guarantee the header on the wire — set it explicitly.
-            if request.body.is_empty() {
-                builder = builder.header(reqwest::header::CONTENT_LENGTH, 0);
-            }
-            builder = builder.body(request.body);
-            let response = builder
-                .send()
-                .await
-                .map_err(|error| Error::Transport(error.to_string()))?;
-            let status = response.status().as_u16();
-            let headers = response
-                .headers()
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
-                })
-                .collect();
-            let body = response
-                .bytes()
-                .await
-                .map_err(|error| Error::Transport(error.to_string()))?
-                .to_vec();
-            Ok(Response {
-                status,
-                headers,
-                body,
-            })
-        })
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct FakeTransport {
-    responses: Mutex<VecDeque<Response>>,
-    requests: Mutex<Vec<Request>>,
-}
-
-impl FakeTransport {
-    pub fn new(responses: impl IntoIterator<Item = Response>) -> Self {
-        Self {
-            responses: Mutex::new(responses.into_iter().collect()),
-            requests: Mutex::default(),
-        }
-    }
-
-    pub fn requests(&self) -> Vec<Request> {
-        self.requests.lock().expect("fake mutex poisoned").clone()
-    }
-}
-
-impl Transport for FakeTransport {
-    fn send(&self, request: Request) -> SendFuture<'_> {
-        Box::pin(async move {
-            self.requests
-                .lock()
-                .map_err(|error| Error::Transport(error.to_string()))?
-                .push(request);
-            tokio::task::yield_now().await;
-            self.responses
-                .lock()
-                .map_err(|error| Error::Transport(error.to_string()))?
-                .pop_front()
-                .ok_or_else(|| Error::Transport("fake response queue exhausted".into()))
-        })
-    }
+    Ok(id)
 }
 
 /// Test double: a client over [`FakeTransport`] with never-expiring tokens
@@ -209,1229 +92,15 @@ pub fn fake_client(
     )
 }
 
-pub struct SpotifyClient<T, S> {
-    client_id: String,
-    transport: T,
-    tokens: S,
-    catalog: Arc<Mutex<SpotifyCatalog>>,
-    request_counts: Mutex<BTreeMap<String, u64>>,
-    refresh_lock: AsyncMutex<()>,
-    request_not_before: AsyncMutex<Option<Instant>>,
-}
-
-impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
-    pub fn new(client_id: impl Into<String>, transport: T, tokens: S) -> Self {
-        Self::new_with_catalog(
-            client_id,
-            transport,
-            tokens,
-            Arc::new(Mutex::new(SpotifyCatalog::default())),
-        )
-    }
-
-    pub fn new_with_catalog(
-        client_id: impl Into<String>,
-        transport: T,
-        tokens: S,
-        catalog: Arc<Mutex<SpotifyCatalog>>,
-    ) -> Self {
-        Self {
-            client_id: client_id.into(),
-            transport,
-            tokens,
-            catalog,
-            request_counts: Mutex::default(),
-            refresh_lock: AsyncMutex::new(()),
-            request_not_before: AsyncMutex::new(None),
-        }
-    }
-
-    pub fn catalog(&self) -> Arc<Mutex<SpotifyCatalog>> {
-        Arc::clone(&self.catalog)
-    }
-
-    pub fn clear_catalog(&self) {
-        self.catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .clear();
-    }
-
-    pub fn transport(&self) -> &T {
-        &self.transport
-    }
-
-    pub fn token_store(&self) -> &S {
-        &self.tokens
-    }
-
-    pub fn reset_request_counts(&self) {
-        self.request_counts
-            .lock()
-            .expect("request count mutex poisoned")
-            .clear();
-    }
-
-    pub fn request_counts(&self) -> BTreeMap<String, u64> {
-        self.request_counts
-            .lock()
-            .expect("request count mutex poisoned")
-            .clone()
-    }
-
-    pub async fn access_token(&self) -> Result<String> {
-        let stored = self.tokens.load()?.ok_or(Error::MissingToken)?;
-        if stored.expires_at <= unix_now() {
-            self.refresh_token(&stored.access).await?;
-        }
-        Ok(self.tokens.load()?.ok_or(Error::MissingToken)?.access)
-    }
-
-    pub async fn saved_tracks(&self, offset: u32, limit: u32) -> Result<Page<SavedTrack>> {
-        let page: Page<SavedTrack> = self.get(&paged("/me/tracks", offset, limit)).await?;
-        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
-        for saved in &page.items {
-            catalog.observe_track(&saved.track);
-        }
-        Ok(page)
-    }
-
-    pub async fn me(&self) -> Result<Profile> {
-        self.get("/me").await
-    }
-
-    pub async fn playlists(
-        &self,
-        offset: u32,
-        limit: u32,
-        current_user_id: &str,
-    ) -> Result<Page<Playlist>> {
-        let mut page: Page<Playlist> = self.get(&paged("/me/playlists", offset, limit)).await?;
-        for playlist in &mut page.items {
-            playlist.owned = playlist.owner.id == current_user_id;
-        }
-        Ok(page)
-    }
-
-    pub async fn create_playlist(&self, name: &str) -> Result<CreatedPlaylist> {
-        self.json(
-            Method::Post,
-            "/me/playlists",
-            serde_json::to_vec(&CreatePlaylist {
-                name,
-                public: false,
-            })
-            .expect("playlist create body serializes"),
-        )
-        .await
-    }
-
-    pub async fn unfollow_playlist(&self, playlist_id: &str) -> Result<()> {
-        self.empty(
-            Method::Delete,
-            &format!("/playlists/{playlist_id}/followers"),
-            Vec::new(),
-        )
-        .await
-    }
-
-    pub async fn playlist_tracks(
-        &self,
-        playlist_id: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Page<Track>> {
-        let fields = "items(is_local,item(uri,name,artists(id,name),album(id,uri,name,images(url)),duration_ms)),next,total";
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("offset", &offset.to_string())
-            .append_pair("limit", &limit.to_string())
-            .append_pair("fields", fields)
-            .finish();
-        let page: Page<PlaylistTrackItem> = self
-            .get(&format!("/playlists/{playlist_id}/items?{query}"))
-            .await?;
-        let total = page.total;
-        let next = page.next;
-        let mut skipped = page.skipped;
-        let items = page
-            .items
-            .into_iter()
-            .filter_map(|item| {
-                if item.is_local || item.track.is_none() {
-                    skipped += 1;
-                    None
-                } else {
-                    item.track
-                }
-            })
-            .collect();
-        let page = Page {
-            items,
-            next,
-            skipped,
-            total,
-        };
-        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
-        for track in &page.items {
-            catalog.observe_track_summary(track);
-        }
-        Ok(page)
-    }
-
-    pub async fn add_playlist_tracks(
-        &self,
-        playlist_id: &str,
-        uris: &[String],
-        position: Option<u32>,
-    ) -> Result<String> {
-        if uris.is_empty() {
-            return Err(Error::InvalidRequest(
-                "playlist add requires at least one URI".into(),
-            ));
-        }
-        let mut snapshot_id = String::new();
-        for (chunk_index, chunk) in uris.chunks(100).enumerate() {
-            let position =
-                position.map(|position| position.saturating_add((chunk_index * 100) as u32));
-            let response: SnapshotResponse = self
-                .json(
-                    Method::Post,
-                    &format!("/playlists/{playlist_id}/items"),
-                    serde_json::to_vec(&AddPlaylistTracks {
-                        uris: chunk,
-                        position,
-                    })
-                    .expect("playlist add body serializes"),
-                )
-                .await?;
-            snapshot_id = response.snapshot_id;
-        }
-        Ok(snapshot_id)
-    }
-
-    pub async fn reorder_playlist_tracks(
-        &self,
-        playlist_id: &str,
-        range_start: u32,
-        insert_before: u32,
-        range_length: u32,
-        snapshot_id: &str,
-    ) -> Result<String> {
-        self.json::<SnapshotResponse>(
-            Method::Put,
-            &format!("/playlists/{playlist_id}/items"),
-            serde_json::to_vec(&ReorderPlaylistTracks {
-                range_start,
-                insert_before,
-                range_length,
-                snapshot_id,
-            })
-            .expect("playlist reorder body serializes"),
-        )
-        .await
-        .map(|response| response.snapshot_id)
-    }
-
-    pub async fn remove_playlist_tracks(
-        &self,
-        playlist_id: &str,
-        uris: &[String],
-        snapshot_id: &str,
-    ) -> Result<String> {
-        if uris.is_empty() {
-            return Err(Error::InvalidRequest(
-                "playlist remove requires at least one URI".into(),
-            ));
-        }
-        let mut snapshot_id = snapshot_id.to_owned();
-        for chunk in uris.chunks(100) {
-            snapshot_id = self
-                .json::<SnapshotResponse>(
-                    Method::Delete,
-                    &format!("/playlists/{playlist_id}/items"),
-                    serde_json::to_vec(&RemovePlaylistTracks {
-                        items: chunk.iter().map(|uri| PlaylistTrackUri { uri }).collect(),
-                        snapshot_id: &snapshot_id,
-                    })
-                    .expect("playlist remove body serializes"),
-                )
-                .await?
-                .snapshot_id;
-        }
-        Ok(snapshot_id)
-    }
-
-    pub async fn saved_albums(&self, offset: u32, limit: u32) -> Result<Page<SavedAlbum>> {
-        let page: Page<SavedAlbum> = self.get(&paged("/me/albums", offset, limit)).await?;
-        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
-        for saved in &page.items {
-            catalog.observe_album_summary(&saved.album);
-        }
-        Ok(page)
-    }
-
-    pub async fn saved_shows(&self, offset: u32, limit: u32) -> Result<Page<SavedShow>> {
-        self.get(&paged("/me/shows", offset, limit)).await
-    }
-
-    pub async fn show_episodes(
-        &self,
-        show_id: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Page<Episode>> {
-        self.get(&paged(&format!("/shows/{show_id}/episodes"), offset, limit))
-            .await
-    }
-
-    pub async fn saved_episodes(&self, offset: u32, limit: u32) -> Result<Page<SavedEpisode>> {
-        self.get(&paged("/me/episodes", offset, limit)).await
-    }
-
-    pub async fn saved_audiobooks(&self, offset: u32, limit: u32) -> Result<Page<Audiobook>> {
-        self.get(&paged("/me/audiobooks", offset, limit)).await
-    }
-
-    pub async fn audiobook_chapters(
-        &self,
-        audiobook_id: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Page<Chapter>> {
-        self.get(&paged(
-            &format!("/audiobooks/{audiobook_id}/chapters"),
-            offset,
-            limit,
-        ))
-        .await
-    }
-
-    pub async fn artist(&self, id: &str) -> Result<Artist> {
-        if let Some(artist) = self
-            .catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .complete_artist(id)
-        {
-            log::info!("Spotify catalog cache hit kind=artist");
-            return Ok(artist);
-        }
-        let artist: Artist = self.get(&format!("/artists/{id}")).await?;
-        self.catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .observe_artist(&artist);
-        Ok(artist)
-    }
-
-    pub async fn album(&self, id: &str) -> Result<Album> {
-        let uri = format!("spotify:album:{id}");
-        if let Some(album) = self
-            .catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .complete_album(&uri)
-        {
-            log::info!("Spotify catalog cache hit kind=album");
-            return Ok(album);
-        }
-        let mut album: Album = self.get(&format!("/albums/{id}")).await?;
-        let Some(mut tracks) = album.tracks.take() else {
-            self.catalog
-                .lock()
-                .expect("Spotify catalog mutex poisoned")
-                .observe_album(&album, false);
-            return Ok(album);
-        };
-        let mut offset = (tracks.items.len() + tracks.skipped) as u32;
-        while tracks.next.is_some() && offset < tracks.total {
-            let page = self.album_tracks(id, offset, 50).await?;
-            let count = (page.items.len() + page.skipped) as u32;
-            tracks.items.extend(page.items);
-            tracks.skipped += page.skipped;
-            tracks.next = page.next;
-            tracks.total = page.total;
-            if count == 0 {
-                break;
-            }
-            offset += count;
-        }
-        let complete = tracks.next.is_none()
-            && tracks.skipped == 0
-            && tracks.items.len() as u32 == tracks.total;
-        if complete {
-            let parent = AlbumSummary {
-                id: album.id.clone(),
-                uri: album.uri.clone(),
-                name: album.name.clone(),
-                release_date: album.release_date.clone(),
-                images: album.images.clone(),
-            };
-            for track in &mut tracks.items {
-                track.album = Some(parent.clone());
-            }
-        }
-        album.tracks = Some(tracks);
-        self.catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .observe_album(&album, complete);
-        Ok(album)
-    }
-
-    pub async fn track(&self, id: &str) -> Result<Track> {
-        let uri = format!("spotify:track:{id}");
-        if let Some(track) = self
-            .catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .complete_track(&uri)
-        {
-            log::info!("Spotify catalog cache hit kind=track");
-            return Ok(track);
-        }
-        let track: Track = self.get(&format!("/tracks/{id}")).await?;
-        self.catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .observe_track(&track);
-        Ok(track)
-    }
-
-    pub async fn is_following_artist(&self, id: &str) -> Result<bool> {
-        let uri = format!("spotify:artist:{id}");
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("uris", &uri)
-            .finish();
-        self.get::<Vec<bool>>(&format!("/me/library/contains?{query}"))
-            .await
-            .map(|following| following.first().copied().unwrap_or(false))
-    }
-
-    pub async fn follow_artist(&self, id: &str, follow: bool) -> Result<()> {
-        self.change_library(
-            if follow { Method::Put } else { Method::Delete },
-            &[format!("spotify:artist:{id}")],
-        )
-        .await
-    }
-
-    pub async fn search(&self, query: &str, offset: u32, limit: u32) -> Result<SearchResults> {
-        self.search_with_types(query, "artist,album,track", offset, limit)
-            .await
-    }
-
-    pub async fn search_with_types(
-        &self,
-        query: &str,
-        types: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<SearchResults> {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("q", query)
-            .append_pair("type", types)
-            .append_pair("offset", &offset.to_string())
-            .append_pair("limit", &limit.min(10).to_string())
-            .finish();
-        let results: SearchResults = self.get(&format!("/search?{query}")).await?;
-        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
-        for artist in &results.artists.items {
-            catalog.observe_artist_summary(artist);
-        }
-        for album in &results.albums.items {
-            catalog.observe_album_summary(album);
-        }
-        for track in &results.tracks.items {
-            catalog.observe_track(track);
-        }
-        Ok(results)
-    }
-
-    pub async fn artist_albums(
-        &self,
-        artist_id: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Page<Album>> {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("include_groups", "album,single")
-            .append_pair("offset", &offset.to_string())
-            .append_pair("limit", &limit.to_string())
-            .finish();
-        let page: Page<Album> = self
-            .get(&format!("/artists/{artist_id}/albums?{query}"))
-            .await?;
-        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
-        for album in &page.items {
-            catalog.observe_album_summary(album);
-        }
-        Ok(page)
-    }
-
-    pub async fn album_tracks(
-        &self,
-        album_id: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<Page<Track>> {
-        let uri = format!("spotify:album:{album_id}");
-        if let Some(page) = self
-            .catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .complete_album_tracks(&uri, offset, limit)
-        {
-            log::info!("Spotify catalog cache hit kind=album_tracks");
-            return Ok(page);
-        }
-        let page: Page<Track> = self
-            .get(&paged(&format!("/albums/{album_id}/tracks"), offset, limit))
-            .await?;
-        let complete = offset == 0
-            && page.next.is_none()
-            && page.skipped == 0
-            && page.items.len() as u32 == page.total;
-        self.catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .observe_album_track_page(&uri, offset, &page, complete);
-        Ok(page)
-    }
-
-    pub async fn player(&self) -> Result<Option<PlayerState>> {
-        let response = self
-            .api_request(Method::Get, "/me/player", Vec::new())
-            .await?;
-        if response.status == 204 || response.body.is_empty() {
-            return Ok(None);
-        }
-        decode("/me/player", &response.body).map(Some)
-    }
-
-    pub async fn devices(&self) -> Result<Vec<Device>> {
-        self.get::<Devices>("/me/player/devices")
-            .await
-            .map(|response| response.devices)
-    }
-
-    pub async fn play(
-        &self,
-        device_id: Option<&str>,
-        uris: &[String],
-        offset: usize,
-    ) -> Result<()> {
-        if offset >= uris.len() {
-            return Err(Error::InvalidRequest(
-                "play offset is outside the queue".into(),
-            ));
-        }
-        let path = player_path("/me/player/play", &[], device_id);
-        self.empty(
-            Method::Put,
-            &path,
-            serde_json::to_vec(&serde_json::json!({
-                "uris": uris,
-                "offset": { "position": offset }
-            }))
-            .expect("play body serializes"),
-        )
-        .await
-    }
-
-    pub async fn set_repeat(&self, state: &str, device_id: Option<&str>) -> Result<()> {
-        if !matches!(state, "off" | "context" | "track") {
-            return Err(Error::InvalidRequest("invalid repeat state".into()));
-        }
-        let path = player_path("/me/player/repeat", &[("state", state)], device_id);
-        self.empty(Method::Put, &path, Vec::new()).await
-    }
-
-    pub async fn resume(&self, device_id: Option<&str>) -> Result<()> {
-        self.empty(
-            Method::Put,
-            &player_path("/me/player/play", &[], device_id),
-            Vec::new(),
-        )
-        .await
-    }
-
-    pub async fn pause(&self, device_id: Option<&str>) -> Result<()> {
-        self.empty(
-            Method::Put,
-            &player_path("/me/player/pause", &[], device_id),
-            Vec::new(),
-        )
-        .await
-    }
-
-    pub async fn set_volume(&self, volume_percent: u8, device_id: Option<&str>) -> Result<()> {
-        if volume_percent > 100 {
-            return Err(Error::InvalidRequest(
-                "volume percent must be between 0 and 100".into(),
-            ));
-        }
-        let path = player_path(
-            "/me/player/volume",
-            &[("volume_percent", &volume_percent.to_string())],
-            device_id,
-        );
-        self.empty(Method::Put, &path, Vec::new()).await
-    }
-
-    pub async fn seek(&self, position_ms: u32, device_id: Option<&str>) -> Result<()> {
-        let path = player_path(
-            "/me/player/seek",
-            &[("position_ms", &position_ms.to_string())],
-            device_id,
-        );
-        self.empty(Method::Put, &path, Vec::new()).await
-    }
-
-    pub async fn transfer(&self, device_id: &str, play: bool) -> Result<()> {
-        self.empty(
-            Method::Put,
-            "/me/player",
-            serde_json::to_vec(&serde_json::json!({
-                "device_ids": [device_id],
-                "play": play
-            }))
-            .expect("transfer body serializes"),
-        )
-        .await
-    }
-
-    pub async fn save_to_library(&self, uris: &[String]) -> Result<()> {
-        self.change_library(Method::Put, uris).await
-    }
-
-    pub async fn remove_from_library(&self, uris: &[String]) -> Result<()> {
-        self.change_library(Method::Delete, uris).await
-    }
-
-    async fn change_library(&self, method: Method, uris: &[String]) -> Result<()> {
-        for chunk in uris.chunks(40) {
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("uris", &chunk.join(","))
-                .finish();
-            self.empty(method, &format!("/me/library?{query}"), Vec::new())
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
-        let response = self.api_request(Method::Get, path, Vec::new()).await?;
-        decode(path, &response.body)
-    }
-
-    async fn json<R: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-        body: Vec<u8>,
-    ) -> Result<R> {
-        let response = self.api_request(method, path, body).await?;
-        decode(path, &response.body)
-    }
-
-    async fn empty(&self, method: Method, path: &str, body: Vec<u8>) -> Result<()> {
-        self.api_request(method, path, body).await.map(|_| ())
-    }
-
-    async fn api_request(&self, method: Method, path: &str, body: Vec<u8>) -> Result<Response> {
-        let mut refreshed = false;
-        let mut rate_retries = 0;
-        let mut server_retries = 0;
-        loop {
-            let access = self.tokens.load()?.ok_or(Error::MissingToken)?.access;
-            let response = self
-                .send_api_request(method, path, body.clone(), &access)
-                .await?;
-            if response.status == 401 && !refreshed {
-                self.refresh_token(&access).await?;
-                refreshed = true;
-                continue;
-            }
-            if response.status == 429 {
-                let family = endpoint_family(path);
-                if quota_exceeded(&response.body) {
-                    let retry_after_secs =
-                        retry_after_header(&response.headers).map(|wait| wait.as_secs());
-                    log::warn!(
-                        "Spotify request classified: family={family} kind=quota retry_delay={retry_after_secs:?} decision=return"
-                    );
-                    return Err(Error::QuotaExceeded {
-                        endpoint: path.into(),
-                        retry_after_secs,
-                    });
-                }
-                let wait = retry_after(&response.headers);
-                if wait > MAX_RATE_LIMIT_WAIT || rate_retries >= MAX_RATE_LIMIT_RETRIES {
-                    log::warn!(
-                        "Spotify request classified: family={family} kind=transient retry_delay={} decision=return",
-                        wait.as_secs()
-                    );
-                    return Err(Error::RateLimited {
-                        endpoint: path.into(),
-                        retry_after_secs: wait.as_secs(),
-                    });
-                }
-                rate_retries += 1;
-                log::warn!(
-                    "Spotify request classified: family={family} kind=transient retry_delay={} decision=retry attempt={rate_retries}/{MAX_RATE_LIMIT_RETRIES}",
-                    wait.as_secs(),
-                );
-                continue;
-            }
-            if matches!(response.status, 500 | 502 | 503 | 504) {
-                if server_retries == SERVER_RETRY_BACKOFFS.len() {
-                    return Err(Error::ServerError {
-                        endpoint: path.into(),
-                        status: response.status,
-                    });
-                }
-                let wait = SERVER_RETRY_BACKOFFS[server_retries];
-                server_retries += 1;
-                log::warn!(
-                    "Spotify {path} returned HTTP {}; retrying in {}s (attempt {}/{})",
-                    response.status,
-                    wait.as_secs(),
-                    server_retries,
-                    SERVER_RETRY_BACKOFFS.len()
-                );
-                tokio::time::sleep(wait).await;
-                continue;
-            }
-            if !(200..300).contains(&response.status) {
-                return Err(http_error(path, response));
-            }
-            return Ok(response);
-        }
-    }
-
-    async fn send_api_request(
-        &self,
-        method: Method,
-        path: &str,
-        body: Vec<u8>,
-        access: &str,
-    ) -> Result<Response> {
-        let mut not_before = self.request_not_before.lock().await;
-        if let Some(deadline) = *not_before {
-            tokio::time::sleep_until(deadline).await;
-            *not_before = None;
-        }
-        *self
-            .request_counts
-            .lock()
-            .expect("request count mutex poisoned")
-            .entry(endpoint_family(path))
-            .or_default() += 1;
-        let response = self
-            .transport
-            .send(Request {
-                method,
-                url: format!("{API_BASE}{path}"),
-                headers: HashMap::from([
-                    ("authorization".into(), format!("Bearer {access}")),
-                    ("content-type".into(), "application/json".into()),
-                ]),
-                body,
-            })
-            .await?;
-        if response.status == 429 && !quota_exceeded(&response.body) {
-            let wait = retry_after(&response.headers);
-            if wait <= MAX_RATE_LIMIT_WAIT {
-                *not_before = Some(Instant::now() + wait);
-            }
-        }
-        Ok(response)
-    }
-
-    async fn refresh_token(&self, stale_access: &str) -> Result<()> {
-        let _guard = self.refresh_lock.lock().await;
-        let stored = self.tokens.load()?.ok_or(Error::MissingToken)?;
-        if stored.access != stale_access {
-            return Ok(());
-        }
-        log::info!("Refreshing Spotify access token");
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", &self.client_id)
-            .append_pair("grant_type", "refresh_token")
-            .append_pair("refresh_token", &stored.refresh)
-            .finish()
-            .into_bytes();
-        let response = self
-            .transport
-            .send(Request {
-                method: Method::Post,
-                url: TOKEN_URL.into(),
-                headers: HashMap::from([(
-                    "content-type".into(),
-                    "application/x-www-form-urlencoded".into(),
-                )]),
-                body,
-            })
-            .await?;
-        if !(200..300).contains(&response.status) {
-            return Err(http_error(TOKEN_URL, response));
-        }
-        let token: TokenResponse = decode(TOKEN_URL, &response.body)?;
-        self.tokens.save(&Tokens {
-            access: token.access_token,
-            refresh: token.refresh_token.unwrap_or(stored.refresh),
-            expires_at: unix_now().saturating_add(token.expires_in),
-            scopes: stored.scopes,
-            playback_credentials: stored.playback_credentials,
-        })?;
-        log::info!("Refreshed Spotify access token");
-        Ok(())
-    }
-}
-
-fn decode<R: DeserializeOwned>(endpoint: &str, body: &[u8]) -> Result<R> {
-    serde_json::from_slice(body).map_err(|source| Error::Json {
-        endpoint: endpoint.into(),
-        source,
-    })
-}
-
-fn http_error(endpoint: &str, response: Response) -> Error {
-    Error::Http {
-        endpoint: endpoint.into(),
-        status: response.status,
-        body: String::from_utf8_lossy(&response.body).into_owned(),
-    }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn retry_after(headers: &HashMap<String, String>) -> Duration {
-    retry_after_header(headers).unwrap_or(Duration::from_secs(1))
-}
-
-fn retry_after_header(headers: &HashMap<String, String>) -> Option<Duration> {
-    let value = headers.get("retry-after")?;
-    value
-        .parse::<u64>()
-        .map(Duration::from_secs)
-        .ok()
-        .or_else(|| {
-            httpdate::parse_http_date(value)
-                .ok()
-                .and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
-        })
-}
-
-#[derive(Deserialize)]
-struct RegularErrorResponse {
-    error: RegularError,
-}
-
-#[derive(Deserialize)]
-struct RegularError {
-    reason: Option<String>,
-}
-
-fn quota_exceeded(body: &[u8]) -> bool {
-    serde_json::from_slice::<RegularErrorResponse>(body)
-        .is_ok_and(|response| response.error.reason.as_deref() == Some("QUOTA_EXCEEDED"))
-}
-
-fn paged(path: &str, offset: u32, limit: u32) -> String {
-    format!("{path}?offset={offset}&limit={limit}")
-}
-
-pub fn endpoint_family(endpoint: &str) -> String {
-    let mut segments = endpoint.split('?').next().unwrap_or(endpoint).split('/');
-    let first = segments
-        .find(|segment| !segment.is_empty())
-        .unwrap_or_default();
-    if first == "me" {
-        segments
-            .find(|segment| !segment.is_empty())
-            .map_or_else(|| "/me".into(), |second| format!("/me/{second}"))
-    } else {
-        format!("/{first}")
-    }
-}
-
-fn player_path(path: &str, pairs: &[(&str, &str)], device_id: Option<&str>) -> String {
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    for (key, value) in pairs {
-        query.append_pair(key, value);
-    }
-    if let Some(device_id) = device_id {
-        query.append_pair("device_id", device_id);
-    }
-    let query = query.finish();
-    if query.is_empty() {
-        path.into()
-    } else {
-        format!("{path}?{query}")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Page<T> {
-    pub items: Vec<T>,
-    pub next: Option<String>,
-    /// Items in the payload that failed to decode and were dropped. Live
-    /// pages null out fields of removed/unplayable content; one bad item
-    /// must not cost the page. Counted so pagination offsets stay correct.
-    pub skipped: usize,
-    pub total: u32,
-}
-
-impl<T> Default for Page<T> {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            next: None,
-            skipped: 0,
-            total: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Profile {
-    pub id: String,
-    #[serde(default)]
-    pub product: Option<String>,
-}
-
-impl Profile {
-    pub fn is_premium(&self) -> bool {
-        self.product.as_deref() == Some("premium")
-    }
-}
-
-impl<'de, T: DeserializeOwned> Deserialize<'de> for Page<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct RawPage {
-            items: Vec<serde_json::Value>,
-            next: Option<String>,
-            #[serde(default)]
-            total: Option<u32>,
-        }
-        let raw = RawPage::deserialize(deserializer)?;
-        let mut items = Vec::with_capacity(raw.items.len());
-        let mut skipped = 0;
-        for item in raw.items {
-            match serde_json::from_value(item) {
-                Ok(item) => items.push(item),
-                Err(error) => {
-                    skipped += 1;
-                    log::warn!("Skipped undecodable item in a Spotify page: {error}");
-                }
-            }
-        }
-        let total = raw.total.unwrap_or((items.len() + skipped) as u32);
-        Ok(Self {
-            items,
-            next: raw.next,
-            skipped,
-            total,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Image {
-    pub url: String,
-    #[serde(default)]
-    pub width: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SimplifiedArtist {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Artist {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub genres: Vec<String>,
-    #[serde(default)]
-    pub followers: Option<Followers>,
-    #[serde(default)]
-    pub images: Vec<Image>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Followers {
-    pub total: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct AlbumSummary {
-    pub id: String,
-    pub uri: String,
-    pub name: String,
-    #[serde(default)]
-    pub release_date: Option<String>,
-    #[serde(default)]
-    pub images: Vec<Image>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Track {
-    pub uri: String,
-    pub name: String,
-    /// Null in some live payloads (e.g. unplayable episodes).
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub track_number: Option<u32>,
-    #[serde(default)]
-    pub disc_number: Option<u32>,
-    #[serde(default)]
-    pub artists: Vec<SimplifiedArtist>,
-    #[serde(default)]
-    pub album: Option<AlbumSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct PlaylistOwner {
-    pub id: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct PlaylistTrackCount {
-    pub total: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Playlist {
-    pub id: String,
-    pub name: String,
-    pub snapshot_id: String,
-    pub owner: PlaylistOwner,
-    #[serde(rename = "items", alias = "tracks")]
-    pub tracks: PlaylistTrackCount,
-    #[serde(default)]
-    pub collaborative: bool,
-    #[serde(skip)]
-    pub owned: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct CreatedPlaylist {
-    pub id: String,
-    pub name: String,
-    pub snapshot_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PlaylistTrackItem {
-    #[serde(default)]
-    is_local: bool,
-    #[serde(rename = "item", alias = "track")]
-    track: Option<Track>,
-}
-
-#[derive(serde::Serialize)]
-struct CreatePlaylist<'a> {
-    name: &'a str,
-    public: bool,
-}
-
-#[derive(serde::Serialize)]
-struct AddPlaylistTracks<'a> {
-    uris: &'a [String],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    position: Option<u32>,
-}
-
-#[derive(serde::Serialize)]
-struct ReorderPlaylistTracks<'a> {
-    range_start: u32,
-    insert_before: u32,
-    range_length: u32,
-    snapshot_id: &'a str,
-}
-
-#[derive(serde::Serialize)]
-struct RemovePlaylistTracks<'a> {
-    items: Vec<PlaylistTrackUri<'a>>,
-    snapshot_id: &'a str,
-}
-
-#[derive(serde::Serialize)]
-struct PlaylistTrackUri<'a> {
-    uri: &'a str,
-}
-
-#[derive(Deserialize)]
-struct SnapshotResponse {
-    snapshot_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SavedTrack {
-    #[serde(default, deserialize_with = "deserialize_added_at")]
-    pub added_at: Option<u64>,
-    pub track: Track,
-}
-
-fn deserialize_added_at<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer)?
-        .map(|value| {
-            chrono::DateTime::parse_from_rfc3339(&value)
-                .map_err(serde::de::Error::custom)
-                .and_then(|date| u64::try_from(date.timestamp()).map_err(serde::de::Error::custom))
-        })
-        .transpose()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Album {
-    pub id: String,
-    pub uri: String,
-    pub name: String,
-    #[serde(default)]
-    pub artists: Vec<SimplifiedArtist>,
-    #[serde(default)]
-    pub images: Vec<Image>,
-    #[serde(default)]
-    pub release_date: Option<String>,
-    #[serde(default)]
-    pub album_type: Option<String>,
-    #[serde(default)]
-    pub total_tracks: u32,
-    #[serde(default)]
-    pub tracks: Option<Page<Track>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SavedAlbum {
-    #[serde(default, deserialize_with = "deserialize_added_at")]
-    pub added_at: Option<u64>,
-    pub album: Album,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Show {
-    pub id: String,
-    pub uri: String,
-    pub name: String,
-    /// Absent from some live /me/shows payloads despite the documented shape.
-    #[serde(default)]
-    pub publisher: String,
-    pub category: Option<String>,
-    #[serde(default)]
-    pub images: Vec<Image>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SavedShow {
-    pub show: Show,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Episode {
-    pub uri: String,
-    pub name: String,
-    /// Null in some live payloads (e.g. unplayable episodes).
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    pub show: Option<Show>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SavedEpisode {
-    pub episode: Episode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Author {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Audiobook {
-    pub id: String,
-    pub uri: String,
-    pub name: String,
-    #[serde(default)]
-    pub authors: Vec<Author>,
-    #[serde(default)]
-    pub genres: Vec<String>,
-    #[serde(default)]
-    pub images: Vec<Image>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Chapter {
-    pub uri: String,
-    pub name: String,
-    /// Null in some live payloads (e.g. unplayable episodes).
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub chapter_number: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct SearchResults {
-    #[serde(default)]
-    pub artists: Page<Artist>,
-    #[serde(default)]
-    pub albums: Page<Album>,
-    #[serde(default)]
-    pub tracks: Page<Track>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Device {
-    pub id: Option<String>,
-    pub name: String,
-    pub is_restricted: bool,
-    #[serde(rename = "type")]
-    pub device_type: String,
-    pub is_active: bool,
-    #[serde(default)]
-    pub supports_volume: bool,
-    pub volume_percent: Option<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Devices {
-    devices: Vec<Device>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct PlayerState {
-    pub is_playing: bool,
-    pub progress_ms: Option<u64>,
-    pub item: Option<Track>,
-    pub device: Device,
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::tokens::InMemoryTokenStore;
+    use crate::auth::TOKEN_URL;
+    use crate::tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials};
+    use tokio::sync::Barrier;
 
     struct OverlapTransport {
         responses: Mutex<VecDeque<Response>>,
@@ -1473,6 +142,28 @@ mod tests {
                     .ok_or_else(|| Error::Transport("fake response queue exhausted".into()));
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 response
+            })
+        }
+    }
+
+    struct DelayedRefreshTransport {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl Transport for DelayedRefreshTransport {
+        fn send(&self, _request: Request) -> SendFuture<'_> {
+            Box::pin(async move {
+                self.entered.wait().await;
+                self.release.wait().await;
+                Ok(Response::json(
+                    200,
+                    serde_json::json!({
+                        "access_token": "stale-refresh",
+                        "refresh_token": "rotated-refresh",
+                        "expires_in": 3600
+                    }),
+                ))
             })
         }
     }
@@ -1524,10 +215,10 @@ mod tests {
                     serde_json::json!({
                         "albums": {
                             "items": [{
-                                "id": "album-id",
-                                "uri": "spotify:album:album-id",
+                                "id": "albumid",
+                                "uri": "spotify:album:albumid",
                                 "name": "Parasite (acoustic)",
-                                "artists": [{"id": "artist-id", "name": "Dead by April"}]
+                                "artists": [{"id": "artistid", "name": "Dead by April"}]
                             }],
                             "next": null,
                             "total": 1
@@ -1539,12 +230,12 @@ mod tests {
                     serde_json::json!({
                         "tracks": {
                             "items": [{
-                                "uri": "spotify:track:track-id",
+                                "uri": "spotify:track:trackid",
                                 "name": "Parasite",
-                                "artists": [{"id": "artist-id", "name": "Dead by April"}],
+                                "artists": [{"id": "artistid", "name": "Dead by April"}],
                                 "album": {
-                                    "id": "album-id",
-                                    "uri": "spotify:album:album-id",
+                                    "id": "albumid",
+                                    "uri": "spotify:album:albumid",
                                     "name": "Parasite (acoustic)"
                                 }
                             }],
@@ -1561,7 +252,7 @@ mod tests {
             .search_with_types("album query", "album", 0, 10)
             .await
             .unwrap();
-        assert_eq!(albums.albums.items[0].uri, "spotify:album:album-id");
+        assert_eq!(albums.albums.items[0].uri, "spotify:album:albumid");
         assert_eq!(albums.albums.items[0].artists[0].name, "Dead by April");
         assert!(albums.artists.items.is_empty());
         assert!(albums.tracks.items.is_empty());
@@ -1570,13 +261,13 @@ mod tests {
             .search_with_types("track query", "track", 0, 10)
             .await
             .unwrap();
-        assert_eq!(tracks.tracks.items[0].uri, "spotify:track:track-id");
+        assert_eq!(tracks.tracks.items[0].uri, "spotify:track:trackid");
         assert_eq!(tracks.tracks.items[0].name, "Parasite");
         assert_eq!(tracks.tracks.items[0].artists[0].name, "Dead by April");
         assert!(tracks.artists.items.is_empty());
         assert!(tracks.albums.items.is_empty());
         assert_eq!(
-            client.track("track-id").await.unwrap(),
+            client.track("trackid").await.unwrap(),
             tracks.tracks.items[0]
         );
 
@@ -1584,6 +275,38 @@ mod tests {
         assert!(requests[0].url.contains("type=album"));
         assert!(requests[1].url.contains("type=track"));
         assert_eq!(requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_limits_reject_before_transport_or_catalog_effects() {
+        let client = SpotifyClient::new("client", FakeTransport::new([]), tokens());
+        let generation = client
+            .catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .generation();
+
+        let long_query = "q".repeat(MAX_SEARCH_QUERY_BYTES + 1);
+        assert!(
+            validate_search_input(&"q".repeat(MAX_SEARCH_QUERY_BYTES), MAX_SEARCH_OFFSET).is_ok()
+        );
+        assert!(client.search(&long_query, 0, 10).await.is_err());
+        assert!(
+            client
+                .search("query", MAX_SEARCH_OFFSET + 1, 10)
+                .await
+                .is_err()
+        );
+
+        assert!(client.transport().requests().is_empty());
+        assert_eq!(
+            client
+                .catalog
+                .lock()
+                .expect("Spotify catalog mutex poisoned")
+                .generation(),
+            generation
+        );
     }
 
     #[tokio::test]
@@ -1635,6 +358,7 @@ mod tests {
             client.tokens.load().unwrap().unwrap().scopes,
             "streaming user-read-private"
         );
+        assert_eq!(client.tokens.load().unwrap().unwrap().refresh, "refresh");
         assert_eq!(
             client
                 .tokens
@@ -1659,23 +383,166 @@ mod tests {
             tokens(),
         );
 
+        let cooldown = Instant::now() + Duration::from_secs(60);
+        *client.request_not_before.lock().await = Some(cooldown);
+
         assert_eq!(client.access_token().await.unwrap(), "new");
-        assert_eq!(client.transport().requests()[0].url, TOKEN_URL);
+        let request = &client.transport().requests()[0];
+        assert_eq!(request.url, TOKEN_URL);
+        assert_eq!(
+            url::form_urlencoded::parse(&request.body)
+                .into_owned()
+                .collect::<HashMap<_, _>>(),
+            HashMap::from([
+                ("client_id".into(), "client".into()),
+                ("grant_type".into(), "refresh_token".into()),
+                ("refresh_token".into(), "refresh".into()),
+            ])
+        );
+        assert!(client.request_counts().is_empty());
+        assert_eq!(*client.request_not_before.lock().await, Some(cooldown));
     }
 
     #[tokio::test]
-    async fn profile_is_premium_only_for_explicit_premium_product() {
+    async fn malformed_refresh_tokens_do_not_change_storage() {
+        for response in [
+            serde_json::json!({"access_token": "", "expires_in": 3600}),
+            serde_json::json!({
+                "access_token": "new",
+                "refresh_token": " ",
+                "expires_in": 3600
+            }),
+        ] {
+            let store = tokens();
+            let before = store.load().unwrap().unwrap();
+            let client = SpotifyClient::new(
+                "client",
+                FakeTransport::new([Response::json(200, response)]),
+                store,
+            );
+
+            assert!(matches!(
+                client.access_token().await,
+                Err(Error::Json { .. })
+            ));
+            assert_eq!(client.token_store().load().unwrap(), Some(before));
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_refresh_cannot_resurrect_a_cleared_grant() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let store = Arc::new(CachedTokenStore::new(tokens()));
+        let client = SpotifyClient::new(
+            "client",
+            DelayedRefreshTransport {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            },
+            Arc::clone(&store),
+        );
+        let refresh = tokio::spawn(async move { client.access_token().await });
+
+        entered.wait().await;
+        store.clear().unwrap();
+        release.wait().await;
+
+        assert!(matches!(refresh.await.unwrap(), Err(Error::MissingToken)));
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn delayed_refresh_cannot_overwrite_a_replacement_grant() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let initial = Tokens {
+            playback_credentials: Some(PlaybackCredentials {
+                username: "old-user".into(),
+                auth_data: vec![1, 2, 3],
+            }),
+            ..tokens().load().unwrap().unwrap()
+        };
+        let store = Arc::new(CachedTokenStore::new(InMemoryTokenStore::new(Some(
+            initial,
+        ))));
+        let client = SpotifyClient::new(
+            "client",
+            DelayedRefreshTransport {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            },
+            Arc::clone(&store),
+        );
+        let refresh = tokio::spawn(async move { client.access_token().await });
+
+        entered.wait().await;
+        let replacement = Tokens {
+            access: "replacement".into(),
+            refresh: "replacement-refresh".into(),
+            expires_at: u64::MAX,
+            scopes: "replacement-scope".into(),
+            playback_credentials: None,
+        };
+        store.save(&replacement).unwrap();
+        release.wait().await;
+
+        assert_eq!(refresh.await.unwrap().unwrap(), "replacement");
+        assert_eq!(store.load().unwrap(), Some(replacement));
+    }
+
+    #[tokio::test]
+    async fn delayed_refresh_preserves_new_playback_credentials_on_the_same_grant() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let store = Arc::new(CachedTokenStore::new(tokens()));
+        let client = SpotifyClient::new(
+            "client",
+            DelayedRefreshTransport {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            },
+            Arc::clone(&store),
+        );
+        let refresh = tokio::spawn(async move { client.access_token().await });
+
+        entered.wait().await;
+        let expected = store.load().unwrap().unwrap();
+        let mut authorized = expected.clone();
+        authorized.playback_credentials = Some(PlaybackCredentials {
+            username: "user".into(),
+            auth_data: vec![1, 2, 3],
+        });
+        assert!(store.replace_if_current(&expected, &authorized).unwrap());
+        release.wait().await;
+
+        assert_eq!(refresh.await.unwrap().unwrap(), "stale-refresh");
+        let refreshed = store.load().unwrap().unwrap();
+        assert_eq!(refreshed.refresh, "rotated-refresh");
+        assert_eq!(
+            refreshed.playback_credentials,
+            authorized.playback_credentials
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_exposes_immutable_account_id_and_tolerates_removed_product() {
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([
-                Response::json(200, serde_json::json!({"product": "premium", "id": "user"})),
                 Response::json(200, serde_json::json!({"id": "user"})),
+                Response::json(
+                    200,
+                    serde_json::json!({"account_id": "account", "id": "profile"}),
+                ),
             ]),
             tokens(),
         );
 
-        assert!(client.me().await.unwrap().is_premium());
-        assert!(!client.me().await.unwrap().is_premium());
+        assert_eq!(client.me().await.unwrap().account_id(), None);
+        let profile = client.me().await.unwrap();
+        assert_eq!(profile.id, "profile");
+        assert_eq!(profile.account_id(), Some("account"));
     }
 
     #[tokio::test]
@@ -1822,7 +689,7 @@ mod tests {
         assert_eq!(client.transport().requests().len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_server_errors_twice_then_succeeds() {
         let transport = FakeTransport::new([
             Response::json(500, serde_json::json!({})),
@@ -1830,12 +697,14 @@ mod tests {
             Response::json(200, serde_json::json!({"items": [], "next": null})),
         ]);
         let client = SpotifyClient::new("client", transport, tokens());
+        let started = Instant::now();
 
         assert!(client.saved_albums(50, 50).await.is_ok());
+        assert_eq!(Instant::now() - started, Duration::from_secs(4));
         assert_eq!(client.transport().requests().len(), 3);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn server_error_retries_are_capped() {
         let transport = FakeTransport::new([
             Response::json(500, serde_json::json!({})),
@@ -1853,6 +722,76 @@ mod tests {
             } if endpoint == "/me/albums?offset=50&limit=50"
         ));
         assert_eq!(client.transport().requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mutation_server_and_transport_failures_are_ambiguous_and_not_retried() {
+        let server = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(500, serde_json::json!({})),
+                Response::json(
+                    201,
+                    serde_json::json!({"id": "duplicate", "name": "Road Trip"}),
+                ),
+            ]),
+            tokens(),
+        );
+        assert!(matches!(
+            server.create_playlist("Road Trip").await,
+            Err(Error::AmbiguousMutation {
+                status: Some(500),
+                ..
+            })
+        ));
+        assert_eq!(server.transport().requests().len(), 1);
+
+        let add = SpotifyClient::new(
+            "client",
+            FakeTransport::new([
+                Response::json(503, serde_json::json!({})),
+                Response::json(201, serde_json::json!({"snapshot_id": "duplicate"})),
+            ]),
+            tokens(),
+        );
+        assert!(matches!(
+            add.add_playlist_tracks("playlist", &["spotify:track:one".into()], None)
+                .await,
+            Err(Error::AmbiguousMutation {
+                status: Some(503),
+                ..
+            })
+        ));
+        assert_eq!(add.transport().requests().len(), 1);
+
+        let transport = SpotifyClient::new("client", FakeTransport::default(), tokens());
+        assert!(matches!(
+            transport.create_playlist("Road Trip").await,
+            Err(Error::AmbiguousMutation { status: None, .. })
+        ));
+        assert_eq!(transport.transport().requests().len(), 1);
+    }
+
+    #[test]
+    fn expiry_and_http_date_boundaries_are_exact() {
+        assert!(!token_expired(10, 9));
+        assert!(token_expired(10, 10));
+        assert!(token_expired(10, 11));
+
+        let deadline = UNIX_EPOCH + Duration::from_secs(10);
+        let headers = HashMap::from([("retry-after".into(), httpdate::fmt_http_date(deadline))]);
+        assert_eq!(
+            retry_after_header_at(&headers, UNIX_EPOCH + Duration::from_secs(9)),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            retry_after_header_at(&headers, deadline),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            retry_after_header_at(&headers, UNIX_EPOCH + Duration::from_secs(11)),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1934,9 +873,9 @@ mod tests {
         ]);
         let client = SpotifyClient::new("client", transport, tokens());
 
-        assert!(client.is_following_artist("a & b").await.unwrap());
-        client.follow_artist("a & b", true).await.unwrap();
-        client.follow_artist("a & b", false).await.unwrap();
+        assert!(client.is_following_artist("ab").await.unwrap());
+        client.follow_artist("ab", true).await.unwrap();
+        client.follow_artist("ab", false).await.unwrap();
 
         let requests = client.transport().requests();
         assert_eq!(requests[0].method, Method::Get);
@@ -1954,8 +893,31 @@ mod tests {
         assert!(requests.iter().all(|request| {
             let url = url::Url::parse(&request.url).unwrap();
             url.query_pairs()
-                .any(|pair| pair == ("uris".into(), "spotify:artist:a & b".into()))
+                .any(|pair| pair == ("uris".into(), "spotify:artist:ab".into()))
         }));
+    }
+
+    #[tokio::test]
+    async fn artist_follow_contains_requires_exactly_one_boolean() {
+        for response in [serde_json::json!([]), serde_json::json!([true, false])] {
+            let client = SpotifyClient::new(
+                "client",
+                FakeTransport::new([Response::json(200, response)]),
+                tokens(),
+            );
+
+            assert!(matches!(
+                client.is_following_artist("artist").await,
+                Err(Error::Json { .. })
+            ));
+        }
+
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(200, serde_json::json!([false]))]),
+            tokens(),
+        );
+        assert!(!client.is_following_artist("artist").await.unwrap());
     }
 
     #[tokio::test]
@@ -2017,6 +979,121 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("uris".into(), "spotify:track:track".into())]
         );
+    }
+
+    #[tokio::test]
+    async fn local_uris_are_rejected_before_spotify_writes() {
+        let client = SpotifyClient::new("client", FakeTransport::default(), tokens());
+        let uris = vec!["spotify:track:track".into(), "file:///tmp/local.mp3".into()];
+
+        assert!(matches!(
+            client.play(None, &uris, 0).await,
+            Err(Error::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            client.add_playlist_tracks("playlist", &uris, None).await,
+            Err(Error::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            client
+                .remove_playlist_tracks("playlist", &uris, "snapshot")
+                .await,
+            Err(Error::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            client.save_to_library(&uris).await,
+            Err(Error::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            client.remove_from_library(&uris).await,
+            Err(Error::InvalidRequest(_))
+        ));
+        assert!(client.transport().requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_path_ids_are_rejected_before_transport() {
+        #[derive(Clone, Copy, Debug)]
+        enum Endpoint {
+            UnfollowPlaylist,
+            PlaylistTracks,
+            AddPlaylistTracks,
+            ReorderPlaylistTracks,
+            RemovePlaylistTracks,
+            ShowEpisodes,
+            AudiobookChapters,
+            Artist,
+            ArtistAlbums,
+            IsFollowingArtist,
+            FollowArtist,
+            Album,
+            AlbumTracks,
+            Track,
+        }
+
+        let cases = [
+            (Endpoint::UnfollowPlaylist, "", "playlist"),
+            (
+                Endpoint::PlaylistTracks,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "playlist",
+            ),
+            (
+                Endpoint::AddPlaylistTracks,
+                "spotify:playlist:abc",
+                "playlist",
+            ),
+            (Endpoint::ReorderPlaylistTracks, "bad/id", "playlist"),
+            (Endpoint::RemovePlaylistTracks, "bad?id", "playlist"),
+            (Endpoint::ShowEpisodes, "bad#id", "show"),
+            (Endpoint::AudiobookChapters, "bad-id", "audiobook"),
+            (Endpoint::Artist, "artist:id", "artist"),
+            (Endpoint::ArtistAlbums, "artist id", "artist"),
+            (Endpoint::IsFollowingArtist, "artist/id", "artist"),
+            (Endpoint::FollowArtist, "artist?id", "artist"),
+            (Endpoint::Album, "/album", "album"),
+            (Endpoint::AlbumTracks, "album?", "album"),
+            (Endpoint::Track, "track#", "track"),
+        ];
+        let client = SpotifyClient::new("client", FakeTransport::default(), tokens());
+        let uris = ["spotify:track:track".into()];
+
+        for (endpoint, id, kind) in cases {
+            let error = match endpoint {
+                Endpoint::UnfollowPlaylist => client.unfollow_playlist(id).await,
+                Endpoint::PlaylistTracks => client.playlist_tracks(id, 0, 1).await.map(|_| ()),
+                Endpoint::AddPlaylistTracks => client
+                    .add_playlist_tracks(id, &uris, None)
+                    .await
+                    .map(|_| ()),
+                Endpoint::ReorderPlaylistTracks => client
+                    .reorder_playlist_tracks(id, 0, 1, 1, "snapshot")
+                    .await
+                    .map(|_| ()),
+                Endpoint::RemovePlaylistTracks => client
+                    .remove_playlist_tracks(id, &uris, "snapshot")
+                    .await
+                    .map(|_| ()),
+                Endpoint::ShowEpisodes => client.show_episodes(id, 0, 1).await.map(|_| ()),
+                Endpoint::AudiobookChapters => {
+                    client.audiobook_chapters(id, 0, 1).await.map(|_| ())
+                }
+                Endpoint::Artist => client.artist(id).await.map(|_| ()),
+                Endpoint::ArtistAlbums => client.artist_albums(id, 0, 1).await.map(|_| ()),
+                Endpoint::IsFollowingArtist => client.is_following_artist(id).await.map(|_| ()),
+                Endpoint::FollowArtist => client.follow_artist(id, true).await,
+                Endpoint::Album => client.album(id).await.map(|_| ()),
+                Endpoint::AlbumTracks => client.album_tracks(id, 0, 1).await.map(|_| ()),
+                Endpoint::Track => client.track(id).await.map(|_| ()),
+            }
+            .expect_err("malformed path ID must fail");
+
+            assert!(
+                matches!(&error, Error::InvalidRequest(message) if message.contains(kind)),
+                "{endpoint:?} returned {error}"
+            );
+            assert!(client.transport().requests().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -2098,41 +1175,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_to_library_chunks_forty_uris_into_query_only_requests() {
-        let transport = FakeTransport::new([
+    async fn save_to_library_chunks_forty_uris_without_reordering() {
+        let transport = FakeTransport::new(std::iter::repeat_n(
             Response::json(204, serde_json::Value::Null),
-            Response::json(204, serde_json::Value::Null),
-        ]);
+            3,
+        ));
         let client = SpotifyClient::new("client", transport, tokens());
-        let uris = (0..41)
+        let uris = (0..81)
             .map(|index| format!("spotify:track:{index}"))
             .collect::<Vec<_>>();
 
         client.save_to_library(&uris).await.unwrap();
 
         let requests = client.transport().requests();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|request| request.body.is_empty()));
+        let sent = requests
+            .iter()
+            .flat_map(|request| {
+                url::Url::parse(&request.url)
+                    .unwrap()
+                    .query_pairs()
+                    .find(|(key, _)| key == "uris")
+                    .unwrap()
+                    .1
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sent, uris);
         assert_eq!(
-            url::Url::parse(&requests[0].url)
-                .unwrap()
-                .query_pairs()
-                .find(|(key, _)| key == "uris")
-                .unwrap()
-                .1
-                .split(',')
-                .count(),
-            40
+            requests
+                .iter()
+                .map(|request| url::Url::parse(&request.url)
+                    .unwrap()
+                    .query_pairs()
+                    .find(|(key, _)| key == "uris")
+                    .unwrap()
+                    .1
+                    .split(',')
+                    .count())
+                .collect::<Vec<_>>(),
+            [40, 40, 1]
         );
-        assert_eq!(
-            url::Url::parse(&requests[1].url)
-                .unwrap()
-                .query_pairs()
-                .find(|(key, _)| key == "uris")
-                .unwrap()
-                .1,
-            "spotify:track:40"
-        );
+    }
+
+    #[tokio::test]
+    async fn library_write_limit_rejects_before_transport() {
+        let client = SpotifyClient::new("client", FakeTransport::new([]), tokens());
+        let uris = vec!["spotify:track:one".to_string(); MAX_LIBRARY_WRITE_URIS + 1];
+
+        assert!(client.save_to_library(&uris).await.is_err());
+
+        assert!(client.transport().requests().is_empty());
     }
 
     #[tokio::test]
@@ -2484,14 +1580,14 @@ mod tests {
     async fn complete_catalog_reads_skip_tokens_and_transport() {
         let catalog = Arc::new(Mutex::new(crate::catalog::SpotifyCatalog::default()));
         let artist = Artist {
-            id: "artist-1".into(),
+            id: "artist1".into(),
             name: "Artist".into(),
             genres: vec!["rock".into()],
             followers: None,
             images: vec![],
         };
         let track = Track {
-            uri: "spotify:track:track-1".into(),
+            uri: "spotify:track:track1".into(),
             name: "Track".into(),
             duration_ms: Some(100),
             track_number: Some(1),
@@ -2501,16 +1597,16 @@ mod tests {
                 name: artist.name.clone(),
             }],
             album: Some(AlbumSummary {
-                id: "album-1".into(),
-                uri: "spotify:album:album-1".into(),
+                id: "album1".into(),
+                uri: "spotify:album:album1".into(),
                 name: "Album".into(),
                 release_date: Some("2024".into()),
                 images: vec![],
             }),
         };
         let album = Album {
-            id: "album-1".into(),
-            uri: "spotify:album:album-1".into(),
+            id: "album1".into(),
+            uri: "spotify:album:album1".into(),
             name: "Album".into(),
             artists: track.artists.clone(),
             images: vec![],
@@ -2537,11 +1633,11 @@ mod tests {
             catalog,
         );
 
-        assert_eq!(client.artist("artist-1").await.unwrap(), artist);
-        assert_eq!(client.track("track-1").await.unwrap(), track);
-        assert_eq!(client.album("album-1").await.unwrap(), album);
+        assert_eq!(client.artist("artist1").await.unwrap(), artist);
+        assert_eq!(client.track("track1").await.unwrap(), track);
+        assert_eq!(client.album("album1").await.unwrap(), album);
         assert_eq!(
-            client.album_tracks("album-1", 0, 50).await.unwrap().items,
+            client.album_tracks("album1", 0, 50).await.unwrap().items,
             vec![track]
         );
         assert!(client.transport().requests().is_empty());

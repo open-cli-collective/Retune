@@ -329,10 +329,14 @@ fn session_error(client: &LiveClient, error: LibrespotError) -> PlaybackError {
         error.kind
     );
     match client.token_store().load() {
-        Ok(Some(mut tokens)) => {
-            tokens.playback_credentials = None;
-            match client.token_store().save(&tokens) {
-                Ok(()) => PlaybackError::authorization(PlaybackAuthorizationReason::Rejected),
+        Ok(Some(current)) => {
+            let mut cleared = current.clone();
+            cleared.playback_credentials = None;
+            match client
+                .token_store()
+                .replace_if_current(&current, &cleared)
+            {
+                Ok(_) => PlaybackError::authorization(PlaybackAuthorizationReason::Rejected),
                 Err(clear_error) => PlaybackError::message(format!(
                     "Spotify playback authorization was rejected and could not be cleared: {clear_error}"
                 )),
@@ -376,11 +380,13 @@ fn monitor(
     events: mpsc::UnboundedSender<NeutralEvent>,
     generation: u64,
 ) {
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         while let Some(event) = receiver.recv().await {
             if let PlayerEvent::Preloading { track_id } = &event {
                 if let Ok(uri) = track_id.to_uri() {
-                    log::info!("Spotify playback operation=preload ready: generation={generation} uri={uri}");
+                    log::info!(
+                        "Spotify playback operation=preload ready: generation={generation} uri={uri}"
+                    );
                 }
             }
             if let PlayerEvent::Unavailable {
@@ -517,6 +523,46 @@ mod tests {
         client::{HttpTransport, SpotifyClient},
         tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials, Tokens},
     };
+    use std::sync::Mutex;
+
+    struct ReplaceDuringLoadStore {
+        current: Mutex<Option<Tokens>>,
+        replacement: Tokens,
+    }
+
+    impl TokenStore for ReplaceDuringLoadStore {
+        fn load(&self) -> retune_spotify::Result<Option<Tokens>> {
+            let mut current = self.current.lock().unwrap();
+            let loaded = current.clone();
+            if loaded.as_ref() != Some(&self.replacement) {
+                *current = Some(self.replacement.clone());
+            }
+            Ok(loaded)
+        }
+
+        fn save(&self, tokens: &Tokens) -> retune_spotify::Result<()> {
+            *self.current.lock().unwrap() = Some(tokens.clone());
+            Ok(())
+        }
+
+        fn clear(&self) -> retune_spotify::Result<()> {
+            *self.current.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn replace_if_current(
+            &self,
+            expected: &Tokens,
+            tokens: &Tokens,
+        ) -> retune_spotify::Result<bool> {
+            let mut current = self.current.lock().unwrap();
+            if current.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *current = Some(tokens.clone());
+            Ok(true)
+        }
+    }
 
     #[tokio::test]
     async fn monitor_reports_only_player_event_channel_closure() {
@@ -622,5 +668,46 @@ mod tests {
             .unwrap()
             .playback_credentials
             .is_some());
+    }
+
+    #[test]
+    fn semantic_rejection_does_not_overwrite_concurrently_refreshed_tokens() {
+        let old = Tokens {
+            access: "old-access".into(),
+            refresh: "old-refresh".into(),
+            expires_at: 0,
+            scopes: "user-library-read".into(),
+            playback_credentials: Some(PlaybackCredentials {
+                username: "old-user".into(),
+                auth_data: vec![1],
+            }),
+        };
+        let replacement = Tokens {
+            access: "new-access".into(),
+            refresh: "new-refresh".into(),
+            expires_at: 1,
+            scopes: "user-library-read".into(),
+            playback_credentials: Some(PlaybackCredentials {
+                username: "new-user".into(),
+                auth_data: vec![2],
+            }),
+        };
+        let inner = Arc::new(ReplaceDuringLoadStore {
+            current: Mutex::new(Some(old)),
+            replacement: replacement.clone(),
+        });
+        let tokens: Box<dyn TokenStore> = Box::new(Arc::clone(&inner));
+        let store = Arc::new(CachedTokenStore::new(tokens));
+        let client = SpotifyClient::new("test", HttpTransport::new(), Arc::clone(&store));
+
+        let error = LibrespotError::new(
+            ErrorKind::PermissionDenied,
+            std::io::Error::other("rejected"),
+        );
+        assert!(matches!(
+            session_error(&client, error),
+            PlaybackError::AuthorizationRequired { .. }
+        ));
+        assert_eq!(store.load().unwrap(), Some(replacement));
     }
 }

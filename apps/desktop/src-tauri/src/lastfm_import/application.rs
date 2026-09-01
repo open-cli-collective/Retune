@@ -1,0 +1,694 @@
+use std::sync::Arc;
+
+use super::model::{ApplyFailure, ApplyPlan};
+use super::{
+    apply::{apply_frozen_mappings, apply_page, commit_apply_plan, run_apply_upstream_effect},
+    apply_history_updates, apply_metadata, current_account_binding,
+    current_spotify_binding_is_current, ensure_import_readable, lastfm_username, lazy_match_page,
+    prepare_accept_all_batches, requires_spotify_ownership, run_incremental_sync, set_sync_problem,
+    AcceptAllCursor, AcceptAllSummary, ApplyJobStage, CollectionAlbumCandidate, CountMode,
+    ImportDefaults, ImportMatchSelection, ImportPageView, ImportPhase, ImportQueuePage,
+    ImportStateView, PageOptions, ReviewAction, ReviewBatchKey, Service,
+};
+
+pub(super) struct UseCases<'a, Provider, Connected> {
+    service: &'a Arc<Service>,
+    lastfm: &'a Arc<crate::lastfm::Service>,
+    membership: &'a crate::spotify_membership::SpotifyMembership,
+    library: &'a crate::library_state::LibraryState,
+    settings: &'a crate::store::SettingsState,
+    cooldown_store: &'a crate::store::FsCooldownStore,
+    provider: Provider,
+    connected: Connected,
+}
+
+pub(super) struct Owners<'a> {
+    pub(super) service: &'a Arc<Service>,
+    pub(super) lastfm: &'a Arc<crate::lastfm::Service>,
+    pub(super) membership: &'a crate::spotify_membership::SpotifyMembership,
+    pub(super) library: &'a crate::library_state::LibraryState,
+    pub(super) settings: &'a crate::store::SettingsState,
+    pub(super) cooldown_store: &'a crate::store::FsCooldownStore,
+}
+
+impl<'a, Provider, Connected> UseCases<'a, Provider, Connected>
+where
+    Provider: Fn() -> Result<Arc<crate::SpotifyProvider>, String>,
+    Connected: Fn() -> Result<bool, String>,
+{
+    pub(super) fn new(owners: Owners<'a>, provider: Provider, connected: Connected) -> Self {
+        Self {
+            service: owners.service,
+            lastfm: owners.lastfm,
+            membership: owners.membership,
+            library: owners.library,
+            settings: owners.settings,
+            cooldown_store: owners.cooldown_store,
+            provider,
+            connected,
+        }
+    }
+
+    async fn readable(&self) -> Result<bool, String> {
+        self.service.ensure_hydrated()?;
+        ensure_import_readable(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+        )
+        .await
+    }
+
+    pub(super) async fn state(&self, now: u64) -> Result<ImportStateView, String> {
+        if self.service.snapshot().await.is_some() {
+            let _ = self.readable().await?;
+        }
+        let mut view = self.service.state().await;
+        if view.phase.is_none() {
+            view.username = lastfm_username(self.lastfm).await.ok();
+        }
+        view.spotify_limit = self
+            .cooldown_store
+            .cooldowns(now)
+            .map_err(|error| error.to_string())?
+            .values()
+            .min_by_key(|cooldown| cooldown.deadline)
+            .copied();
+        Ok(view)
+    }
+
+    pub(super) async fn queue(
+        &self,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<ImportQueuePage, String> {
+        if !self.readable().await? {
+            if cursor != 0 {
+                return Err("Last.fm import queue cursor is out of range.".into());
+            }
+            return Ok(ImportQueuePage {
+                items: Vec::new(),
+                cursor,
+                next_cursor: None,
+                total: 0,
+            });
+        }
+        self.service.queue_page(cursor, limit).await
+    }
+
+    pub(super) async fn page(
+        &self,
+        key: ReviewBatchKey,
+    ) -> Result<(Option<ImportPageView>, bool), String> {
+        if !self.readable().await? {
+            return Ok((None, false));
+        }
+        lazy_match_page(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            key,
+        )
+        .await
+    }
+
+    pub(super) async fn review(
+        &self,
+        key: ReviewBatchKey,
+        ids: Option<&[String]>,
+        action: ReviewAction,
+    ) -> Result<ImportStateView, String> {
+        super::review_import(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            key,
+            ids,
+            action,
+        )
+        .await
+    }
+
+    pub(super) async fn options(
+        &self,
+        key: ReviewBatchKey,
+        options: PageOptions,
+    ) -> Result<ImportStateView, String> {
+        super::update_import_options(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+            key,
+            options,
+        )
+        .await
+    }
+
+    pub(super) async fn count_mode(
+        &self,
+        target_uri: &str,
+        mode: CountMode,
+    ) -> Result<ImportStateView, String> {
+        super::update_import_count_mode(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+            target_uri,
+            mode,
+        )
+        .await
+    }
+
+    pub(super) async fn search_terms(&self, show: bool) -> Result<ImportStateView, String> {
+        super::update_import_search_terms(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+            show,
+        )
+        .await
+    }
+
+    pub(super) async fn select_matches(
+        &self,
+        batch_id: u32,
+        selections: Vec<ImportMatchSelection>,
+    ) -> Result<Option<ImportPageView>, String> {
+        let selections = selections
+            .into_iter()
+            .map(|selection| (selection.id, selection.uri))
+            .collect::<Vec<_>>();
+        super::select_import_matches(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            &selections,
+        )
+        .await
+        .map(|(page, _)| page)
+    }
+
+    pub(super) async fn search_collection_albums(
+        &self,
+        batch_id: u32,
+        artist: &str,
+        query: &str,
+    ) -> Result<Vec<CollectionAlbumCandidate>, String> {
+        super::search_collection_albums(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            artist,
+            query,
+        )
+        .await
+    }
+
+    pub(super) async fn preview_or_add_collection_album(
+        &self,
+        batch_id: u32,
+        artist: &str,
+        uri: &str,
+        add: bool,
+    ) -> Result<Option<ImportPageView>, String> {
+        super::preview_or_add_collection_album(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            artist,
+            uri,
+            add,
+        )
+        .await
+        .map(|(page, _)| page)
+    }
+
+    pub(super) async fn remove_collection_album(
+        &self,
+        batch_id: u32,
+        artist: &str,
+        uri: &str,
+    ) -> Result<Option<ImportPageView>, String> {
+        super::remove_collection_album(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            artist,
+            uri,
+        )
+        .await
+        .map(|(page, _)| page)
+    }
+
+    pub(super) async fn change_track(
+        &self,
+        batch_id: u32,
+        id: &str,
+        query: &str,
+    ) -> Result<Option<ImportPageView>, String> {
+        super::change_import_track(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            id,
+            query,
+        )
+        .await
+        .map(|(page, _)| page)
+    }
+
+    pub(super) async fn change_album(
+        &self,
+        batch_id: u32,
+        id: &str,
+        query: &str,
+    ) -> Result<ImportStateView, String> {
+        super::change_import_album(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            id,
+            query,
+        )
+        .await
+    }
+
+    pub(super) async fn activate_collection(
+        &self,
+        key: ReviewBatchKey,
+    ) -> Result<Option<ImportPageView>, String> {
+        super::activate_collection(
+            self.service,
+            self.lastfm,
+            self.membership,
+            self.library,
+            &self.provider,
+            &self.connected,
+            key,
+        )
+        .await
+        .map(|(page, _)| page)
+    }
+
+    pub(super) async fn start_import<Spawn, Changed>(
+        &self,
+        defaults: Option<ImportDefaults>,
+        spawn: Spawn,
+        mut changed: Changed,
+    ) -> Result<ImportStateView, String>
+    where
+        Spawn:
+            FnOnce(super::service::RunnerGuard, Arc<crate::lastfm::Service>, Arc<Service>, String),
+        Changed: FnMut(),
+    {
+        let username = lastfm_username(self.lastfm).await?;
+        let history_to =
+            crate::settings_commands::history_cutoff_for_import(self.settings, &username).await?;
+        if let Some(session) = self.service.snapshot().await {
+            if session.phase == ImportPhase::Suspended
+                && requires_spotify_ownership(&session)
+                && !current_spotify_binding_is_current(
+                    self.service,
+                    self.lastfm,
+                    self.membership,
+                    &self.provider,
+                    &self.connected,
+                    true,
+                )
+                .await?
+            {
+                let view = self.service.state().await;
+                changed();
+                return Ok(view);
+            }
+        }
+        let view = self
+            .service
+            .start_or_resume(&username, history_to, defaults)
+            .await?;
+        changed();
+        if let Some(run) = self.service.claim_runner() {
+            spawn(
+                run,
+                Arc::clone(self.lastfm),
+                Arc::clone(self.service),
+                username,
+            );
+        }
+        Ok(view)
+    }
+
+    pub(super) async fn sync<StartWorker, Changed>(
+        &self,
+        mut start_worker: StartWorker,
+        mut changed: Changed,
+    ) -> Result<ImportStateView, String>
+    where
+        StartWorker: FnMut(),
+        Changed: FnMut(),
+    {
+        let username = lastfm_username(self.lastfm).await?;
+        if self.service.next_apply_job().await.is_some()
+            || self.service.sync_snapshot().await.accept_all.is_some()
+        {
+            start_worker();
+        }
+        self.lastfm.settle_before_import().await;
+        let Some(_run) = self.service.claim_sync_runner() else {
+            return Ok(self.service.state().await);
+        };
+        changed();
+        let result = run_incremental_sync(
+            self.library,
+            self.membership,
+            self.lastfm,
+            self.service,
+            &username,
+        )
+        .await;
+        if let Err(error) = &result {
+            let _ = set_sync_problem(self.service, Some(error.clone())).await;
+        }
+        let view = self.service.state().await;
+        changed();
+        result.map(|()| view)
+    }
+
+    pub(super) async fn apply<StartWorker, Changed>(
+        &self,
+        key: ReviewBatchKey,
+        selected_ids: &[String],
+        archive_batch: bool,
+        options: PageOptions,
+        mut start_worker: StartWorker,
+        mut changed: Changed,
+    ) -> Result<ImportStateView, String>
+    where
+        StartWorker: FnMut(),
+        Changed: FnMut(),
+    {
+        let membership = self.membership.lock().await;
+        current_account_binding(
+            self.service,
+            self.lastfm,
+            &membership,
+            &self.provider,
+            &self.connected,
+            false,
+            true,
+            false,
+        )
+        .await?;
+        let view = apply_page(
+            self.service,
+            key.batch_id,
+            (&key.artist, &key.album),
+            selected_ids,
+            archive_batch,
+            options,
+        )
+        .await?;
+        drop(membership);
+        start_worker();
+        changed();
+        Ok(view)
+    }
+
+    pub(super) async fn retry_apply<StartWorker, Changed>(
+        &self,
+        batch_id: u32,
+        mut start_worker: StartWorker,
+        mut changed: Changed,
+    ) -> Result<ImportStateView, String>
+    where
+        StartWorker: FnMut(),
+        Changed: FnMut(),
+    {
+        let membership = self.membership.lock().await;
+        let (binding, _) = current_account_binding(
+            self.service,
+            self.lastfm,
+            &membership,
+            &self.provider,
+            &self.connected,
+            false,
+            true,
+            false,
+        )
+        .await?;
+        let session_id = self
+            .service
+            .snapshot()
+            .await
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?
+            .cache_id;
+        let view = self
+            .service
+            .retry_failed_apply(
+                &session_id,
+                batch_id,
+                &binding.lastfm_username,
+                &binding.spotify_account_id,
+            )
+            .await?;
+        drop(membership);
+        start_worker();
+        changed();
+        Ok(view)
+    }
+
+    pub(super) async fn prepare_accept_all(&self) -> Result<(AcceptAllSummary, bool), String> {
+        if !self.readable().await? {
+            return Ok((
+                AcceptAllSummary {
+                    album_entities: 0,
+                    track_entities: 0,
+                },
+                false,
+            ));
+        }
+        let changed_any = std::sync::atomic::AtomicBool::new(false);
+        let summary = prepare_accept_all_batches(self.service, |batch_id, artist, album| {
+            let changed_any = &changed_any;
+            async move {
+                let (_, changed) = self
+                    .page(ReviewBatchKey {
+                        batch_id,
+                        artist,
+                        album,
+                    })
+                    .await?;
+                changed_any.fetch_or(changed, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+        })
+        .await?;
+        Ok((
+            summary,
+            changed_any.load(std::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+
+    pub(super) async fn accept_all<StartWorker, Changed>(
+        &self,
+        mut start_worker: StartWorker,
+        mut changed: Changed,
+    ) -> Result<ImportStateView, String>
+    where
+        StartWorker: FnMut(),
+        Changed: FnMut(),
+    {
+        let session = self
+            .service
+            .snapshot()
+            .await
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+        let username = session.lastfm_username.clone();
+        let spotify_account_id = session
+            .spotify_account_id
+            .clone()
+            .ok_or_else(|| "Prepare Spotify matches before accepting all imports.".to_string())?;
+        if self.service.sync_snapshot().await.accept_all.is_some() {
+            return Err("Accept All is already applying this Last.fm review.".into());
+        }
+        self.service
+            .mutate_sync(|sync| {
+                sync.accept_all = Some(AcceptAllCursor {
+                    session_id: session.cache_id.clone(),
+                    lastfm_username: username.clone(),
+                    spotify_account_id: spotify_account_id.clone(),
+                    next_batch_index: 0,
+                });
+                Ok(())
+            })
+            .await?;
+        start_worker();
+        let view = self.service.state().await;
+        changed();
+        Ok(view)
+    }
+
+    pub(super) async fn validate_apply_account(
+        &self,
+        membership: &crate::spotify_membership::SpotifyMembershipGuard,
+        plan: &ApplyPlan,
+        require_provider: bool,
+        changed_message: &str,
+    ) -> Result<Option<Arc<crate::SpotifyProvider>>, ApplyFailure> {
+        let (binding, provider) = current_account_binding(
+            self.service,
+            self.lastfm,
+            membership,
+            &self.provider,
+            &self.connected,
+            require_provider,
+            true,
+            false,
+        )
+        .await?;
+        if binding.lastfm_username != plan.lastfm_username
+            || binding.spotify_account_id != plan.spotify_account_id
+        {
+            return Err(changed_message.into());
+        }
+        Ok(provider)
+    }
+
+    pub(super) async fn run_apply_effect<LibraryChanged>(
+        &self,
+        stage: ApplyJobStage,
+        plan: &ApplyPlan,
+        mut library_changed: LibraryChanged,
+    ) -> Result<(), ApplyFailure>
+    where
+        LibraryChanged: FnMut() -> Result<(), String>,
+    {
+        let mut membership = self.membership.lock().await;
+        match stage {
+            ApplyJobStage::Upstream => {
+                let provider = self
+                    .validate_apply_account(
+                        &membership,
+                        plan,
+                        true,
+                        "The connected account changed before Spotify membership was applied.",
+                    )
+                    .await?
+                    .expect("upstream apply resolves a provider");
+                let library_owner = self.library.owner();
+                run_apply_upstream_effect(
+                    self.service,
+                    &mut membership,
+                    &library_owner,
+                    self.cooldown_store,
+                    provider.as_ref(),
+                    plan,
+                    crate::unix_now(),
+                )
+                .await?;
+            }
+            ApplyJobStage::Local => {
+                self.validate_apply_account(
+                    &membership,
+                    plan,
+                    false,
+                    "The connected account changed while applying this review batch.",
+                )
+                .await?;
+                if !plan.updates.is_empty() || !plan.metadata_uris.is_empty() {
+                    let updates = plan.updates.clone();
+                    let metadata_uris = plan.metadata_uris.clone();
+                    let options = plan.options.clone();
+                    self.library
+                        .mutate_async(move |library| {
+                            apply_history_updates(library, &updates);
+                            apply_metadata(
+                                library,
+                                &metadata_uris,
+                                options.whole_album,
+                                options.genre.as_deref(),
+                                options.rating,
+                            )
+                        })
+                        .await?;
+                    library_changed()?;
+                }
+                log::info!(target: "lastfm_import", "apply local complete batch={}", plan.batch_id);
+            }
+            ApplyJobStage::Mappings => {
+                self.validate_apply_account(
+                    &membership,
+                    plan,
+                    false,
+                    "The connected account changed while applying this review batch.",
+                )
+                .await?;
+                let mappings = self
+                    .service
+                    .mappings_for(&plan.lastfm_username, Some(&plan.spotify_account_id))
+                    .await?;
+                let before = mappings.clone();
+                let mut mappings = mappings;
+                apply_frozen_mappings(&mut mappings, plan);
+                if mappings != before {
+                    self.service
+                        .save_mappings_for(
+                            &plan.lastfm_username,
+                            Some(&plan.spotify_account_id),
+                            mappings,
+                        )
+                        .await?;
+                }
+                log::info!(target: "lastfm_import", "apply mappings complete batch={}", plan.batch_id);
+            }
+            ApplyJobStage::Decision => {
+                self.validate_apply_account(
+                    &membership,
+                    plan,
+                    false,
+                    "The connected account changed while applying this review batch.",
+                )
+                .await?;
+                commit_apply_plan(self.service, plan).await?;
+                log::info!(target: "lastfm_import", "apply decision complete batch={}", plan.batch_id);
+            }
+        }
+        Ok(())
+    }
+}

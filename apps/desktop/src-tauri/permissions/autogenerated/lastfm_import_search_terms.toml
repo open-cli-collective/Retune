@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-search-terms"
+description = "Enables the lastfm_import_search_terms command without any pre-configured scope."
+commands.allow = ["lastfm_import_search_terms"]
+
+[[permission]]
+identifier = "deny-lastfm-import-search-terms"
+description = "Denies the lastfm_import_search_terms command without any pre-configured scope."
+commands.deny = ["lastfm_import_search_terms"]

@@ -1,62 +1,88 @@
+mod backup;
 mod diagnostics;
+mod external_links;
 mod fixture;
 mod lastfm;
 mod lastfm_import;
 mod library_commands;
+mod library_state;
 mod localfiles;
+mod main_events;
 mod media_keys;
+mod persistence;
 mod playback;
 mod playback_commands;
+mod playback_resources;
 mod playlist_commands;
+mod playlist_state;
 mod playlists;
 mod provider;
+mod restore;
+mod restore_latch;
+mod settings_commands;
 mod spotify_commands;
+mod spotify_membership;
+mod spotify_sync_commit;
 mod store;
 mod sync;
 mod sync_orchestrator;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::HashMap,
     fs,
-    io::Read,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-use flate2::read::GzDecoder;
+use library_state::LibraryState;
+#[cfg(test)]
+use library_state::{
+    commit_library_candidate, record_play_with as record_play, LibraryTransactionState,
+};
 
-use playback::{AudioSettings, Playback, PlayerStateEvent, SnapshotTrack};
-use provider::{
-    artist_albums_page, artist_descriptor, image_url, image_url_at_least, spotify_id, title_case,
-    ArtistAlbumsPage, SearchResults, SpotifySyncProvider, SyncBatch,
-};
-use retune_core::{
-    browse::{self, Selection},
-    io::{export_json, import},
-    model::{
-        AlbumKey, EffectiveRating, Library, NewTrack, Rating, SourceId, TrackEdit, TrackId,
-        TrackRecord,
-    },
-};
+#[cfg(test)]
+use playback::RepeatMode;
+use playback::{AudioSettings, Playback, PlaybackBackend, PlayerStateEvent};
+use playlist_state::PlaylistState;
+#[cfg(test)]
+use provider::SyncBatch;
+use provider::{image_url, image_url_at_least, spotify_id};
+use retune_core::model::Library;
+#[cfg(test)]
+use retune_core::model::{AlbumKey, Rating, SourceId};
+#[cfg(test)]
+use retune_spotify::client::{Album, Track as SpotifyTrack};
 use retune_spotify::{
     auth::{self, LoopbackListener, Pkce},
     catalog::SpotifyCatalog,
-    client::{
-        endpoint_family, Album, HttpTransport, SpotifyClient, Track as SpotifyTrack, Transport,
-    },
-    normalize::UNCATEGORIZED,
+    client::{HttpTransport, SpotifyClient, Transport},
     tokens::{CachedTokenStore, EncryptedFsTokenStore, TokenStore, Tokens},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use spotify_commands::sync_spotify;
+#[cfg(test)]
+use spotify_commands::{
+    artist_albums_outcome, mark_album_membership, mark_track_membership, partial_import_message,
+    record_full_sync, SyncProgressState,
+};
+#[cfg(test)]
+use spotify_commands::{
+    spotify_item_link, spotify_track_destination, SpotifyDestination, SpotifyNavigation,
+    SpotifyOpenTarget,
+};
+#[cfg(test)]
+use spotify_membership::album_track_uris;
+#[cfg(test)]
+use store::SpotifyLibraryState;
 use store::{
-    BrowserPanes, FsOverlayStore, FsPlaylistStore, FsSettingsStore, FsSpotifyCatalogStore,
-    FsSyncStore, LastFmScrobblingProfile, OverlayStore, Settings, SpotifyLibraryState, StoreError,
-    Theme,
+    FsArtistGenresStore, FsCooldownStore, FsOverlayStore, FsPlaylistStore, FsSettingsStore,
+    FsSpotifyCatalogStore, FsSpotifyLibraryStore, OverlayStore, Settings, SettingsState,
+    StoreError, Theme,
 };
 use sync_orchestrator::SyncOrchestrator;
 use tauri::{
@@ -67,48 +93,157 @@ use tauri_plugin_opener::OpenerExt;
 
 pub(crate) type SharedTokenStore = Arc<CachedTokenStore<Box<dyn TokenStore>>>;
 type SpotifyProvider = SpotifyClient<HttpTransport, SharedTokenStore>;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_dialog::DialogExt;
 
-struct LibraryTransactionState {
-    active: Mutex<bool>,
-    changed: Condvar,
+enum PlaybackDurableEffect {
+    RecordPlay(String),
+    Listening(playback::ListeningFact),
+    Shutdown(tokio::sync::oneshot::Sender<()>),
 }
 
-impl Default for LibraryTransactionState {
-    fn default() -> Self {
+struct PlaybackEffects {
+    sender: Mutex<Option<tokio::sync::mpsc::Sender<PlaybackDurableEffect>>>,
+    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExitAction {
+    StartDrain,
+    WaitForDrain,
+    Allow,
+}
+
+fn exit_action(state: &AtomicU8) -> ExitAction {
+    loop {
+        match state.load(Ordering::Acquire) {
+            0 => {
+                if state
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return ExitAction::StartDrain;
+                }
+            }
+            1 => return ExitAction::WaitForDrain,
+            _ => return ExitAction::Allow,
+        }
+    }
+}
+
+impl PlaybackEffects {
+    #[cfg(test)]
+    fn disabled() -> Self {
         Self {
-            active: Mutex::new(false),
-            changed: Condvar::new(),
+            sender: Mutex::new(None),
+            task: Mutex::new(None),
+        }
+    }
+
+    fn start(app: tauri::AppHandle, lastfm: Arc<lastfm::Service>) -> Self {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+        let task = tauri::async_runtime::spawn(async move {
+            while let Some(effect) = receiver.recv().await {
+                match effect {
+                    PlaybackDurableEffect::RecordPlay(uri) => {
+                        let handle = app.clone();
+                        match tauri::async_runtime::spawn_blocking(move || {
+                            let state = handle.state::<AppState>();
+                            state.library.record_play(&uri, unix_now())
+                        })
+                        .await
+                        {
+                            Ok(Ok(true)) => {
+                                if let Err(error) = emit_main(&app, "library-changed", ()) {
+                                    notify_error(&app, error.to_string());
+                                }
+                            }
+                            Ok(Ok(false)) => {}
+                            Ok(Err(error)) => notify_error(&app, error),
+                            Err(error) => notify_error(&app, error.to_string()),
+                        }
+                    }
+                    PlaybackDurableEffect::Listening(fact) => {
+                        lastfm.handle_listening_fact(fact).await;
+                    }
+                    PlaybackDurableEffect::Shutdown(done) => {
+                        let _ = done.send(());
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            sender: Mutex::new(Some(sender)),
+            task: Mutex::new(Some(task)),
+        }
+    }
+
+    fn submit(&self, effect: PlaybackDurableEffect) -> Result<(), String> {
+        self.sender
+            .lock()
+            .expect("playback effects sender mutex poisoned")
+            .as_ref()
+            .ok_or_else(|| "Playback persistence is unavailable.".to_string())?
+            .try_send(effect)
+            .map_err(|_| "Playback persistence queue is full.".to_string())
+    }
+
+    async fn shutdown(&self) {
+        let sender = self
+            .sender
+            .lock()
+            .expect("playback effects sender mutex poisoned")
+            .take();
+        if let Some(sender) = sender {
+            let (done, drained) = tokio::sync::oneshot::channel();
+            if sender
+                .send(PlaybackDurableEffect::Shutdown(done))
+                .await
+                .is_ok()
+            {
+                let _ = drained.await;
+            }
+        }
+        let task = self
+            .task
+            .lock()
+            .expect("playback effects mutex poisoned")
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
         }
     }
 }
 
 struct AppState {
-    library: Mutex<Library>,
-    store: FsOverlayStore,
-    library_write_gate: Arc<Mutex<()>>,
-    library_transaction: Arc<LibraryTransactionState>,
-    spotify_library: Mutex<SpotifyLibraryState>,
-    spotify_library_gate: tokio::sync::Mutex<()>,
-    settings: Mutex<Settings>,
-    settings_store: FsSettingsStore,
-    sync_store: FsSyncStore,
-    playlists: Mutex<playlists::PlaylistCache>,
-    playlist_store: FsPlaylistStore,
+    library: LibraryState,
+    spotify_membership: spotify_membership::SpotifyMembership,
+    settings: SettingsState,
+    cooldown_store: FsCooldownStore,
+    artist_genres_store: FsArtistGenresStore,
+    playlists: PlaylistState,
     menu_checks: Option<MenuChecks>,
-    recovery_notice: Mutex<Option<String>>,
+    main_events: main_events::MainEventSink,
     token_store: SharedTokenStore,
     spotify_catalog: Arc<Mutex<SpotifyCatalog>>,
     spotify_catalog_store: FsSpotifyCatalogStore,
-    spotify_catalog_saved_generation: AtomicU64,
+    spotify_catalog_saved_generation: Arc<AtomicU64>,
+    spotify_catalog_flush_gate: Arc<Mutex<()>>,
+    spotify_catalog_hydration_epoch: Arc<AtomicU64>,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
     artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
     playback: Arc<Playback>,
+    playback_effects: PlaybackEffects,
     lastfm: Arc<lastfm::Service>,
     lastfm_import: Arc<lastfm_import::Service>,
     media_keys: media_keys::MediaKeys,
+    spotify_session: spotify_commands::SpotifySession,
     sync_orchestrator: SyncOrchestrator,
+    catalog_flush_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     playlist_reauth_notified: AtomicBool,
+    local_import_active: Arc<AtomicBool>,
+    restore_mutations: Arc<restore_latch::RestoreMutationState>,
+    shutdown_state: AtomicU8,
 }
 
 #[cfg(test)]
@@ -124,32 +259,52 @@ pub(crate) fn test_app_state(
         &app_data_dir,
     )) as Box<dyn TokenStore>));
     let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
+    let restore_mutations = lastfm_import.restore_mutations();
     AppState {
-        library: Mutex::new(library),
-        store: FsOverlayStore::new(&app_data_dir),
-        library_write_gate: Arc::new(Mutex::new(())),
-        library_transaction: Arc::new(LibraryTransactionState::default()),
-        spotify_library: Mutex::new(spotify_library),
-        spotify_library_gate: tokio::sync::Mutex::new(()),
-        settings: Mutex::new(Settings::default()),
-        settings_store: FsSettingsStore::new(&app_data_dir),
-        sync_store: FsSyncStore::new(&app_data_dir),
-        playlists: Mutex::new(playlists::PlaylistCache::default()),
-        playlist_store: FsPlaylistStore::new(&app_data_dir),
+        library: LibraryState::new_with_restore_state(
+            library,
+            FsOverlayStore::new(&app_data_dir),
+            Arc::clone(&restore_mutations),
+        ),
+        spotify_membership: spotify_membership::SpotifyMembership::new_with_restore_state(
+            spotify_library,
+            FsSpotifyLibraryStore::new(&app_data_dir),
+            Arc::clone(&restore_mutations),
+        ),
+        settings: SettingsState::new_with_restore_state(
+            Settings::default(),
+            FsSettingsStore::new(&app_data_dir),
+            Arc::clone(&restore_mutations),
+        ),
+        cooldown_store: FsCooldownStore::new(&app_data_dir),
+        artist_genres_store: FsArtistGenresStore::new(&app_data_dir),
+        playlists: PlaylistState::new_with_restore_state(
+            playlists::PlaylistCache::default(),
+            FsPlaylistStore::new(&app_data_dir),
+            Arc::clone(&restore_mutations),
+        ),
         menu_checks: None,
-        recovery_notice: Mutex::new(None),
+        main_events: main_events::MainEventSink::default(),
         token_store,
         spotify_catalog,
         spotify_catalog_store: FsSpotifyCatalogStore::new(&app_data_dir),
-        spotify_catalog_saved_generation: AtomicU64::new(0),
+        spotify_catalog_saved_generation: Arc::new(AtomicU64::new(0)),
+        spotify_catalog_flush_gate: Arc::new(Mutex::new(())),
+        spotify_catalog_hydration_epoch: Arc::new(AtomicU64::new(0)),
         spotify: Mutex::new(None),
         artwork_cache: Mutex::default(),
         playback: Arc::new(Playback::default()),
+        playback_effects: PlaybackEffects::disabled(),
         lastfm,
         lastfm_import,
         media_keys: media_keys::MediaKeys::disabled(),
+        spotify_session: spotify_commands::SpotifySession::default(),
         sync_orchestrator: SyncOrchestrator::default(),
+        catalog_flush_task: Mutex::new(None),
         playlist_reauth_notified: AtomicBool::new(false),
+        local_import_active: Arc::new(AtomicBool::new(false)),
+        restore_mutations,
+        shutdown_state: AtomicU8::new(0),
     }
 }
 
@@ -218,652 +373,30 @@ impl ConnectionState {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportSettings {
-    theme: Theme,
-    zoom: f64,
-    zebra: bool,
-    #[serde(default)]
-    pl_collapsed: bool,
-    #[serde(default = "default_browser_visible")]
-    browser_visible: bool,
-    #[serde(default)]
-    browser_panes: BrowserPanes,
-    column_order: Vec<String>,
-    #[serde(default)]
-    column_widths: BTreeMap<String, u32>,
-    hidden_columns: Vec<String>,
-    #[serde(default)]
-    playlist_hidden_columns: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    playlist_column_orders: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    playlist_column_widths: BTreeMap<String, BTreeMap<String, u32>>,
-    #[serde(default)]
-    sort_column: Option<String>,
-    #[serde(default)]
-    sort_desc: bool,
-    #[serde(default)]
-    shuffle: bool,
-    #[serde(default)]
-    lastfm_scrobbling_profile: Option<LastFmScrobblingProfile>,
-}
-
-impl ExportSettings {
-    fn from_settings(settings: &Settings) -> Self {
-        Self {
-            theme: settings.theme,
-            zoom: settings.zoom,
-            zebra: settings.zebra,
-            pl_collapsed: settings.pl_collapsed,
-            browser_visible: settings.browser_visible,
-            browser_panes: settings.browser_panes,
-            column_order: settings.column_order.clone(),
-            column_widths: settings.column_widths.clone(),
-            hidden_columns: settings.hidden_columns.clone(),
-            playlist_hidden_columns: settings.playlist_hidden_columns.clone(),
-            playlist_column_orders: settings.playlist_column_orders.clone(),
-            playlist_column_widths: settings.playlist_column_widths.clone(),
-            sort_column: settings.sort_column.clone(),
-            sort_desc: settings.sort_desc,
-            shuffle: settings.shuffle,
-            lastfm_scrobbling_profile: settings.lastfm_scrobbling_profile.clone(),
-        }
-    }
-
-    fn apply_to(self, settings: &mut Settings) -> Result<(), String> {
-        settings.theme = self.theme;
-        settings.zoom = self.zoom;
-        settings.zebra = self.zebra;
-        settings.pl_collapsed = self.pl_collapsed;
-        settings.browser_visible = self.browser_visible;
-        settings.browser_panes = self.browser_panes;
-        settings.column_order = self.column_order;
-        settings.column_widths = self.column_widths;
-        settings.hidden_columns = self.hidden_columns;
-        settings.playlist_hidden_columns = self.playlist_hidden_columns;
-        settings.playlist_column_orders = self.playlist_column_orders;
-        settings.playlist_column_widths = self.playlist_column_widths;
-        settings.sort_column = self.sort_column;
-        settings.sort_desc = self.sort_desc;
-        settings.shuffle = self.shuffle;
-        if self.lastfm_scrobbling_profile.is_some() {
-            settings.lastfm_scrobbling_profile = self.lastfm_scrobbling_profile;
-        }
-        settings.normalize();
-        settings.validate().map_err(|error| error.to_string())
-    }
-}
-
-fn default_browser_visible() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-struct SelectionDto {
-    #[serde(default)]
-    cat: Vec<String>,
-    #[serde(default)]
-    art: Vec<String>,
-    #[serde(default)]
-    alb: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowseView {
-    facets: FacetsView,
-    tracks: Vec<TrackView>,
-    album_rating: Option<u8>,
-    album_rating_artist: Option<String>,
-    album_rating_ambiguous: bool,
-    counts: CountsView,
-}
-
-#[derive(Serialize)]
-struct FacetsView {
-    cats: Vec<String>,
-    arts: Vec<String>,
-    albs: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MetadataValues {
-    arts: Vec<String>,
-    albs: Vec<String>,
-    cats: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TrackView {
-    id: u64,
-    uri: String,
-    name: String,
-    art: String,
-    alb: String,
-    cat: String,
-    disc_no: Option<u32>,
-    track_no: Option<u32>,
-    duration_secs: u64,
-    enabled: bool,
-    play_count: u32,
-    last_played_at: Option<u64>,
-    added_at: Option<u64>,
-    release_date: Option<String>,
-    kind: Option<String>,
-    bitrate_kbps: Option<u32>,
-    overridden: bool,
-    is_local: bool,
-    rating: Option<RatingView>,
-}
-
-impl TrackView {
-    fn from_track(track: &TrackRecord, rating: Option<EffectiveRating>) -> Self {
-        Self {
-            id: track.id.0,
-            uri: track.uri.clone(),
-            name: track.name.clone(),
-            art: track.art.clone(),
-            alb: track.alb.clone(),
-            cat: track.cat.clone(),
-            disc_no: track.disc_no,
-            track_no: track.track_no,
-            duration_secs: track.duration.as_secs(),
-            enabled: track.enabled,
-            play_count: track.play_count,
-            last_played_at: track.last_played_at,
-            added_at: track.added_at,
-            release_date: track.release_date.clone(),
-            kind: track.kind.clone(),
-            bitrate_kbps: track.bitrate_kbps,
-            overridden: track
-                .orig_cat
-                .as_ref()
-                .is_some_and(|original| original != &track.cat),
-            is_local: track.uri.starts_with("file:"),
-            rating: rating.map(rating_view),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TrackInfoView {
-    id: u64,
-    uri: String,
-    local_path: Option<String>,
-    source: SourceId,
-    name: String,
-    art: String,
-    alb: String,
-    cat: String,
-    orig_cat: Option<String>,
-    rating: Option<RatingView>,
-    inherited_rating: Option<u8>,
-    genres: Vec<String>,
-}
-
-impl TrackInfoView {
-    fn from_track(library: &Library, track: &TrackRecord) -> Self {
-        Self {
-            id: track.id.0,
-            uri: track.uri.clone(),
-            local_path: localfiles::path_from_file_uri(&track.uri)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-            source: track.source,
-            name: track.name.clone(),
-            art: track.art.clone(),
-            alb: track.alb.clone(),
-            cat: track.cat.clone(),
-            orig_cat: track.orig_cat.clone(),
-            rating: library.effective_rating(track.id).map(rating_view),
-            inherited_rating: library
-                .album_rating(&AlbumKey::of(track))
-                .map(Rating::stars),
-            genres: library
-                .tracks()
-                .iter()
-                .filter(|candidate| candidate.source == track.source)
-                .map(|candidate| candidate.cat.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        }
-    }
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TrackEditDto {
-    name: Option<String>,
-    art: Option<String>,
-    alb: Option<String>,
-    cat: Option<String>,
-    /// Present = set (`stars: n`) or clear (`stars: null`) the explicit
-    /// track rating in the same transaction; absent = leave it untouched.
-    rating_change: Option<RatingChangeDto>,
-}
-
-#[derive(Deserialize)]
-struct RatingChangeDto {
-    stars: Option<u8>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-struct RatingView {
-    stars: u8,
-    explicit: bool,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AlbumPageTrackView {
-    uri: String,
-    name: String,
-    track_no: Option<u32>,
-    duration_secs: u64,
-    enabled: bool,
-    track_id: Option<u64>,
-    saved_individually: bool,
-    rating: Option<RatingView>,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AlbumPageView {
-    uri: String,
-    name: String,
-    artist: String,
-    artist_id: String,
-    album_type: String,
-    year: Option<String>,
-    image_url: Option<String>,
-    total_duration_secs: u64,
-    saved_album: bool,
-    content_complete: bool,
-    added_at: Option<u64>,
-    album_rating: Option<u8>,
-    tracks: Vec<AlbumPageTrackView>,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ArtistPageView {
-    id: String,
-    name: String,
-    descriptor: String,
-    image_url: Option<String>,
-    following: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CountsView {
-    tracks: usize,
-    total_secs: u64,
-    overlay_edits: usize,
-    per_source: PerSourceView,
-}
-
-#[derive(Serialize)]
-struct PerSourceView {
-    music: usize,
-    podcasts: usize,
-    audiobooks: usize,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlaylistListView {
-    id: String,
-    name: String,
-    owned: bool,
-    owner: Option<String>,
-    contains: bool,
-    track_count: usize,
-    items_available: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlaylistTrackView {
-    id: Option<u64>,
-    uri: String,
-    name: String,
-    art: String,
-    alb: String,
-    cat: String,
-    disc_no: Option<u32>,
-    track_no: Option<u32>,
-    duration_secs: u64,
-    enabled: bool,
-    play_count: u32,
-    last_played_at: Option<u64>,
-    added_at: Option<u64>,
-    release_date: Option<String>,
-    kind: Option<String>,
-    bitrate_kbps: Option<u32>,
-    overridden: bool,
-    is_local: bool,
-    rating: Option<RatingView>,
-}
-
-fn collect_metadata_values(library: &Library) -> MetadataValues {
-    let mut arts = BTreeSet::new();
-    let mut albs = BTreeSet::new();
-    let mut cats = BTreeSet::new();
-    for track in library.tracks() {
-        if !track.art.is_empty() {
-            arts.insert(track.art.clone());
-        }
-        if !track.alb.is_empty() {
-            albs.insert(track.alb.clone());
-        }
-        if !track.cat.is_empty() && track.cat != UNCATEGORIZED {
-            cats.insert(track.cat.clone());
-        }
-    }
-    let sort = |values: BTreeSet<String>| {
-        let mut values = values.into_iter().collect::<Vec<_>>();
-        values.sort_by_key(|value| value.to_lowercase());
-        values
-    };
-    MetadataValues {
-        arts: sort(arts),
-        albs: sort(albs),
-        cats: sort(cats),
-    }
-}
-
-fn album_rating_view(
-    library: &Library,
-    selection: &Selection,
-    tracks: &[&TrackRecord],
-) -> (Option<u8>, Option<String>, bool) {
-    if selection.alb().len() != 1 {
-        return (None, None, false);
-    }
-    let albums = tracks
-        .iter()
-        .map(|track| AlbumKey::of(track))
-        .collect::<BTreeSet<_>>();
-    if albums.len() != 1 {
-        return (None, None, true);
-    }
-    let album = albums.into_iter().next().expect("one album key");
-    (
-        library.album_rating(&album).map(Rating::stars),
-        Some(album.art),
-        false,
-    )
-}
-
-fn counts(library: &Library, source: SourceId, selection: &Selection, query: &str) -> CountsView {
-    let visible = browse::tracks(library, source, selection)
-        .into_iter()
-        .filter(|track| {
-            query.is_empty()
-                || [&track.name, &track.art, &track.alb, &track.cat]
-                    .iter()
-                    .any(|value| value.to_lowercase().contains(query))
-        })
-        .collect::<Vec<_>>();
-    let source_count = |source| {
-        library
-            .tracks()
-            .iter()
-            .filter(|track| track.source == source)
-            .count()
-    };
-    let albums = library
-        .tracks()
-        .iter()
-        .map(AlbumKey::of)
-        .collect::<BTreeSet<_>>();
-    let overlay_edits = library
-        .tracks()
-        .iter()
-        .filter(|track| track.rating.is_some())
-        .count()
-        + library
-            .tracks()
-            .iter()
-            .filter(|track| !track.enabled)
-            .count()
-        + library
-            .tracks()
-            .iter()
-            .filter(|track| {
-                track
-                    .orig_cat
-                    .as_ref()
-                    .is_some_and(|original| original != &track.cat)
-            })
-            .count()
-        + albums
-            .iter()
-            .filter(|album| library.album_rating(album).is_some())
-            .count();
-
-    CountsView {
-        tracks: visible.len(),
-        total_secs: visible.iter().map(|track| track.duration.as_secs()).sum(),
-        overlay_edits,
-        per_source: PerSourceView {
-            music: source_count(SourceId::Music),
-            podcasts: source_count(SourceId::Podcasts),
-            audiobooks: source_count(SourceId::Audiobooks),
-        },
-    }
-}
-
-fn rating_view(rating: EffectiveRating) -> RatingView {
-    match rating {
-        EffectiveRating::Explicit(rating) => RatingView {
-            stars: rating.stars(),
-            explicit: true,
-        },
-        EffectiveRating::Inherited(rating) => RatingView {
-            stars: rating.stars(),
-            explicit: false,
-        },
-    }
-}
-
-fn rating_change(edit: &TrackEditDto) -> Result<Option<Option<Rating>>, String> {
-    edit.rating_change
-        .as_ref()
-        .map(|change| {
-            change
-                .stars
-                .map(|stars| {
-                    Rating::new(stars).ok_or_else(|| format!("invalid star rating {stars}"))
-                })
-                .transpose()
-        })
-        .transpose()
-}
-
-fn apply_track_info(
-    library: &mut Library,
-    id: u64,
-    edit: &TrackEditDto,
-    rating_change: Option<Option<Rating>>,
-) -> Result<(), String> {
-    library
-        .edit(
-            TrackId(id),
-            TrackEdit {
-                name: edit.name.clone(),
-                art: edit.art.clone(),
-                alb: edit.alb.clone(),
-                cat: edit.cat.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    if let Some(rating) = rating_change {
-        library
-            .set_track_rating(TrackId(id), rating)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-fn apply_track_infos(
-    library: &mut Library,
-    ids: &[u64],
-    edit: &TrackEditDto,
-) -> Result<(), String> {
-    if ids.is_empty() {
-        return Err("at least one track id is required".into());
-    }
-    for &id in ids {
-        if library.get(TrackId(id)).is_none() {
-            return Err(format!("unknown track id {id}"));
-        }
-    }
-    let rating_change = rating_change(edit)?;
-    for &id in ids {
-        apply_track_info(library, id, edit, rating_change)?;
-    }
-    Ok(())
-}
-
 #[tauri::command]
-fn startup_notice(state: tauri::State<'_, AppState>) -> Option<String> {
-    state
-        .recovery_notice
-        .lock()
-        .expect("notice mutex poisoned")
-        .take()
-}
-
-#[tauri::command]
-fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
-    state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone()
-}
-
-#[tauri::command]
-async fn set_settings(app: tauri::AppHandle, mut settings: Settings) -> Result<(), String> {
+async fn finish_lastfm(app: tauri::AppHandle) -> Result<lastfm::LastFmState, String> {
     let state = app.state::<AppState>();
-    settings.normalize();
-    let current = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    let client_id_changed = current.spotify_client_id != settings.spotify_client_id;
-    settings.spotify_sync_completed = current.spotify_sync_completed;
-    settings.last_full_sync = current.last_full_sync;
-    if settings.lastfm_scrobbling {
-        if let Some(username) = state.lastfm.state().await.username {
-            reconcile_lastfm_scrobbling_profile(&mut settings, &username, unix_now());
-        }
+    let account_changed = state.lastfm.finish().await?;
+    if account_changed {
+        state.lastfm_import.clear_sync_state().await?;
     }
-    settings.validate().map_err(|error| error.to_string())?;
-    let wants_local = settings.playback_backend == "local";
-    state.playback.set_local_requested(wants_local);
-    // Local activation is intentionally lazy: playback owns authorization
-    // prompts, and unrelated preference saves must remain offline-safe.
-    if !wants_local && state.playback.is_local_active().await {
-        state.playback.switch_to_connect().await;
-    }
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    state.lastfm.set_enabled(settings.lastfm_scrobbling).await;
-    state
-        .playback
-        .set_play_threshold_percent(settings.play_threshold_percent)
-        .await;
-    if let Some(menu_checks) = &state.menu_checks {
-        menu_checks
-            .sync(&settings)
-            .map_err(|error| error.to_string())?;
-    }
-    if client_id_changed {
-        *state.spotify.lock().expect("spotify mutex poisoned") = spotify_provider(
-            &settings.spotify_client_id,
-            Arc::clone(&state.token_store),
-            Arc::clone(&state.spotify_catalog),
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn set_lastfm_scrobbling(
-    app: &tauri::AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let current = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    let mut settings = current.clone();
-    settings.lastfm_scrobbling = enabled;
-    if enabled {
-        if let Some(username) = state.lastfm.state().await.username {
-            reconcile_lastfm_scrobbling_profile(&mut settings, &username, unix_now());
-        }
-    }
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())
-}
-
-fn reconcile_lastfm_scrobbling_profile(settings: &mut Settings, username: &str, now: u64) {
-    if username.trim().is_empty()
-        || settings
-            .lastfm_scrobbling_profile
-            .as_ref()
-            .is_some_and(|profile| profile.username == username)
-    {
-        return;
-    }
-    settings.lastfm_scrobbling_profile = Some(LastFmScrobblingProfile {
-        username: username.to_owned(),
-        started_at: now,
+    state.lastfm.activate_connection().await;
+    let sync_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = lastfm_import::commands::sync_lastfm_plays(sync_app).await;
     });
+    state.lastfm.set_enabled(true).await;
+    settings_commands::set_lastfm_scrobbling(&app, true).await?;
+    let result = state.lastfm.state().await;
+    Ok(result)
 }
 
-async fn history_cutoff_for_import(app: &tauri::AppHandle, username: &str) -> Result<u64, String> {
+#[tauri::command]
+async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<lastfm::LastFmState, String> {
     let state = app.state::<AppState>();
-    let current = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    let mut settings = current.clone();
-    reconcile_lastfm_scrobbling_profile(&mut settings, username, unix_now());
-    let cutoff = settings
-        .lastfm_scrobbling_profile
-        .as_ref()
-        .map(|profile| profile.started_at)
-        .ok_or_else(|| "Could not establish the Last.fm history cutoff.".to_string())?;
-    if settings != current {
-        state
-            .settings_store
-            .save(&settings)
-            .map_err(|error| error.to_string())?;
-        *state.settings.lock().expect("settings mutex poisoned") = settings;
-    }
-    Ok(cutoff)
+    let result = state.lastfm.disconnect().await?;
+    state.lastfm_import.clear_sync_state().await?;
+    Ok(result)
 }
 
 async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
@@ -873,14 +406,6 @@ async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Connect to Spotify before enabling built-in playback.".to_string())?;
     let client = provider_from(state)?;
-    if !client
-        .me()
-        .await
-        .map_err(|error| format!("Could not verify Spotify Premium: {error}"))?
-        .is_premium()
-    {
-        return Err("Playback requires Spotify Premium.".into());
-    }
     state
         .playback
         .switch_to_local(client.as_ref(), volume)
@@ -910,21 +435,79 @@ fn stored_connection_state(token_store: &SharedTokenStore) -> Result<ConnectionS
         .map_err(|error| error.to_string())
 }
 
+fn quarantine_token_file(
+    app_data_dir: &std::path::Path,
+    use_dev_token_store: bool,
+    timestamp: u64,
+) -> std::io::Result<PathBuf> {
+    let name = if use_dev_token_store {
+        "dev-tokens.json"
+    } else {
+        "tokens.enc"
+    };
+    let path = app_data_dir.join(name);
+    let quarantined = app_data_dir.join(format!("{name}.corrupt-{timestamp}"));
+    fs::rename(path, &quarantined)?;
+    Ok(quarantined)
+}
+
+async fn load_startup_credentials<T: Send + 'static>(
+    load: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(load)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn spawn_catalog_hydration<E: Send + 'static>(
+    catalog: Arc<Mutex<SpotifyCatalog>>,
+    saved_generation: Arc<AtomicU64>,
+    flush_gate: Arc<Mutex<()>>,
+    hydration_epoch: Arc<AtomicU64>,
+    load: impl FnOnce() -> Result<SpotifyCatalog, E> + Send + 'static,
+) -> tauri::async_runtime::JoinHandle<Result<bool, E>> {
+    let baseline = catalog
+        .lock()
+        .expect("Spotify catalog mutex poisoned")
+        .generation();
+    let baseline_epoch = hydration_epoch.load(Ordering::Acquire);
+    tauri::async_runtime::spawn_blocking(move || {
+        let loaded = load()?;
+        let _flush = flush_gate
+            .lock()
+            .expect("Spotify catalog flush gate poisoned");
+        let mut current = catalog.lock().expect("Spotify catalog mutex poisoned");
+        if current.generation() != baseline
+            || hydration_epoch.load(Ordering::Acquire) != baseline_epoch
+        {
+            return Ok(false);
+        }
+        let generation = loaded.generation();
+        *current = loaded;
+        saved_generation.store(generation, Ordering::Release);
+        Ok(true)
+    })
+}
+
 fn flush_spotify_catalog(state: &AppState) -> Result<(), String> {
+    let _flush = state
+        .spotify_catalog_flush_gate
+        .lock()
+        .expect("Spotify catalog flush gate poisoned");
     let (catalog, generation) = {
         let catalog = state
             .spotify_catalog
             .lock()
             .expect("Spotify catalog mutex poisoned");
+        if catalog.generation()
+            == state
+                .spotify_catalog_saved_generation
+                .load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
         (catalog.clone(), catalog.generation())
     };
-    if generation
-        == state
-            .spotify_catalog_saved_generation
-            .load(Ordering::Acquire)
-    {
-        return Ok(());
-    }
     state
         .spotify_catalog_store
         .save(&catalog)
@@ -942,7 +525,11 @@ fn flush_spotify_catalog(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn clear_spotify_catalog(state: &AppState) -> Result<(), String> {
+    state
+        .spotify_catalog_hydration_epoch
+        .fetch_add(1, Ordering::AcqRel);
     state
         .spotify_catalog
         .lock()
@@ -951,33 +538,43 @@ pub(crate) fn clear_spotify_catalog(state: &AppState) -> Result<(), String> {
     flush_spotify_catalog(state)
 }
 
-pub(crate) fn emit_connection_state(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) async fn clear_spotify_catalog_async(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let connection = stored_connection_state(&state.token_store)?;
+    state
+        .spotify_catalog_hydration_epoch
+        .fetch_add(1, Ordering::AcqRel);
+    state
+        .spotify_catalog
+        .lock()
+        .expect("Spotify catalog mutex poisoned")
+        .clear();
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || flush_spotify_catalog(&handle.state::<AppState>()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+pub(crate) async fn emit_connection_state_async(app: &tauri::AppHandle) -> Result<(), String> {
+    let token_store = Arc::clone(&app.state::<AppState>().token_store);
+    let connection =
+        tauri::async_runtime::spawn_blocking(move || stored_connection_state(&token_store))
+            .await
+            .map_err(|error| error.to_string())??;
+    let state = app.state::<AppState>();
     if let Some(menu_checks) = &state.menu_checks {
         menu_checks
             .sync_connection(&connection)
             .map_err(|error| error.to_string())?;
     }
-    app.emit("connection-changed", connection)
-        .map_err(|error| error.to_string())
+    emit_main(app, "connection-changed", ()).map_err(|error| error.to_string())
 }
 
-fn set_auto_connect(app: &tauri::AppHandle, auto_connect: bool) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    settings.auto_connect = auto_connect;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings)
-        .map_err(|error| error.to_string())
+pub(crate) fn emit_main<R: tauri::Runtime, S: serde::Serialize + Clone>(
+    app: &tauri::AppHandle<R>,
+    event: &str,
+    payload: S,
+) -> tauri::Result<()> {
+    app.emit_to("main", event, payload)
 }
 
 fn empty_player_state(shuffle: bool) -> PlayerStateEvent {
@@ -1008,25 +605,45 @@ fn provider_from(state: &AppState) -> Result<Arc<SpotifyProvider>, String> {
 }
 
 fn track_id(uri: &str) -> Option<&str> {
-    uri.strip_prefix("spotify:track:")
-        .filter(|id| !id.is_empty() && !id.contains(':'))
+    provider::spotify_id(uri, "track").ok()
 }
 
 fn album_id(uri: &str) -> Option<&str> {
-    uri.strip_prefix("spotify:album:")
-        .filter(|id| !id.is_empty() && !id.contains(':'))
+    provider::spotify_id(uri, "album").ok()
 }
 
 async fn resolve_track_artwork<T: Transport, S: TokenStore>(
     client: Option<&SpotifyClient<T, S>>,
     cache: &Mutex<HashMap<(String, u32), Option<String>>>,
+    local_path: Result<Option<PathBuf>, String>,
     uri: &str,
     min_width: u32,
-) -> Option<String> {
-    let local = uri.starts_with("file:");
-    let id = (!local).then(|| track_id(uri)).flatten();
-    if !local && id.is_none() {
-        return None;
+) -> Result<Option<String>, String> {
+    resolve_track_artwork_with(client, cache, local_path, uri, min_width, |path| {
+        retune_audio::read_artwork(path, MAX_LOCAL_ARTWORK_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|artwork| artwork.map(local_artwork_data_url).transpose())
+    })
+    .await
+}
+
+async fn resolve_track_artwork_with<T, S, F>(
+    client: Option<&SpotifyClient<T, S>>,
+    cache: &Mutex<HashMap<(String, u32), Option<String>>>,
+    local_path: Result<Option<PathBuf>, String>,
+    uri: &str,
+    min_width: u32,
+    read_local: F,
+) -> Result<Option<String>, String>
+where
+    T: Transport,
+    S: TokenStore,
+    F: FnOnce(PathBuf) -> Result<Option<String>, String> + Send + 'static,
+{
+    let local_path = local_path?;
+    let id = local_path.is_none().then(|| track_id(uri)).flatten();
+    if local_path.is_none() && id.is_none() {
+        return Ok(None);
     }
     let cache_key = (uri.into(), min_width);
     if let Some(cached) = cache
@@ -1035,26 +652,16 @@ async fn resolve_track_artwork<T: Transport, S: TokenStore>(
         .get(&cache_key)
         .cloned()
     {
-        return cached;
+        return Ok(cached);
     }
-    let artwork = if local {
-        localfiles::path_from_file_uri(uri)
-            .ok()
-            .and_then(|path| retune_audio::read_tags(path).ok())
-            .and_then(|tags| tags.artwork)
-            .map(|artwork| {
-                format!(
-                    "data:{};base64,{}",
-                    artwork
-                        .mime
-                        .as_deref()
-                        .unwrap_or("application/octet-stream"),
-                    BASE64_STANDARD.encode(artwork.bytes)
-                )
-            })
+    let artwork = if let Some(path) = local_path {
+        tauri::async_runtime::spawn_blocking(move || read_local(path))
+            .await
+            .map_err(|error| error.to_string())??
     } else {
-        client?
-            .track(id?)
+        client
+            .ok_or_else(|| "Connect to Spotify to load artwork.".to_string())?
+            .track(id.expect("validated Spotify track URI"))
             .await
             .ok()
             .and_then(|track| track.album)
@@ -1065,15 +672,53 @@ async fn resolve_track_artwork<T: Transport, S: TokenStore>(
         cache.clear();
     }
     cache.insert(cache_key, artwork.clone());
-    artwork
+    Ok(artwork)
+}
+
+const MAX_LOCAL_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
+
+fn local_artwork_data_url(artwork: retune_audio::Artwork) -> Result<String, String> {
+    if artwork.bytes.len() > MAX_LOCAL_ARTWORK_BYTES {
+        return Err(format!(
+            "Embedded artwork exceeds the {MAX_LOCAL_ARTWORK_BYTES}-byte limit."
+        ));
+    }
+    Ok(format!(
+        "data:{};base64,{}",
+        artwork
+            .mime
+            .as_deref()
+            .unwrap_or("application/octet-stream"),
+        BASE64_STANDARD.encode(artwork.bytes)
+    ))
+}
+
+fn authorized_local_artwork_path(library: &Library, uri: &str) -> Result<Option<PathBuf>, String> {
+    if !uri.starts_with("file:") {
+        return Ok(None);
+    }
+    let canonical_uri = library
+        .tracks()
+        .iter()
+        .find(|track| track.uri == uri)
+        .map(|track| track.uri.as_str())
+        .ok_or_else(|| "Local artwork resource is not in the library.".to_string())?;
+    localfiles::path_from_file_uri(canonical_uri).map(Some)
 }
 
 pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerStateEvent) {
     let state = app.state::<AppState>();
     let provider = provider_from(&state).ok();
-    let Some(url) = resolve_track_artwork(
+    let local_path = authorized_local_artwork_path(
+        &state.library.lock().expect("library mutex poisoned"),
+        event.uri.as_deref().unwrap_or_default(),
+    )
+    .ok()
+    .flatten();
+    let Ok(Some(url)) = resolve_track_artwork(
         provider.as_deref(),
         &state.artwork_cache,
+        Ok(local_path),
         event.uri.as_deref().unwrap_or_default(),
         300,
     )
@@ -1084,418 +729,11 @@ pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerSt
     state.media_keys.update_artwork(&event, &url);
 }
 
-async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    state.sync_orchestrator.cancel_retry();
-    if !state.sync_orchestrator.begin() {
-        return Ok(());
-    }
-    run_sync_loop(app).await
-}
-
-async fn run_sync_loop(app: &tauri::AppHandle) -> Result<(), String> {
-    loop {
-        let result = sync_spotify_inner(app).await;
-        if !result.as_ref().is_ok_and(|completion| completion.partial) {
-            let _ = app.emit("sync-progress", "");
-        }
-        if app.state::<AppState>().sync_orchestrator.finish() {
-            continue;
-        }
-        if let Ok(SyncCompletion {
-            auto_resume: Some(deadline),
-            ..
-        }) = &result
-        {
-            schedule_auto_resume(app, *deadline);
-        }
-        return result.map(|_| ());
-    }
-}
-
-fn schedule_auto_resume(app: &tauri::AppHandle, deadline: u64) {
-    let now = unix_now();
-    let jitter = 30
-        + SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u64
-            % 61;
-    let delay = Duration::from_secs(deadline.saturating_sub(now).saturating_add(jitter));
-    let handle = app.clone();
-    let retry = tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        let state = handle.state::<AppState>();
-        state.sync_orchestrator.retry_fired();
-        if state.sync_orchestrator.begin() {
-            if let Err(error) = Box::pin(run_sync_loop(&handle)).await {
-                notify_error(&handle, error);
-            }
-        }
-    });
-    app.state::<AppState>()
-        .sync_orchestrator
-        .replace_retry(retry);
-}
-
-struct SyncCompletion {
-    partial: bool,
-    auto_resume: Option<u64>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct SyncProgressCount {
-    tracks: u64,
-    fraction: f64,
-}
-
-#[derive(Default)]
-struct SyncProgressState {
-    tracks: u64,
-    sections: [(u32, Option<u32>); 5],
-    high_water: f64,
-}
-
-impl SyncProgressState {
-    fn update(&mut self, batch: &SyncBatch) -> SyncProgressCount {
-        self.tracks += batch.tracks.len() as u64;
-        let index = provider::LibraryKind::ALL
-            .iter()
-            .position(|kind| kind.label() == batch.section)
-            .expect("unknown sync section");
-        self.sections[index] = (batch.done, batch.total);
-        let fraction = self
-            .sections
-            .iter()
-            .enumerate()
-            .map(|(section, (done, total))| {
-                if section < index {
-                    1.0
-                } else {
-                    total.map_or(0.0, |total| {
-                        if total == 0 {
-                            1.0
-                        } else {
-                            f64::from(*done) / f64::from(total)
-                        }
-                    })
-                }
-            })
-            .sum::<f64>()
-            / provider::LibraryKind::ALL.len() as f64;
-        self.high_water = self.high_water.max(fraction.clamp(0.0, 1.0));
-        SyncProgressCount {
-            tracks: self.tracks,
-            fraction: self.high_water,
-        }
-    }
-}
-
-const GENRES_DEGRADED_MSG: &str =
-    "Imported without genres (Spotify rate limit) — genres will fill in on a later sync.";
-
-fn partial_import_message(
-    detail: &str,
-    quota_exhausted: bool,
-    earliest_cooldown: Option<u64>,
-    now: chrono::DateTime<chrono::Local>,
-) -> String {
-    earliest_cooldown.map_or_else(
-        || {
-            if quota_exhausted {
-                if detail.is_empty() {
-                    "Partial import — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.".into()
-                } else {
-                    format!("Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.")
-                }
-            } else if detail.is_empty() {
-                "Partial import (Spotify rate limit) — run File → Sync later to finish.".into()
-            } else {
-                format!("Partial import ({detail}) — run File → Sync later to finish.")
-            }
-        },
-        |deadline| {
-            let time = provider::format_resume_time(deadline, now);
-            if quota_exhausted && detail.is_empty() {
-                format!("Partial import (Spotify Development Mode quota) — will finish automatically after {time}.")
-            } else if quota_exhausted {
-                format!("Partial import (Spotify Development Mode quota) — {detail} — will finish automatically after {time}.")
-            } else if detail.is_empty() {
-                format!("Partial import — will finish automatically after {time}.")
-            } else {
-                format!("Partial import — {detail} — will finish automatically after {time}.")
-            }
-        },
-    )
-}
-
-async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, String> {
-    log::info!("Starting Spotify sync");
-    let state = app.state::<AppState>();
-    let _membership_guard = state.spotify_library_gate.lock().await;
-    if !stored_connection_state(&state.token_store)?.connected {
-        return Err("Connect to Spotify before syncing.".into());
-    }
-    let provider = provider_from(&state)?;
-    let account_id = provider
-        .me()
-        .await
-        .map_err(|error| format!("Could not identify the Spotify account: {error}"))?
-        .id;
-    {
-        let current = state
-            .spotify_library
-            .lock()
-            .expect("Spotify library mutex poisoned")
-            .clone();
-        if !current.account_id.is_empty() && current.account_id != account_id {
-            let reset = SpotifyLibraryState {
-                account_id: account_id.clone(),
-                ..SpotifyLibraryState::default()
-            };
-            spotify_commands::replace_spotify_library_state(
-                &state.sync_store,
-                &state.spotify_library,
-                reset,
-            )?;
-            clear_spotify_catalog(&state)?;
-        }
-    }
-    let sync_provider =
-        SpotifySyncProvider::for_account(provider.as_ref(), &state.sync_store, account_id)?;
-    let first_sync = !state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .spotify_sync_completed;
-    if first_sync {
-        mutate_library(&state, |library| {
-            *library = sync::without_fixtures(library)?;
-            Ok(())
-        })?;
-        app.emit("library-changed", ())
-            .map_err(|error| error.to_string())?;
-    }
-    let sync_progress = Mutex::new(SyncProgressState::default());
-    let on_batch = |batch: SyncBatch| {
-        let mut counts = sync_progress.lock().expect("sync progress mutex poisoned");
-        let payload = counts.update(&batch);
-        drop(counts);
-        if let Err(error) = with_library_gate(&state, |library| {
-            sync::apply_in_memory(library, batch.tracks);
-            Ok(())
-        }) {
-            notify_error(app, error);
-            return;
-        }
-        let _ = app.emit("library-changed", ());
-        let _ = app.emit("sync-progress-count", payload);
-    };
-    let outcome = sync::snapshot(
-        &sync_provider,
-        |phase| {
-            log::info!("{phase}");
-            let _ = app.emit("sync-progress", phase);
-        },
-        &on_batch,
-    )
-    .await?;
-    let sync::SnapshotOutcome {
-        tracks,
-        genres_degraded,
-        partial,
-        quota_exhausted,
-        progress,
-        earliest_cooldown,
-        request_counts,
-        spotify_library,
-    } = outcome;
-    let tracks_synced = sync_progress
-        .lock()
-        .expect("sync progress mutex poisoned")
-        .tracks;
-    app.emit(
-        "sync-progress-count",
-        SyncProgressCount {
-            tracks: tracks_synced,
-            fraction: 1.0,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    app.emit("sync-progress", "Saving library…")
-        .map_err(|error| error.to_string())?;
-    let spotify_library = spotify_library.map(|incoming| {
-        let current = state
-            .spotify_library
-            .lock()
-            .expect("Spotify library mutex poisoned")
-            .clone();
-        let mut merged = if current.is_exact() {
-            current.merge_earliest_times(incoming)
-        } else {
-            incoming
-        };
-        let library = state.library.lock().expect("library mutex poisoned");
-        let added_times = library
-            .tracks()
-            .iter()
-            .map(|track| (track.uri.as_str(), track.added_at))
-            .collect::<HashMap<_, _>>();
-        let aliases = sync::spotify_track_aliases(&library, &tracks);
-        for album in merged.saved_albums.values_mut() {
-            if album.added_at.is_none() {
-                album.added_at = album
-                    .track_uris
-                    .iter()
-                    .filter_map(|uri| {
-                        let local_uri = aliases.get(uri).unwrap_or(uri);
-                        added_times.get(local_uri.as_str()).copied().flatten()
-                    })
-                    .min()
-                    .or_else(|| Some(unix_now()));
-            }
-        }
-        merged
-    });
-    if let Some(spotify_library) = spotify_library.as_ref() {
-        state
-            .sync_store
-            .save_spotify_library(spotify_library)
-            .map_err(|error| error.to_string())?;
-        *state
-            .spotify_library
-            .lock()
-            .expect("Spotify library mutex poisoned") = spotify_library.clone();
-    }
-    with_library_gate(&state, |library| {
-        sync::apply(
-            library,
-            &state.store,
-            first_sync,
-            tracks,
-            spotify_library.as_ref(),
-        )
-    })?;
-    {
-        let library = state.library.lock().expect("library mutex poisoned");
-        log::info!(
-            "Spotify sync applied; {} library tracks",
-            library.tracks().len()
-        );
-    }
-    if partial {
-        let detail = progress
-            .iter()
-            .map(|progress| match progress.total {
-                Some(total) => format!("{} of {total} {}", progress.done, progress.label),
-                None => format!("{} pending", progress.label),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let message = partial_import_message(
-            &detail,
-            quota_exhausted,
-            earliest_cooldown,
-            chrono::Local::now(),
-        );
-        log::warn!("{message}");
-        if genres_degraded {
-            log::warn!("{GENRES_DEGRADED_MSG}");
-        }
-        app.emit("sync-progress", message)
-            .map_err(|error| error.to_string())?;
-    } else if genres_degraded {
-        log::warn!("{GENRES_DEGRADED_MSG}");
-        app.emit("sync-progress", GENRES_DEGRADED_MSG)
-            .map_err(|error| error.to_string())?;
-    }
-    {
-        let mut settings = state.settings.lock().expect("settings mutex poisoned");
-        if record_full_sync(&mut settings, partial, unix_now()) {
-            state
-                .settings_store
-                .save(&settings)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    log::info!(
-        "sync requests:{}",
-        request_counts
-            .iter()
-            .map(|(family, count)| format!(" {family}={count}"))
-            .collect::<String>()
-    );
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = sync_playlists(app, provider.as_ref()).await {
-        log::warn!("Playlist sync failed: {error}");
-    }
-    Ok(SyncCompletion {
-        partial,
-        auto_resume: partial.then_some(earliest_cooldown).flatten(),
-    })
-}
-
-async fn sync_playlists(app: &tauri::AppHandle, client: &SpotifyProvider) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let current = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    let synced = match playlists::sync(client, &current).await {
-        Ok(synced) => synced,
-        Err(error) => {
-            let tokens = state.token_store.load().ok().flatten();
-            if let Some(error) = dispatch_playlist_error(
-                &state.playlist_reauth_notified,
-                error,
-                tokens.as_ref(),
-                |error| notify_error(app, error),
-            ) {
-                return Err(error);
-            }
-            return Ok(());
-        }
-    };
-    save_playlists(app, synced)
-}
-
-fn playlist_error(state: &AppState, error: retune_spotify::Error) -> String {
-    let tokens = state.token_store.load().ok().flatten();
-    playlists::map_error(error, tokens.as_ref())
-}
-
-fn dispatch_playlist_error(
-    notified: &AtomicBool,
-    error: retune_spotify::Error,
-    tokens: Option<&Tokens>,
-    notify: impl FnOnce(String),
-) -> Option<String> {
-    let error = playlists::map_error(error, tokens);
-    if error != playlists::RECONNECT_HINT {
-        return Some(error);
-    }
-    if !notified.swap(true, Ordering::Relaxed) {
-        notify(error);
-    }
-    None
-}
-
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn record_full_sync(settings: &mut Settings, partial: bool, now: u64) -> bool {
-    if partial {
-        return false;
-    }
-    settings.spotify_sync_completed = true;
-    settings.last_full_sync = Some(now);
-    true
 }
 
 fn initial_library(debug: bool) -> Library {
@@ -1506,560 +744,9 @@ fn initial_library(debug: bool) -> Library {
     }
 }
 
-fn album_page_view(
-    library: &Library,
-    spotify_library: &SpotifyLibraryState,
-    album: Album,
-) -> AlbumPageView {
-    let artist = album.artists.first();
-    let artist_name = artist.map(|artist| artist.name.clone()).unwrap_or_default();
-    let total_duration_secs = album
-        .tracks
-        .as_ref()
-        .into_iter()
-        .flat_map(|page| &page.items)
-        .map(|track| track.duration_ms.unwrap_or_default())
-        .sum::<u64>()
-        / 1_000;
-    let local_added_at = album
-        .tracks
-        .as_ref()
-        .into_iter()
-        .flat_map(|page| &page.items)
-        .filter_map(|track| {
-            let normalized = retune_spotify::normalize::track(track, None, Some(&album));
-            spotify_track_match(library, &normalized).and_then(|track| track.added_at)
-        })
-        .min();
-    let tracks = album
-        .tracks
-        .clone()
-        .map(|page| {
-            page.items
-                .into_iter()
-                .map(|track| {
-                    let uri = track.uri.clone();
-                    let normalized = retune_spotify::normalize::track(&track, None, Some(&album));
-                    let local = spotify_track_match(library, &normalized);
-                    AlbumPageTrackView {
-                        uri: uri.clone(),
-                        name: track.name,
-                        track_no: track.track_number,
-                        duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
-                        enabled: local.is_none_or(|track| track.enabled),
-                        track_id: local.map(|track| track.id.0),
-                        saved_individually: if spotify_library.is_exact() {
-                            spotify_library.saved_tracks.contains_key(&uri)
-                        } else {
-                            local.is_some()
-                        },
-                        rating: local
-                            .and_then(|track| library.effective_rating(track.id).map(rating_view)),
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let content_complete =
-        !tracks.is_empty() && tracks.iter().all(|track| track.track_id.is_some());
-    let saved_album = if spotify_library.is_exact() {
-        spotify_library.saved_albums.contains_key(&album.uri)
-    } else {
-        content_complete
-    };
-    let added_at = spotify_library
-        .is_exact()
-        .then(|| {
-            spotify_library
-                .saved_albums
-                .get(&album.uri)
-                .and_then(|album| album.added_at)
-        })
-        .flatten()
-        .or(local_added_at);
-    let album_rating = content_complete
-        .then(|| {
-            library.album_rating(&AlbumKey {
-                source: SourceId::Music,
-                art: artist_name.clone(),
-                alb: album.name.clone(),
-            })
-        })
-        .flatten()
-        .map(Rating::stars);
-    AlbumPageView {
-        uri: album.uri,
-        name: album.name,
-        artist: artist_name,
-        artist_id: artist.map(|artist| artist.id.clone()).unwrap_or_default(),
-        album_type: title_case(album.album_type.as_deref().unwrap_or("album")),
-        year: album
-            .release_date
-            .as_deref()
-            .and_then(|date| date.get(..4))
-            .map(str::to_owned),
-        image_url: image_url(&album.images),
-        total_duration_secs,
-        saved_album,
-        content_complete,
-        added_at,
-        album_rating,
-        tracks,
-    }
-}
-
-fn mark_album_membership(
-    library: &Library,
-    spotify_library: &SpotifyLibraryState,
-    albums: &mut [provider::SearchAlbum],
-) {
-    for album in albums {
-        if spotify_library.is_exact() {
-            album.in_library = spotify_library.saved_albums.contains_key(&album.uri);
-            continue;
-        }
-        // ponytail: local album identity is artist/title; store Spotify album URIs if
-        // same-named editions become a real ambiguity.
-        album.in_library = album.track_count > 0
-            && library
-                .tracks()
-                .iter()
-                .filter(|track| {
-                    track.source == SourceId::Music
-                        && track.art == album.artist
-                        && track.alb == album.name
-                })
-                .count()
-                >= album.track_count as usize;
-    }
-}
-
-fn mark_track_membership(
-    library: &Library,
-    spotify_library: &SpotifyLibraryState,
-    tracks: &mut [provider::SearchTrack],
-) {
-    for track in tracks {
-        track.in_library = if spotify_library.is_exact() {
-            spotify_library.saved_tracks.contains_key(&track.uri)
-        } else {
-            library
-                .tracks()
-                .iter()
-                .any(|candidate| candidate.source == SourceId::Music && candidate.uri == track.uri)
-        };
-    }
-}
-
-fn album_track_uris(album: &Album) -> Vec<String> {
-    album
-        .tracks
-        .as_ref()
-        .into_iter()
-        .flat_map(|page| &page.items)
-        .map(|track| track.uri.clone())
-        .collect()
-}
-
 #[cfg(test)]
 fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
     library.remove_uris(&album_track_uris(album))
-}
-
-fn record_cooldown(
-    sync_store: &FsSyncStore,
-    endpoint: &str,
-    kind: store::CooldownKind,
-    deadline: u64,
-    now: u64,
-) -> Result<(), String> {
-    let mut cooldowns = sync_store
-        .cooldowns(now)
-        .map_err(|error| error.to_string())?;
-    cooldowns.insert(
-        endpoint_family(endpoint),
-        store::Cooldown { kind, deadline },
-    );
-    sync_store
-        .save_cooldowns(&cooldowns)
-        .map_err(|error| error.to_string())
-}
-
-async fn artist_albums_outcome<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
-    sync_store: &FsSyncStore,
-    artist_id: &str,
-    offset: u32,
-    now: u64,
-    display_now: chrono::DateTime<chrono::Local>,
-) -> Result<ArtistAlbumsPage, String> {
-    if let Some(cooldown) = sync_store
-        .cooldowns(now)
-        .map_err(|error| error.to_string())?
-        .get("/artists")
-        .copied()
-    {
-        let time = provider::format_resume_time(cooldown.deadline, display_now);
-        return Err(match cooldown.kind {
-            store::CooldownKind::Transient => {
-                format!("Spotify artist albums are rate limited; try again {time}.")
-            }
-            store::CooldownKind::Quota => format!(
-                "Spotify Development Mode quota is still exhausted; try artist albums again {time}."
-            ),
-        });
-    }
-    match artist_albums_page(provider, artist_id, offset).await {
-        Ok(page) => Ok(page),
-        Err(retune_spotify::Error::RateLimited {
-            endpoint,
-            retry_after_secs,
-        }) => {
-            let deadline = now.saturating_add(retry_after_secs);
-            record_cooldown(
-                sync_store,
-                &endpoint,
-                store::CooldownKind::Transient,
-                deadline,
-                now,
-            )?;
-            Err(format!(
-                "Spotify artist albums are rate limited; try again {}.",
-                provider::format_resume_time(deadline, display_now)
-            ))
-        }
-        Err(retune_spotify::Error::QuotaExceeded {
-            endpoint,
-            retry_after_secs,
-        }) => {
-            if let Some(retry_after_secs) = retry_after_secs {
-                let deadline = now.saturating_add(retry_after_secs);
-                record_cooldown(
-                    sync_store,
-                    &endpoint,
-                    store::CooldownKind::Quota,
-                    deadline,
-                    now,
-                )?;
-                Err(format!(
-                    "Spotify Development Mode quota is exhausted; try artist albums again {}.",
-                    provider::format_resume_time(deadline, display_now)
-                ))
-            } else {
-                Err("Spotify Development Mode quota is exhausted; try artist albums again after Spotify resets it.".into())
-            }
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec<PlaylistListView> {
-    cache
-        .playlists
-        .iter()
-        .map(|playlist| PlaylistListView {
-            id: playlist.id.clone(),
-            name: playlist.name.clone(),
-            owned: playlist.owned,
-            owner: playlist.owner.clone(),
-            contains: !uris.is_empty() && uris.iter().all(|uri| playlist.tracks.contains(uri)),
-            track_count: playlist.track_count,
-            items_available: playlist.owned
-                || playlist.track_count == 0
-                || !playlist.tracks.is_empty(),
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum SpotifyOpenTarget {
-    App,
-    Web,
-}
-
-fn spotify_item_link(kind: &str, id: &str, target: SpotifyOpenTarget) -> Result<String, String> {
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-    {
-        return Err("Invalid Spotify ID.".into());
-    }
-    Ok(match target {
-        SpotifyOpenTarget::App => format!("spotify:{kind}:{id}"),
-        SpotifyOpenTarget::Web => format!("https://open.spotify.com/{kind}/{id}"),
-    })
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum SpotifyDestination {
-    Album,
-    Artist,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-enum SpotifyNavigation {
-    Album { uri: String, highlight: String },
-    Artist { id: String },
-}
-
-fn spotify_track_destination(
-    track: &SpotifyTrack,
-    destination: SpotifyDestination,
-) -> Result<SpotifyNavigation, String> {
-    match destination {
-        SpotifyDestination::Album => track
-            .album
-            .as_ref()
-            .map(|album| SpotifyNavigation::Album {
-                uri: album.uri.clone(),
-                highlight: track.uri.clone(),
-            })
-            .ok_or_else(|| "Spotify album is unavailable.".into()),
-        SpotifyDestination::Artist => track
-            .artists
-            .first()
-            .map(|artist| SpotifyNavigation::Artist {
-                id: artist.id.clone(),
-            })
-            .ok_or_else(|| "Spotify artist is unavailable.".into()),
-    }
-}
-
-async fn playlist_add_inner(
-    app: &tauri::AppHandle,
-    id: String,
-    uris: Vec<String>,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut cache = state
-        .playlists
-        .lock()
-        .expect("playlist mutex poisoned")
-        .clone();
-    let library = state
-        .library
-        .lock()
-        .expect("library mutex poisoned")
-        .clone();
-    let client = provider_from(&state)?;
-    playlists::add(client.as_ref(), &mut cache, &library, &id, uris)
-        .await
-        .map_err(|error| match error {
-            playlists::PlaylistAddError::Local(message) => message,
-            playlists::PlaylistAddError::Unknown(id) => format!("Unknown playlist {id}"),
-            playlists::PlaylistAddError::ReadOnly => "Only your playlists can be changed.".into(),
-            playlists::PlaylistAddError::Spotify(error) => playlist_error(&state, error),
-        })?;
-    save_playlists(app, cache)
-}
-
-fn save_playlists(app: &tauri::AppHandle, cache: playlists::PlaylistCache) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    state
-        .playlist_store
-        .save(&cache)
-        .map_err(|error| error.to_string())?;
-    *state.playlists.lock().expect("playlist mutex poisoned") = cache;
-    app.emit("playlists-changed", ())
-        .map_err(|error| error.to_string())
-}
-
-struct LibraryTransactionGuard {
-    state: Arc<LibraryTransactionState>,
-}
-
-impl Drop for LibraryTransactionGuard {
-    fn drop(&mut self) {
-        let mut active = self
-            .state
-            .active
-            .lock()
-            .expect("library transaction mutex poisoned");
-        *active = false;
-        self.state.changed.notify_all();
-    }
-}
-
-fn begin_library_transaction(state: &AppState) -> Result<LibraryTransactionGuard, String> {
-    let mut active = state
-        .library_transaction
-        .active
-        .lock()
-        .map_err(|_| "library transaction mutex poisoned".to_string())?;
-    if *active {
-        return Err("Another library transaction is already applying.".to_string());
-    }
-    *active = true;
-    drop(active);
-    Ok(LibraryTransactionGuard {
-        state: Arc::clone(&state.library_transaction),
-    })
-}
-
-fn wait_for_library_transaction(
-    state: &LibraryTransactionState,
-) -> Result<std::sync::MutexGuard<'_, bool>, String> {
-    let mut active = state
-        .active
-        .lock()
-        .map_err(|_| "library transaction mutex poisoned".to_string())?;
-    while *active {
-        active = state
-            .changed
-            .wait(active)
-            .map_err(|_| "library transaction mutex poisoned".to_string())?;
-    }
-    Ok(active)
-}
-
-fn with_library_gate<T>(
-    state: &AppState,
-    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
-) -> Result<T, String> {
-    let _transaction_state = wait_for_library_transaction(&state.library_transaction)?;
-    let _write_gate = state
-        .library_write_gate
-        .lock()
-        .expect("library write gate poisoned");
-    let mut library = state.library.lock().expect("library mutex poisoned");
-    mutation(&mut library)
-}
-
-fn mutate_library<T>(
-    state: &AppState,
-    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
-) -> Result<T, String> {
-    let _transaction_state = wait_for_library_transaction(&state.library_transaction)?;
-    let write_gate = state
-        .library_write_gate
-        .lock()
-        .expect("library write gate poisoned");
-    mutate_library_locked(state, write_gate, mutation)
-}
-
-fn mutate_library_in_transaction<T>(
-    state: &AppState,
-    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
-) -> Result<T, String> {
-    let write_gate = state
-        .library_write_gate
-        .lock()
-        .expect("library write gate poisoned");
-    mutate_library_locked(state, write_gate, mutation)
-}
-
-fn mutate_library_locked<T>(
-    state: &AppState,
-    _write_gate: std::sync::MutexGuard<'_, ()>,
-    mutation: impl FnOnce(&mut Library) -> Result<T, String>,
-) -> Result<T, String> {
-    let mut current = state.library.lock().expect("library mutex poisoned");
-    let mut next = current.clone();
-    let value = mutation(&mut next)?;
-    state.store.save(&next).map_err(|error| error.to_string())?;
-    *current = next;
-    Ok(value)
-}
-
-fn spotify_track_match<'a>(library: &'a Library, incoming: &NewTrack) -> Option<&'a TrackRecord> {
-    library.tracks().iter().find(|existing| {
-        existing.uri == incoming.uri
-            || (existing.uri.starts_with("spotify:track:")
-                && incoming.uri.starts_with("spotify:track:")
-                && existing.source == incoming.source
-                && existing.art == incoming.art
-                && existing.alb == incoming.alb
-                && existing.disc_no == incoming.disc_no
-                && existing.track_no == incoming.track_no
-                && existing.name == incoming.name
-                && existing.duration == incoming.duration
-                && existing.release_date == incoming.release_date)
-    })
-}
-
-fn record_play(
-    store: &impl OverlayStore,
-    library: &Mutex<Library>,
-    write_gate: &Mutex<()>,
-    transaction: &LibraryTransactionState,
-    uri: &str,
-    played_at: u64,
-) -> Result<bool, String> {
-    let _transaction_state = wait_for_library_transaction(transaction)?;
-    let _write_gate = write_gate.lock().expect("library write gate poisoned");
-    let mut current = library.lock().expect("library mutex poisoned");
-    if !current.tracks().iter().any(|track| track.uri == uri) {
-        return Ok(false);
-    }
-    let mut next = current.clone();
-    let track = next
-        .tracks_mut()
-        .iter_mut()
-        .find(|track| track.uri == uri)
-        .expect("track existence checked before cloning");
-    track.play_count = track.play_count.saturating_add(1);
-    track.last_played_at = Some(played_at);
-    store.save(&next).map_err(|error| error.to_string())?;
-    *current = next;
-    Ok(true)
-}
-
-fn run_local_import(
-    app: &tauri::AppHandle,
-    paths: &[PathBuf],
-) -> Result<localfiles::ImportSummary, String> {
-    let state = app.state::<AppState>();
-    let summary = with_library_gate(&state, |library| {
-        localfiles::import_transaction(&state.store, library, paths)
-    })?;
-    for failure in &summary.failed {
-        log::warn!(
-            "local import failed for {}: {}",
-            failure.path,
-            failure.reason
-        );
-    }
-    app.emit("library-changed", ())
-        .map_err(|error| error.to_string())?;
-    if let Some(error) = format_import_failures(&summary.failed) {
-        app.emit("operation-error", error)
-            .map_err(|error| error.to_string())?;
-    }
-    app.emit("local-import-complete", summary.clone())
-        .map_err(|error| error.to_string())?;
-    Ok(summary)
-}
-
-fn launch_local_import(app: tauri::AppHandle, paths: Vec<PathBuf>) {
-    let _ = app.emit("local-import-started", ());
-    drop(tauri::async_runtime::spawn_blocking(move || {
-        if let Err(error) = run_local_import(&app, &paths) {
-            notify_error(&app, error);
-            let _ = app.emit("local-import-failed", ());
-        }
-    }));
-}
-
-fn format_import_failures(failures: &[localfiles::FailedImport]) -> Option<String> {
-    if failures.is_empty() {
-        return None;
-    }
-    let mut lines = failures
-        .iter()
-        .take(5)
-        .map(|failure| format!("{} — {}", failure.path, failure.reason))
-        .collect::<Vec<_>>();
-    if failures.len() > 5 {
-        lines.push(format!("+ {} more", failures.len() - 5));
-    }
-    Some(format!(
-        "Some files could not be imported:\n{}",
-        lines.join("\n")
-    ))
 }
 
 fn import_local_files(app: &tauri::AppHandle) {
@@ -2080,10 +767,10 @@ fn import_local_files(app: &tauri::AppHandle) {
                 .map(|path| path.into_path().map_err(|error| error.to_string()))
                 .collect::<Result<Vec<_>, _>>();
             match paths {
-                Ok(paths) => launch_local_import(handle.clone(), paths),
+                Ok(paths) => library_commands::launch_local_import(handle.clone(), paths),
                 Err(error) => {
                     notify_error(&handle, error);
-                    let _ = handle.emit("local-import-failed", ());
+                    let _ = emit_main(&handle, "local-import-failed", ());
                 }
             }
         });
@@ -2094,13 +781,38 @@ fn import_local_folder(app: &tauri::AppHandle) {
     app.dialog().file().pick_folder(move |path| {
         let Some(path) = path else { return };
         match path.into_path() {
-            Ok(path) => launch_local_import(handle.clone(), vec![path]),
+            Ok(path) => library_commands::launch_local_import(handle.clone(), vec![path]),
             Err(error) => {
                 notify_error(&handle, error.to_string());
-                let _ = handle.emit("local-import-failed", ());
+                let _ = emit_main(&handle, "local-import-failed", ());
             }
         }
     });
+}
+
+fn handle_local_drag_event(app: &tauri::AppHandle, label: &str, event: &tauri::WindowEvent) {
+    if label != "main" {
+        return;
+    }
+    let tauri::WindowEvent::DragDrop(event) = event else {
+        return;
+    };
+    match event {
+        tauri::DragDropEvent::Enter { .. } => {
+            let _ = app.emit_to("main", "local-drag-changed", true);
+        }
+        tauri::DragDropEvent::Drop { paths, .. } => {
+            let _ = app.emit_to("main", "local-drag-changed", false);
+            if !paths.is_empty() {
+                library_commands::launch_local_import(app.clone(), paths.clone());
+            }
+        }
+        tauri::DragDropEvent::Leave => {
+            let _ = app.emit_to("main", "local-drag-changed", false);
+        }
+        tauri::DragDropEvent::Over { .. } => {}
+        _ => {}
+    }
 }
 
 fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<MenuChecks> {
@@ -2214,16 +926,16 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| match event.id().as_ref() {
         "get_info" => {
-            let _ = app.emit("get-info", ());
+            let _ = emit_main(app, "get-info", ());
         }
         "setup_library" => {
-            let _ = app.emit("open-setup", ());
+            let _ = emit_main(app, "open-setup", ());
         }
         "add_local_files" => import_local_files(app),
         "add_local_folder" => import_local_folder(app),
-        "export_library" => export_library(app),
-        "restore_library" => import_library(app, true),
-        "merge_library" => import_library(app, false),
+        "export_library" => backup::export_library(app),
+        "restore_library" => backup::import_library(app, true),
+        "merge_library" => backup::import_library(app, false),
         "sync_spotify" => {
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -2258,14 +970,14 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
                 .show(|_| {});
         }
         "preferences" => {
-            let _ = app.emit("open-preferences", ());
+            let _ = emit_main(app, "open-preferences", ());
         }
         "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "toggle_browser"
         | "theme_system" | "theme_light" | "theme_dark" => {
-            let _ = app.emit("view-action", event.id().as_ref());
+            let _ = emit_main(app, "view-action", event.id().as_ref());
         }
         "play_pause" | "previous" | "next" => {
-            let _ = app.emit("player-action", event.id().as_ref());
+            let _ = emit_main(app, "player-action", event.id().as_ref());
         }
         _ => {}
     });
@@ -2280,297 +992,58 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     })
 }
 
-fn export_library(app: &tauri::AppHandle) {
-    let handle = app.clone();
-    app.dialog()
-        .file()
-        .set_file_name("Retune Library.json")
-        .add_filter("Retune Library", &["json"])
-        .save_file(move |path| {
-            let Some(path) = path else { return };
-            let result = (|| -> Result<(), String> {
-                let path = path.into_path().map_err(|error| error.to_string())?;
-                let state = handle.state::<AppState>();
-                let lastfm_mappings =
-                    tauri::async_runtime::block_on(state.lastfm_import.export_mappings());
-                let library = state.library.lock().expect("library mutex poisoned");
-                let settings = state.settings.lock().expect("settings mutex poisoned");
-                let playlists = state.playlists.lock().expect("playlist mutex poisoned");
-                let bytes = export_with_settings_and_mappings(
-                    &library,
-                    &settings,
-                    &playlists,
-                    Some(&lastfm_mappings),
-                )?;
-                fs::write(path, bytes).map_err(|error| error.to_string())
-            })();
-            if let Err(error) = result {
-                notify_error(&handle, error);
-            }
-        });
-}
-
-#[cfg(test)]
-fn export_with_settings(
-    library: &Library,
-    settings: &Settings,
-    playlists: &playlists::PlaylistCache,
-) -> Result<Vec<u8>, String> {
-    export_with_settings_and_mappings(library, settings, playlists, None)
-}
-
-fn export_with_settings_and_mappings(
-    library: &Library,
-    settings: &Settings,
-    playlists: &playlists::PlaylistCache,
-    lastfm_mappings: Option<&lastfm_import::PersistedLastFmMappings>,
-) -> Result<Vec<u8>, String> {
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&export_json(library)).map_err(|error| error.to_string())?;
-    envelope
-        .as_object_mut()
-        .expect("core export is an object")
-        .insert(
-            "settings".into(),
-            serde_json::to_value(ExportSettings::from_settings(settings))
-                .map_err(|error| error.to_string())?,
-        );
-    envelope
-        .as_object_mut()
-        .expect("core export is an object")
-        .insert(
-            "playlists".into(),
-            serde_json::to_value(playlists).map_err(|error| error.to_string())?,
-        );
-    if let Some(lastfm_mappings) = lastfm_mappings {
-        envelope
-            .as_object_mut()
-            .expect("core export is an object")
-            .insert(
-                "lastfmMappings".into(),
-                serde_json::to_value(lastfm_mappings).map_err(|error| error.to_string())?,
-            );
-    }
-    serde_json::to_vec(&envelope).map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-fn import_with_settings(
-    bytes: &[u8],
-    restore: bool,
-) -> Result<
-    (
-        Library,
-        Option<ExportSettings>,
-        Option<playlists::PlaylistCache>,
-    ),
-    String,
-> {
-    import_with_settings_and_mappings(bytes, restore)
-        .map(|(library, settings, playlists, _)| (library, settings, playlists))
-}
-
-type ImportedBackup = (
-    Library,
-    Option<ExportSettings>,
-    Option<playlists::PlaylistCache>,
-    Option<lastfm_import::PersistedLastFmMappings>,
-);
-
-fn import_with_settings_and_mappings(
-    bytes: &[u8],
-    restore: bool,
-) -> Result<ImportedBackup, String> {
-    let mut json = Vec::new();
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        GzDecoder::new(bytes)
-            .read_to_end(&mut json)
-            .map_err(|error| error.to_string())?;
-    } else {
-        json.extend_from_slice(bytes);
-    }
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&json).map_err(|error| error.to_string())?;
-    let settings: Option<ExportSettings> = envelope
-        .as_object_mut()
-        .and_then(|object| object.remove("settings"))
-        .filter(|_| restore)
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    if let Some(settings) = &settings {
-        settings.clone().apply_to(&mut Settings::default())?;
-    }
-    let playlists = envelope
-        .as_object_mut()
-        .and_then(|object| object.remove("playlists"))
-        .filter(|_| restore)
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    let lastfm_mappings = envelope
-        .as_object_mut()
-        .and_then(|object| object.remove("lastfmMappings"))
-        .filter(|_| restore)
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    if lastfm_mappings
-        .as_ref()
-        .is_some_and(|mappings: &lastfm_import::PersistedLastFmMappings| {
-            mappings.version != lastfm_import::LASTFM_MAPPINGS_VERSION
-        })
-    {
-        return Err("The Last.fm mappings version is unsupported.".into());
-    }
-    let library = import(&serde_json::to_vec(&envelope).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
-    Ok((library, settings, playlists, lastfm_mappings))
-}
-
-fn import_library(app: &tauri::AppHandle, replace: bool) {
-    let handle = app.clone();
-    app.dialog()
-        .file()
-        .add_filter("Retune Library", &["json", "json.gz", "gz"])
-        .pick_file(move |path| {
-            let Some(path) = path else { return };
-            let result = (|| -> Result<_, String> {
-                let path = path.into_path().map_err(|error| error.to_string())?;
-                let bytes = fs::read(path).map_err(|error| error.to_string())?;
-                import_with_settings_and_mappings(&bytes, replace)
-            })();
-            match result {
-                Ok((library, settings, playlists, lastfm_mappings)) if replace => {
-                    let confirmed_handle = handle.clone();
-                    handle
-                        .dialog()
-                        .message("Replace your library? This cannot be undone.")
-                        .buttons(MessageDialogButtons::OkCancelCustom(
-                            "Replace".into(),
-                            "Cancel".into(),
-                        ))
-                        .show(move |confirmed| {
-                            if confirmed {
-                                apply_import(
-                                    &confirmed_handle,
-                                    library,
-                                    settings,
-                                    playlists,
-                                    lastfm_mappings,
-                                    true,
-                                );
-                            }
-                        });
-                }
-                Ok((library, _, _, _)) => apply_import(&handle, library, None, None, None, false),
-                Err(error) => notify_error(&handle, error),
-            }
-        });
-}
-
-fn apply_import(
-    app: &tauri::AppHandle,
-    imported: Library,
-    export_settings: Option<ExportSettings>,
-    imported_playlists: Option<playlists::PlaylistCache>,
-    imported_lastfm_mappings: Option<lastfm_import::PersistedLastFmMappings>,
-    replace: bool,
-) {
-    let state = app.state::<AppState>();
-    let result = mutate_library(&state, |library| {
-        if replace {
-            library.restore(imported);
-        } else {
-            library.merge(imported);
-        }
-        Ok(())
-    });
-    match result {
-        Ok(()) => {
-            if let Some(export_settings) = export_settings {
-                if let Err(error) = apply_export_settings(app, export_settings) {
-                    notify_error(app, error);
-                    return;
-                }
-            }
-            if let Some(playlists) = imported_playlists {
-                if let Err(error) = save_playlists(app, playlists) {
-                    notify_error(app, error);
-                    return;
-                }
-            }
-            if let Some(lastfm_mappings) = imported_lastfm_mappings {
-                if let Err(error) = tauri::async_runtime::block_on(
-                    state.lastfm_import.restore_mappings(lastfm_mappings),
-                ) {
-                    notify_error(app, error);
-                    return;
-                }
-            }
-            let _ = app.emit("library-changed", ());
-        }
-        Err(error) => notify_error(app, error),
-    }
-}
-
-fn apply_export_settings(
-    app: &tauri::AppHandle,
-    export_settings: ExportSettings,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let mut settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    export_settings.apply_to(&mut settings)?;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|error| error.to_string())?;
-    if let Some(menu_checks) = &state.menu_checks {
-        menu_checks
-            .sync(&settings)
-            .map_err(|error| error.to_string())?;
-    }
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
-    app.emit("settings-changed", settings.clone())
-        .map_err(|error| error.to_string())?;
-    let playback = Arc::clone(&state.playback);
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let event = playback.set_shuffle(settings.shuffle).await;
-        let _ = app.emit("player-state", event);
-    });
-    Ok(())
-}
-
 fn notify_error(app: &tauri::AppHandle, error: String) {
     log::error!("{error}");
-    let _ = app.emit("operation-error", error);
+    let _ = emit_main_event(app, main_events::MainEvent::OperationError(error));
+}
+
+pub(crate) fn emit_main_event<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    event: main_events::MainEvent,
+) -> tauri::Result<()> {
+    app.state::<AppState>().main_events.send(event)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
     #[cfg(all(desktop, not(test)))]
-    let builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    let builder = builder.plugin(
+        tauri_plugin_window_state::Builder::default()
+            .with_denylist(&["lastfm-importer"])
+            .with_state_flags(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION
+                    | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+            )
+            .build(),
+    );
     let app = builder.invoke_handler(tauri::generate_handler![
             library_commands::browse,
             library_commands::metadata_values,
+            library_commands::genre_values,
             library_commands::click_track_star,
             library_commands::set_track_enabled,
             library_commands::set_album_rating,
             library_commands::get_track,
             library_commands::edit_track,
             library_commands::set_track_infos,
-            library_commands::import_local,
-            startup_notice,
-            get_settings,
-            set_settings,
+            main_events::subscribe_main_events,
+            main_events::unsubscribe_main_events,
+            settings_commands::get_settings,
+            settings_commands::get_appearance,
+            settings_commands::update_settings,
             spotify_commands::connection_state,
             spotify_commands::connect_spotify,
             spotify_commands::authorize_spotify_playback,
@@ -2605,37 +1078,37 @@ pub fn run() {
             playback_commands::player_set_volume,
             playback_commands::set_repeat,
             playback_commands::set_shuffle,
-            playback_commands::set_audio_settings,
             spotify_commands::track_artwork,
             lastfm::lastfm_state,
             lastfm::connect_lastfm,
-            lastfm::finish_lastfm,
-            lastfm::disconnect_lastfm,
-            lastfm_import::open_lastfm_importer,
-            lastfm_import::lastfm_import_state,
-            lastfm_import::lastfm_import_queue,
-            lastfm_import::lastfm_import_page,
-            lastfm_import::start_lastfm_import,
-            lastfm_import::sync_lastfm_plays,
-            lastfm_import::lastfm_import_review,
-            lastfm_import::lastfm_import_options,
-            lastfm_import::lastfm_import_count_mode,
-            lastfm_import::lastfm_import_search_terms,
-            lastfm_import::lastfm_import_select_match,
-            lastfm_import::lastfm_import_select_matches,
-            lastfm_import::lastfm_import_collection_search_albums,
-            lastfm_import::lastfm_import_collection_preview_album,
-            lastfm_import::lastfm_import_collection_add_album,
-            lastfm_import::lastfm_import_collection_remove_album,
-            lastfm_import::lastfm_import_activate_collection,
-            lastfm_import::lastfm_import_change_track,
-            lastfm_import::lastfm_import_change_album,
-            lastfm_import::lastfm_import_apply,
-            lastfm_import::lastfm_import_retry_apply,
-            lastfm_import::lastfm_import_prepare_accept_all,
-            lastfm_import::lastfm_import_accept_all,
+            finish_lastfm,
+            disconnect_lastfm,
+            lastfm_import::commands::open_lastfm_importer,
+            lastfm_import::commands::lastfm_import_state,
+            lastfm_import::commands::lastfm_import_queue,
+            lastfm_import::commands::lastfm_import_page,
+            lastfm_import::commands::start_lastfm_import,
+            lastfm_import::commands::sync_lastfm_plays,
+            lastfm_import::commands::lastfm_import_review,
+            lastfm_import::commands::lastfm_import_options,
+            lastfm_import::commands::lastfm_import_count_mode,
+            lastfm_import::commands::lastfm_import_search_terms,
+            lastfm_import::commands::lastfm_import_select_match,
+            lastfm_import::commands::lastfm_import_select_matches,
+            lastfm_import::commands::lastfm_import_collection_search_albums,
+            lastfm_import::commands::lastfm_import_collection_preview_album,
+            lastfm_import::commands::lastfm_import_collection_add_album,
+            lastfm_import::commands::lastfm_import_collection_remove_album,
+            lastfm_import::commands::lastfm_import_activate_collection,
+            lastfm_import::commands::lastfm_import_change_track,
+            lastfm_import::commands::lastfm_import_change_album,
+            lastfm_import::commands::lastfm_import_apply,
+            lastfm_import::commands::lastfm_import_retry_apply,
+            lastfm_import::commands::lastfm_import_prepare_accept_all,
+            lastfm_import::commands::lastfm_import_accept_all,
             diagnostics::load_diagnostics,
-            diagnostics::email_diagnostics
+            diagnostics::email_diagnostics,
+            external_links::open_external_destination
         ])
         .setup(|app| {
             app.handle().plugin(
@@ -2651,8 +1124,14 @@ pub fn run() {
                 diagnostics::SESSION_START_MARKER
             );
             let app_data_dir = app.path().app_data_dir()?;
+            spotify_sync_commit::Store::new(&app_data_dir)
+                .recover()
+                .map_err(std::io::Error::other)?;
+            restore::RestoreStore::new(&app_data_dir)
+                .recover()
+                .map_err(std::io::Error::other)?;
             let store = FsOverlayStore::new(&app_data_dir);
-            let (mut library, recovery_notice, needs_save) = match store.load() {
+            let (library, recovery_notice, needs_save) = match store.load() {
                 Ok(Some(library)) => (library, None, false),
                 Ok(None) => {
                     let library = initial_library(cfg!(debug_assertions));
@@ -2672,20 +1151,29 @@ pub fn run() {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let backfilled = localfiles::backfill_transaction(&store, &mut library)
-                .map_err(std::io::Error::other)?;
-            if needs_save && !backfilled {
+            if needs_save {
                 store.save(&library)?;
             }
             let settings_store = FsSettingsStore::new(&app_data_dir);
-            let sync_store = FsSyncStore::new(&app_data_dir);
-            let spotify_library = sync_store.spotify_library()?;
+            let cooldown_store = FsCooldownStore::new(&app_data_dir);
+            let artist_genres_store = FsArtistGenresStore::new(&app_data_dir);
+            let spotify_library_store = FsSpotifyLibraryStore::new(&app_data_dir);
+            let spotify_library = spotify_library_store.load()?;
             let spotify_catalog_store = FsSpotifyCatalogStore::new(&app_data_dir);
-            let spotify_catalog = Arc::new(Mutex::new(spotify_catalog_store.load()?));
-            let spotify_catalog_saved_generation = spotify_catalog
-                .lock()
-                .expect("Spotify catalog mutex poisoned")
-                .generation();
+            let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
+            let spotify_catalog_saved_generation = Arc::new(AtomicU64::new(0));
+            let spotify_catalog_flush_gate = Arc::new(Mutex::new(()));
+            let spotify_catalog_hydration_epoch = Arc::new(AtomicU64::new(0));
+            let catalog_hydration = spawn_catalog_hydration(
+                Arc::clone(&spotify_catalog),
+                Arc::clone(&spotify_catalog_saved_generation),
+                Arc::clone(&spotify_catalog_flush_gate),
+                Arc::clone(&spotify_catalog_hydration_epoch),
+                {
+                    let store = spotify_catalog_store.clone();
+                    move || store.load()
+                },
+            );
             let playlist_store = FsPlaylistStore::new(&app_data_dir);
             let playlists = playlist_store.load()?;
             let settings = settings_store.load()?.unwrap_or_default();
@@ -2700,27 +1188,25 @@ pub fn run() {
                 Box::new(EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?)
             };
             let token_store = Arc::new(CachedTokenStore::new(backing));
-            let lastfm = lastfm::Service::new(
+            let lastfm_app = app.handle().clone();
+            let lastfm = lastfm::Service::new_unhydrated(
                 &app_data_dir,
                 use_dev_token_store,
                 settings.lastfm_scrobbling,
+                lastfm::credentials_from(
+                    option_env!("RETUNE_LASTFM_API_KEY"),
+                    option_env!("RETUNE_LASTFM_SHARED_SECRET"),
+                ),
+                Arc::new(move |_| {
+                    let _ = emit_main(&lastfm_app, "lastfm-changed", ());
+                }),
             );
-            let lastfm_import = lastfm_import::Service::new(&app_data_dir);
-            // Native credential-store access can fail transiently; start
-            // disconnected rather than aborting startup.
-            let connection = match token_store.load() {
-                Ok(tokens) => ConnectionState::from_tokens(tokens),
-                Err(error) => {
-                    log::warn!("Token store unavailable at startup: {error}");
-                    ConnectionState::from_tokens(None)
-                }
-            };
-            if connection.needs_reauth {
-                log::info!(
-                    "Spotify connection is missing playlist scopes: {}",
-                    connection.missing_scopes.join(" ")
-                );
-            }
+            let restore_mutations = Arc::new(restore_latch::RestoreMutationState::default());
+            let lastfm_import = lastfm_import::Service::new_unhydrated_with_restore_state(
+                &app_data_dir,
+                Arc::clone(&restore_mutations),
+            );
+            let connection = ConnectionState::from_tokens(None);
             menu_checks.sync_connection(&connection)?;
             let spotify = spotify_provider(
                 &settings.spotify_client_id,
@@ -2728,22 +1214,13 @@ pub fn run() {
                 Arc::clone(&spotify_catalog),
             )
                 .map_err(std::io::Error::other)?;
-            let startup_action = startup_action(
-                &connection,
-                &settings.spotify_client_id,
-                settings.auto_connect,
-                settings.last_full_sync,
-                unix_now(),
-            );
-            if connection.connected && startup_action == StartupAction::Nothing {
-                log::info!("startup sync skipped; library fresh");
-            }
-            let activate_local = connection.connected
-                && connection.playback_authorized
-                && settings.playback_backend == "local";
+            let startup_client_id = settings.spotify_client_id.clone();
+            let startup_auto_connect = settings.auto_connect;
+            let startup_last_full_sync = settings.last_full_sync;
+            let startup_backend = settings.playback_backend;
             let initial_volume = settings.volume;
             let playback = Arc::new(Playback::new(
-                &settings.repeat,
+                settings.repeat,
                 settings.shuffle,
                 settings.play_threshold_percent,
                 AudioSettings {
@@ -2753,39 +1230,85 @@ pub fn run() {
                 },
                 Some(app_data_dir.clone()),
             ));
-            playback.set_local_requested(settings.playback_backend == "local");
-            let media_keys = media_keys::MediaKeys::spawn(app.handle().clone());
+            playback.set_requested_backend(settings.playback_backend);
+            let media_control_app = app.handle().clone();
+            let media_keys = media_keys::MediaKeys::spawn(app.handle(), move |control| {
+                let app = media_control_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = playback_commands::handle_media_control(&app, control).await
+                    {
+                        notify_error(&app, error);
+                    }
+                });
+            });
             let lastfm_enabled = settings.lastfm_scrobbling;
             let lastfm_import_startup = Arc::clone(&lastfm_import);
+            let playback_effects =
+                PlaybackEffects::start(app.handle().clone(), Arc::clone(&lastfm));
             app.manage(AppState {
-                library: Mutex::new(library),
-                store,
-                library_write_gate: Arc::new(Mutex::new(())),
-                library_transaction: Arc::new(LibraryTransactionState::default()),
-                spotify_library: Mutex::new(spotify_library),
-                spotify_library_gate: tokio::sync::Mutex::new(()),
-                settings: Mutex::new(settings),
-                settings_store,
-                sync_store,
-                playlists: Mutex::new(playlists),
-                playlist_store,
+                library: LibraryState::new_with_restore_state(
+                    library,
+                    store,
+                    Arc::clone(&restore_mutations),
+                ),
+                spotify_membership: spotify_membership::SpotifyMembership::new_with_restore_state(
+                    spotify_library,
+                    spotify_library_store,
+                    Arc::clone(&restore_mutations),
+                ),
+                settings: SettingsState::new_with_restore_state(
+                    settings,
+                    settings_store,
+                    Arc::clone(&restore_mutations),
+                ),
+                cooldown_store,
+                artist_genres_store,
+                playlists: PlaylistState::new_with_restore_state(
+                    playlists,
+                    playlist_store,
+                    Arc::clone(&restore_mutations),
+                ),
                 menu_checks: Some(menu_checks),
-                recovery_notice: Mutex::new(recovery_notice),
+                main_events: main_events::MainEventSink::new(recovery_notice),
                 token_store,
                 spotify_catalog,
                 spotify_catalog_store,
-                spotify_catalog_saved_generation: AtomicU64::new(spotify_catalog_saved_generation),
+                spotify_catalog_saved_generation,
+                spotify_catalog_flush_gate,
+                spotify_catalog_hydration_epoch,
                 spotify: Mutex::new(spotify),
                 artwork_cache: Mutex::default(),
                 playback: Arc::clone(&playback),
+                playback_effects,
                 lastfm: Arc::clone(&lastfm),
                 lastfm_import,
                 media_keys,
+                spotify_session: spotify_commands::SpotifySession::default(),
                 sync_orchestrator: SyncOrchestrator::default(),
+                catalog_flush_task: Mutex::new(None),
                 playlist_reauth_notified: AtomicBool::new(false),
+                local_import_active: Arc::new(AtomicBool::new(false)),
+                restore_mutations,
+                shutdown_state: AtomicU8::new(0),
             });
             let catalog_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
+            let catalog_task = tauri::async_runtime::spawn(async move {
+                match catalog_hydration.await {
+                    Ok(Ok(true)) => {
+                        let _ = emit_main(&catalog_app, "library-changed", ());
+                    }
+                    Ok(Ok(false)) => {
+                        log::debug!("Skipped stale Spotify catalog hydration");
+                    }
+                    Ok(Err(error)) => notify_error(
+                        &catalog_app,
+                        format!("Could not load the Spotify catalog: {error}"),
+                    ),
+                    Err(error) => notify_error(
+                        &catalog_app,
+                        format!("Spotify catalog hydration failed: {error}"),
+                    ),
+                }
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 interval.tick().await;
                 loop {
@@ -2807,53 +1330,132 @@ pub fn run() {
                     }
                 }
             });
-            lastfm.attach_app(app.handle().clone());
+            *app
+                .state::<AppState>()
+                .catalog_flush_task
+                .lock()
+                .expect("catalog flush-task mutex poisoned") = Some(catalog_task);
+            let backfill_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let event_app = backfill_app.clone();
+                match tauri::async_runtime::spawn_blocking(move || {
+                    backfill_app
+                        .state::<AppState>()
+                        .library
+                        .mutate(|library| Ok(localfiles::backfill_metadata(library)))
+                })
+                .await
+                {
+                    Ok(Ok(true)) => {
+                        let _ = emit_main(&event_app, "library-changed", ());
+                    }
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => notify_error(&event_app, error),
+                    Err(error) => notify_error(&event_app, error.to_string()),
+                }
+            });
             let lastfm_startup = Arc::clone(&lastfm);
             let profile_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let import_hydration = async {
+                    let result = lastfm_import_startup.hydrate().await;
+                    if result.is_ok() {
+                        let _ = profile_app.emit_to("main", "lastfm-import-changed", ());
+                        let _ = profile_app.emit_to(
+                            "lastfm-importer",
+                            "lastfm-import-changed",
+                            (),
+                        );
+                    }
+                    result
+                };
+                let (lastfm_result, import_result) =
+                    tokio::join!(lastfm_startup.hydrate(), import_hydration);
+                if let Err(error) = &lastfm_result {
+                    notify_error(&profile_app, error.clone());
+                }
+                if let Err(error) = &import_result {
+                    notify_error(&profile_app, error.clone());
+                }
                 lastfm_startup.set_enabled(lastfm_enabled).await;
-                let _ = set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
-                lastfm_import::resume_persisted_import(profile_app.clone()).await;
-                lastfm_import::resume_persisted_apply(profile_app.clone()).await;
-                let _ = lastfm_import_startup.backfill_completed_mappings().await;
-                if lastfm_startup.state().await.connected {
-                    let _ = lastfm_import::sync_lastfm_plays(profile_app.clone()).await;
+                let _ = settings_commands::set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
+                if import_result.is_ok() {
+                    lastfm_import::resume_persisted_import(profile_app.clone()).await;
+                    lastfm_import::resume_persisted_apply(profile_app.clone()).await;
+                    let _ = lastfm_import_startup.backfill_completed_mappings().await;
+                    if lastfm_result.is_ok() && lastfm_startup.state().await.connected {
+                        let _ =
+                            lastfm_import::commands::sync_lastfm_plays(profile_app.clone()).await;
+                    }
                 }
             });
-            let completion_app = app.handle().clone();
-            let lastfm = Arc::clone(&lastfm);
+            let provider_app = app.handle().clone();
+            let playback_effect_app = app.handle().clone();
             playback.listen(
-                app.handle().clone(),
-                move |uri| {
-                    let handle = completion_app.clone();
-                    drop(tauri::async_runtime::spawn_blocking(move || {
-                        let state = handle.state::<AppState>();
-                        match record_play(
-                            &state.store,
-                            &state.library,
-                            &state.library_write_gate,
-                            &state.library_transaction,
-                            &uri,
-                            unix_now(),
-                        ) {
-                            Ok(true) => {
-                                if let Err(error) = handle.emit("library-changed", ()) {
-                                    notify_error(&handle, error.to_string());
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(error) => notify_error(&handle, error),
-                        }
-                    }));
-                },
-                move |fact| lastfm.handle_listening_fact(fact),
+                move || provider_from(&provider_app.state::<AppState>()),
+                move |effect| playback_commands::execute_effect(&playback_effect_app, effect),
             );
-            if activate_local
-                || connection.connected
-                || startup_action != StartupAction::Nothing
             {
                 let handle = app.handle().clone();
+                let credential_dir = app_data_dir.clone();
                 tauri::async_runtime::spawn(async move {
+                    let load_handle = handle.clone();
+                    let loaded = load_startup_credentials(move || {
+                        match load_handle.state::<AppState>().token_store.load() {
+                            Ok(tokens) => Ok((ConnectionState::from_tokens(tokens), None)),
+                            Err(retune_spotify::Error::TokenStoreCorrupt(error)) => {
+                                let corrupt = quarantine_token_file(
+                                    &credential_dir,
+                                    use_dev_token_store,
+                                    unix_now(),
+                                )
+                                .map_err(|error| error.to_string())?;
+                                Ok((
+                                    ConnectionState::from_tokens(None),
+                                    Some(format!(
+                                        "Retune could not load your Spotify credentials ({error}). The damaged file was moved to {}. Reconnect Spotify to continue.",
+                                        corrupt.display()
+                                    )),
+                                ))
+                            }
+                            Err(error) => {
+                                log::warn!("Token store unavailable at startup: {error}");
+                                Ok((ConnectionState::from_tokens(None), None))
+                            }
+                        }
+                    })
+                    .await;
+                    let (connection, notice) = match loaded {
+                        Ok(Ok(loaded)) => loaded,
+                        Ok(Err(error)) => {
+                            notify_error(&handle, error);
+                            (ConnectionState::from_tokens(None), None)
+                        }
+                        Err(error) => {
+                            notify_error(&handle, error.to_string());
+                            (ConnectionState::from_tokens(None), None)
+                        }
+                    };
+                    if let Some(notice) = notice {
+                        log::warn!("{notice}");
+                        let _ = emit_main_event(
+                            &handle,
+                            main_events::MainEvent::StartupNotice(notice),
+                        );
+                    }
+                    if let Err(error) = emit_connection_state_async(&handle).await {
+                        notify_error(&handle, error);
+                    }
+                    let startup_action = startup_action(
+                        &connection,
+                        &startup_client_id,
+                        startup_auto_connect,
+                        startup_last_full_sync,
+                        unix_now(),
+                    );
+                    let activate_local = connection.connected
+                        && connection.playback_authorized
+                        && startup_backend == PlaybackBackend::Local;
                     if activate_local {
                         let state = handle.state::<AppState>();
                         if let Err(error) = switch_to_local(&state, initial_volume).await {
@@ -2864,7 +1466,9 @@ pub fn run() {
                         StartupAction::Sync => sync_spotify(&handle).await,
                         StartupAction::Connect => spotify_commands::connect_spotify(handle.clone()).await,
                         StartupAction::Nothing => match provider_from(&handle.state::<AppState>()) {
-                            Ok(client) => sync_playlists(&handle, client.as_ref()).await,
+                            Ok(client) => {
+                                playlist_commands::sync_playlists(&handle, client.as_ref()).await
+                            }
                             Err(error) => Err(error),
                         },
                     };
@@ -2880,16 +1484,59 @@ pub fn run() {
     let mut ready = false;
     app.run(move |app, event| match event {
         tauri::RunEvent::Ready => ready = true,
+        tauri::RunEvent::WindowEvent { label, event, .. } => {
+            handle_local_drag_event(app, &label, &event);
+        }
         tauri::RunEvent::Resumed if ready => {
             let playback = Arc::clone(&app.state::<AppState>().playback);
             tauri::async_runtime::spawn(async move {
                 playback.invalidate_local().await;
             });
         }
-        tauri::RunEvent::ExitRequested { .. } => {
-            if let Err(error) = flush_spotify_catalog(&app.state::<AppState>()) {
-                log::warn!("Could not persist Spotify catalog at exit: {error}");
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            let state = app.state::<AppState>();
+            match exit_action(&state.shutdown_state) {
+                ExitAction::Allow => return,
+                ExitAction::WaitForDrain => {
+                    api.prevent_exit();
+                    return;
+                }
+                ExitAction::StartDrain => api.prevent_exit(),
             }
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                let catalog_task = state
+                    .catalog_flush_task
+                    .lock()
+                    .expect("catalog flush-task mutex poisoned")
+                    .take();
+                if let Some(task) = catalog_task {
+                    task.abort();
+                }
+                state.sync_orchestrator.cancel_retry();
+                if tokio::time::timeout(Duration::from_secs(3), state.playback_effects.shutdown())
+                    .await
+                    .is_err()
+                {
+                    log::warn!("Timed out draining playback persistence at exit");
+                }
+                state.lastfm.shutdown().await;
+                let flush_handle = handle.clone();
+                match tauri::async_runtime::spawn_blocking(move || {
+                    flush_spotify_catalog(&flush_handle.state::<AppState>())
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        log::warn!("Could not persist Spotify catalog at exit: {error}")
+                    }
+                    Err(error) => log::warn!("Spotify catalog exit task failed: {error}"),
+                }
+                state.shutdown_state.store(2, Ordering::Release);
+                handle.exit(0);
+            });
         }
         _ => {}
     });
@@ -2924,6 +1571,256 @@ fn startup_action(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn playback_effect_shutdown_drains_queued_work_and_is_idempotent() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_completed = Arc::clone(&completed);
+        let task = tauri::async_runtime::spawn(async move {
+            while let Some(effect) = receiver.recv().await {
+                match effect {
+                    PlaybackDurableEffect::RecordPlay(uri) => {
+                        assert_eq!(uri, "file:///song.mp3");
+                        worker_completed.store(true, Ordering::Release);
+                    }
+                    PlaybackDurableEffect::Shutdown(done) => {
+                        let _ = done.send(());
+                        break;
+                    }
+                    PlaybackDurableEffect::Listening(_) => unreachable!(),
+                }
+            }
+        });
+        let effects = PlaybackEffects {
+            sender: Mutex::new(Some(sender)),
+            task: Mutex::new(Some(task)),
+        };
+
+        effects
+            .submit(PlaybackDurableEffect::RecordPlay("file:///song.mp3".into()))
+            .unwrap();
+        effects.shutdown().await;
+        effects.shutdown().await;
+        assert!(completed.load(Ordering::Acquire));
+        assert!(effects
+            .submit(PlaybackDurableEffect::RecordPlay("file:///late.mp3".into()))
+            .is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_credential_store_does_not_block_initializing_ui_work() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = std::sync::mpsc::channel();
+        let load = {
+            let started = Arc::clone(&started);
+            tokio::spawn(async move {
+                load_startup_credentials(move || {
+                    started.notify_one();
+                    released.recv().unwrap();
+                    ConnectionState::from_tokens(None)
+                })
+                .await
+            })
+        };
+        started.notified().await;
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .expect("delayed credential storage must not block initializing UI work");
+        release.send(()).unwrap();
+        assert!(!load.await.unwrap().unwrap().connected);
+    }
+
+    #[test]
+    fn catalog_hydration_starts_without_a_current_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let hydration = spawn_catalog_hydration(
+            Arc::new(Mutex::new(SpotifyCatalog::default())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(())),
+            Arc::new(AtomicU64::new(0)),
+            || Ok::<_, std::io::Error>(SpotifyCatalog::default()),
+        );
+
+        assert!(tauri::async_runtime::block_on(hydration).unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn catalog_hydration_is_non_blocking_stale_safe_and_reports_load_failure() {
+        fn catalog(uri: &str) -> SpotifyCatalog {
+            let mut catalog = SpotifyCatalog::default();
+            catalog.observe_track(&SpotifyTrack {
+                uri: uri.into(),
+                name: uri.into(),
+                duration_ms: Some(1_000),
+                track_number: Some(1),
+                disc_number: Some(1),
+                artists: vec![],
+                album: None,
+            });
+            catalog
+        }
+
+        let current = Arc::new(Mutex::new(SpotifyCatalog::default()));
+        let saved = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(Mutex::new(()));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let hydration = spawn_catalog_hydration(
+            Arc::clone(&current),
+            Arc::clone(&saved),
+            Arc::clone(&gate),
+            Arc::clone(&epoch),
+            move || {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                Ok::<_, std::io::Error>(catalog("spotify:track:loaded"))
+            },
+        );
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(current.lock().unwrap().counts().tracks, 0);
+        release.send(()).unwrap();
+        assert!(hydration.await.unwrap().unwrap());
+        assert!(current
+            .lock()
+            .unwrap()
+            .complete_track("spotify:track:loaded")
+            .is_some());
+        assert_eq!(
+            saved.load(Ordering::Acquire),
+            current.lock().unwrap().generation()
+        );
+
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let hydration = spawn_catalog_hydration(
+            Arc::clone(&current),
+            Arc::clone(&saved),
+            Arc::clone(&gate),
+            Arc::clone(&epoch),
+            move || {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                Ok::<_, std::io::Error>(catalog("spotify:track:stale"))
+            },
+        );
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        current.lock().unwrap().observe_track(&SpotifyTrack {
+            uri: "spotify:track:current".into(),
+            name: "Current".into(),
+            duration_ms: Some(1_000),
+            track_number: Some(1),
+            disc_number: Some(1),
+            artists: vec![],
+            album: None,
+        });
+        release.send(()).unwrap();
+        assert!(!hydration.await.unwrap().unwrap());
+        {
+            let snapshot = current.lock().unwrap();
+            assert!(snapshot.complete_track("spotify:track:current").is_some());
+            assert!(snapshot.complete_track("spotify:track:stale").is_none());
+        }
+
+        let failed = spawn_catalog_hydration(
+            Arc::clone(&current),
+            Arc::clone(&saved),
+            gate,
+            epoch,
+            || Err::<SpotifyCatalog, _>(std::io::Error::other("broken")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failed.unwrap_err().to_string(), "broken");
+        assert!(current
+            .lock()
+            .unwrap()
+            .complete_track("spotify:track:current")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn playback_effect_queue_full_is_reported() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let effects = PlaybackEffects {
+            sender: Mutex::new(Some(sender)),
+            task: Mutex::new(None),
+        };
+        effects
+            .submit(PlaybackDurableEffect::RecordPlay("file:///one.mp3".into()))
+            .unwrap();
+        assert_eq!(
+            effects
+                .submit(PlaybackDurableEffect::RecordPlay("file:///two.mp3".into()))
+                .unwrap_err(),
+            "Playback persistence queue is full."
+        );
+    }
+
+    #[test]
+    fn repeated_exit_requests_wait_until_the_drain_is_complete() {
+        let state = AtomicU8::new(0);
+        assert_eq!(exit_action(&state), ExitAction::StartDrain);
+        assert_eq!(exit_action(&state), ExitAction::WaitForDrain);
+        state.store(2, Ordering::Release);
+        assert_eq!(exit_action(&state), ExitAction::Allow);
+    }
+
+    #[tokio::test]
+    async fn successful_submit_is_always_ordered_before_shutdown() {
+        for _ in 0..32 {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+            let processed = Arc::new(AtomicBool::new(false));
+            let worker_processed = Arc::clone(&processed);
+            let task = tauri::async_runtime::spawn(async move {
+                while let Some(effect) = receiver.recv().await {
+                    match effect {
+                        PlaybackDurableEffect::RecordPlay(_) => {
+                            worker_processed.store(true, Ordering::Release)
+                        }
+                        PlaybackDurableEffect::Shutdown(done) => {
+                            let _ = done.send(());
+                            break;
+                        }
+                        PlaybackDurableEffect::Listening(_) => unreachable!(),
+                    }
+                }
+            });
+            let effects = Arc::new(PlaybackEffects {
+                sender: Mutex::new(Some(sender)),
+                task: Mutex::new(Some(task)),
+            });
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let submit = {
+                let effects = Arc::clone(&effects);
+                let barrier = Arc::clone(&barrier);
+                tauri::async_runtime::spawn_blocking(move || {
+                    barrier.wait();
+                    effects.submit(PlaybackDurableEffect::RecordPlay("file:///song.mp3".into()))
+                })
+            };
+            let shutdown = {
+                let effects = Arc::clone(&effects);
+                let barrier = Arc::clone(&barrier);
+                tauri::async_runtime::spawn(async move {
+                    tauri::async_runtime::spawn_blocking(move || barrier.wait())
+                        .await
+                        .unwrap();
+                    effects.shutdown().await;
+                })
+            };
+            let submitted = submit.await.unwrap().is_ok();
+            shutdown.await.unwrap();
+            assert_eq!(processed.load(Ordering::Acquire), submitted);
+        }
+    }
+
     #[derive(Default)]
     struct RecordingOverlayStore(Mutex<Vec<Library>>);
 
@@ -2941,6 +1838,20 @@ mod tests {
         }
     }
 
+    struct RejectingOverlayStore;
+
+    impl OverlayStore for RejectingOverlayStore {
+        fn load(&self) -> store::StoreResult<Option<Library>> {
+            Ok(None)
+        }
+
+        fn save(&self, _library: &Library) -> store::StoreResult<()> {
+            Err(store::StoreError::Io(std::io::Error::other(
+                "save rejected",
+            )))
+        }
+    }
+
     use retune_core::model::NewTrack;
     use retune_spotify::{
         auth,
@@ -2952,6 +1863,52 @@ mod tests {
     };
 
     use super::*;
+    use crate::backup::{
+        commit_restore, export_with_settings, export_with_settings_and_mappings,
+        import_with_settings, import_with_settings_and_mappings, refresh_completed_restore_with,
+        ExportSettings,
+    };
+    use crate::store::{BrowserPanes, LastFmScrobblingProfile};
+
+    #[test]
+    fn failed_library_candidate_save_does_not_swap_live_memory() {
+        let mut live = Library::new();
+        live.add(metadata_track(
+            "spotify:track:existing",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+        let before = retune_core::io::export_json(&live);
+        let mut candidate = live.clone();
+        candidate.add(metadata_track(
+            "spotify:track:new",
+            "Rock",
+            "Artist",
+            "Album",
+        ));
+
+        assert!(commit_library_candidate(&RejectingOverlayStore, &mut live, candidate).is_err());
+        assert_eq!(retune_core::io::export_json(&live), before);
+    }
+
+    #[test]
+    fn corrupt_token_quarantine_preserves_the_damaged_file() {
+        for (use_dev_store, name) in [(true, "dev-tokens.json"), (false, "tokens.enc")] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(name);
+            fs::write(&path, b"damaged").unwrap();
+
+            let quarantined = quarantine_token_file(directory.path(), use_dev_store, 42).unwrap();
+
+            assert!(!path.exists());
+            assert_eq!(
+                quarantined.file_name().unwrap().to_string_lossy(),
+                format!("{name}.corrupt-42")
+            );
+            assert_eq!(fs::read(quarantined).unwrap(), b"damaged");
+        }
+    }
 
     #[test]
     fn spotify_album_id_accepts_only_strict_album_uris() {
@@ -2989,17 +1946,19 @@ mod tests {
             "Artist",
             "Album",
         ));
-        library.tracks_mut()[0].play_count = 3;
+        library.merge_history_absolute("spotify:track:track", Some(3), None, None);
         let library = Mutex::new(library);
         let store = RecordingOverlayStore::default();
         let write_gate = Mutex::new(());
         let transaction = LibraryTransactionState::default();
+        let restore_mutations = restore_latch::RestoreMutationState::default();
 
         assert!(record_play(
             &store,
             &library,
             &write_gate,
             &transaction,
+            &restore_mutations,
             "spotify:track:track",
             123,
         )
@@ -3009,6 +1968,7 @@ mod tests {
             &library,
             &write_gate,
             &transaction,
+            &restore_mutations,
             "spotify:track:missing",
             456,
         )
@@ -3025,6 +1985,7 @@ mod tests {
 
     #[test]
     fn record_play_waits_for_library_transaction_and_wakes() {
+        let directory = tempfile::tempdir().unwrap();
         let mut library = Library::new();
         let id = library.add(metadata_track(
             "spotify:track:track",
@@ -3032,38 +1993,24 @@ mod tests {
             "Artist",
             "Album",
         ));
-        let library = Arc::new(Mutex::new(library));
-        let store = Arc::new(RecordingOverlayStore::default());
-        let write_gate = Arc::new(Mutex::new(()));
-        let transaction = Arc::new(LibraryTransactionState::default());
-        *transaction.active.lock().unwrap() = true;
+        let library = Arc::new(LibraryState::new(
+            library,
+            FsOverlayStore::new(directory.path()),
+        ));
+        let transaction = library.begin_transaction().unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn({
             let library = Arc::clone(&library);
-            let store = Arc::clone(&store);
-            let write_gate = Arc::clone(&write_gate);
-            let transaction = Arc::clone(&transaction);
             move || {
                 started_tx.send(()).unwrap();
-                let result = record_play(
-                    store.as_ref(),
-                    library.as_ref(),
-                    write_gate.as_ref(),
-                    transaction.as_ref(),
-                    "spotify:track:track",
-                    123,
-                );
+                let result = library.record_play("spotify:track:track", 123);
                 finished_tx.send(result).unwrap();
             }
         });
         started_rx.recv().unwrap();
         assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
-        {
-            let mut active = transaction.active.lock().unwrap();
-            *active = false;
-            transaction.changed.notify_all();
-        }
+        drop(transaction);
         assert!(finished_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap()
@@ -3071,75 +2018,12 @@ mod tests {
         worker.join().unwrap();
 
         assert_eq!(library.lock().unwrap().get(id).unwrap().play_count, 1);
-        assert_eq!(store.0.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn track_view_derives_local_state_from_uri() {
-        let mut library = Library::new();
-        let local = library.add(metadata_track(
-            "file:///tmp/song.mp3",
-            "Genre",
-            "Artist",
-            "Album",
-        ));
-        let spotify = library.add(metadata_track(
-            "spotify:track:track",
-            "Genre",
-            "Artist",
-            "Album",
-        ));
-
-        assert!(TrackView::from_track(library.get(local).unwrap(), None).is_local);
-        assert!(!TrackView::from_track(library.get(spotify).unwrap(), None).is_local);
-    }
-
-    #[test]
-    fn track_view_exposes_metadata_fields() {
-        let mut library = Library::new();
-        let id = library.add(metadata_track(
-            "spotify:track:track",
-            "Genre",
-            "Artist",
-            "Album",
-        ));
-        let track = &mut library.tracks_mut()[0];
-        track.play_count = 4;
-        track.last_played_at = Some(123);
-        track.added_at = Some(100);
-        track.kind = Some("Spotify".into());
-        let view = TrackView::from_track(library.get(id).unwrap(), None);
-
-        assert_eq!((view.play_count, view.last_played_at), (4, Some(123)));
-        assert_eq!(view.added_at, Some(100));
-        assert_eq!(view.kind.as_deref(), Some("Spotify"));
-        assert_eq!(view.bitrate_kbps, None);
-    }
-
-    #[test]
-    fn track_info_view_decodes_only_local_file_paths() {
-        let mut library = Library::new();
-        let local_path = std::env::temp_dir().join("Rétune song.mp3");
-        let local = library.add(metadata_track(
-            &localfiles::file_uri(&local_path),
-            "Genre",
-            "Artist",
-            "Album",
-        ));
-        let spotify = library.add(metadata_track(
-            "spotify:track:track",
-            "Genre",
-            "Artist",
-            "Album",
-        ));
-
         assert_eq!(
-            TrackInfoView::from_track(&library, library.get(local).unwrap()).local_path,
-            Some(local_path.to_string_lossy().into_owned())
-        );
-        assert_eq!(
-            TrackInfoView::from_track(&library, library.get(spotify).unwrap()).local_path,
-            None
+            FsOverlayStore::new(directory.path())
+                .load()
+                .unwrap()
+                .unwrap(),
+            *library.lock().unwrap()
         );
     }
 
@@ -3203,6 +2087,78 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn playlist_sync_and_later_mutation_commit_in_gate_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(PlaylistState::new(
+            playlist_cache(),
+            FsPlaylistStore::new(directory.path()),
+        ));
+
+        let (sync_guard, mut synced) = state.begin_mutation().await.unwrap();
+        synced.playlists[0].name = "Synced".into();
+
+        let (mutation_started, mutation_waiting) = tokio::sync::oneshot::channel();
+        let mutation = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                mutation_started.send(()).unwrap();
+                let (operation, mut next) = state.begin_mutation().await.unwrap();
+                let mut created = next.playlists[0].clone();
+                created.id = "created".into();
+                created.name = "Created".into();
+                next.playlists.push(created);
+                state.commit(operation, next, true).await.unwrap();
+            })
+        };
+
+        mutation_waiting.await.unwrap();
+        state.commit(sync_guard, synced, false).await.unwrap();
+        mutation.await.unwrap();
+
+        let final_cache = state.snapshot().unwrap();
+        assert_eq!(final_cache.playlists[0].name, "Synced");
+        assert!(final_cache
+            .playlists
+            .iter()
+            .any(|playlist| playlist.id == "created"));
+        assert_eq!(
+            FsPlaylistStore::new(directory.path()).load().unwrap(),
+            final_cache
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_playlist_save_makes_old_memory_non_authoritative() {
+        let directory = tempfile::tempdir().unwrap();
+        let before = playlist_cache();
+        let store = FsPlaylistStore::new(directory.path());
+        store.save(&before).unwrap();
+        let control = store.clone();
+        let state = PlaylistState::new(before.clone(), store);
+        let hook = store::SaveHook::new(true);
+        control.arm_save(Arc::clone(&hook));
+        let mut next = before.clone();
+        next.playlists[0].name = "Changed".into();
+
+        let (operation, _) = state.begin_mutation().await.unwrap();
+        let failed = state.commit(operation, next, true);
+        let release = std::thread::spawn(move || {
+            hook.wait_until_reached();
+            hook.release();
+        });
+        assert!(failed.await.is_err());
+        release.join().unwrap();
+        assert!(state.snapshot().is_err());
+        assert!(state.begin_mutation().await.is_err());
+        let (_guard, refresh_base) = state.begin_sync().await.unwrap();
+        assert_eq!(refresh_base, playlists::PlaylistCache::default());
+        assert_eq!(
+            FsPlaylistStore::new(directory.path()).load().unwrap(),
+            before
+        );
+    }
+
     fn playlist_client(
         responses: impl IntoIterator<Item = Response>,
     ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
@@ -3212,7 +2168,7 @@ mod tests {
     #[tokio::test]
     async fn artist_albums_reports_persisted_quota_cooldown() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let store = FsCooldownStore::new(dir.path());
         store
             .save_cooldowns(&BTreeMap::from([(
                 "/artists".into(),
@@ -3239,7 +2195,7 @@ mod tests {
     #[tokio::test]
     async fn artist_albums_persists_live_quota_deadline() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let store = FsCooldownStore::new(dir.path());
         let client = playlist_client([Response::quota_exceeded(Some(120))]);
 
         let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
@@ -3260,7 +2216,7 @@ mod tests {
     #[tokio::test]
     async fn artist_albums_does_not_invent_live_quota_deadline() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let store = FsCooldownStore::new(dir.path());
         let client = playlist_client([Response::quota_exceeded(None)]);
 
         let error = artist_albums_outcome(&client, &store, "artist", 0, 100, chrono::Local::now())
@@ -3282,7 +2238,9 @@ mod tests {
         );
         assert_eq!(
             partial_import_message(detail, true, None, now),
-            format!("Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it.")
+            format!(
+                "Partial import ({detail}) — Spotify Development Mode quota is exhausted; sync again after Spotify resets it."
+            )
         );
         assert_eq!(
             partial_import_message("", false, None, now),
@@ -3342,30 +2300,54 @@ mod tests {
         assert_eq!(track_id("spotify:track:track"), Some("track"));
         assert_eq!(track_id("spotify:album:album"), None);
         assert_eq!(track_id("spotify:track:"), None);
+        assert_eq!(track_id("spotify:track:../albums"), None);
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 64)
+            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:track", 64)
                 .await
+                .unwrap()
                 .as_deref(),
             Some("small")
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 64).await,
+            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:track", 64)
+                .await
+                .unwrap(),
             Some("small".into())
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:track", 300).await,
+            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:track", 300)
+                .await
+                .unwrap(),
             Some("large".into())
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:album:album", 64).await,
+            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:album:album", 64)
+                .await
+                .unwrap(),
             None
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
+            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:missing", 64)
+                .await
+                .unwrap(),
             None
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, "spotify:track:missing", 64).await,
+            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:missing", 64)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_track_artwork(
+                Some(&client),
+                &cache,
+                Ok(None),
+                "spotify:track:../albums",
+                64
+            )
+            .await
+            .unwrap(),
             None
         );
         assert_eq!(client.transport().requests().len(), 2);
@@ -3384,10 +2366,12 @@ mod tests {
         let artwork = resolve_track_artwork(
             None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
             &cache,
+            Ok(Some(tagged.clone())),
             &uri,
             64,
         )
         .await
+        .unwrap()
         .unwrap();
         assert!(artwork.starts_with("data:image/png;base64,"));
         let encoded = artwork.split_once(',').unwrap().1;
@@ -3404,56 +2388,123 @@ mod tests {
             resolve_track_artwork(
                 None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
                 &cache,
+                Ok(Some(tagged.clone())),
                 &uri,
                 64
             )
-            .await,
+            .await
+            .unwrap(),
             Some(artwork)
         );
 
         let wav = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../crates/retune-audio/tests/fixtures/cc0-audio.wav");
-        assert_eq!(
-            resolve_track_artwork(
+        assert!(resolve_track_artwork(
+            None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+            &cache,
+            Ok(Some(wav.clone())),
+            &localfiles::file_uri(&wav),
+            64
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_local_artwork_read_does_not_block_the_async_worker() {
+        let cache = Arc::new(Mutex::default());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = std::sync::mpsc::channel();
+        let resolver = {
+            let cache = Arc::clone(&cache);
+            let started = Arc::clone(&started);
+            tokio::spawn(async move {
+                resolve_track_artwork_with(
+                    None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+                    &cache,
+                    Ok(Some(PathBuf::from("slow.mp3"))),
+                    "file:///slow.mp3",
+                    64,
+                    move |_| {
+                        started.notify_one();
+                        released.recv().unwrap();
+                        Ok(None)
+                    },
+                )
+                .await
+            })
+        };
+        started.notified().await;
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .expect("slow tag I/O must not block the Tokio worker");
+        release.send(()).unwrap();
+        assert_eq!(resolver.await.unwrap().unwrap(), None);
+    }
+
+    #[test]
+    fn local_artwork_requires_membership_and_caps_decoded_bytes() {
+        let library = Library::new();
+        assert!(authorized_local_artwork_path(&library, "file:///etc/passwd").is_err());
+        assert!(local_artwork_data_url(retune_audio::Artwork {
+            mime: Some("image/png".into()),
+            bytes: vec![0; MAX_LOCAL_ARTWORK_BYTES + 1],
+        })
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn rejected_local_artwork_never_reads_tags() {
+        let cache = Mutex::default();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader_reads = Arc::clone(&reads);
+
+        let result = resolve_track_artwork_with(
+            None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+            &cache,
+            Err("Local artwork resource is not in the library.".into()),
+            "file:///etc/passwd",
+            64,
+            move |_| {
+                reader_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(cache.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_artwork_errors_are_not_cached() {
+        let cache = Mutex::default();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let reader_reads = Arc::clone(&reads);
+            let result = resolve_track_artwork_with(
                 None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
                 &cache,
-                &localfiles::file_uri(&wav),
-                64
+                Ok(Some(PathBuf::from("oversized.mp3"))),
+                "file:///oversized.mp3",
+                64,
+                move |_| {
+                    reader_reads.fetch_add(1, Ordering::SeqCst);
+                    Err("embedded artwork exceeds the byte limit".into())
+                },
             )
-            .await,
-            None
-        );
-    }
+            .await;
+            assert!(result.is_err());
+        }
 
-    #[test]
-    fn import_failure_message_is_bounded() {
-        let failures = (1..=7)
-            .map(|index| localfiles::FailedImport {
-                path: format!("file-{index}"),
-                reason: "bad".into(),
-            })
-            .collect::<Vec<_>>();
-
-        let message = format_import_failures(&failures).unwrap();
-        assert!(message.contains("file-1 — bad"));
-        assert!(message.contains("file-5 — bad"));
-        assert!(!message.contains("file-6 — bad"));
-        assert!(message.ends_with("+ 2 more"));
-        assert_eq!(format_import_failures(&[]), None);
-    }
-
-    #[test]
-    fn playlist_membership_requires_all_nonempty_uris() {
-        let mut cache = playlist_cache();
-
-        assert!(playlist_list_views(&cache, &["one".into(), "two".into()])[0].contains);
-        assert!(!playlist_list_views(&cache, &["one".into(), "missing".into()])[0].contains);
-        assert!(!playlist_list_views(&cache, &["missing".into()])[0].contains);
-        assert!(!playlist_list_views(&cache, &[])[0].contains);
-        assert!(playlist_list_views(&cache, &[])[0].items_available);
-        cache.playlists[0].owned = false;
-        cache.playlists[0].tracks.clear();
-        assert!(!playlist_list_views(&cache, &[])[0].items_available);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        assert!(cache.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -3565,98 +2616,6 @@ mod tests {
     }
 
     #[test]
-    fn album_page_resolves_library_ids_ratings_and_completeness() {
-        let mut library = Library::new();
-        let mut first = metadata_track("spotify:track:one", "Rock", "Artist", "Album");
-        first.added_at = Some(42);
-        let id = library.add(first);
-        library.set_track_rating(id, Rating::new(4)).unwrap();
-        library.set_album_rating(
-            AlbumKey {
-                source: SourceId::Music,
-                art: "Artist".into(),
-                alb: "Album".into(),
-            },
-            Rating::new(5),
-        );
-
-        let page = album_page_view(&library, &SpotifyLibraryState::default(), spotify_album());
-
-        assert_eq!(page.album_type, "Compilation");
-        assert_eq!(page.year.as_deref(), Some("2024"));
-        assert_eq!(page.total_duration_secs, 4);
-        assert!(!page.saved_album);
-        assert!(!page.content_complete);
-        assert_eq!(page.added_at, Some(42));
-        assert_eq!(page.album_rating, None);
-        assert_eq!(page.tracks[0].track_id, Some(id.0));
-        assert_eq!(
-            page.tracks[0].rating,
-            Some(RatingView {
-                stars: 4,
-                explicit: true
-            })
-        );
-        assert_eq!(page.tracks[1].track_id, None);
-
-        library.add(metadata_track(
-            "spotify:track:two",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
-        let page = album_page_view(&library, &SpotifyLibraryState::default(), spotify_album());
-        assert!(page.saved_album);
-        assert!(page.content_complete);
-        assert_eq!(page.album_rating, Some(5));
-    }
-
-    #[test]
-    fn album_page_resolves_alternate_track_uri_to_retained_overlay() {
-        let mut library = Library::new();
-        let mut retained = metadata_track("spotify:track:retained", "Rock", "Artist", "Album");
-        retained.name = "One".into();
-        retained.duration = Duration::from_millis(1_500);
-        retained.track_no = Some(1);
-        retained.disc_no = Some(1);
-        retained.release_date = Some("2024-02-03".into());
-        retained.kind = Some("Spotify".into());
-        retained.added_at = Some(42);
-        let id = library.add(retained);
-        library.set_track_rating(id, Rating::new(4)).unwrap();
-        library.add(metadata_track(
-            "spotify:track:two",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
-        library.set_album_rating(
-            AlbumKey {
-                source: SourceId::Music,
-                art: "Artist".into(),
-                alb: "Album".into(),
-            },
-            Rating::new(5),
-        );
-
-        let mut album = spotify_album();
-        album.tracks.as_mut().unwrap().items[0].uri = "spotify:track:alternate".into();
-        let page = album_page_view(&library, &SpotifyLibraryState::default(), album);
-
-        assert_eq!(page.tracks[0].track_id, Some(id.0));
-        assert_eq!(
-            page.tracks[0].rating,
-            Some(RatingView {
-                stars: 4,
-                explicit: true
-            })
-        );
-        assert!(page.content_complete);
-        assert_eq!(page.album_rating, Some(5));
-        assert_eq!(page.added_at, Some(42));
-    }
-
-    #[test]
     fn exact_membership_distinguishes_album_and_individual_track_states() {
         for (saved_album, saved_track) in
             [(false, false), (true, false), (false, true), (true, true)]
@@ -3730,7 +2689,8 @@ mod tests {
 
             mark_album_membership(&library, &spotify_library, &mut albums);
             mark_track_membership(&library, &spotify_library, &mut tracks);
-            let page = album_page_view(&library, &spotify_library, spotify_album());
+            let page =
+                spotify_commands::album_page_view(&library, &spotify_library, spotify_album());
 
             assert_eq!(albums[0].in_library, saved_album);
             assert_eq!(tracks[0].in_library, saved_track);
@@ -3862,21 +2822,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_values_are_distinct_sorted_and_categorized() {
-        let mut library = Library::new();
-        library.add(metadata_track("one", "rock", "zebra", "Yellow"));
-        library.add(metadata_track("two", "Jazz", "Alpha", "beta"));
-        library.add(metadata_track("three", UNCATEGORIZED, "Alpha", "Yellow"));
-        library.add(metadata_track("empty", "", "", ""));
-
-        let values = collect_metadata_values(&library);
-
-        assert_eq!(values.arts, ["Alpha", "zebra"]);
-        assert_eq!(values.albs, ["beta", "Yellow"]);
-        assert_eq!(values.cats, ["Jazz", "rock"]);
-    }
-
-    #[test]
     fn sync_progress_is_section_weighted_and_never_moves_backwards() {
         let mut progress = SyncProgressState::default();
         let first = progress.update(&SyncBatch {
@@ -3898,6 +2843,49 @@ mod tests {
         assert_eq!(first.tracks, 2);
         assert!((first.fraction - 0.3).abs() < f64::EPSILON);
         assert_eq!(second.fraction, first.fraction);
+    }
+
+    #[test]
+    fn spotify_account_reconciliation_migrates_legacy_ids_and_resets_true_mismatches() {
+        let profile = retune_spotify::client::Profile {
+            id: "legacy-profile".into(),
+            account_id: Some("immutable-account".into()),
+            product: None,
+        };
+        let mut legacy = SpotifyLibraryState {
+            account_id: "legacy-profile".into(),
+            complete: true,
+            ..SpotifyLibraryState::default()
+        };
+        legacy
+            .saved_tracks
+            .insert("spotify:track:one".into(), Some(1));
+
+        let (migrated, changed) =
+            spotify_commands::reconcile_spotify_account(legacy, &profile).unwrap();
+        assert!(!changed);
+        assert_eq!(migrated.account_id, "immutable-account");
+        assert!(migrated.saved_tracks.contains_key("spotify:track:one"));
+
+        let (reset, changed) = spotify_commands::reconcile_spotify_account(
+            SpotifyLibraryState {
+                account_id: "another-account".into(),
+                complete: true,
+                ..SpotifyLibraryState::default()
+            },
+            &profile,
+        )
+        .unwrap();
+        assert!(changed);
+        assert_eq!(reset.account_id, "immutable-account");
+        assert!(!reset.complete);
+
+        let missing = retune_spotify::client::Profile {
+            id: "profile".into(),
+            account_id: None,
+            product: None,
+        };
+        assert!(spotify_commands::reconcile_spotify_account(reset, &missing).is_err());
     }
 
     #[test]
@@ -4006,48 +2994,6 @@ mod tests {
     }
 
     #[test]
-    fn playlist_reconnect_hint_is_dispatched_once() {
-        let notified = AtomicBool::new(false);
-        let mut messages = vec![];
-        let legacy = Tokens {
-            access: String::new(),
-            refresh: String::new(),
-            expires_at: 0,
-            scopes: "user-library-read".into(),
-            playback_credentials: None,
-        };
-        let forbidden = || retune_spotify::Error::Http {
-            endpoint: "/playlists/id/tracks".into(),
-            status: 403,
-            body: "Insufficient client scope".into(),
-        };
-
-        assert_eq!(
-            dispatch_playlist_error(&notified, forbidden(), Some(&legacy), |message| {
-                messages.push(message)
-            }),
-            None
-        );
-        assert_eq!(
-            dispatch_playlist_error(&notified, forbidden(), Some(&legacy), |message| {
-                messages.push(message)
-            }),
-            None
-        );
-        assert_eq!(messages, [playlists::RECONNECT_HINT]);
-        let unrelated = retune_spotify::Error::Http {
-            endpoint: "/playlists/id/tracks".into(),
-            status: 500,
-            body: "Server error".into(),
-        };
-        let expected = unrelated.to_string();
-        assert_eq!(
-            dispatch_playlist_error(&notified, unrelated, Some(&legacy), |_| panic!()),
-            Some(expected)
-        );
-    }
-
-    #[test]
     fn partial_completion_does_not_mark_a_full_sync() {
         let mut settings = Settings::default();
         assert!(!record_full_sync(&mut settings, true, 42));
@@ -4062,7 +3008,7 @@ mod tests {
     #[test]
     fn lastfm_profile_is_account_bound_and_survives_toggles() {
         let mut settings = Settings::default();
-        reconcile_lastfm_scrobbling_profile(&mut settings, "first-user", 10);
+        settings_commands::reconcile_lastfm_scrobbling_profile(&mut settings, "first-user", 10);
         assert_eq!(
             settings.lastfm_scrobbling_profile,
             Some(LastFmScrobblingProfile {
@@ -4071,7 +3017,7 @@ mod tests {
             })
         );
         settings.lastfm_scrobbling = false;
-        reconcile_lastfm_scrobbling_profile(&mut settings, "first-user", 20);
+        settings_commands::reconcile_lastfm_scrobbling_profile(&mut settings, "first-user", 20);
         assert_eq!(
             settings
                 .lastfm_scrobbling_profile
@@ -4080,7 +3026,7 @@ mod tests {
                 .started_at,
             10
         );
-        reconcile_lastfm_scrobbling_profile(&mut settings, "second-user", 30);
+        settings_commands::reconcile_lastfm_scrobbling_profile(&mut settings, "second-user", 30);
         assert_eq!(
             settings.lastfm_scrobbling_profile,
             Some(LastFmScrobblingProfile {
@@ -4182,8 +3128,8 @@ mod tests {
             spotify_client_id: "exported-machine".into(),
             spotify_sync_completed: true,
             last_full_sync: Some(42),
-            playback_backend: "local".into(),
-            repeat: "all".into(),
+            playback_backend: PlaybackBackend::Local,
+            repeat: RepeatMode::All,
             shuffle: true,
             volume: 40,
             streaming_bitrate: 160,
@@ -4303,32 +3249,454 @@ mod tests {
     }
 
     #[test]
+    fn successful_runtime_restore_agrees_in_memory_and_on_disk_before_refresh() {
+        use std::sync::atomic::AtomicUsize;
+
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState::default(),
+            lastfm::Service::new_for_test(directory.path(), true, false),
+            lastfm_import::Service::new(directory.path()),
+        );
+        let library_events = Arc::new(AtomicUsize::new(0));
+        let playlist_events = Arc::new(AtomicUsize::new(0));
+        let settings_events = Arc::new(AtomicUsize::new(0));
+
+        let imported = fixture::library();
+        let restored_settings = Settings {
+            zebra: false,
+            ..Settings::default()
+        };
+        let export_settings = ExportSettings::from_settings(&restored_settings);
+        let restored_playlists = playlists::PlaylistCache {
+            playlists: vec![playlists::CachedPlaylist {
+                id: "restored".into(),
+                name: "Restored".into(),
+                snapshot_id: "snapshot".into(),
+                owned: true,
+                owner: None,
+                track_count: 1,
+                tracks: vec!["spotify:track:restored".into()],
+                track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                spotify_tracks: vec![],
+            }],
+        };
+        let restored_mappings = lastfm_import::PersistedLastFmMappings {
+            version: lastfm_import::LASTFM_MAPPINGS_VERSION,
+            lastfm_username: Some("listener".into()),
+            ..lastfm_import::PersistedLastFmMappings::default()
+        };
+
+        commit_restore(
+            &state.library,
+            &state.settings,
+            &state.playlists,
+            state.lastfm_import.as_ref(),
+            state.restore_mutations.as_ref(),
+            directory.path(),
+            imported.clone(),
+            Some(export_settings),
+            Some(restored_playlists.clone()),
+            Some(restored_mappings.clone()),
+            |refresh| {
+                let journal: serde_json::Value = serde_json::from_slice(
+                    &fs::read(directory.path().join("restore-journal.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(journal["phase"], "complete");
+                assert_eq!(library_events.load(Ordering::SeqCst), 0);
+                assert_eq!(playlist_events.load(Ordering::SeqCst), 0);
+                assert_eq!(settings_events.load(Ordering::SeqCst), 0);
+                refresh_completed_restore_with(
+                    refresh,
+                    |_, _| {
+                        settings_events.fetch_add(1, Ordering::SeqCst);
+                        Err("settings refresh rejected".into())
+                    },
+                    || {
+                        playlist_events.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    || {
+                        library_events.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                );
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*state.library.lock().unwrap(), imported);
+        assert_eq!(state.settings.snapshot(), restored_settings);
+        assert_eq!(state.playlists.snapshot().unwrap(), restored_playlists);
+        let expected_mappings =
+            lastfm_import::normalize_restored_mappings(restored_mappings).unwrap();
+        assert_eq!(
+            tauri::async_runtime::block_on(state.lastfm_import.export_mappings()),
+            expected_mappings
+        );
+        assert_eq!(
+            FsOverlayStore::new(directory.path()).load().unwrap(),
+            Some(imported)
+        );
+        assert_eq!(
+            FsSettingsStore::new(directory.path()).load().unwrap(),
+            Some(restored_settings)
+        );
+        assert_eq!(
+            FsPlaylistStore::new(directory.path()).load().unwrap(),
+            restored_playlists
+        );
+        assert_eq!(
+            lastfm_import::load_mappings_for_recovery(directory.path()).unwrap(),
+            expected_mappings
+        );
+        assert_eq!(library_events.load(Ordering::SeqCst), 1);
+        assert_eq!(playlist_events.load(Ordering::SeqCst), 1);
+        assert_eq!(settings_events.load(Ordering::SeqCst), 1);
+        assert!(!directory.path().join("restore-journal.json").exists());
+    }
+
+    #[test]
+    fn runtime_restore_rolls_forward_after_transient_completion_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = lastfm_import::Service::new(directory.path());
+        let state = test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState::default(),
+            lastfm::Service::new_for_test(directory.path(), true, false),
+            Arc::clone(&service),
+        );
+        let mut imported = Library::new();
+        imported.add(NewTrack {
+            uri: "file:///restored.mp3".into(),
+            name: "Restored".into(),
+            ..NewTrack::default()
+        });
+        let restored_settings = Settings {
+            zebra: false,
+            ..Settings::default()
+        };
+        let restored_playlists = playlists::PlaylistCache {
+            playlists: vec![playlists::CachedPlaylist {
+                id: "restored".into(),
+                name: "Restored".into(),
+                snapshot_id: "snapshot".into(),
+                owned: true,
+                owner: None,
+                track_count: 0,
+                tracks: vec![],
+                track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                spotify_tracks: vec![],
+            }],
+        };
+        let restored_mappings = lastfm_import::PersistedLastFmMappings {
+            version: lastfm_import::LASTFM_MAPPINGS_VERSION,
+            lastfm_username: Some("listener".into()),
+            ..lastfm_import::PersistedLastFmMappings::default()
+        };
+        restore::RestoreStore::new(directory.path()).fail_next_complete();
+
+        commit_restore(
+            &state.library,
+            &state.settings,
+            &state.playlists,
+            state.lastfm_import.as_ref(),
+            state.restore_mutations.as_ref(),
+            directory.path(),
+            imported.clone(),
+            Some(ExportSettings::from_settings(&restored_settings)),
+            Some(restored_playlists.clone()),
+            Some(restored_mappings.clone()),
+            |_| {},
+        )
+        .unwrap();
+
+        let expected_mappings =
+            lastfm_import::normalize_restored_mappings(restored_mappings).unwrap();
+        assert_eq!(*state.library.lock().unwrap(), imported);
+        assert_eq!(state.settings.snapshot(), restored_settings);
+        assert_eq!(state.playlists.snapshot().unwrap(), restored_playlists);
+        assert_eq!(
+            tauri::async_runtime::block_on(service.export_mappings()),
+            expected_mappings
+        );
+        assert_eq!(
+            FsOverlayStore::new(directory.path()).load().unwrap(),
+            Some(imported)
+        );
+        assert_eq!(
+            FsSettingsStore::new(directory.path()).load().unwrap(),
+            Some(restored_settings)
+        );
+        assert_eq!(
+            FsPlaylistStore::new(directory.path()).load().unwrap(),
+            restored_playlists
+        );
+        assert_eq!(
+            lastfm_import::load_mappings_for_recovery(directory.path()).unwrap(),
+            expected_mappings
+        );
+        assert!(!directory.path().join("restore-journal.json").exists());
+
+        state.library.mutate(|_| Ok(())).unwrap();
+        tauri::async_runtime::block_on(state.settings.mutate(
+            |settings| {
+                settings.zebra = !settings.zebra;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        ))
+        .unwrap();
+        drop(tauri::async_runtime::block_on(state.playlists.begin_mutation()).unwrap());
+        tauri::async_runtime::block_on(service.begin_mappings_restore())
+            .unwrap()
+            .replace(lastfm_import::PersistedLastFmMappings {
+                version: lastfm_import::LASTFM_MAPPINGS_VERSION,
+                ..lastfm_import::PersistedLastFmMappings::default()
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_runtime_recovery_latches_all_restore_owners_until_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = lastfm_import::Service::new(directory.path());
+        let state = Arc::new(test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState::default(),
+            lastfm::Service::new_for_test(directory.path(), true, false),
+            Arc::clone(&service),
+        ));
+        let mut imported = Library::new();
+        imported.add(NewTrack {
+            uri: "file:///restored.mp3".into(),
+            ..NewTrack::default()
+        });
+        let baseline_playlists = playlists::PlaylistCache::default();
+        FsPlaylistStore::new(directory.path())
+            .save(&baseline_playlists)
+            .unwrap();
+        let restored_playlists = playlists::PlaylistCache {
+            playlists: vec![playlists::CachedPlaylist {
+                id: "restored".into(),
+                name: "Restored".into(),
+                snapshot_id: "snapshot".into(),
+                owned: true,
+                owner: None,
+                track_count: 0,
+                tracks: vec![],
+                track_metadata_version: playlists::TRACK_METADATA_VERSION,
+                spotify_tracks: vec![],
+            }],
+        };
+        let baseline_mappings = lastfm_import::PersistedLastFmMappings {
+            version: lastfm_import::LASTFM_MAPPINGS_VERSION,
+            ..lastfm_import::PersistedLastFmMappings::default()
+        };
+        lastfm_import::save_mappings_for_recovery(directory.path(), &baseline_mappings).unwrap();
+        let restored_mappings = lastfm_import::PersistedLastFmMappings {
+            version: lastfm_import::LASTFM_MAPPINGS_VERSION,
+            lastfm_username: Some("restored".into()),
+            ..lastfm_import::PersistedLastFmMappings::default()
+        };
+        let settings_path = directory.path().join("settings.json");
+        fs::create_dir(&settings_path).unwrap();
+
+        let mut third_library = imported.clone();
+        third_library.add(NewTrack {
+            uri: "file:///third.mp3".into(),
+            ..NewTrack::default()
+        });
+        let third_settings = Settings {
+            zebra: false,
+            ..Settings::default()
+        };
+        let library_mutated = AtomicBool::new(false);
+        let settings_mutated = AtomicBool::new(false);
+
+        let error = commit_restore(
+            &state.library,
+            &state.settings,
+            &state.playlists,
+            state.lastfm_import.as_ref(),
+            state.restore_mutations.as_ref(),
+            directory.path(),
+            imported.clone(),
+            Some(ExportSettings::from_settings(&Settings::default())),
+            Some(restored_playlists.clone()),
+            Some(restored_mappings.clone()),
+            |_| panic!("failed recovery must not refresh"),
+        )
+        .unwrap_err();
+        assert!(error.contains("Restore failed"));
+        assert!(error.contains("immediate recovery failed"));
+        assert!(error.contains("Restart Retune"));
+
+        assert!(state
+            .library
+            .mutate(|library| {
+                library_mutated.store(true, Ordering::SeqCst);
+                *library = third_library.clone();
+                Ok(())
+            })
+            .is_err());
+        assert!(tauri::async_runtime::block_on(state.settings.mutate(
+            |settings| {
+                settings_mutated.store(true, Ordering::SeqCst);
+                *settings = third_settings;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        ))
+        .is_err());
+        assert!(tauri::async_runtime::block_on(state.playlists.begin_mutation()).is_err());
+        assert!(tauri::async_runtime::block_on(service.begin_mappings_restore()).is_err());
+        assert!(!library_mutated.load(Ordering::SeqCst));
+        assert!(!settings_mutated.load(Ordering::SeqCst));
+        assert_eq!(
+            FsOverlayStore::new(directory.path()).load().unwrap(),
+            Some(imported.clone())
+        );
+        assert_eq!(
+            FsPlaylistStore::new(directory.path()).load().unwrap(),
+            baseline_playlists
+        );
+        assert_eq!(
+            lastfm_import::load_mappings_for_recovery(directory.path()).unwrap(),
+            baseline_mappings
+        );
+        assert!(settings_path.is_dir());
+        let journal: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.path().join("restore-journal.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(journal["phase"], "applying");
+
+        fs::remove_dir(&settings_path).unwrap();
+        restore::RestoreStore::new(directory.path())
+            .recover()
+            .unwrap();
+        assert!(!directory.path().join("restore-journal.json").exists());
+        assert_eq!(
+            FsPlaylistStore::new(directory.path()).load().unwrap(),
+            restored_playlists
+        );
+        assert_eq!(
+            lastfm_import::load_mappings_for_recovery(directory.path()).unwrap(),
+            lastfm_import::normalize_restored_mappings(restored_mappings).unwrap()
+        );
+        let restarted_service = lastfm_import::Service::new(directory.path());
+        let restarted = test_app_state(
+            directory.path(),
+            imported,
+            SpotifyLibraryState::default(),
+            lastfm::Service::new_for_test(directory.path(), true, false),
+            restarted_service,
+        );
+        restarted
+            .library
+            .mutate(|library| {
+                *library = third_library.clone();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            FsOverlayStore::new(directory.path()).load().unwrap(),
+            Some(third_library)
+        );
+    }
+
+    #[test]
     fn spotify_catalog_flush_persists_dirty_data_and_clear() {
         let directory = tempfile::tempdir().unwrap();
         let state = test_app_state(
             directory.path(),
             Library::new(),
             SpotifyLibraryState::default(),
-            lastfm::Service::new(directory.path(), true, false),
+            lastfm::Service::new_for_test(directory.path(), true, false),
             lastfm_import::Service::new(directory.path()),
         );
         state
             .spotify_catalog
             .lock()
             .unwrap()
-            .set_track_local_hint("spotify:track:one", "Artist — Album — One");
+            .observe_track(&SpotifyTrack {
+                uri: "spotify:track:one".into(),
+                name: "One".into(),
+                duration_ms: Some(1_000),
+                track_number: Some(1),
+                disc_number: Some(1),
+                artists: vec![],
+                album: None,
+            });
 
         flush_spotify_catalog(&state).unwrap();
         let store = FsSpotifyCatalogStore::new(directory.path());
-        assert!(store
-            .load()
-            .unwrap()
-            .v1
-            .tracks
-            .contains_key("spotify:track:one"));
+        assert_eq!(store.load().unwrap().counts().tracks, 1);
 
         clear_spotify_catalog(&state).unwrap();
-        assert!(store.load().unwrap().v1.tracks.is_empty());
+        assert_eq!(store.load().unwrap().counts().tracks, 0);
+    }
+
+    #[test]
+    fn concurrent_catalog_flushes_leave_a_parseable_current_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState::default(),
+            lastfm::Service::new_for_test(directory.path(), true, false),
+            lastfm_import::Service::new(directory.path()),
+        ));
+        state
+            .spotify_catalog
+            .lock()
+            .unwrap()
+            .observe_track(&SpotifyTrack {
+                uri: "spotify:track:current".into(),
+                name: "Current".into(),
+                duration_ms: Some(1_000),
+                track_number: Some(1),
+                disc_number: Some(1),
+                artists: vec![],
+                album: None,
+            });
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let state = Arc::clone(&state);
+                scope.spawn(move || flush_spotify_catalog(&state).unwrap());
+            }
+        });
+
+        let persisted = FsSpotifyCatalogStore::new(directory.path()).load().unwrap();
+        assert_eq!(persisted.counts().tracks, 1);
+        assert_eq!(
+            state
+                .spotify_catalog_saved_generation
+                .load(Ordering::Acquire),
+            state.spotify_catalog.lock().unwrap().generation()
+        );
+    }
+
+    #[test]
+    fn clean_spotify_catalog_flush_does_not_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState::default(),
+            lastfm::Service::new_for_test(directory.path(), true, false),
+            lastfm_import::Service::new(directory.path()),
+        );
+
+        flush_spotify_catalog(&state).unwrap();
+
+        assert!(!directory.path().join("spotify-catalog.json").exists());
     }
 
     #[test]
@@ -4434,133 +3802,5 @@ mod tests {
         assert_eq!(merged, library);
         assert_eq!(visual, None);
         assert_eq!(playlists, None);
-    }
-
-    #[test]
-    fn fixture_counts_cover_visible_tracks_and_global_overlay_edits() {
-        let library = fixture::library();
-        let all = counts(&library, SourceId::Music, &Selection::default(), "");
-        assert_eq!(all.tracks, 26);
-        assert_eq!(all.per_source.music, 26);
-        assert_eq!(all.per_source.podcasts, 4);
-        assert_eq!(all.per_source.audiobooks, 3);
-        assert_eq!(all.overlay_edits, 5);
-
-        let filtered = counts(&library, SourceId::Music, &Selection::default(), "bohemian");
-        assert_eq!(filtered.tracks, 1);
-    }
-
-    #[test]
-    fn batch_edit_applies_category_and_preserves_each_original() {
-        let mut library = fixture::library();
-        let ids = library
-            .tracks()
-            .iter()
-            .take(2)
-            .map(|track| track.id.0)
-            .collect::<Vec<_>>();
-
-        apply_track_infos(
-            &mut library,
-            &ids,
-            &TrackEditDto {
-                cat: Some("Personal".into()),
-                ..TrackEditDto::default()
-            },
-        )
-        .unwrap();
-
-        for id in ids {
-            let track = library.get(TrackId(id)).unwrap();
-            assert_eq!(track.cat, "Personal");
-            assert_eq!(track.orig_cat.as_deref(), Some("Rock"));
-        }
-    }
-
-    #[test]
-    fn batch_edit_without_rating_change_leaves_ratings_unchanged() {
-        let mut library = fixture::library();
-        let ids = library
-            .tracks()
-            .iter()
-            .take(2)
-            .map(|track| track.id.0)
-            .collect::<Vec<_>>();
-        library
-            .set_track_rating(TrackId(ids[0]), Rating::new(2))
-            .unwrap();
-        library
-            .set_track_rating(TrackId(ids[1]), Rating::new(5))
-            .unwrap();
-
-        apply_track_infos(
-            &mut library,
-            &ids,
-            &TrackEditDto {
-                art: Some("Various Artists".into()),
-                ..TrackEditDto::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(library.get(TrackId(ids[0])).unwrap().rating, Rating::new(2));
-        assert_eq!(library.get(TrackId(ids[1])).unwrap().rating, Rating::new(5));
-    }
-
-    #[test]
-    fn batch_edit_with_unknown_id_is_atomic() {
-        let mut library = fixture::library();
-        let before = library.clone();
-        let known = library.tracks()[0].id.0;
-
-        let error = apply_track_infos(
-            &mut library,
-            &[known, u64::MAX],
-            &TrackEditDto {
-                cat: Some("Personal".into()),
-                ..TrackEditDto::default()
-            },
-        )
-        .unwrap_err();
-
-        assert!(error.contains(&u64::MAX.to_string()));
-        assert_eq!(library, before);
-    }
-
-    #[test]
-    fn batch_edit_rejects_empty_ids() {
-        let mut library = fixture::library();
-        let before = library.clone();
-
-        assert!(apply_track_infos(&mut library, &[], &TrackEditDto::default()).is_err());
-        assert_eq!(library, before);
-    }
-
-    #[test]
-    fn album_rating_is_ambiguous_for_same_named_albums_by_different_artists() {
-        let mut library = fixture::library();
-        let fleetwood_track = library
-            .tracks()
-            .iter()
-            .find(|track| track.art == "Fleetwood Mac")
-            .expect("fixture has Fleetwood Mac")
-            .id;
-        library
-            .edit(
-                fleetwood_track,
-                TrackEdit {
-                    alb: Some("Hotel California".into()),
-                    ..TrackEdit::default()
-                },
-            )
-            .expect("fixture track exists");
-        let mut selection = Selection::default();
-        selection.select_alb(vec!["Hotel California".into()]);
-        let tracks = browse::tracks(&library, SourceId::Music, &selection);
-
-        assert_eq!(
-            album_rating_view(&library, &selection, &tracks),
-            (None, None, true)
-        );
     }
 }

@@ -2,21 +2,15 @@ cask "retune" do
   version "__VERSION__"
   sha256 "__SHA256__"
 
-  url "https://github.com/open-cli-collective/Retune/releases/download/v#{version}/Retune-#{version}-aarch64.tar.gz"
+  url "https://github.com/open-cli-collective/Retune/releases/download/v#{version}/Retune-#{version}-aarch64.zip"
   name "Retune"
   desc "Album-first music library for local audio and Spotify"
   homepage "https://github.com/open-cli-collective/Retune"
 
   app "Retune.app"
 
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-cr", "#{appdir}/Retune.app"]
-  end
-
   caveats <<~EOS
-    Retune is stable-signed with the Open CLI Collective certificate but is not notarized.
-    The first access to stored Spotify credentials after upgrading from an older ad-hoc build
-    may show one macOS Keychain prompt. Choose Always Allow once; later stable-signed updates
-    keep the same identity and do not prompt again.
+    Retune is Developer ID-signed, hardened, securely timestamped, and Apple-notarized.
+    Gatekeeper can validate the stapled ticket without a quarantine bypass.
   EOS
 end

@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
-import type { ReactNode, RefObject } from 'react'
+import { Children, cloneElement, isValidElement, useEffect, useLayoutEffect, useRef } from 'react'
+import type { ReactElement, ReactNode, RefObject } from 'react'
 import { dialogTabTarget, menuPosition } from './ui.ts'
 
 const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'
@@ -44,6 +44,9 @@ export function ModalDialog({ className, labelledBy, dialogRef, onCancel, onSubm
 
 export function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
   const menu = useRef<HTMLDivElement>(null)
+  const previousFocus = useRef<HTMLElement | null>(null)
+  const closeMenu = useRef(onClose)
+  closeMenu.current = onClose
   useLayoutEffect(() => {
     const element = menu.current
     if (!element) return
@@ -59,16 +62,36 @@ export function ContextMenu({ x, y, onClose, children }: { x: number; y: number;
     return () => window.removeEventListener('resize', place)
   }, [x, y])
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest('.context-menu')) onClose() }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest('.context-menu')) closeMenu.current() }
+    previousFocus.current = document.activeElement as HTMLElement | null
+    const element = menu.current
+    const firstItem = element?.querySelector<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"]), button:not(:disabled)')
+    ;(firstItem ?? element)?.focus()
     document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', escape)
     return () => {
       document.removeEventListener('pointerdown', close)
-      document.removeEventListener('keydown', escape)
+      previousFocus.current?.focus()
     }
-  }, [onClose])
-  return <div ref={menu} className="column-menu context-menu popup-context-menu" style={{ left: x, top: y }}>{children}</div>
+  }, [])
+  return <div ref={menu} className="column-menu context-menu popup-context-menu" role="menu" tabIndex={-1} style={{ left: x, top: y }} onKeyDown={(event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closeMenu.current()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"]), button:not(:disabled)')]
+    if (!items.length) return
+    event.preventDefault()
+    const current = items.indexOf(document.activeElement as HTMLElement)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length
+    items[next].focus()
+  }}>{Children.map(children, (child) => {
+      if (!isValidElement(child) || child.type !== 'button') return child
+      const button = child as ReactElement<React.ButtonHTMLAttributes<HTMLButtonElement>>
+      return cloneElement(button, { role: 'menuitem', tabIndex: -1, 'aria-disabled': button.props.disabled || undefined })
+    })}</div>
 }
 
 export function CheckboxMenu({ x, y, onClose, items }: {
@@ -77,7 +100,7 @@ export function CheckboxMenu({ x, y, onClose, items }: {
   onClose: () => void
   items: { key: string; label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }[]
 }) {
-  return <ContextMenu x={x} y={y} onClose={onClose}>{items.map((item) => <label key={item.key}><input type="checkbox" checked={item.checked} disabled={item.disabled} onChange={(event) => item.onChange(event.target.checked)} />{item.label}</label>)}</ContextMenu>
+  return <ContextMenu x={x} y={y} onClose={onClose}>{items.map((item) => <label key={item.key} role="menuitemcheckbox" aria-checked={item.checked} aria-disabled={item.disabled || undefined} tabIndex={-1}><input type="checkbox" checked={item.checked} disabled={item.disabled} tabIndex={-1} onChange={(event) => item.onChange(event.target.checked)} />{item.label}</label>)}</ContextMenu>
 }
 export function RatingStars({ rating, explicit = false, onRate }: { rating: number | null; explicit?: boolean; onRate?: (stars: number) => void }) {
   return <span className={`rating-stars ${rating ? explicit ? 'explicit' : 'inherited' : 'empty'} ${onRate ? '' : 'inert'}`} aria-label={rating ? `${rating} out of 5 stars` : 'Unrated'}>

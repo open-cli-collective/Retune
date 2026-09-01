@@ -12,7 +12,9 @@ use std::{
     },
 };
 
-use crate::store::{Cooldown, CooldownKind, FsSyncStore, SavedAlbumRecord};
+use crate::store::{
+    Cooldown, CooldownKind, FsArtistGenresStore, FsCooldownStore, SavedAlbumRecord,
+};
 use crate::unix_now;
 
 const PAGE_SIZE: u32 = 50;
@@ -31,11 +33,7 @@ pub enum LibraryKind {
 }
 
 impl LibraryKind {
-    /// Ordering invariant: Audiobooks must remain the final section.
-    /// SpotifySyncProvider parks music batches in `SyncRun::pending_music`
-    /// and flushes + genre-enriches them only when `kind == Audiobooks`
-    /// (see the flush in `spotify_library_snapshot`), so `sync::snapshot`
-    /// must iterate ALL to completion.
+    /// Default order for a complete library snapshot.
     pub const ALL: [Self; 5] = [
         Self::Tracks,
         Self::Albums,
@@ -133,6 +131,7 @@ pub struct Snapshot {
     pub account_id: Option<String>,
     pub saved_tracks: Option<BTreeMap<String, Option<u64>>>,
     pub saved_albums: Option<BTreeMap<String, SavedAlbumRecord>>,
+    section_progress: SectionProgress,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,11 +149,11 @@ pub struct SyncBatch {
 }
 
 pub trait MediaProvider: Send + Sync {
-    async fn library_snapshot(
+    async fn complete_snapshot(
         &self,
-        kind: LibraryKind,
+        on_section: &mut (dyn FnMut(LibraryKind) + Send),
         on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
-    ) -> Result<Snapshot, String>;
+    ) -> Result<Vec<Snapshot>, String>;
     fn earliest_cooldown(&self) -> Option<u64> {
         None
     }
@@ -171,36 +170,48 @@ pub struct SpotifySyncProvider<'a, T, S> {
 
 impl<'a, T: Transport, S: TokenStore> SpotifySyncProvider<'a, T, S> {
     #[cfg(test)]
-    pub fn new(client: &'a SpotifyClient<T, S>, store: &'a FsSyncStore) -> Result<Self, String> {
-        Self::new_with_account(client, store, None)
+    pub fn new(
+        client: &'a SpotifyClient<T, S>,
+        cooldown_store: &'a FsCooldownStore,
+        artist_genres_store: &'a FsArtistGenresStore,
+    ) -> Result<Self, String> {
+        Self::new_with_account(client, cooldown_store, artist_genres_store, None)
     }
 
     pub fn for_account(
         client: &'a SpotifyClient<T, S>,
-        store: &'a FsSyncStore,
+        cooldown_store: &'a FsCooldownStore,
+        artist_genres_store: &'a FsArtistGenresStore,
         account_id: impl Into<String>,
     ) -> Result<Self, String> {
-        Self::new_with_account(client, store, Some(account_id.into()))
+        Self::new_with_account(
+            client,
+            cooldown_store,
+            artist_genres_store,
+            Some(account_id.into()),
+        )
     }
 
     fn new_with_account(
         client: &'a SpotifyClient<T, S>,
-        store: &'a FsSyncStore,
+        cooldown_store: &'a FsCooldownStore,
+        artist_genres_store: &'a FsArtistGenresStore,
         account_id: Option<String>,
     ) -> Result<Self, String> {
         client.reset_request_counts();
+        artist_genres_store
+            .artist_genres_for("")
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             client,
             account_id,
             run: SyncRun {
-                store,
+                cooldown_store,
+                artist_genres_store,
                 cooldowns: Mutex::new(
-                    store
+                    cooldown_store
                         .cooldowns(unix_now())
                         .map_err(|error| error.to_string())?,
-                ),
-                artist_genres: Mutex::new(
-                    store.artist_genres().map_err(|error| error.to_string())?,
                 ),
                 pending_music: Mutex::new(vec![]),
                 artist_lookups: AtomicUsize::new(0),
@@ -211,9 +222,9 @@ impl<'a, T: Transport, S: TokenStore> SpotifySyncProvider<'a, T, S> {
 }
 
 struct SyncRun<'a> {
-    store: &'a FsSyncStore,
+    cooldown_store: &'a FsCooldownStore,
+    artist_genres_store: &'a FsArtistGenresStore,
     cooldowns: Mutex<BTreeMap<String, Cooldown>>,
-    artist_genres: Mutex<BTreeMap<String, Vec<String>>>,
     pending_music: Mutex<Vec<Vec<PendingTrack>>>,
     artist_lookups: AtomicUsize,
     earliest_cooldown: AtomicU64,
@@ -241,10 +252,17 @@ impl SyncRun<'_> {
     fn record_cooldown(&self, endpoint: &str, kind: CooldownKind, retry_after_secs: u64) {
         let family = endpoint_family(endpoint);
         let deadline = unix_now().saturating_add(retry_after_secs);
-        let mut cooldowns = self.cooldowns.lock().expect("cooldown mutex poisoned");
-        cooldowns.insert(family, Cooldown { kind, deadline });
+        self.cooldowns
+            .lock()
+            .expect("cooldown mutex poisoned")
+            .insert(family.clone(), Cooldown { kind, deadline });
         self.note_deadline(deadline);
-        if let Err(error) = self.store.save_cooldowns(&cooldowns) {
+        if let Err(error) = self
+            .cooldown_store
+            .update_cooldowns(unix_now(), |cooldowns| {
+                cooldowns.insert(family, Cooldown { kind, deadline });
+            })
+        {
             log::warn!("Could not persist Spotify cooldown: {error}");
         }
     }
@@ -262,11 +280,11 @@ impl SyncRun<'_> {
     }
 
     fn cached_artist(&self, id: &str) -> Option<Artist> {
-        self.artist_genres
-            .lock()
-            .expect("artist genre mutex poisoned")
-            .get(id)
-            .cloned()
+        self.artist_genres_store
+            .artist_genres_for(id)
+            .map_err(|error| log::warn!("Could not read Spotify artist genres: {error}"))
+            .ok()
+            .flatten()
             .map(|genres| Artist {
                 id: id.into(),
                 name: String::new(),
@@ -277,14 +295,20 @@ impl SyncRun<'_> {
     }
 
     fn cache_artist(&self, artist: &Artist) {
-        let mut cache = self
-            .artist_genres
-            .lock()
-            .expect("artist genre mutex poisoned");
-        cache.insert(artist.id.clone(), artist.genres.clone());
-        if let Err(error) = self.store.save_artist_genres(&cache) {
-            log::warn!("Could not persist Spotify artist genres: {error}");
+        if let Err(error) = self
+            .artist_genres_store
+            .cache_artist_genres(artist.id.clone(), artist.genres.clone())
+        {
+            log::warn!("Could not cache Spotify artist genres: {error}");
         }
+    }
+
+    async fn flush_artist_genres(&self) -> Result<(), String> {
+        let store = self.artist_genres_store.clone();
+        tokio::task::spawn_blocking(move || store.flush_artist_genres())
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
     }
 
     fn earliest_cooldown(&self) -> Option<u64> {
@@ -399,12 +423,25 @@ fn search_album(album: Album) -> SearchAlbum {
     }
 }
 
-pub(crate) fn spotify_id(value: &str) -> &str {
-    value.rsplit(':').next().unwrap_or(value)
+pub(crate) fn spotify_id<'a>(value: &'a str, kind: &str) -> Result<&'a str, String> {
+    let id = if value.starts_with("spotify:") {
+        value
+            .strip_prefix(&format!("spotify:{kind}:"))
+            .filter(|id| !id.contains(':'))
+            .ok_or_else(|| format!("Invalid Spotify {kind} URI."))?
+    } else {
+        value
+    };
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(format!("Invalid Spotify {kind} ID."));
+    }
+    Ok(id)
 }
 
 pub fn format_resume_time(deadline: u64, now: chrono::DateTime<chrono::Local>) -> String {
-    chrono::DateTime::from_timestamp(deadline as i64, 0)
+    i64::try_from(deadline)
+        .ok()
+        .and_then(|deadline| chrono::DateTime::from_timestamp(deadline, 0))
         .map(|time| {
             let deadline = time.with_timezone(&chrono::Local);
             let days = deadline
@@ -764,27 +801,21 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
     };
     let label = kind.label();
     if health.skip_content_family(family) {
-        let batches = if kind == LibraryKind::Audiobooks {
-            match run {
-                Some(run) => enrich_music(&genres, run.take_pending_music()).await?,
-                None => vec![],
-            }
-        } else {
-            vec![]
+        let section_progress = SectionProgress {
+            label,
+            done: 0,
+            total: None,
         };
         return Ok(Snapshot {
-            batches,
+            batches: vec![],
             genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
             partial: true,
             quota_exhausted: health.quota_exhausted.load(Ordering::Relaxed),
-            progress: Some(SectionProgress {
-                label,
-                done: 0,
-                total: None,
-            }),
+            progress: Some(section_progress.clone()),
             account_id: account_id.map(str::to_owned),
             saved_tracks: None,
             saved_albums: None,
+            section_progress,
         });
     }
     let discovery_at = unix_now();
@@ -872,28 +903,44 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                health.mark_skipped(page.skipped, "saved shows");
                 total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
                 let mut interrupted = false;
                 for saved in page.items {
-                    if health.skip_content_family("/shows") {
-                        interrupted = true;
+                    let mut episode_offset = 0;
+                    loop {
+                        if health.skip_content_family("/shows") {
+                            interrupted = true;
+                            break;
+                        }
+                        let Some(episodes) = health.snapshot_page(
+                            client
+                                .show_episodes(&saved.show.id, episode_offset, PAGE_SIZE)
+                                .await,
+                        )?
+                        else {
+                            interrupted = true;
+                            break;
+                        };
+                        health.mark_skipped(episodes.skipped, "show episodes");
+                        let episode_count = (episodes.items.len() + episodes.skipped) as u32;
+                        batch.extend(
+                            episodes
+                                .items
+                                .iter()
+                                .map(|episode| normalize::episode(episode, Some(&saved.show))),
+                        );
+                        if episode_count == 0 || episodes.next.is_none() {
+                            break;
+                        }
+                        episode_offset += episode_count;
+                    }
+                    if interrupted {
                         break;
                     }
-                    let Some(episodes) = health
-                        .snapshot_page(client.show_episodes(&saved.show.id, 0, PAGE_SIZE).await)?
-                    else {
-                        interrupted = true;
-                        break;
-                    };
                     done += 1;
-                    batch.extend(
-                        episodes
-                            .items
-                            .iter()
-                            .map(|episode| normalize::episode(episode, Some(&saved.show))),
-                    );
                 }
                 (batch, count, page.next.is_some() && !interrupted)
             }
@@ -903,6 +950,7 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                health.mark_skipped(page.skipped, "saved episodes");
                 total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let batch = page
@@ -919,28 +967,44 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
                 else {
                     break 'pages;
                 };
+                health.mark_skipped(page.skipped, "saved audiobooks");
                 total.get_or_insert(page.total);
                 let count = (page.items.len() + page.skipped) as u32;
                 let mut batch = vec![];
                 let mut interrupted = false;
                 for book in page.items {
-                    if health.skip_content_family("/audiobooks") {
-                        interrupted = true;
+                    let mut chapter_offset = 0;
+                    loop {
+                        if health.skip_content_family("/audiobooks") {
+                            interrupted = true;
+                            break;
+                        }
+                        let Some(chapters) = health.snapshot_page(
+                            client
+                                .audiobook_chapters(&book.id, chapter_offset, PAGE_SIZE)
+                                .await,
+                        )?
+                        else {
+                            interrupted = true;
+                            break;
+                        };
+                        health.mark_skipped(chapters.skipped, "audiobook chapters");
+                        let chapter_count = (chapters.items.len() + chapters.skipped) as u32;
+                        batch.extend(
+                            chapters
+                                .items
+                                .iter()
+                                .map(|chapter| normalize::chapter(chapter, &book)),
+                        );
+                        if chapter_count == 0 || chapters.next.is_none() {
+                            break;
+                        }
+                        chapter_offset += chapter_count;
+                    }
+                    if interrupted {
                         break;
                     }
-                    let Some(chapters) = health
-                        .snapshot_page(client.audiobook_chapters(&book.id, 0, PAGE_SIZE).await)?
-                    else {
-                        interrupted = true;
-                        break;
-                    };
                     done += 1;
-                    batch.extend(
-                        chapters
-                            .items
-                            .iter()
-                            .map(|chapter| normalize::chapter(chapter, &book)),
-                    );
                 }
                 (batch, count, page.next.is_some() && !interrupted)
             }
@@ -961,12 +1025,6 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
     }
     if let Some(run) = run {
         run.defer_music(music_batches);
-        // Audiobooks is the final section (see LibraryKind::ALL) — flush here.
-        if kind == LibraryKind::Audiobooks {
-            let mut music = enrich_music(&genres, run.take_pending_music()).await?;
-            music.append(&mut batches);
-            batches = music;
-        }
     } else {
         let mut music = enrich_music(&genres, music_batches).await?;
         music.append(&mut batches);
@@ -975,25 +1033,56 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
     let partial = health.partial.load(Ordering::Relaxed);
     let saved_tracks = (kind == LibraryKind::Tracks && !partial).then_some(saved_tracks);
     let saved_albums = (kind == LibraryKind::Albums && !partial).then_some(saved_albums);
+    let section_progress = SectionProgress { label, done, total };
     Ok(Snapshot {
         batches,
         genres_degraded: health.genres_degraded.load(Ordering::Relaxed),
         partial,
         quota_exhausted: health.quota_exhausted.load(Ordering::Relaxed),
-        progress: partial.then_some(SectionProgress { label, done, total }),
+        progress: partial.then_some(section_progress.clone()),
         account_id: account_id.map(str::to_owned),
         saved_tracks,
         saved_albums,
+        section_progress,
     })
 }
 
+async fn spotify_library_snapshots<'a, T: Transport, S: TokenStore>(
+    client: &'a SpotifyClient<T, S>,
+    run: Option<&'a SyncRun<'a>>,
+    account_id: Option<&str>,
+    kinds: &[LibraryKind],
+    on_section: &mut (dyn FnMut(LibraryKind) + Send),
+    on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
+) -> Result<Vec<Snapshot>, String> {
+    let mut snapshots = Vec::with_capacity(kinds.len());
+    for &kind in kinds {
+        on_section(kind);
+        snapshots.push(spotify_library_snapshot(client, kind, run, account_id, on_batch).await?);
+    }
+    if let (Some(run), Some(last)) = (run, snapshots.last_mut()) {
+        let health = SyncHealth::new(Some(run));
+        let genres = GenreSource::new(client, &health);
+        let mut music = enrich_music(&genres, run.take_pending_music()).await?;
+        music.append(&mut last.batches);
+        last.batches = music;
+        last.genres_degraded |= health.genres_degraded.load(Ordering::Relaxed);
+        last.partial |= health.partial.load(Ordering::Relaxed);
+        last.quota_exhausted |= health.quota_exhausted.load(Ordering::Relaxed);
+        if last.partial && last.progress.is_none() {
+            last.progress = Some(last.section_progress.clone());
+        }
+    }
+    Ok(snapshots)
+}
+
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
-    async fn library_snapshot(
+    async fn complete_snapshot(
         &self,
-        kind: LibraryKind,
+        on_section: &mut (dyn FnMut(LibraryKind) + Send),
         on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
-    ) -> Result<Snapshot, String> {
-        spotify_library_snapshot(self, kind, None, None, on_batch).await
+    ) -> Result<Vec<Snapshot>, String> {
+        spotify_library_snapshots(self, None, None, &LibraryKind::ALL, on_section, on_batch).await
     }
 }
 
@@ -1093,22 +1182,43 @@ pub async fn album_tracks<T: Transport, S: TokenStore>(
     album_content(client, album, None)
         .await
         .map(|(_, tracks)| tracks)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug)]
+pub enum AlbumContentError {
+    Spotify(retune_spotify::Error),
+    Other(String),
+}
+
+impl std::fmt::Display for AlbumContentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spotify(error) => error.fmt(formatter),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
 }
 
 pub async fn album_content<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     album: &str,
     added_at: Option<u64>,
-) -> Result<(Album, Vec<NewTrack>), String> {
+) -> Result<(Album, Vec<NewTrack>), AlbumContentError> {
     let health = SyncHealth::new(None);
     let genres = GenreSource::new(client, &health);
-    let album = SpotifyClient::album(client, spotify_id(album))
-        .await
-        .map_err(|error| error.to_string())?;
+    let album = SpotifyClient::album(
+        client,
+        spotify_id(album, "album").map_err(AlbumContentError::Other)?,
+    )
+    .await
+    .map_err(AlbumContentError::Spotify)?;
     if album.tracks.as_ref().is_some_and(|page| page.skipped > 0) {
-        return Err("Spotify returned incomplete album tracks; try again later.".into());
+        return Err(AlbumContentError::Other(
+            "Spotify returned incomplete album tracks; try again later.".into(),
+        ));
     }
-    let normalized = album
+    let normalized: Vec<PendingTrack> = album
         .tracks
         .as_ref()
         .map(|page| {
@@ -1118,13 +1228,20 @@ pub async fn album_content<T: Transport, S: TokenStore>(
                 .collect()
         })
         .unwrap_or_default();
-    Ok((
-        album,
-        enrich_music(&genres, vec![normalized])
-            .await?
-            .pop()
-            .unwrap_or_default(),
-    ))
+    let tracks = match enrich_music(&genres, vec![normalized.clone()]).await {
+        Ok(mut batches) => batches.pop().unwrap_or_default(),
+        Err(error) => {
+            log::warn!(
+                "Spotify album {} is missing optional artist enrichment: {error}",
+                album.uri
+            );
+            normalized
+                .into_iter()
+                .map(|pending| pending.track)
+                .collect()
+        }
+    };
+    Ok((album, tracks))
 }
 
 pub async fn artist_albums_page<T: Transport, S: TokenStore>(
@@ -1133,7 +1250,11 @@ pub async fn artist_albums_page<T: Transport, S: TokenStore>(
     offset: u32,
 ) -> retune_spotify::Result<ArtistAlbumsPage> {
     let page = client
-        .artist_albums(spotify_id(artist), offset, SEARCH_PAGE_SIZE)
+        .artist_albums(
+            spotify_id(artist, "artist").map_err(retune_spotify::Error::InvalidRequest)?,
+            offset,
+            SEARCH_PAGE_SIZE,
+        )
         .await?;
     let count = (page.items.len() + page.skipped) as u32;
     Ok(ArtistAlbumsPage {
@@ -1144,19 +1265,24 @@ pub async fn artist_albums_page<T: Transport, S: TokenStore>(
 }
 
 impl<T: Transport, S: TokenStore> MediaProvider for SpotifySyncProvider<'_, T, S> {
-    async fn library_snapshot(
+    async fn complete_snapshot(
         &self,
-        kind: LibraryKind,
+        on_section: &mut (dyn FnMut(LibraryKind) + Send),
         on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
-    ) -> Result<Snapshot, String> {
-        spotify_library_snapshot(
+    ) -> Result<Vec<Snapshot>, String> {
+        let result = spotify_library_snapshots(
             self.client,
-            kind,
             Some(&self.run),
             self.account_id.as_deref(),
+            &LibraryKind::ALL,
+            on_section,
             on_batch,
         )
-        .await
+        .await;
+        if let Err(error) = self.run.flush_artist_genres().await {
+            log::warn!("Could not persist Spotify artist genres: {error}");
+        }
+        result
     }
 
     fn earliest_cooldown(&self) -> Option<u64> {
@@ -1179,31 +1305,41 @@ pub struct FakeProvider {
 
 #[cfg(test)]
 impl MediaProvider for FakeProvider {
-    async fn library_snapshot(
+    async fn complete_snapshot(
         &self,
-        kind: LibraryKind,
+        on_section: &mut (dyn FnMut(LibraryKind) + Send),
         on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
-    ) -> Result<Snapshot, String> {
-        let batches = self.snapshots.get(&kind).cloned().unwrap_or_default();
-        let total = batches.len() as u32;
-        for (index, tracks) in batches.iter().enumerate() {
-            on_batch(SyncBatch {
-                tracks: tracks.clone(),
-                done: index as u32 + 1,
-                total: Some(total),
-                section: kind.label(),
+    ) -> Result<Vec<Snapshot>, String> {
+        let mut snapshots = Vec::with_capacity(LibraryKind::ALL.len());
+        for kind in LibraryKind::ALL {
+            on_section(kind);
+            let batches = self.snapshots.get(&kind).cloned().unwrap_or_default();
+            let total = batches.len() as u32;
+            for (index, tracks) in batches.iter().enumerate() {
+                on_batch(SyncBatch {
+                    tracks: tracks.clone(),
+                    done: index as u32 + 1,
+                    total: Some(total),
+                    section: kind.label(),
+                });
+            }
+            snapshots.push(Snapshot {
+                batches,
+                genres_degraded: self.genres_degraded,
+                partial: self.partial,
+                quota_exhausted: self.quota_exhausted,
+                progress: None,
+                account_id: None,
+                saved_tracks: None,
+                saved_albums: None,
+                section_progress: SectionProgress {
+                    label: kind.label(),
+                    done: total,
+                    total: Some(total),
+                },
             });
         }
-        Ok(Snapshot {
-            batches,
-            genres_degraded: self.genres_degraded,
-            partial: self.partial,
-            quota_exhausted: self.quota_exhausted,
-            progress: None,
-            account_id: None,
-            saved_tracks: None,
-            saved_albums: None,
-        })
+        Ok(snapshots)
     }
 }
 
@@ -1224,6 +1360,27 @@ mod tests {
         responses: impl IntoIterator<Item = Response>,
     ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
         fake_client(responses, "")
+    }
+
+    async fn client_snapshot(
+        client: &SpotifyClient<FakeTransport, InMemoryTokenStore>,
+        kind: LibraryKind,
+    ) -> Result<Snapshot, String> {
+        spotify_library_snapshot(client, kind, None, None, &|_| {}).await
+    }
+
+    async fn provider_snapshot(
+        provider: &SpotifySyncProvider<'_, FakeTransport, InMemoryTokenStore>,
+        kind: LibraryKind,
+    ) -> Result<Snapshot, String> {
+        spotify_library_snapshot(
+            provider.client,
+            kind,
+            Some(&provider.run),
+            provider.account_id.as_deref(),
+            &|_| {},
+        )
+        .await
     }
 
     fn assert_track(
@@ -1250,22 +1407,23 @@ mod tests {
                 200,
                 serde_json::json!({"items": [{"added_at": "2024-01-02T03:04:05Z", "track": {
                     "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
-                    "artists": [{"id": "artist-1", "name": "Artist"}],
-                    "album": {"id": "album-1", "uri": "spotify:album:1", "name": "Album", "images": []}
+                    "artists": [{"id": "artist1", "name": "Artist"}],
+                    "album": {"id": "album1", "uri": "spotify:album:1", "name": "Album", "images": []}
                 }}], "next": "next"}),
             ),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
             Response::json(
                 200,
-                serde_json::json!({"id": "artist-1", "name": "Artist", "genres": ["rock"]}),
+                serde_json::json!({"id": "artist1", "name": "Artist", "genres": ["rock"]}),
             ),
         ]);
         let tapped = Mutex::new(vec![]);
-        let snapshot = MediaProvider::library_snapshot(&client, LibraryKind::Tracks, &|batch| {
-            tapped.lock().unwrap().push(batch)
-        })
-        .await
-        .unwrap();
+        let snapshot =
+            spotify_library_snapshot(&client, LibraryKind::Tracks, None, None, &|batch| {
+                tapped.lock().unwrap().push(batch)
+            })
+            .await
+            .unwrap();
         let batches = snapshot.batches;
         let tapped = tapped.into_inner().unwrap();
 
@@ -1292,10 +1450,7 @@ mod tests {
             }}, null], "next": null, "total": 2}),
         )]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Tracks).await.unwrap();
 
         assert!(snapshot.partial);
         assert!(snapshot.saved_tracks.is_none());
@@ -1307,8 +1462,8 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({"items": [{"album": {
-                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
-                "artists": [{"id": "artist-1", "name": "Artist"}], "images": []
+                "id": "album1", "uri": "spotify:album:1", "name": "Record",
+                "artists": [{"id": "artist1", "name": "Artist"}], "images": []
             }}], "next": null}),
             ),
             Response::json(
@@ -1321,15 +1476,12 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "id": "artist-1", "name": "Artist", "genres": ["rock"]
+                    "id": "artist1", "name": "Artist", "genres": ["rock"]
                 }),
             ),
         ]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
         let batches = snapshot.batches;
 
         assert_track(
@@ -1355,20 +1507,26 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({"items": [{"added_at": "2024-01-02T03:04:05Z", "album": {
-                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                "id": "album1", "uri": "spotify:album:1", "name": "Record",
                 "album_type": "album", "release_date": "2024-01-02",
-                "artists": [{"id": "artist-1", "name": "Artist"}], "images": [],
+                "artists": [{"id": "artist1", "name": "Artist"}], "images": [],
                 "tracks": {"items": [{
                     "uri": "spotify:track:1", "name": "Song", "duration_ms": 1234,
                     "artists": [], "album": null
                 }], "next": null, "total": 1}
             }}], "next": null, "total": 1}),
         )]);
-        let store = FsSyncStore::new(dir.path());
-        let provider = SpotifySyncProvider::for_account(&client, &store, "account").unwrap();
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        let provider = SpotifySyncProvider::for_account(
+            &client,
+            &cooldown_store,
+            &artist_genres_store,
+            "account",
+        )
+        .unwrap();
 
-        let snapshot = provider
-            .library_snapshot(LibraryKind::Albums, &|_| {})
+        let snapshot = provider_snapshot(&provider, LibraryKind::Albums)
             .await
             .unwrap();
         let mut albums = snapshot.saved_albums.unwrap();
@@ -1387,7 +1545,7 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({"items": [{"album": {
-                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                "id": "album1", "uri": "spotify:album:1", "name": "Record",
                 "artists": [], "images": [],
                 "tracks": {"items": [{
                     "uri": "spotify:track:1", "name": "Song", "duration_ms": 1234,
@@ -1396,10 +1554,7 @@ mod tests {
             }}], "next": null, "total": 1}),
         )]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
 
         assert!(snapshot.partial);
         assert!(snapshot.saved_albums.is_none());
@@ -1410,16 +1565,13 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({"items": [{"album": {
-                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                "id": "album1", "uri": "spotify:album:1", "name": "Record",
                 "artists": [], "images": [],
                 "tracks": {"items": [], "next": null, "total": 0}
             }}, null], "next": null, "total": 2}),
         )]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
 
         assert!(snapshot.partial);
         assert!(snapshot.saved_albums.is_none());
@@ -1430,7 +1582,7 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({"items": [{"album": {
-                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                "id": "album1", "uri": "spotify:album:1", "name": "Record",
                 "artists": [], "images": [],
                 "tracks": {"items": [{
                     "uri": "spotify:track:1", "name": "Song", "duration_ms": 1234,
@@ -1439,10 +1591,7 @@ mod tests {
             }}], "next": null}),
         )]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
 
         assert_eq!(snapshot.batches[0].len(), 1);
         assert_eq!(client.transport().requests().len(), 1);
@@ -1465,7 +1614,7 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({"items": [{"album": {
-                    "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                    "id": "album1", "uri": "spotify:album:1", "name": "Record",
                     "artists": [], "images": [],
                     "tracks": {"items": tracks(0, 50), "next": "next", "total": 120}
                 }}], "next": null}),
@@ -1480,15 +1629,12 @@ mod tests {
             ),
         ]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
         let album_requests = client
             .transport()
             .requests()
             .into_iter()
-            .filter(|request| request.url.contains("/albums/album-1/tracks"))
+            .filter(|request| request.url.contains("/albums/album1/tracks"))
             .collect::<Vec<_>>();
 
         assert_eq!(snapshot.batches[0].len(), 120);
@@ -1503,7 +1649,7 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                    "id": "album1", "uri": "spotify:album:1", "name": "Record",
                     "artists": [], "images": [],
                     "tracks": {"items": [{
                         "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
@@ -1539,7 +1685,7 @@ mod tests {
     #[tokio::test]
     async fn complete_cached_album_content_needs_no_spotify_request() {
         let album = Album {
-            id: "album-1".into(),
+            id: "album1".into(),
             uri: "spotify:album:1".into(),
             name: "Record".into(),
             artists: vec![SimplifiedArtist {
@@ -1593,7 +1739,7 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({
-                "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                "id": "album1", "uri": "spotify:album:1", "name": "Record",
                 "artists": [], "images": [],
                 "tracks": {"items": [{
                     "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
@@ -1605,7 +1751,54 @@ mod tests {
         assert!(album_content(&client, "spotify:album:1", None)
             .await
             .unwrap_err()
+            .to_string()
             .contains("incomplete album tracks"));
+    }
+
+    #[tokio::test]
+    async fn explicit_album_content_preserves_primary_spotify_error() {
+        let client = client([Response::rate_limited("3600")]);
+
+        let error = album_content(&client, "spotify:album:1", None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                AlbumContentError::Spotify(retune_spotify::Error::RateLimited {
+                    retry_after_secs: 3600,
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_album_content_degrades_optional_artist_enrichment() {
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({
+                    "id": "album1", "uri": "spotify:album:1", "name": "Record",
+                    "artists": [], "images": [],
+                    "tracks": {"items": [{
+                        "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
+                        "artists": [{"id": "artist1", "name": "Artist"}], "album": null
+                    }], "next": null, "total": 1}
+                }),
+            ),
+            Response::json(200, serde_json::json!({})),
+        ]);
+
+        let (_, tracks) = album_content(&client, "spotify:album:1", None)
+            .await
+            .unwrap();
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].art, "Artist");
+        assert_eq!(client.transport().requests().len(), 2);
     }
 
     #[tokio::test]
@@ -1623,21 +1816,15 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({"items": [{"album": {
-                    "id": "album-1", "uri": "spotify:album:1", "name": "Record",
+                    "id": "album1", "uri": "spotify:album:1", "name": "Record",
                     "artists": [], "images": []
                 }}], "next": null}),
             ),
             Response::rate_limited("3600"),
         ]);
 
-        let tracks = client
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
-            .await
-            .unwrap();
-        let albums = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let tracks = client_snapshot(&client, LibraryKind::Tracks).await.unwrap();
+        let albums = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
 
         assert_eq!(tracks.batches[0].len(), 2);
         assert!(!tracks.partial);
@@ -1648,7 +1835,7 @@ mod tests {
                 .transport()
                 .requests()
                 .iter()
-                .filter(|request| request.url.contains("/albums/album-1/tracks"))
+                .filter(|request| request.url.contains("/albums/album1/tracks"))
                 .count(),
             1
         );
@@ -1661,11 +1848,11 @@ mod tests {
                 200,
                 serde_json::json!({"items": [
                     {"album": {
-                        "id": "album-1", "uri": "spotify:album:1", "name": "One",
+                        "id": "album1", "uri": "spotify:album:1", "name": "One",
                         "artists": [], "images": []
                     }},
                     {"album": {
-                        "id": "album-2", "uri": "spotify:album:2", "name": "Two",
+                        "id": "album2", "uri": "spotify:album:2", "name": "Two",
                         "artists": [], "images": []
                     }}
                 ], "next": null, "total": 2}),
@@ -1677,10 +1864,7 @@ mod tests {
             Response::rate_limited("3600"),
         ]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Albums, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Albums).await.unwrap();
 
         assert_eq!(
             snapshot.progress,
@@ -1696,10 +1880,7 @@ mod tests {
     async fn first_saved_tracks_rate_limit_returns_empty_partial_snapshot() {
         let client = client([Response::rate_limited("3600")]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Tracks).await.unwrap();
 
         assert!(snapshot.batches.is_empty());
         assert!(snapshot.partial);
@@ -1708,9 +1889,10 @@ mod tests {
     #[tokio::test]
     async fn active_cooldown_skips_section_without_a_request() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let deadline = unix_now() + 3_600;
-        store
+        cooldown_store
             .save_cooldowns(&BTreeMap::from([(
                 "/me/tracks".into(),
                 Cooldown {
@@ -1720,10 +1902,10 @@ mod tests {
             )]))
             .unwrap();
         let client = client([]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
+        let snapshot = provider_snapshot(&provider, LibraryKind::Tracks)
             .await
             .unwrap();
 
@@ -1744,8 +1926,9 @@ mod tests {
     #[tokio::test]
     async fn expired_cooldown_is_cleared_and_section_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
-        store
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        cooldown_store
             .save_cooldowns(&BTreeMap::from([(
                 "/me/tracks".into(),
                 Cooldown {
@@ -1758,31 +1941,34 @@ mod tests {
             200,
             serde_json::json!({"items": [], "next": null}),
         )]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
+        let snapshot = provider_snapshot(&provider, LibraryKind::Tracks)
             .await
             .unwrap();
 
         assert!(!snapshot.partial);
         assert!(snapshot.progress.is_none());
         assert_eq!(client.transport().requests().len(), 1);
-        assert!(store.cooldowns(unix_now()).unwrap().is_empty());
+        assert!(cooldown_store.cooldowns(unix_now()).unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn live_rate_limit_persists_its_endpoint_family() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let client = client([Response::rate_limited("3600")]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
+        let snapshot = provider_snapshot(&provider, LibraryKind::Tracks)
             .await
             .unwrap();
-        let cooldowns = FsSyncStore::new(dir.path()).cooldowns(unix_now()).unwrap();
+        let cooldowns = FsCooldownStore::new(dir.path())
+            .cooldowns(unix_now())
+            .unwrap();
 
         assert!(snapshot.partial);
         assert!(cooldowns["/me/tracks"].deadline > unix_now());
@@ -1792,27 +1978,30 @@ mod tests {
     #[tokio::test]
     async fn quota_without_retry_after_is_partial_without_auto_resume() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let client = client([Response::quota_exceeded(None)]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
+        let snapshot = provider_snapshot(&provider, LibraryKind::Tracks)
             .await
             .unwrap();
 
         assert!(snapshot.partial);
         assert!(snapshot.quota_exhausted);
         assert_eq!(provider.earliest_cooldown(), None);
-        assert!(store.cooldowns(unix_now()).unwrap().is_empty());
+        assert!(cooldown_store.cooldowns(unix_now()).unwrap().is_empty());
     }
 
     #[test]
     fn quota_without_deadline_preserves_known_transient_resume() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let client = client([]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
         let health = SyncHealth::new(Some(&provider.run));
 
         health
@@ -1830,7 +2019,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(provider.earliest_cooldown(), Some(transient_deadline));
-        assert_eq!(store.cooldowns(unix_now()).unwrap().len(), 1);
+        assert_eq!(cooldown_store.cooldowns(unix_now()).unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1840,16 +2029,13 @@ mod tests {
                 200,
                 serde_json::json!({"items": [{"track": {
                     "uri": "spotify:track:1", "name": "Song", "duration_ms": 1,
-                    "artists": [{"id": "artist-1", "name": "Artist"}], "album": null
+                    "artists": [{"id": "artist1", "name": "Artist"}], "album": null
                 }}], "next": null}),
             ),
             Response::quota_exceeded(None),
         ]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Tracks).await.unwrap();
 
         assert!(snapshot.partial);
         assert!(snapshot.quota_exhausted);
@@ -1859,15 +2045,16 @@ mod tests {
     #[tokio::test]
     async fn quota_with_retry_after_persists_typed_auto_resume() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let client = client([Response::quota_exceeded(Some(3_600))]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let snapshot = provider
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
+        let snapshot = provider_snapshot(&provider, LibraryKind::Tracks)
             .await
             .unwrap();
-        let cooldown = store.cooldowns(unix_now()).unwrap()["/me/tracks"];
+        let cooldown = cooldown_store.cooldowns(unix_now()).unwrap()["/me/tracks"];
 
         assert!(snapshot.partial);
         assert!(snapshot.quota_exhausted);
@@ -1878,9 +2065,11 @@ mod tests {
     #[test]
     fn server_error_marks_snapshot_partial_without_a_cooldown() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let client = client([]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
         let health = SyncHealth::new(Some(&provider.run));
 
         let page = health
@@ -1893,7 +2082,7 @@ mod tests {
         assert!(page.is_none());
         assert!(health.partial.load(Ordering::Relaxed));
         assert_eq!(provider.earliest_cooldown(), None);
-        assert!(store.cooldowns(unix_now()).unwrap().is_empty());
+        assert!(cooldown_store.cooldowns(unix_now()).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1904,16 +2093,16 @@ mod tests {
             Response::json(504, serde_json::json!({})),
             Response::json(
                 200,
-                serde_json::json!({"id": "artist-2", "name": "Two", "genres": ["rock"]}),
+                serde_json::json!({"id": "artist2", "name": "Two", "genres": ["rock"]}),
             ),
         ]);
         let health = SyncHealth::new(None);
         let genres = GenreSource::new(&client, &health);
 
-        assert!(genres.artist("artist-1").await.unwrap().is_none());
+        assert!(genres.artist("artist1").await.unwrap().is_none());
         assert_eq!(
-            genres.artist("artist-2").await.unwrap().unwrap().id,
-            "artist-2"
+            genres.artist("artist2").await.unwrap().unwrap().id,
+            "artist2"
         );
         assert!(!health.genres_degraded.load(Ordering::Relaxed));
         assert_eq!(client.transport().requests().len(), 4);
@@ -1922,16 +2111,17 @@ mod tests {
     #[tokio::test]
     async fn persistent_artist_cache_hit_skips_artist_request() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
-        store
-            .save_artist_genres(&BTreeMap::from([("artist-1".into(), vec!["rock".into()])]))
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        artist_genres_store
+            .save_artist_genres(&BTreeMap::from([("artist1".into(), vec!["rock".into()])]))
             .unwrap();
         let client = client([
             Response::json(
                 200,
                 serde_json::json!({"items": [{"track": {
                 "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
-                "artists": [{"id": "artist-1", "name": "Artist"}], "album": null
+                "artists": [{"id": "artist1", "name": "Artist"}], "album": null
             }}], "next": null}),
             ),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
@@ -1939,13 +2129,15 @@ mod tests {
             Response::json(200, serde_json::json!({"items": [], "next": null})),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
         ]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let mut snapshot = None;
-        for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
-        }
-        let snapshot = snapshot.unwrap();
+        let snapshot = provider
+            .complete_snapshot(&mut |_| {}, &|_| {})
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
 
         assert_eq!(snapshot.batches[0][0].cat, "rock");
         assert_eq!(client.transport().requests().len(), 5);
@@ -1955,13 +2147,14 @@ mod tests {
     #[tokio::test]
     async fn persistent_artist_cache_miss_is_written_through() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let client = client([
             Response::json(
                 200,
                 serde_json::json!({"items": [{"track": {
                     "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
-                    "artists": [{"id": "artist-1", "name": "Artist"}], "album": null
+                    "artists": [{"id": "artist1", "name": "Artist"}], "album": null
                 }}], "next": null}),
             ),
             Response::json(200, serde_json::json!({"items": [], "next": null})),
@@ -1970,28 +2163,162 @@ mod tests {
             Response::json(200, serde_json::json!({"items": [], "next": null})),
             Response::json(
                 200,
-                serde_json::json!({"id": "artist-1", "name": "Artist", "genres": ["rock"]}),
+                serde_json::json!({"id": "artist1", "name": "Artist", "genres": ["rock"]}),
             ),
         ]);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let mut snapshot = None;
-        for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
-        }
+        let snapshot = provider
+            .complete_snapshot(&mut |_| {}, &|_| {})
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
 
-        assert_eq!(snapshot.unwrap().batches[0][0].cat, "rock");
+        assert_eq!(snapshot.batches[0][0].cat, "rock");
         assert_eq!(client.transport().requests().len(), 6);
         assert!(client.transport().requests()[4]
             .url
             .contains("/me/audiobooks"));
         assert!(client.transport().requests()[5]
             .url
-            .contains("/artists/artist-1"));
+            .contains("/artists/artist1"));
         assert_eq!(
-            FsSyncStore::new(dir.path()).artist_genres().unwrap()["artist-1"],
+            FsArtistGenresStore::new(dir.path())
+                .artist_genres()
+                .unwrap()["artist1"],
             ["rock"]
         );
+        assert_eq!(artist_genres_store.save_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_sync_flushes_artist_genres_already_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        let client = client([
+            Response::json(
+                200,
+                serde_json::json!({"items": [
+                    {"track": {"uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
+                        "artists": [{"id": "artist1", "name": "One"}], "album": null}},
+                    {"track": {"uri": "spotify:track:2", "name": "Two", "duration_ms": 1000,
+                        "artists": [{"id": "artist2", "name": "Two"}], "album": null}}
+                ], "next": null}),
+            ),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+            Response::json(
+                200,
+                serde_json::json!({"id": "artist1", "name": "One", "genres": ["rock"]}),
+            ),
+            Response::json(400, serde_json::json!({"error": "bad artist"})),
+        ]);
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
+
+        assert!(provider
+            .complete_snapshot(&mut |_| {}, &|_| {})
+            .await
+            .is_err());
+
+        let genres = FsArtistGenresStore::new(dir.path())
+            .artist_genres()
+            .unwrap();
+        assert_eq!(genres["artist1"], ["rock"]);
+        assert!(!genres.contains_key("artist2"));
+        assert_eq!(artist_genres_store.save_count(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn artist_genre_flush_does_not_block_the_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        artist_genres_store
+            .cache_artist_genres("seed".into(), vec!["rock".into()])
+            .unwrap();
+        let hook = crate::store::SaveHook::new(false);
+        artist_genres_store.arm_save(Arc::clone(&hook));
+        let client = client(
+            (0..5).map(|_| Response::json(200, serde_json::json!({"items": [], "next": null}))),
+        );
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
+        let wait_hook = Arc::clone(&hook);
+        let reached = tokio::task::spawn_blocking(move || wait_hook.wait_until_reached());
+
+        let mut on_section = |_| {};
+        let on_batch = |_| {};
+        let (snapshot, ()) = tokio::join!(
+            provider.complete_snapshot(&mut on_section, &on_batch),
+            async {
+                reached.await.unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    tokio::time::sleep(std::time::Duration::from_millis(1)),
+                )
+                .await
+                .unwrap();
+                hook.release();
+            }
+        );
+
+        assert!(snapshot.is_ok());
+    }
+
+    #[tokio::test]
+    async fn complete_snapshot_finalizes_music_after_reordered_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        let client = client([
+            Response::json(200, serde_json::json!({"items": [], "next": null})),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{"track": {
+                    "uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
+                    "artists": [{"id": "artist1", "name": "Artist"}], "album": null
+                }}], "next": null}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"id": "artist1", "name": "Artist", "genres": ["rock"]}),
+            ),
+        ]);
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
+        let kinds = [LibraryKind::Audiobooks, LibraryKind::Tracks];
+        let mut visited = vec![];
+
+        let snapshots = spotify_library_snapshots(
+            provider.client,
+            Some(&provider.run),
+            provider.account_id.as_deref(),
+            &kinds,
+            &mut |kind| visited.push(kind),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        let tracks = snapshots
+            .into_iter()
+            .flat_map(|snapshot| snapshot.batches)
+            .flatten()
+            .collect::<Vec<_>>();
+
+        assert_eq!(visited, kinds);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].uri, "spotify:track:1");
+        assert_eq!(tracks[0].cat, "rock");
+        let requests = client.transport().requests();
+        assert!(requests[0].url.contains("/me/audiobooks"));
+        assert!(requests[1].url.contains("/me/tracks"));
+        assert!(requests[2].url.contains("/artists/artist1"));
     }
 
     #[tokio::test]
@@ -2000,7 +2327,7 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({"items": [{"show": {
-                "id": "show-1", "uri": "spotify:show:1", "name": "Show",
+                "id": "show1", "uri": "spotify:show:1", "name": "Show",
                 "publisher": "Publisher", "category": "Technology", "images": []
             }}], "next": null}),
             ),
@@ -2009,15 +2336,19 @@ mod tests {
                 serde_json::json!({"items": [{
                 "uri": "spotify:episode:1", "name": "Episode", "duration_ms": 2000,
                 "show": null
-                }], "next": null}),
+                }, null], "next": "next", "total": 3}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                "uri": "spotify:episode:2", "name": "Episode Two", "duration_ms": 3000,
+                "show": null
+                }], "next": null, "total": 3}),
             ),
         ]);
 
-        let batches = client
-            .library_snapshot(LibraryKind::Shows, &|_| {})
-            .await
-            .unwrap()
-            .batches;
+        let snapshot = client_snapshot(&client, LibraryKind::Shows).await.unwrap();
+        let batches = snapshot.batches;
 
         assert_track(
             &batches[0][0],
@@ -2029,7 +2360,11 @@ mod tests {
             "Episode",
         );
         assert_eq!(batches[0][0].duration.as_millis(), 2000);
-        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(batches[0][1].uri, "spotify:episode:2");
+        assert!(snapshot.partial);
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.contains("offset=2&limit=50"));
     }
 
     #[tokio::test]
@@ -2038,9 +2373,9 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({"items": [
-                    {"show": {"id": "show-1", "uri": "spotify:show:1", "name": "Show One",
+                    {"show": {"id": "show1", "uri": "spotify:show:1", "name": "Show One",
                         "publisher": "Publisher", "category": null, "images": []}},
-                    {"show": {"id": "show-2", "uri": "spotify:show:2", "name": "Show Two",
+                    {"show": {"id": "show2", "uri": "spotify:show:2", "name": "Show Two",
                         "publisher": "Publisher", "category": null, "images": []}}
                 ], "next": null}),
             ),
@@ -2054,10 +2389,7 @@ mod tests {
             Response::rate_limited("3600"),
         ]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Shows, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Shows).await.unwrap();
 
         assert!(snapshot.partial);
         let tracks = snapshot.batches.concat();
@@ -2071,13 +2403,12 @@ mod tests {
             200,
             serde_json::json!({"items": [{"episode": {
             "uri": "spotify:episode:2", "name": "Saved Episode", "duration_ms": 3000,
-            "show": {"id": "show-2", "uri": "spotify:show:2", "name": "Saved Show",
+            "show": {"id": "show2", "uri": "spotify:show:2", "name": "Saved Show",
                 "publisher": "Host", "category": null, "images": []}
         }}], "next": null}),
         )]);
 
-        let batches = client
-            .library_snapshot(LibraryKind::Episodes, &|_| {})
+        let batches = client_snapshot(&client, LibraryKind::Episodes)
             .await
             .unwrap()
             .batches;
@@ -2100,7 +2431,7 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({"items": [{
-                "id": "book-1", "uri": "spotify:audiobook:1", "name": "Book",
+                "id": "book1", "uri": "spotify:audiobook:1", "name": "Book",
                 "authors": [{"name": "Author"}], "genres": ["History"], "images": []
                 }], "next": null}),
             ),
@@ -2108,15 +2439,20 @@ mod tests {
                 200,
                 serde_json::json!({"items": [{
                 "uri": "spotify:chapter:1", "name": "Chapter", "duration_ms": 4000
-            }], "next": "next"}),
+            }, null], "next": "next"}),
+            ),
+            Response::json(
+                200,
+                serde_json::json!({"items": [{
+                "uri": "spotify:chapter:2", "name": "Chapter Two", "duration_ms": 5000
+            }], "next": null}),
             ),
         ]);
 
-        let batches = client
-            .library_snapshot(LibraryKind::Audiobooks, &|_| {})
+        let snapshot = client_snapshot(&client, LibraryKind::Audiobooks)
             .await
-            .unwrap()
-            .batches;
+            .unwrap();
+        let batches = snapshot.batches;
 
         assert_track(
             &batches[0][0],
@@ -2128,7 +2464,11 @@ mod tests {
             "Chapter",
         );
         assert_eq!(batches[0][0].duration.as_millis(), 4000);
-        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(batches[0][1].uri, "spotify:chapter:2");
+        assert!(snapshot.partial);
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.contains("offset=2&limit=50"));
     }
 
     #[tokio::test]
@@ -2136,15 +2476,15 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({
-                "artists": {"items": [{"id": "artist-1", "name": "Artist", "genres": ["modern classical"],
+                "artists": {"items": [{"id": "artist1", "name": "Artist", "genres": ["modern classical"],
                     "followers": {"total": 1234567},
                     "images": [{"url": "large", "width": 300}, {"url": "small", "width": 64}]}], "next": null},
-                "albums": {"items": [{"id": "album-1", "uri": "spotify:album:1", "name": "Album",
-                    "artists": [{"id": "artist-1", "name": "Artist"}], "release_date": "2024-03-01",
+                "albums": {"items": [{"id": "album1", "uri": "spotify:album:1", "name": "Album",
+                    "artists": [{"id": "artist1", "name": "Artist"}], "release_date": "2024-03-01",
                     "images": [{"url": "album", "width": 64}]}], "next": null},
                 "tracks": {"items": [{"uri": "spotify:track:1", "name": "Track", "duration_ms": 123456,
-                    "artists": [{"id": "artist-1", "name": "Artist"}],
-                    "album": {"id": "album-1", "uri": "spotify:album:1", "name": "Album",
+                    "artists": [{"id": "artist1", "name": "Artist"}],
+                    "album": {"id": "album1", "uri": "spotify:album:1", "name": "Album",
                         "images": [{"url": "track", "width": 64}]}}], "next": null}
             }),
         )]);
@@ -2154,7 +2494,7 @@ mod tests {
         assert_eq!(
             results.artists.items[0],
             SearchArtist {
-                id: "artist-1".into(),
+                id: "artist1".into(),
                 name: "Artist".into(),
                 descriptor: "Modern Classical · 1.2M followers".into(),
                 image_url: Some("small".into()),
@@ -2191,7 +2531,7 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "artists": {"items": (0..10).map(|index| serde_json::json!({"id": format!("artist-{index}"), "name": "Artist", "images": []})).collect::<Vec<_>>(), "next": "next", "total": 10},
+                    "artists": {"items": (0..10).map(|index| serde_json::json!({"id": format!("artist{index}"), "name": "Artist", "images": []})).collect::<Vec<_>>(), "next": "next", "total": 10},
                     "albums": {"items": [], "next": "next", "total": 10},
                     "tracks": {"items": [], "next": "next", "total": 10}
                 }),
@@ -2273,12 +2613,12 @@ mod tests {
         let client = client([Response::json(
             200,
             serde_json::json!({"items": [{
-            "id": "album-1", "uri": "spotify:album:1", "name": "Album",
-            "artists": [{"id": "artist-1", "name": "Artist"}], "images": []
+            "id": "album1", "uri": "spotify:album:album1", "name": "Album",
+            "artists": [{"id": "artist1", "name": "Artist"}], "images": []
         }], "next": "next", "total": 12}),
         )]);
 
-        let page = artist_albums_page(&client, "spotify:artist:artist-1", 0)
+        let page = artist_albums_page(&client, "spotify:artist:artist1", 0)
             .await
             .unwrap();
 
@@ -2286,7 +2626,7 @@ mod tests {
         assert_eq!(page.next_offset, Some(1));
         assert_eq!(page.total, 12);
         let url = url::Url::parse(&client.transport().requests()[0].url).unwrap();
-        assert_eq!(url.path(), "/v1/artists/artist-1/albums");
+        assert_eq!(url.path(), "/v1/artists/artist1/albums");
         assert!(url
             .query_pairs()
             .any(|pair| pair == ("include_groups".into(), "album,single".into())));
@@ -2302,17 +2642,16 @@ mod tests {
             serde_json::json!({"items": [
                 {"episode": {"uri": "spotify:episode:1", "name": "Ep", "duration_ms": "bogus"}},
                 {"episode": {"uri": "spotify:episode:2", "name": "Good", "duration_ms": 2000,
-                    "show": {"id": "show-1", "uri": "spotify:show:1", "name": "Show",
+                    "show": {"id": "show1", "uri": "spotify:show:1", "name": "Show",
                         "publisher": "Host", "category": null, "images": []}}}
             ], "next": null}),
         )]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Episodes, &|_| {})
+        let snapshot = client_snapshot(&client, LibraryKind::Episodes)
             .await
             .unwrap();
 
-        assert!(!snapshot.partial);
+        assert!(snapshot.partial);
         let tracks: Vec<_> = snapshot.batches.concat();
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].uri, "spotify:episode:2");
@@ -2322,8 +2661,7 @@ mod tests {
     async fn undecodable_page_degrades_to_partial_instead_of_failing() {
         let client = client([Response::json(200, serde_json::json!({"items": "bogus"}))]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Episodes, &|_| {})
+        let snapshot = client_snapshot(&client, LibraryKind::Episodes)
             .await
             .unwrap();
 
@@ -2336,7 +2674,7 @@ mod tests {
         let tracks = (0..5)
             .map(|index| serde_json::json!({
                 "track": {"uri": format!("spotify:track:{index}"), "name": format!("Track {index}"),
-                    "duration_ms": 1000, "artists": [{"id": format!("artist-{}", index % 4), "name": "Artist"}], "album": null}
+                    "duration_ms": 1000, "artists": [{"id": format!("artist{}", index % 4), "name": "Artist"}], "album": null}
             }))
             .collect::<Vec<_>>();
         let mut responses = vec![Response::json(
@@ -2347,14 +2685,13 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "id": format!("artist-{index}"), "name": "Artist", "genres": ["genre"]
+                    "id": format!("artist{index}"), "name": "Artist", "genres": ["genre"]
                 }),
             )
         }));
         let client = client(responses);
 
-        let batches = client
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
+        let batches = client_snapshot(&client, LibraryKind::Tracks)
             .await
             .unwrap()
             .batches;
@@ -2375,13 +2712,14 @@ mod tests {
     #[tokio::test]
     async fn sync_artist_budget_stops_at_cap_and_degrades_remaining_genres() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
         let tracks = (0..ARTIST_LOOKUPS_PER_SYNC + 1)
             .map(|index| {
                 serde_json::json!({"track": {
                     "uri": format!("spotify:track:{index}"), "name": format!("Track {index}"),
                     "duration_ms": 1000,
-                    "artists": [{"id": format!("artist-{index:03}"), "name": "Artist"}],
+                    "artists": [{"id": format!("artist{index:03}"), "name": "Artist"}],
                     "album": null
                 }})
             })
@@ -2397,18 +2735,20 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "id": format!("artist-{index:03}"), "name": "Artist", "genres": ["genre"]
+                    "id": format!("artist{index:03}"), "name": "Artist", "genres": ["genre"]
                 }),
             )
         }));
         let client = client(responses);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let mut snapshot = None;
-        for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
-        }
-        let snapshot = snapshot.unwrap();
+        let snapshot = provider
+            .complete_snapshot(&mut |_| {}, &|_| {})
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
 
         assert!(snapshot.genres_degraded);
         assert_eq!(
@@ -2427,15 +2767,17 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(artist_genres_store.save_count(), 1);
     }
 
     #[tokio::test]
     async fn cached_artists_do_not_consume_sync_artist_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
-        store
+        let cooldown_store = FsCooldownStore::new(dir.path());
+        let artist_genres_store = FsArtistGenresStore::new(dir.path());
+        artist_genres_store
             .save_artist_genres(&BTreeMap::from([(
-                "artist-000".into(),
+                "artist000".into(),
                 vec!["cached".into()],
             )]))
             .unwrap();
@@ -2444,7 +2786,7 @@ mod tests {
                 serde_json::json!({"track": {
                     "uri": format!("spotify:track:{index}"), "name": format!("Track {index}"),
                     "duration_ms": 1000,
-                    "artists": [{"id": format!("artist-{index:03}"), "name": "Artist"}],
+                    "artists": [{"id": format!("artist{index:03}"), "name": "Artist"}],
                     "album": null
                 }})
             })
@@ -2460,18 +2802,20 @@ mod tests {
             Response::json(
                 200,
                 serde_json::json!({
-                    "id": format!("artist-{index:03}"), "name": "Artist", "genres": ["genre"]
+                    "id": format!("artist{index:03}"), "name": "Artist", "genres": ["genre"]
                 }),
             )
         }));
         let client = client(responses);
-        let provider = SpotifySyncProvider::new(&client, &store).unwrap();
+        let provider =
+            SpotifySyncProvider::new(&client, &cooldown_store, &artist_genres_store).unwrap();
 
-        let mut snapshot = None;
-        for kind in LibraryKind::ALL {
-            snapshot = Some(provider.library_snapshot(kind, &|_| {}).await.unwrap());
-        }
-        let snapshot = snapshot.unwrap();
+        let snapshot = provider
+            .complete_snapshot(&mut |_| {}, &|_| {})
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
 
         assert!(!snapshot.genres_degraded);
         assert_eq!(snapshot.batches[0][0].cat, "cached");
@@ -2509,6 +2853,31 @@ mod tests {
             format_resume_time(later.timestamp() as u64, now),
             "Jan 18 at 12:00"
         );
+        assert_eq!(
+            format_resume_time(i64::MAX as u64, now),
+            i64::MAX.to_string()
+        );
+        assert_eq!(format_resume_time(u64::MAX, now), u64::MAX.to_string());
+    }
+
+    #[test]
+    fn spotify_ids_are_base62_and_kind_scoped_before_path_interpolation() {
+        assert_eq!(spotify_id("AbC123", "album").unwrap(), "AbC123");
+        assert_eq!(
+            spotify_id("spotify:album:AbC123", "album").unwrap(),
+            "AbC123"
+        );
+        for invalid in [
+            "",
+            "spotify:track:AbC123",
+            "spotify:album:AbC123:extra",
+            "../album",
+            "album/id",
+            "album?id",
+        ] {
+            assert!(spotify_id(invalid, "album").is_err(), "{invalid}");
+        }
+        assert!(spotify_id(&"a".repeat(65), "album").is_err());
     }
 
     #[tokio::test]
@@ -2518,20 +2887,17 @@ mod tests {
                 200,
                 serde_json::json!({"items": [
                     {"track": {"uri": "spotify:track:1", "name": "One", "duration_ms": 1000,
-                        "artists": [{"id": "artist-1", "name": "One"}], "album": null}},
+                        "artists": [{"id": "artist1", "name": "One"}], "album": null}},
                     {"track": {"uri": "spotify:track:2", "name": "Two", "duration_ms": 1000,
-                        "artists": [{"id": "artist-1", "name": "One"}], "album": null}},
+                        "artists": [{"id": "artist1", "name": "One"}], "album": null}},
                     {"track": {"uri": "spotify:track:3", "name": "Three", "duration_ms": 1000,
-                        "artists": [{"id": "artist-2", "name": "Two"}], "album": null}}
+                        "artists": [{"id": "artist2", "name": "Two"}], "album": null}}
                 ], "next": null}),
             ),
             Response::rate_limited("3600"),
         ]);
 
-        let snapshot = client
-            .library_snapshot(LibraryKind::Tracks, &|_| {})
-            .await
-            .unwrap();
+        let snapshot = client_snapshot(&client, LibraryKind::Tracks).await.unwrap();
 
         assert!(snapshot.genres_degraded);
         assert_eq!(snapshot.batches[0].len(), 3);

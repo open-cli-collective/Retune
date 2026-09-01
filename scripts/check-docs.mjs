@@ -52,7 +52,8 @@ const install = fs.readFileSync(path.join(root, "docs/INSTALL.md"), "utf8");
 const normalizedInstall = install.replace(/\s+/g, " ");
 for (const value of [
   "https://github.com/open-cli-collective/Retune/releases/latest",
-  "Retune-<version>-aarch64.tar.gz",
+  "Retune-<version>-aarch64.zip",
+  "/usr/bin/ditto -x -k",
   "Retune-<version>-windows-x64-setup.exe",
   "Retune-<version>-windows-arm64-setup.exe",
   "retune_<version>_amd64.deb",
@@ -63,10 +64,12 @@ for (const value of [
   "http://127.0.0.1:8898/callback",
   "Do **not** register",
   "/login",
-  "stable-signed",
-  "not Apple-notarized",
-  "Unknown",
-  "SmartScreen",
+  "Developer ID-signed and notarized",
+  "Apple notarization",
+  "Authenticode-signed",
+  "RFC 3161",
+  "spctl --assess",
+  "Get-AuthenticodeSignature",
   "Linux Secret Service",
   "checksums.txt",
 ]) {

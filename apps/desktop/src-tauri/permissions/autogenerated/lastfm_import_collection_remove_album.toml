@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-collection-remove-album"
+description = "Enables the lastfm_import_collection_remove_album command without any pre-configured scope."
+commands.allow = ["lastfm_import_collection_remove_album"]
+
+[[permission]]
+identifier = "deny-lastfm-import-collection-remove-album"
+description = "Denies the lastfm_import_collection_remove_album command without any pre-configured scope."
+commands.deny = ["lastfm_import_collection_remove_album"]

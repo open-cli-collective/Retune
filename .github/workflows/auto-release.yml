@@ -17,14 +17,17 @@ permissions:
 jobs:
   auto-release:
     runs-on: ubuntu-22.04
+    outputs:
+      should-release: ${{ steps.gate.outputs.should-release }}
+      tag: ${{ steps.gate.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 22
 
@@ -65,11 +68,22 @@ jobs:
           set -euo pipefail
           echo "::notice::dry-run: would create tag $TAG at $SHA"
 
+  tag:
+    if: github.event_name == 'push' && needs.auto-release.outputs.should-release == 'true'
+    needs: auto-release
+    environment: release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
       - name: Tag
-        if: github.event_name == 'push' && steps.gate.outputs.should-release == 'true'
         shell: bash
         env:
-          TAG: ${{ steps.gate.outputs.tag }}
+          TAG: ${{ needs.auto-release.outputs.tag }}
           TAG_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}

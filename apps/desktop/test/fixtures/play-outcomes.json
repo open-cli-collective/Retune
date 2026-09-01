@@ -1,0 +1,11 @@
+{
+  "started": "started",
+  "playbackAuthorizationRequired": {
+    "playbackAuthorizationRequired": {
+      "reason": "missing",
+      "message": "Authorize playback.",
+      "targetTrackId": 2,
+      "targetTrackUri": "spotify:track:two"
+    }
+  }
+}

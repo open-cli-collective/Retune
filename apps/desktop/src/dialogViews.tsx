@@ -1,9 +1,13 @@
-import { invoke } from '@tauri-apps/api/core'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useEffectEvent, useMemo, useState } from 'react'
+import { appGateway } from './appGateway.ts'
 import { diagnosticLevels, formatDiagnosticReport, reportWindow, type DiagnosticLevel, type DiagnosticReport } from './diagnostics.ts'
 import type { LastFmImportState, LastFmState, MetadataValues, PlaybackAuthorizationPrompt, PlayThresholdPercent, PlaylistTrack, Settings, Theme, TrackInfo } from './types.ts'
 import { clearedTrackRating, overlayEditTargets } from './ui.ts'
 import { ModalDialog, RatingStars } from './viewShared.tsx'
+import { libraryGateway } from './libraryGateway.ts'
+import { spotifyGateway } from './spotifyGateway.ts'
+import { openExternalDestination } from './ipc.ts'
+import { lastfmGateway } from './lastfmGateway.ts'
 
 const streamingQualities = [
   ['Normal', 96],
@@ -39,8 +43,9 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
   const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat === 'Uncategorized' ? '' : track.cat })
   const [suggestions, setSuggestions] = useState<MetadataValues>({ arts: [], albs: [], cats: [] })
   const [rating, setRating] = useState(track.rating)
+  const reportError = useEffectEvent(onError)
   useEffect(() => {
-    invoke<MetadataValues>('metadata_values').then(setSuggestions).catch((error) => onError(String(error)))
+    libraryGateway.metadataValues().then(setSuggestions).catch((error) => reportError(String(error)))
   }, [])
   const genres = useMemo(() => [...new Map([...suggestions.cats, ...track.genres].filter((genre) => genre && genre !== 'Uncategorized').map((genre) => [genre.toLowerCase(), genre] as const)).values()]
     .sort((left, right) => left.toLowerCase().localeCompare(right.toLowerCase())), [suggestions.cats, track.genres])
@@ -51,7 +56,7 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
     try {
       const ratingChange = { stars: rating?.explicit ? rating.stars : null }
       const edit = Object.fromEntries(Object.entries(draft).filter(([, value]) => value.trim() !== ''))
-      await invoke('edit_track', { id: track.id, edit: { ...edit, ratingChange } })
+      await libraryGateway.editTrack(track.id, { ...edit, ratingChange })
       onSaved()
     } catch (error) {
       onError(String(error))
@@ -82,17 +87,18 @@ export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: 
   const [rating, setRating] = useState<number | null | undefined>(undefined)
   const [confirming, setConfirming] = useState(false)
   const [saving, setSaving] = useState(false)
+  const reportError = useEffectEvent(onError)
   useEffect(() => {
-    invoke<MetadataValues>('metadata_values').then(setSuggestions).catch((error) => onError(String(error)))
+    libraryGateway.metadataValues().then(setSuggestions).catch((error) => reportError(String(error)))
   }, [])
   const placeholder = (key: Field) => tracks.every((track) => track[key] === tracks[0][key]) ? tracks[0][key] : 'Mixed'
   const { ids, missingUris } = overlayEditTargets(tracks)
   const save = async (addMissing: boolean) => {
     setSaving(true)
     try {
-      const addedIds = addMissing ? await invoke<number[]>('add_spotify_tracks', { uris: missingUris }) : []
+      const addedIds = addMissing ? await spotifyGateway.addTracks(missingUris) : []
       const targetIds = [...new Set([...ids, ...addedIds])]
-      if (targetIds.length) await invoke('set_track_infos', { ids: targetIds, edit: { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) } })
+      if (targetIds.length) await libraryGateway.editTracks(targetIds, { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) })
       onSaved()
     } catch (error) {
       onError(String(error))
@@ -126,9 +132,10 @@ export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: 
   </ModalDialog>
 }
 
-export function SetupLibrary({ settings, connected, onCancel, onConnect, onSync }: {
+export function SetupLibrary({ settings, connected, connectionHydrated, onCancel, onConnect, onSync }: {
   settings: Settings
   connected: boolean
+  connectionHydrated: boolean
   onCancel: () => void
   onConnect: (clientId: string) => void
   onSync: (clientId: string) => void
@@ -143,7 +150,7 @@ export function SetupLibrary({ settings, connected, onCancel, onConnect, onSync 
         <p>Retune reads your Spotify library through the Web API and builds a local overlay. Confirm three things, then sync.</p>
         <div className="setup-step"><span className="step-number">1</span><label><strong>Spotify app Client ID</strong><input value={clientId} onChange={(event) => setClientId(event.target.value)} /><small>Create one at developer.spotify.com → Dashboard → your app.</small></label></div>
         <div className="setup-step"><span className="step-number">2</span><div><label className="setup-check"><input type="checkbox" checked={webApi} onChange={(event) => setWebApi(event.target.checked)} /><strong>Web API enabled</strong></label><small>The app must have the Web API scope turned on in its dashboard settings.</small></div></div>
-        <div className="setup-step"><span className="step-number">3</span><div><strong>Spotify connection</strong><div className={`setup-status ${connected ? 'connected' : ''}`}><span className="connection-dot" /><span>{connected ? 'Connected' : 'Not connected'}</span>{connected ? <span className="detected">✓ auto-detected</span> : <button type="button" onClick={() => onConnect(trimmedClientId)}>Connect…</button>}</div></div></div>
+        <div className="setup-step"><span className="step-number">3</span><div><strong>Spotify connection</strong><div className={`setup-status ${connected ? 'connected' : ''}`}><span className="connection-dot" /><span>{!connectionHydrated ? 'Checking connection…' : connected ? 'Connected' : 'Not connected'}</span>{connected ? <span className="detected">✓ auto-detected</span> : connectionHydrated ? <button type="button" onClick={() => onConnect(trimmedClientId)}>Connect…</button> : null}</div></div></div>
       </div>
       <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!canSync}>Sync</button></div>
   </ModalDialog>
@@ -183,7 +190,7 @@ function BugPreferences() {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     let active = true
-    invoke<DiagnosticReport>('load_diagnostics')
+    appGateway.diagnostics()
       .then((next) => { if (active) setReport(next) })
       .catch((reason) => { if (active) setError(String(reason)) })
     return () => { active = false }
@@ -203,7 +210,7 @@ function BugPreferences() {
   }
   const email = async () => {
     try {
-      await invoke('email_diagnostics', { body })
+      await appGateway.emailDiagnostics(body)
     } catch (reason) {
       setError(String(reason))
     }
@@ -276,13 +283,17 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
     ['dark', 'Dark', 'Always use the dark theme.'],
   ]
   const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent, lastfmScrobbling })
-  const lastfmAction = async (command: 'connect_lastfm' | 'finish_lastfm' | 'disconnect_lastfm') => {
+  const lastfmAction = async (action: 'connect' | 'finish' | 'disconnect') => {
     setLastfmBusy(true)
     setLastfmError(undefined)
     try {
-      const next = await invoke<LastFmState>(command)
+      const next = await {
+        connect: lastfmGateway.connectAccount,
+        finish: lastfmGateway.finishAccount,
+        disconnect: lastfmGateway.disconnectAccount,
+      }[action]()
       onLastfm(next)
-      if (command === 'finish_lastfm') {
+      if (action === 'finish') {
         setLastfmScrobbling(true)
       }
     } catch (error) {
@@ -327,7 +338,7 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
                 <div className="lastfm-status-row">
                   <span className="lastfm-status-dot connected" aria-hidden="true" />
                   <span className="lastfm-status-label">Connected as <strong>{lastfm.username ?? 'Last.fm'}</strong></span>
-                  <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect_lastfm')} disabled={lastfmBusy}>Disconnect</button>
+                  <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect')} disabled={lastfmBusy}>Disconnect</button>
                 </div>
                 <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Sent once a track passes Last.fm's listening threshold.</small></span></label>
                 <div className="lastfm-actions">
@@ -343,12 +354,12 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
                   <strong>{lastfm.pending ? 'Authorization pending' : 'No Last.fm account'}</strong>
                   <small>{lastfm.pending ? 'Finish connecting to scrobble everything you play in Retune.' : 'Connect one to scrobble everything you play in Retune.'}</small>
                 </span>
-                {lastfm.pending ? <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('finish_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish…'}</button> : <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('connect_lastfm')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening…' : 'Connect…'}</button>}
+                {lastfm.pending ? <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('finish')} disabled={lastfmBusy}>{lastfmBusy ? 'Finishing…' : 'Finish…'}</button> : <button type="button" className="lastfm-pill primary" onClick={() => void lastfmAction('connect')} disabled={lastfmBusy}>{lastfmBusy ? 'Opening…' : 'Connect…'}</button>}
               </div>}
               {lastfm.problem && lastfm.available && <small className="error-text" role="alert">{lastfm.problem}</small>}
               {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
             </div>
-            <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" target="_blank" rel="noreferrer">Last.fm</a>.</small>
+            <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" onClick={(event) => { event.preventDefault(); void openExternalDestination({ kind: 'lastFm' }).catch((error) => setLastfmError(String(error))) }}>Last.fm</a>.</small>
           </div></section>
         </>}
         {tab === 'audio' && <>

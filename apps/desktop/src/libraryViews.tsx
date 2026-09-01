@@ -126,7 +126,7 @@ export function TrackCell({ track, column, facetTitle, playing, selected, onInfo
 
 export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
-  columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: React.MouseEvent) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
+  columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: Pick<React.MouseEvent | React.KeyboardEvent, 'shiftKey' | 'metaKey' | 'ctrlKey'>) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
   onColumnWidths: (widths: Partial<Record<ColumnKey, number>>) => void
   onPlaylist: (subject: PlaylistSubject) => void
@@ -135,6 +135,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
 }) {
   const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
+  const [focusedTrackId, setFocusedTrackId] = useState<number>()
   const headerDragged = useRef(false)
   const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLSpanElement } | undefined>(undefined)
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
@@ -142,6 +143,9 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   const headings = trackColumnHeadings(label)
   const visibleColumns = visibleColumnOrder(columnOrder, hiddenColumns)
   const columns = trackGridColumns(visibleColumns, liveWidths)
+  const rovingTrackId = tracks.some((track) => track.id === focusedTrackId)
+    ? focusedTrackId
+    : tracks.find((track) => selectedIds.has(track.id))?.id ?? tracks[0]?.id
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
@@ -188,7 +192,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   }
   const menuTrack = menu?.trackId === undefined ? undefined : tracks.find((track) => track.id === menu.trackId)
   return <div className="track-list" onMouseDown={onActivate}>
-    <div className={`track-scroll ${empty ? 'empty-library' : ''}`} onClick={(event) => { if (event.target === event.currentTarget) onClearSelection() }}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
+    <div className={`track-scroll ${empty ? 'empty-library' : ''}`} aria-label="Library tracks" onClick={(event) => { if (event.target === event.currentTarget) onClearSelection() }}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
     }}><span className="track-enabled-cell" />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
@@ -211,7 +215,28 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     }} /></span>)}</div>
       {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
         const isPlaying = isCurrentTrack(playing, track)
-        return <div key={track.id} data-track-id={track.id} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onClick={(event) => onSelect(track.id, event)} onDoubleClick={() => onPlay(track.id)} onDragStart={(event) => {
+        return <div key={track.id} data-track-id={track.id} role="group" aria-label={`${track.name} by ${track.art}`} data-keyboard-row tabIndex={rovingTrackId === track.id ? 0 : -1} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onFocus={() => setFocusedTrackId(track.id)} onClick={(event) => { setFocusedTrackId(track.id); onSelect(track.id, event) }} onDoubleClick={() => onPlay(track.id)} onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            onPlay(track.id)
+            return
+          }
+          if (event.key === ' ') {
+            event.preventDefault()
+            onSelect(track.id, event)
+            return
+          }
+          if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
+          event.preventDefault()
+          const index = tracks.findIndex((candidate) => candidate.id === track.id)
+          const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? tracks.length - 1 : Math.max(0, Math.min(tracks.length - 1, index + (event.key === 'ArrowUp' ? -1 : 1)))
+          const next = tracks[nextIndex]
+          if (!next) return
+          setFocusedTrackId(next.id)
+          onSelect(next.id, event)
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${next.id}"]`)?.focus())
+        }} onDragStart={(event) => {
           const dragged = selectedIds.has(track.id) ? tracks.filter((candidate) => selectedIds.has(candidate.id)) : [track]
           event.dataTransfer.effectAllowed = 'copy'
           const subject = { kind: 'tracks', label: dragged.length === 1 ? `Track · ${dragged[0].name}` : `${dragged.length} tracks`, uris: dragged.map((candidate) => candidate.uri) } satisfies PlaylistSubject
@@ -219,6 +244,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           if (hasLocalTracks(subject)) event.dataTransfer.setData(DRAG_LOCAL_TYPE, '')
         }} onContextMenu={(event) => {
           event.preventDefault()
+          event.currentTarget.focus()
           if (!selectedIds.has(track.id)) onSelect(track.id, event)
           setMenu({ x: event.clientX, y: event.clientY, trackId: track.id })
         }}>

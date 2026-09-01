@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use retune_audio::FileSource;
+use retune_audio::{FileSource, FileSourceStatus};
 use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -32,6 +32,7 @@ struct Stopped {
 
 struct Active {
     sink: Sink,
+    source_status: FileSourceStatus,
     generation: u64,
     request_id: u64,
     uri: String,
@@ -39,7 +40,7 @@ struct Active {
 }
 
 pub(super) struct FileEngine {
-    commands: mpsc::Sender<Command>,
+    commands: Result<mpsc::Sender<Command>, String>,
     events: tokio_mpsc::UnboundedSender<NeutralEvent>,
     generation: u64,
     request_id: u64,
@@ -54,12 +55,25 @@ impl FileEngine {
         generation: u64,
         volume: u8,
     ) -> Self {
+        Self::with_spawner(events, generation, volume, |worker| {
+            std::thread::Builder::new()
+                .name("retune-file-playback".into())
+                .spawn(worker)
+                .map(|_| ())
+        })
+    }
+
+    fn with_spawner(
+        events: tokio_mpsc::UnboundedSender<NeutralEvent>,
+        generation: u64,
+        volume: u8,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let worker_events = events.clone();
-        std::thread::Builder::new()
-            .name("retune-file-playback".into())
-            .spawn(move || run(receiver, worker_events, volume))
-            .expect("file playback thread starts");
+        let commands = spawn(Box::new(move || run(receiver, worker_events, volume)))
+            .map(|_| commands)
+            .map_err(|error| format!("File playback is unavailable: {error}"));
         Self {
             commands,
             events,
@@ -91,6 +105,7 @@ impl FileEngine {
         start_playing: bool,
         position_ms: u32,
     ) -> Result<(), String> {
+        self.available()?;
         self.request_id = self.request_id.wrapping_add(1);
         self.uri = Some(uri.to_owned());
         self.playing = start_playing;
@@ -176,8 +191,14 @@ impl FileEngine {
 
     fn send(&self, command: Command) -> Result<(), String> {
         self.commands
+            .as_ref()
+            .map_err(Clone::clone)?
             .send(command)
             .map_err(|_| "File playback is unavailable".into())
+    }
+
+    fn available(&self) -> Result<(), String> {
+        self.commands.as_ref().map(|_| ()).map_err(Clone::clone)
     }
 
     fn send_event(&self, event: NeutralEvent) {
@@ -308,11 +329,13 @@ fn run(
             continue;
         };
         if !current.sink.is_paused() && current.sink.empty() {
-            let _ = events.send(NeutralEvent::EndOfTrack {
-                generation: current.generation,
-                request_id: current.request_id,
-                uri: current.uri.clone(),
-            });
+            let event = terminal_event(
+                current.generation,
+                current.request_id,
+                &current.uri,
+                current.source_status.take_failure(),
+            );
+            let _ = events.send(event);
             runtime = None;
         } else if !current.sink.is_paused() && current.last_tick.elapsed() >= Duration::from_secs(1)
         {
@@ -323,6 +346,28 @@ fn run(
                 uri: current.uri.clone(),
                 position_ms: position_ms(&current.sink),
             });
+        }
+    }
+}
+
+fn terminal_event(
+    generation: u64,
+    request_id: u64,
+    uri: &str,
+    failure: Option<String>,
+) -> NeutralEvent {
+    if let Some(error) = failure {
+        log::warn!("File playback failed for {uri}: {error}");
+        NeutralEvent::Unavailable {
+            generation,
+            request_id,
+            uri: uri.to_owned(),
+        }
+    } else {
+        NeutralEvent::EndOfTrack {
+            generation,
+            request_id,
+            uri: uri.to_owned(),
         }
     }
 }
@@ -338,6 +383,7 @@ fn load(
 ) -> Result<Active, String> {
     let path = crate::localfiles::path_from_file_uri(&uri)?;
     let mut source = FileSource::open(path).map_err(|error| error.to_string())?;
+    let source_status = source.status();
     if position_ms != 0 {
         source
             .try_seek(Duration::from_millis(u64::from(position_ms)))
@@ -355,6 +401,7 @@ fn load(
     }
     Ok(Active {
         sink,
+        source_status,
         generation,
         request_id,
         uri,
@@ -428,11 +475,56 @@ mod tests {
     }
 
     #[test]
+    fn worker_spawn_failure_disables_file_playback_without_panicking() {
+        let (events, mut receiver) = tokio_mpsc::unbounded_channel();
+        let mut engine = FileEngine::with_spawner(events, 7, 50, |_| {
+            Err(std::io::Error::other("thread limit"))
+        });
+
+        assert_eq!(
+            engine
+                .load("file:///definitely/missing/song.mp3", true, 0)
+                .unwrap_err(),
+            "File playback is unavailable: thread limit"
+        );
+        assert!(!engine.is_active());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_decode_failure_is_unavailable_not_end_of_track() {
+        let failed = terminal_event(
+            7,
+            3,
+            "file:///damaged.aac",
+            Some("fatal decode error".into()),
+        );
+        assert!(matches!(
+            failed,
+            NeutralEvent::Unavailable {
+                generation: 7,
+                request_id: 3,
+                ref uri,
+            } if uri == "file:///damaged.aac"
+        ));
+
+        let clean = terminal_event(7, 3, "file:///clean.wav", None);
+        assert!(matches!(
+            clean,
+            NeutralEvent::EndOfTrack {
+                generation: 7,
+                request_id: 3,
+                ref uri,
+            } if uri == "file:///clean.wav"
+        ));
+    }
+
+    #[test]
     fn queued_load_and_stop_have_one_ordered_event_producer() {
         let (events, mut event_receiver) = tokio_mpsc::unbounded_channel();
         let (commands, command_receiver) = mpsc::channel();
         let mut engine = FileEngine {
-            commands,
+            commands: Ok(commands),
             events,
             generation: 7,
             request_id: 0,

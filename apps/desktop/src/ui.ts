@@ -1,16 +1,21 @@
 import type { BrowseView, ColumnKey, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayOutcome, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
 
-export type NativeDragEvent = { type: 'enter'; paths: string[] } | { type: 'over' } | { type: 'drop' } | { type: 'leave' }
-
 export const LIBRARY_DEFAULT_COLUMN_ORDER: ColumnKey[] = ['track', 'name', 'artist', 'album', 'time', 'plays', 'rating', 'genre', 'disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate']
 export const LIBRARY_DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate']
 export const PLAYLIST_DEFAULT_COLUMN_ORDER: ColumnKey[] = ['name', 'artist', 'album', 'time', 'rating', 'plays', 'genre', 'disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate', 'track']
 export const PLAYLIST_DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ['disc', 'kind', 'bitrate', 'lastPlayed', 'added', 'releaseDate', 'track']
 export const PLAYLIST_COLUMNS: readonly ColumnKey[] = PLAYLIST_DEFAULT_COLUMN_ORDER
 
-export const nextNativeDragActive = (active: boolean, event: NativeDragEvent) => {
-  if (event.type === 'enter') return event.paths.length > 0
-  return event.type === 'over' ? active : false
+export function isInteractiveShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false
+  const contentEditable = target.closest<HTMLElement>('[contenteditable]')
+  return Boolean(target.closest('button, a[href], input, textarea, select, summary, [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="slider"], [data-keyboard-row]')
+    || (contentEditable && contentEditable.contentEditable !== 'false'))
+}
+
+export function routeGlobalShortcut(event: KeyboardEvent) {
+  const command = event.metaKey || event.ctrlKey
+  return command || !isInteractiveShortcutTarget(event.target)
 }
 
 export const normalizeZoom = (zoom: number, min: number, max: number) =>
@@ -72,10 +77,24 @@ export const playbackAuthorizationPrompt = (outcome: PlayOutcome | undefined) =>
   typeof outcome === 'object' ? outcome.playbackAuthorizationRequired : null
 
 export const pendingPlaybackTarget = (prompt: PlaybackAuthorizationPrompt, tracks: readonly PlaybackTrack[]) =>
-  tracks.some((track) => track.id === prompt.targetTrackId) ? prompt.targetTrackId : null
+  tracks.find((track) => track.uri === prompt.targetTrackUri)?.id ?? null
 
 export const playbackRetryReady = (connected: boolean, playbackAuthorized: boolean, awaitingAuthorization: boolean) =>
   connected && (!awaitingAuthorization || playbackAuthorized)
+
+export const simulatedPlaybackTick = (
+  simulated: boolean | undefined,
+  isPlaying: boolean | undefined,
+  trackId: number | null | undefined,
+  tracks: readonly PlaybackTrack[],
+) => {
+  if (!simulated || !isPlaying) return null
+  const currentIndex = tracks.findIndex((track) => track.id === trackId)
+  if (currentIndex < 0) return null
+  const current = tracks[currentIndex]
+  const next = tracks[(currentIndex + 1) % tracks.length]
+  return { duration: current.durationSecs, nextId: next.id }
+}
 
 export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
   ? { type: 'playlist' as const, id: origin.id }
@@ -129,6 +148,26 @@ export const playlistRows = <T extends SortableTrack>(tracks: readonly T[], colu
   const rows = tracks.map((track, upstreamIndex) => ({ track, upstreamIndex }))
   return column ? rows.sort((left, right) => compareTracks(left.track, right.track, column, desc)) : rows
 }
+
+export type KeyedPlaylistRows<T> = {
+  playlistId: string
+  status: 'loading' | 'ready' | 'error'
+  rows: T[]
+}
+
+export const loadingPlaylistRows = <T>(playlistId: string): KeyedPlaylistRows<T> => ({ playlistId, status: 'loading', rows: [] })
+
+export const resolvedPlaylistRows = <T>(current: KeyedPlaylistRows<T>, playlistId: string, rows: T[]): KeyedPlaylistRows<T> =>
+  current.playlistId === playlistId ? { playlistId, status: 'ready', rows } : current
+
+export const failedPlaylistRows = <T>(current: KeyedPlaylistRows<T>, playlistId: string): KeyedPlaylistRows<T> =>
+  current.playlistId === playlistId ? { playlistId, status: 'error', rows: [] } : current
+
+export const currentPlaylistRows = <T>(state: KeyedPlaylistRows<T>, playlistId: string): readonly T[] =>
+  state.playlistId === playlistId && state.status === 'ready' ? state.rows : []
+
+export const playlistRowsReady = <T>(state: KeyedPlaylistRows<T>, playlistId: string): boolean =>
+  state.playlistId === playlistId && state.status === 'ready'
 
 export const dialogTabTarget = (current: number, count: number, backward: boolean) => {
   if (!count) return null
@@ -185,6 +224,59 @@ export const mergeByUri = <T extends { uri: string }>(current: T[], incoming: T[
     seen.add(item.uri)
     return true
   })]
+}
+
+export type RequestGeneration = { current: number }
+
+export const beginRequestGeneration = (generation: RequestGeneration) => ++generation.current
+
+export const isCurrentRequestGeneration = (request: number, generation: RequestGeneration) => request === generation.current
+
+export async function loadCurrentGeneration<T>(generation: RequestGeneration, load: () => Promise<T>, apply: (value: T) => void, fail: (error: unknown) => void) {
+  const request = beginRequestGeneration(generation)
+  try {
+    const value = await load()
+    if (isCurrentRequestGeneration(request, generation)) apply(value)
+  } catch (error) {
+    if (isCurrentRequestGeneration(request, generation)) fail(error)
+  }
+}
+
+export const cancelTrackInfoLoad = (generation: RequestGeneration) => { generation.current += 1 }
+
+export const entityRequestGeneration = (generations: Map<string, RequestGeneration>, key: string) => {
+  const current = generations.get(key) ?? { current: 0 }
+  generations.set(key, current)
+  return current
+}
+
+export const beginPendingEntity = (pending: Set<string>, key: string) => {
+  if (pending.has(key)) return false
+  pending.add(key)
+  return true
+}
+
+export const pendingEntities = (pending: Set<string>) => new Set(pending)
+
+export const currentPlaybackAuthorization = (
+  request: number,
+  generation: RequestGeneration,
+  outcome: PlayOutcome,
+  tracks: readonly PlaybackTrack[],
+) => {
+  if (!isCurrentRequestGeneration(request, generation)) return null
+  const prompt = playbackAuthorizationPrompt(outcome)
+  if (!prompt) return null
+  const id = pendingPlaybackTarget(prompt, tracks)
+  return id === null ? null : { id, prompt }
+}
+
+export async function loadArtwork(load: () => Promise<string | null>) {
+  try {
+    return await load()
+  } catch {
+    return null
+  }
 }
 
 export const menuPosition = (x: number, y: number, width: number, height: number, viewportWidth: number, viewportHeight: number, zoom: number, margin = 6) => {

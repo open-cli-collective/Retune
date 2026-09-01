@@ -7,6 +7,32 @@ export type ImportMatchRelation = 'best-match' | 'same-songs' | 'superset' | nul
 export type ImportNavigationTarget = 'queue' | 'source' | 'match'
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
 export type QueueStatus = ReviewStatus | 'excluded' | 'failed'
+export type ImportApplyErrorCode = 'spotify-rate-limited' | 'spotify-quota-exhausted' | 'apply-failed'
+
+export type ImportApplyResult =
+  | { status: 'succeeded'; batchId: number }
+  | { status: 'failed'; batchId: number; code: ImportApplyErrorCode; message: string; retryAt: number | null }
+
+const importApplyErrorCodes = new Set<ImportApplyErrorCode>(['spotify-rate-limited', 'spotify-quota-exhausted', 'apply-failed'])
+
+export function importApplyErrorCode(value: unknown): ImportApplyErrorCode {
+  return typeof value === 'string' && importApplyErrorCodes.has(value as ImportApplyErrorCode) ? value as ImportApplyErrorCode : 'apply-failed'
+}
+
+export function parseImportApplyResult(value: unknown): ImportApplyResult | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const result = value as Record<string, unknown>
+  if (!Number.isSafeInteger(result.batchId) || (result.batchId as number) <= 0 || (result.batchId as number) > 0xffff_ffff || (result.status !== 'succeeded' && result.status !== 'failed')) return null
+  if (result.status === 'succeeded') {
+    return Object.keys(result).length === 2 && Object.hasOwn(result, 'batchId') && Object.hasOwn(result, 'status')
+      ? { status: 'succeeded', batchId: result.batchId as number }
+      : null
+  }
+  if (Object.keys(result).length !== 5 || !['status', 'batchId', 'code', 'message', 'retryAt'].every((key) => Object.hasOwn(result, key))) return null
+  if (typeof result.code !== 'string' || !importApplyErrorCodes.has(result.code as ImportApplyErrorCode) || typeof result.message !== 'string') return null
+  if (result.retryAt !== null && (!Number.isSafeInteger(result.retryAt) || (result.retryAt as number) < 0)) return null
+  return { status: 'failed', batchId: result.batchId as number, code: result.code as ImportApplyErrorCode, message: result.message, retryAt: result.retryAt as number | null }
+}
 
 export type ImportShortcutContext = {
   key: string
@@ -93,6 +119,7 @@ export type ImportQueueItem = {
   trackEntities: number
   status?: QueueStatus | null
   error?: string | null
+  errorCode?: unknown
   retryAt?: number | null
 }
 
@@ -356,20 +383,28 @@ export type ReviewState = {
   rating: number | null
 }
 
-const pending: ImportDecision = { status: 'pending', excluded: false }
+export type ReviewBatchKey = { batchId: number; artist: string; album: string }
 
-export function defaultReviewState(rows: ImportSourceRow[]): ReviewState {
+export const sameReviewBatch = (left: ReviewBatchKey, right: ReviewBatchKey) =>
+  left.batchId === right.batchId && left.artist === right.artist && left.album === right.album
+
+export function mergeReviewBatchDraft(current: ReviewState, currentKey: ReviewBatchKey, incoming: ReviewState, incomingKey: ReviewBatchKey): ReviewState {
+  if (!sameReviewBatch(currentKey, incomingKey)) return incoming
+  const currentIds = new Set(current.rows.map((row) => row.stableId))
+  const checked = new Set(incoming.rows.flatMap((row) =>
+    (currentIds.has(row.stableId) ? current.checked : incoming.checked).has(row.stableId) ? [row.stableId] : []))
   return {
-    rows,
-    decisions: Object.fromEntries(rows.map((row) => [row.stableId, { ...pending }])),
-    checked: new Set(rows.map((row) => row.stableId)),
-    importContent: true,
-    includeHistoricalPlayCounts: true,
-    wholeAlbum: false,
-    genre: '',
-    rating: null,
+    ...incoming,
+    checked,
+    importContent: current.importContent,
+    includeHistoricalPlayCounts: current.includeHistoricalPlayCounts,
+    wholeAlbum: current.wholeAlbum,
+    genre: current.genre,
+    rating: current.rating,
   }
 }
+
+const pending: ImportDecision = { status: 'pending', excluded: false }
 
 function withDecision(state: ReviewState, ids: string[], decision: Partial<ImportDecision>): ReviewState {
   const decisions = { ...state.decisions }
@@ -380,10 +415,6 @@ function withDecision(state: ReviewState, ids: string[], decision: Partial<Impor
 function reviewable(state: ReviewState, id: string) {
   const decision = state.decisions[id] ?? pending
   return decision.status === 'pending' || decision.status === 'skipped'
-}
-
-function albumIds(state: ReviewState, artist: string, album: string) {
-  return state.rows.filter((row) => row.artist === artist && row.album === album && reviewable(state, row.stableId) && !state.decisions[row.stableId]?.excluded).map((row) => row.stableId)
 }
 
 export function toggleImportRow(state: ReviewState, id: string): ReviewState {
@@ -403,46 +434,6 @@ export function setWholeAlbumImport(state: ReviewState, wholeAlbum: boolean): Re
 export function excludeImportRows(state: ReviewState, ids: Iterable<string>, excluded = true): ReviewState {
   const reviewableIds = [...new Set(ids)].filter((id) => reviewable(state, id))
   return reviewableIds.length ? withDecision(state, reviewableIds, { excluded }) : state
-}
-
-export function excludeImportRow(state: ReviewState, id: string, excluded = true): ReviewState {
-  return excludeImportRows(state, [id], excluded)
-}
-
-export function skipImportAlbum(state: ReviewState, artist: string, album: string): ReviewState {
-  return withDecision(state, albumIds(state, artist, album), { status: 'skipped' })
-}
-
-export function ignoreImportAlbum(state: ReviewState, artist: string, album: string): ReviewState {
-  return withDecision(state, albumIds(state, artist, album), { status: 'ignored-album' })
-}
-
-export function ignoreImportArtist(state: ReviewState, artist: string): ReviewState {
-  return withDecision(state, state.rows.filter((row) => row.artist === artist && reviewable(state, row.stableId) && !state.decisions[row.stableId]?.excluded).map((row) => row.stableId), { status: 'ignored-artist' })
-}
-
-export function restoreImportAlbum(state: ReviewState, artist: string, album: string): ReviewState {
-  return withDecision(state, albumIds(state, artist, album), pending)
-}
-
-export function acceptImportChanges(state: ReviewState): { state: ReviewState; committed: string[] } {
-  const committed = [...state.checked].filter((id) => {
-    const decision = state.decisions[id] ?? pending
-    return !decision.excluded && (decision.status === 'pending' || decision.status === 'skipped')
-  })
-  return { state: withDecision(state, committed, { status: 'done' }), committed }
-}
-
-export function acceptImportAndNext(state: ReviewState): { state: ReviewState; committed: string[]; advance: true } {
-  const accepted = acceptImportChanges(state)
-  return { ...accepted, advance: true }
-}
-
-export function remainingImportCount(state: ReviewState): number {
-  return state.rows.filter((row) => {
-    const decision = state.decisions[row.stableId] ?? pending
-    return !decision.excluded && (decision.status === 'pending' || decision.status === 'skipped')
-  }).length
 }
 
 export function selectedImportCount(state: ReviewState): number {
@@ -607,7 +598,8 @@ export function importStatusLabel(status: QueueStatus): string {
   return status === 'ignored-album' ? 'ignored-album' : status === 'ignored-artist' ? 'ignored-artist' : status
 }
 
-export function importStatusText(phase: ImportPhase | null, username: string | null): string {
+export function importStatusText(phase: ImportPhase | null, username: string | null, problem: string | null = null): string {
+  if (problem) return problem
   if (phase === 'downloading') return 'Downloading Last.fm plays'
   if (phase === 'aggregating') return 'Preparing Last.fm review'
   if (phase === 'suspended') return 'Import suspended for account safety'
@@ -636,6 +628,33 @@ export function importEmptyPageMessage(phase: ImportPhase | null, pageLoading: b
 
 export function isCurrentImportPageResponse(requestGeneration: number, currentGeneration: number): boolean {
   return requestGeneration === currentGeneration
+}
+
+export function beginImportRefresh(generation: { current: number }): number {
+  return ++generation.current
+}
+
+export function isCurrentImportRefresh(requestGeneration: number, generation: { current: number }): boolean {
+  return requestGeneration === generation.current
+}
+
+export async function applyCurrentImportRefresh<T>(requestGeneration: number, generation: { current: number }, response: Promise<T>, apply: (value: T) => void, strict = false): Promise<{ value: T; applied: boolean }> {
+  const value = await response
+  const applied = isCurrentImportRefresh(requestGeneration, generation)
+  if (!applied && strict) throw new Error('Last.fm import refresh was superseded.')
+  if (applied) apply(value)
+  return { value, applied }
+}
+
+export async function runCheckedImportMutation<T>(mutation: () => Promise<unknown>, refresh: () => Promise<T>, onSuccess: (value: T) => void, onError: (error: unknown) => void): Promise<boolean> {
+  try {
+    await mutation()
+    onSuccess(await refresh())
+    return true
+  } catch (error) {
+    onError(error)
+    return false
+  }
 }
 
 export async function applyCurrentImportPageResponse<T>(requestGeneration: number, currentGeneration: () => number, response: Promise<T>, apply: (value: T) => void): Promise<void> {

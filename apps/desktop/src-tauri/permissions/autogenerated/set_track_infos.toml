@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-track-infos"
+description = "Enables the set_track_infos command without any pre-configured scope."
+commands.allow = ["set_track_infos"]
+
+[[permission]]
+identifier = "deny-set-track-infos"
+description = "Denies the set_track_infos command without any pre-configured scope."
+commands.deny = ["set_track_infos"]

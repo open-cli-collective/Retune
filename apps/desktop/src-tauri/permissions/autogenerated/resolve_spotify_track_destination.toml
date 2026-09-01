@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-spotify-track-destination"
+description = "Enables the resolve_spotify_track_destination command without any pre-configured scope."
+commands.allow = ["resolve_spotify_track_destination"]
+
+[[permission]]
+identifier = "deny-resolve-spotify-track-destination"
+description = "Denies the resolve_spotify_track_destination command without any pre-configured scope."
+commands.deny = ["resolve_spotify_track_destination"]

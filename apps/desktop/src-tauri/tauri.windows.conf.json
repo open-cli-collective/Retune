@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "windows": {
+      "allowDowngrades": false,
+      "minimumWebview2Version": "105.0.0.0"
+    }
+  }
+}

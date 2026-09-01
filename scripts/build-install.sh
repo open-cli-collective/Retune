@@ -27,8 +27,8 @@ fi
 npx tauri build --bundles app --features dev-token-store
 unset RETUNE_LASTFM_API_KEY RETUNE_LASTFM_SHARED_SECRET
 
-# Tauri ad-hoc signs the bundle (bundle.macOS.signingIdentity is "-" in
-# tauri.conf.json — same as release builds). Fail loudly if it didn't.
+# Seal this local-only bundle without using production signing credentials.
+codesign --force --deep --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
 codesign -dv "$bundle" 2>&1 | grep -F "Signature=adhoc" >/dev/null \
   || { echo "Expected an ad-hoc signature on $bundle" >&2; exit 1; }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-prepare-accept-all"
+description = "Enables the lastfm_import_prepare_accept_all command without any pre-configured scope."
+commands.allow = ["lastfm_import_prepare_accept_all"]
+
+[[permission]]
+identifier = "deny-lastfm-import-prepare-accept-all"
+description = "Denies the lastfm_import_prepare_accept_all command without any pre-configured scope."
+commands.deny = ["lastfm_import_prepare_accept_all"]

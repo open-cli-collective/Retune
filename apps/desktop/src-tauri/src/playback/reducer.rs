@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
 use super::{
-    empty_event, local_event, ListeningFact, NeutralEvent, NeutralState, PlayerStateEvent, Snapshot,
+    empty_event, local_event, ListeningFact, NeutralEvent, NeutralState, PlayerStateEvent,
+    RepeatMode, Snapshot,
 };
 
 fn duration_secs_ceil(duration_ms: Option<u32>) -> u64 {
@@ -37,7 +38,7 @@ pub(super) struct EventReducer {
     latest_intent: Option<u64>,
     pending: VecDeque<LoadIntent>,
     current: Option<(u64, LoadIntent)>,
-    repeat: String,
+    repeat: RepeatMode,
     play_threshold_percent: u8,
     previous_position_ms: u32,
     counted: bool,
@@ -60,7 +61,7 @@ impl Default for EventReducer {
             latest_intent: None,
             pending: VecDeque::new(),
             current: None,
-            repeat: "off".into(),
+            repeat: RepeatMode::Off,
             play_threshold_percent: 100,
             previous_position_ms: 0,
             counted: false,
@@ -114,8 +115,8 @@ impl EventReducer {
         self.previous_position_ms
     }
 
-    pub(super) fn repeat(&self) -> &str {
-        &self.repeat
+    pub(super) fn repeat(&self) -> RepeatMode {
+        self.repeat
     }
 
     pub(super) fn shuffle(&self) -> bool {
@@ -133,8 +134,8 @@ impl EventReducer {
         self.state.shuffle = shuffle;
     }
 
-    pub(super) fn set_repeat(&mut self, repeat: &str) {
-        self.repeat = repeat.to_owned();
+    pub(super) fn set_repeat(&mut self, repeat: RepeatMode) {
+        self.repeat = repeat;
     }
 
     pub(super) fn set_play_threshold_percent(&mut self, percent: u8) {
@@ -455,10 +456,9 @@ impl EventReducer {
             self.counted = true;
             actions.push(ReducerAction::TrackCompleted(uri));
         }
-        actions.push(if self.repeat == "one" {
-            ReducerAction::Reload
-        } else {
-            ReducerAction::Advance
+        actions.push(match self.repeat {
+            RepeatMode::Off | RepeatMode::All => ReducerAction::Advance,
+            RepeatMode::One => ReducerAction::Reload,
         });
         actions
     }
@@ -700,34 +700,25 @@ mod tests {
     }
 
     #[test]
-    fn connect_boundary_advances_full_snapshot() {
-        assert_eq!(
-            reducer().handle(NeutralEvent::ConnectBoundary {
-                generation: 7,
-                uri: "spotify:track:1".into(),
-            }),
-            [
-                ReducerAction::TrackCompleted("spotify:track:1".into()),
-                ReducerAction::Advance
-            ]
-        );
-    }
-
-    #[test]
-    fn connect_boundary_reloads_under_repeat_one() {
-        let mut reducer = reducer();
-        reducer.set_repeat("one");
-
-        assert_eq!(
-            reducer.handle(NeutralEvent::ConnectBoundary {
-                generation: 7,
-                uri: "spotify:track:1".into(),
-            }),
-            [
-                ReducerAction::TrackCompleted("spotify:track:1".into()),
-                ReducerAction::Reload
-            ]
-        );
+    fn connect_boundary_completion_is_exhaustive_for_repeat_modes() {
+        for (repeat, expected) in [
+            (RepeatMode::Off, ReducerAction::Advance),
+            (RepeatMode::All, ReducerAction::Advance),
+            (RepeatMode::One, ReducerAction::Reload),
+        ] {
+            let mut reducer = reducer();
+            reducer.set_repeat(repeat);
+            assert_eq!(
+                reducer.handle(NeutralEvent::ConnectBoundary {
+                    generation: 7,
+                    uri: "spotify:track:1".into(),
+                }),
+                [
+                    ReducerAction::TrackCompleted("spotify:track:1".into()),
+                    expected
+                ]
+            );
+        }
     }
 
     #[test]
@@ -883,7 +874,7 @@ mod tests {
     #[test]
     fn repeat_one_reloads_same_track_on_end() {
         let mut reducer = reducer();
-        reducer.set_repeat("one");
+        reducer.set_repeat(RepeatMode::One);
         bind(&mut reducer, "spotify:track:1", true, 1);
         for request_id in [1, 2] {
             assert_eq!(
@@ -906,7 +897,7 @@ mod tests {
     #[test]
     fn unavailable_advances_under_repeat_one() {
         let mut reducer = reducer();
-        reducer.set_repeat("one");
+        reducer.set_repeat(RepeatMode::One);
         bind(&mut reducer, "spotify:track:1", true, 1);
         assert!(matches!(
             reducer
@@ -962,7 +953,7 @@ mod tests {
     fn file_end_reloads_under_repeat_one_and_second_request_is_accepted() {
         let mut reducer = reducer();
         reducer.snapshot_mut().unwrap().tracks[0].uri = "file:///tmp/song.mp3".into();
-        reducer.set_repeat("one");
+        reducer.set_repeat(RepeatMode::One);
         bind(&mut reducer, "file:///tmp/song.mp3", true, 42);
 
         assert_eq!(
@@ -1596,7 +1587,7 @@ mod tests {
     fn repeat_one_counts_each_loaded_pass() {
         let mut reducer = reducer();
         reducer.set_play_threshold_percent(90);
-        reducer.set_repeat("one");
+        reducer.set_repeat(RepeatMode::One);
 
         for request_id in [1, 2] {
             bind(&mut reducer, "spotify:track:1", true, request_id);

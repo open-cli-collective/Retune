@@ -25,6 +25,7 @@ export type State = {
   setup: boolean
   playbackAuthorization: PlaybackAuthorizationPrompt | null
   connection: ConnectionState
+  connectionHydrated: boolean
   lastfm: LastFmState
   lastfmImport: LastFmImportState
   spotifyResults: SpotifyResults | null
@@ -97,7 +98,6 @@ export const defaultSettings: Settings = {
   autoAddSpotifyLibrary: true,
   autoConnect: true,
   spotifyClientId: '',
-  spotifySyncCompleted: false,
   playbackBackend: 'local',
   repeat: 'off',
   shuffle: false,
@@ -107,7 +107,6 @@ export const defaultSettings: Settings = {
   gapless: true,
   playThresholdPercent: 100,
   lastfmScrobbling: true,
-  lastfmScrobblingProfile: null,
 }
 
 export const initialState: State = {
@@ -128,6 +127,7 @@ export const initialState: State = {
   setup: false,
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
+  connectionHydrated: false,
   lastfm: { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null },
   lastfmImport: { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: null, applyingAll: false, spotifyLimit: null },
   spotifyResults: null,
@@ -221,7 +221,7 @@ export function reducer(state: State, action: Action): State {
         ? { ...state, playbackAuthorization: action.prompt, info: undefined, preferences: false, setup: false }
         : { ...state, playbackAuthorization: null }
     case 'connection':
-      return { ...state, connection: action.connection, playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization }
+      return { ...state, connection: action.connection, connectionHydrated: true, playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization }
     case 'lastfm':
       return { ...state, lastfm: action.lastfm }
     case 'lastfmImport':
@@ -239,7 +239,7 @@ export function reducer(state: State, action: Action): State {
     case 'importStarted':
       return { ...state, importStatus: 'Importing local files…' }
     case 'importComplete':
-      return { ...state, importStatus: `Imported ${action.summary.imported} tracks (${action.summary.duplicates} duplicates skipped, ${action.summary.failed.length} failed)` }
+      return { ...state, importStatus: `Imported ${action.summary.imported} tracks (${action.summary.duplicates} duplicates skipped, ${action.summary.failureCount} failed)` }
     case 'importFailed':
       return { ...state, importStatus: undefined }
     case 'clearImportStatus':

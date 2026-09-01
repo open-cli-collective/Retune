@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-disconnect-lastfm"
+description = "Enables the disconnect_lastfm command without any pre-configured scope."
+commands.allow = ["disconnect_lastfm"]
+
+[[permission]]
+identifier = "deny-disconnect-lastfm"
+description = "Denies the disconnect_lastfm command without any pre-configured scope."
+commands.deny = ["disconnect_lastfm"]

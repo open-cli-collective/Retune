@@ -1,10 +1,13 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::sync::{atomic::AtomicBool, atomic::AtomicUsize, Barrier};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -15,7 +18,21 @@ use retune_spotify::catalog::SpotifyCatalog;
 use retune_spotify::tokens::{TokenStore, Tokens};
 use serde::{Deserialize, Serialize};
 
-use crate::playlists::PlaylistCache;
+use crate::{
+    persistence::{atomic_write, read_limited, read_limited_file},
+    playback::{PlaybackBackend, RepeatMode},
+    playlists::PlaylistCache,
+};
+
+const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
+const MAX_CREDENTIAL_BYTES: u64 = 1024 * 1024;
+const MAX_COOLDOWN_BYTES: u64 = 1024 * 1024;
+const MAX_ARTIST_GENRES_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PLAYLIST_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SPOTIFY_STATE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_LIBRARY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SETTINGS_PATCH_STRING_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_SETTINGS_PATCH_COLLECTION_ITEMS: usize = 4 * 1024;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -38,7 +55,17 @@ impl std::fmt::Display for StoreError {
     }
 }
 
-impl std::error::Error for StoreError {}
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Import(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Clock(error) => Some(error),
+            Self::InvalidSettings(_) => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for StoreError {
     fn from(error: std::io::Error) -> Self {
@@ -71,8 +98,11 @@ pub trait OverlayStore {
     fn save(&self, library: &Library) -> StoreResult<()>;
 }
 
+#[derive(Clone)]
 pub struct FsOverlayStore {
     path: PathBuf,
+    #[cfg(test)]
+    save_hook: Arc<Mutex<Option<Arc<SaveHook>>>>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -118,10 +148,10 @@ pub struct Settings {
     pub spotify_sync_completed: bool,
     #[serde(default)]
     pub last_full_sync: Option<u64>,
-    #[serde(default = "default_playback_backend")]
-    pub playback_backend: String,
-    #[serde(default = "default_repeat")]
-    pub repeat: String,
+    #[serde(default)]
+    pub playback_backend: PlaybackBackend,
+    #[serde(default)]
+    pub repeat: RepeatMode,
     #[serde(default)]
     pub shuffle: bool,
     #[serde(default = "default_volume")]
@@ -138,6 +168,197 @@ pub struct Settings {
     pub lastfm_scrobbling: bool,
     #[serde(default)]
     pub lastfm_scrobbling_profile: Option<LastFmScrobblingProfile>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    pub theme: Theme,
+    pub zoom: f64,
+    pub zebra: bool,
+    pub pl_collapsed: bool,
+    pub browser_visible: bool,
+    pub browser_panes: BrowserPanes,
+    pub column_order: Vec<String>,
+    pub column_widths: BTreeMap<String, u32>,
+    pub hidden_columns: Vec<String>,
+    pub playlist_hidden_columns: BTreeMap<String, Vec<String>>,
+    pub playlist_column_orders: BTreeMap<String, Vec<String>>,
+    pub playlist_column_widths: BTreeMap<String, BTreeMap<String, u32>>,
+    pub sort_column: Option<String>,
+    pub sort_desc: bool,
+    pub auto_add_spotify_library: bool,
+    pub auto_connect: bool,
+    pub spotify_client_id: String,
+    pub playback_backend: PlaybackBackend,
+    pub repeat: RepeatMode,
+    pub shuffle: bool,
+    pub volume: u8,
+    pub streaming_bitrate: u16,
+    pub normalize_volume: bool,
+    pub gapless: bool,
+    pub play_threshold_percent: u8,
+    pub lastfm_scrobbling: bool,
+}
+
+impl From<&Settings> for SettingsView {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            theme: settings.theme,
+            zoom: settings.zoom,
+            zebra: settings.zebra,
+            pl_collapsed: settings.pl_collapsed,
+            browser_visible: settings.browser_visible,
+            browser_panes: settings.browser_panes,
+            column_order: settings.column_order.clone(),
+            column_widths: settings.column_widths.clone(),
+            hidden_columns: settings.hidden_columns.clone(),
+            playlist_hidden_columns: settings.playlist_hidden_columns.clone(),
+            playlist_column_orders: settings.playlist_column_orders.clone(),
+            playlist_column_widths: settings.playlist_column_widths.clone(),
+            sort_column: settings.sort_column.clone(),
+            sort_desc: settings.sort_desc,
+            auto_add_spotify_library: settings.auto_add_spotify_library,
+            auto_connect: settings.auto_connect,
+            spotify_client_id: settings.spotify_client_id.clone(),
+            playback_backend: settings.playback_backend,
+            repeat: settings.repeat,
+            shuffle: settings.shuffle,
+            volume: settings.volume,
+            streaming_bitrate: settings.streaming_bitrate,
+            normalize_volume: settings.normalize_volume,
+            gapless: settings.gapless,
+            play_threshold_percent: settings.play_threshold_percent,
+            lastfm_scrobbling: settings.lastfm_scrobbling,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct SettingsPatch {
+    pub theme: Option<Theme>,
+    pub zoom: Option<f64>,
+    pub zebra: Option<bool>,
+    pub pl_collapsed: Option<bool>,
+    pub browser_visible: Option<bool>,
+    pub browser_panes: Option<BrowserPanes>,
+    pub column_order: Option<Vec<String>>,
+    pub column_widths: Option<BTreeMap<String, u32>>,
+    pub hidden_columns: Option<Vec<String>>,
+    pub playlist_hidden_columns: Option<BTreeMap<String, Vec<String>>>,
+    pub playlist_column_orders: Option<BTreeMap<String, Vec<String>>>,
+    pub playlist_column_widths: Option<BTreeMap<String, BTreeMap<String, u32>>>,
+    #[serde(deserialize_with = "present_nullable")]
+    pub sort_column: Option<Option<String>>,
+    pub sort_desc: Option<bool>,
+    pub auto_add_spotify_library: Option<bool>,
+    pub auto_connect: Option<bool>,
+    pub spotify_client_id: Option<String>,
+    pub playback_backend: Option<PlaybackBackend>,
+    pub streaming_bitrate: Option<u16>,
+    pub normalize_volume: Option<bool>,
+    pub gapless: Option<bool>,
+    pub play_threshold_percent: Option<u8>,
+    pub lastfm_scrobbling: Option<bool>,
+}
+
+fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+impl SettingsPatch {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        fn string(label: &str, value: &str) -> Result<(), String> {
+            (value.len() <= MAX_SETTINGS_PATCH_STRING_BYTES)
+                .then_some(())
+                .ok_or_else(|| format!("{label} is too long."))
+        }
+        fn strings(label: &str, values: &[String]) -> Result<(), String> {
+            if values.len() > MAX_SETTINGS_PATCH_COLLECTION_ITEMS {
+                return Err(format!("{label} has too many items."));
+            }
+            values.iter().try_for_each(|value| string(label, value))
+        }
+        fn keys<V>(label: &str, values: &BTreeMap<String, V>) -> Result<(), String> {
+            if values.len() > MAX_SETTINGS_PATCH_COLLECTION_ITEMS {
+                return Err(format!("{label} has too many items."));
+            }
+            values.keys().try_for_each(|key| string(label, key))
+        }
+
+        if let Some(value) = &self.spotify_client_id {
+            string("Spotify client ID", value)?;
+        }
+        if let Some(Some(value)) = &self.sort_column {
+            string("Sort column", value)?;
+        }
+        for (label, values) in [
+            ("Column order", self.column_order.as_deref()),
+            ("Hidden columns", self.hidden_columns.as_deref()),
+        ] {
+            if let Some(values) = values {
+                strings(label, values)?;
+            }
+        }
+        if let Some(values) = &self.column_widths {
+            keys("Column widths", values)?;
+        }
+        for (label, maps) in [
+            ("Playlist hidden columns", &self.playlist_hidden_columns),
+            ("Playlist column orders", &self.playlist_column_orders),
+        ] {
+            if let Some(maps) = maps {
+                keys(label, maps)?;
+                maps.values()
+                    .try_for_each(|values| strings(label, values))?;
+            }
+        }
+        if let Some(maps) = &self.playlist_column_widths {
+            keys("Playlist column widths", maps)?;
+            for widths in maps.values() {
+                keys("Playlist column widths", widths)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn apply(self, settings: &mut Settings) {
+        macro_rules! set {
+            ($($field:ident),+ $(,)?) => {
+                $(if let Some(value) = self.$field { settings.$field = value; })+
+            };
+        }
+        set!(
+            theme,
+            zoom,
+            zebra,
+            pl_collapsed,
+            browser_visible,
+            browser_panes,
+            column_order,
+            column_widths,
+            hidden_columns,
+            playlist_hidden_columns,
+            playlist_column_orders,
+            playlist_column_widths,
+            sort_column,
+            sort_desc,
+            auto_add_spotify_library,
+            auto_connect,
+            spotify_client_id,
+            playback_backend,
+            streaming_bitrate,
+            normalize_volume,
+            gapless,
+            play_threshold_percent,
+            lastfm_scrobbling,
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -161,20 +382,12 @@ fn default_true() -> bool {
     true
 }
 
-fn default_playback_backend() -> String {
-    "local".into()
-}
-
 fn default_volume() -> u8 {
     62
 }
 
 fn default_streaming_bitrate() -> u16 {
     320
-}
-
-fn default_repeat() -> String {
-    "off".into()
 }
 
 fn default_play_threshold_percent() -> u8 {
@@ -211,8 +424,8 @@ impl Default for Settings {
             spotify_client_id: String::new(),
             spotify_sync_completed: false,
             last_full_sync: None,
-            playback_backend: default_playback_backend(),
-            repeat: default_repeat(),
+            playback_backend: PlaybackBackend::default(),
+            repeat: RepeatMode::default(),
             shuffle: false,
             volume: default_volume(),
             streaming_bitrate: default_streaming_bitrate(),
@@ -409,16 +622,6 @@ impl Settings {
                 "settings sortColumn must be a track column",
             ));
         }
-        if !matches!(self.playback_backend.as_str(), "connect" | "local") {
-            return Err(StoreError::InvalidSettings(
-                "settings playbackBackend must be connect or local",
-            ));
-        }
-        if !matches!(self.repeat.as_str(), "off" | "all" | "one") {
-            return Err(StoreError::InvalidSettings(
-                "settings repeat must be off, all, or one",
-            ));
-        }
         if self.volume > 100 {
             return Err(StoreError::InvalidSettings(
                 "settings volume must be between 0 and 100",
@@ -507,20 +710,117 @@ impl Settings {
     }
 }
 
+#[derive(Clone)]
 pub struct FsSettingsStore {
     path: PathBuf,
+    #[cfg(test)]
+    save_hook: Arc<Mutex<Option<Arc<SaveHook>>>>,
 }
 
-pub struct FsSyncStore {
-    cooldowns_path: PathBuf,
-    artist_genres_path: PathBuf,
-    spotify_library_path: PathBuf,
+#[derive(Clone)]
+pub struct SettingsState {
+    current: Arc<Mutex<Settings>>,
+    mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    store: FsSettingsStore,
+    restore_mutations: Arc<crate::restore_latch::RestoreMutationState>,
 }
 
+pub(crate) struct SettingsRestore<'a> {
+    state: &'a SettingsState,
+    _mutation_guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+pub(crate) struct SettingsSyncGuard {
+    current: Arc<Mutex<Settings>>,
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+pub struct FsCooldownStore {
+    path: PathBuf,
+    state: Mutex<CooldownState>,
+}
+
+#[derive(Default)]
+struct CooldownState {
+    cooldowns: Option<BTreeMap<String, Cooldown>>,
+}
+
+#[derive(Clone)]
+pub struct FsArtistGenresStore {
+    path: PathBuf,
+    state: Arc<Mutex<ArtistGenresState>>,
+    #[cfg(test)]
+    save_hook: Arc<Mutex<Option<Arc<SaveHook>>>>,
+    #[cfg(test)]
+    save_count: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+struct ArtistGenresState {
+    genres: Option<BTreeMap<String, Vec<String>>>,
+    generation: u64,
+    persisted_generation: u64,
+}
+
+#[derive(Clone)]
+pub struct FsSpotifyLibraryStore {
+    path: PathBuf,
+    #[cfg(test)]
+    save_hook: Arc<Mutex<Option<Arc<SaveHook>>>>,
+}
+
+#[derive(Clone)]
 pub struct FsPlaylistStore {
     path: PathBuf,
+    #[cfg(test)]
+    save_hook: Arc<Mutex<Option<Arc<SaveHook>>>>,
 }
 
+#[cfg(test)]
+pub(crate) struct SaveHook {
+    reached: Barrier,
+    release: Barrier,
+    is_reached: AtomicBool,
+    fail: AtomicBool,
+}
+
+#[cfg(test)]
+impl SaveHook {
+    pub(crate) fn new(fail: bool) -> Arc<Self> {
+        Arc::new(Self {
+            reached: Barrier::new(2),
+            release: Barrier::new(2),
+            is_reached: AtomicBool::new(false),
+            fail: AtomicBool::new(fail),
+        })
+    }
+
+    pub(crate) fn wait_until_reached(&self) {
+        self.reached.wait();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.wait();
+    }
+
+    pub(crate) fn is_reached(&self) -> bool {
+        self.is_reached.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn pause(&self) -> StoreResult<()> {
+        self.is_reached
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.reached.wait();
+        self.release.wait();
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(std::io::Error::other("injected save failure").into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct FsSpotifyCatalogStore {
     path: PathBuf,
 }
@@ -612,15 +912,26 @@ impl FsPlaylistStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
             path: app_data_dir.as_ref().join("playlists.json"),
+            #[cfg(test)]
+            save_hook: Arc::new(Mutex::new(None)),
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
+        *self.save_hook.lock().unwrap() = Some(hook);
+    }
+
     pub fn load(&self) -> StoreResult<PlaylistCache> {
-        read_json_or_default(&self.path)
+        read_json_or_default(&self.path, MAX_PLAYLIST_BYTES)
     }
 
     pub fn save(&self, playlists: &PlaylistCache) -> StoreResult<()> {
-        atomic_write(&self.path, &serde_json::to_vec(playlists)?)
+        #[cfg(test)]
+        if let Some(hook) = self.save_hook.lock().unwrap().take() {
+            hook.pause()?;
+        }
+        atomic_write(&self.path, &serde_json::to_vec(playlists)?, None).map_err(Into::into)
     }
 }
 
@@ -632,15 +943,20 @@ impl FsSpotifyCatalogStore {
     }
 
     pub fn load(&self) -> StoreResult<SpotifyCatalog> {
-        let bytes = match fs::read(&self.path) {
+        let bytes = match read_limited(&self.path, MAX_SPOTIFY_STATE_BYTES) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SpotifyCatalog::default());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                self.quarantine("oversized file")?;
+                log::warn!("Ignored oversized Spotify catalog; started empty");
                 return Ok(SpotifyCatalog::default());
             }
             Err(error) => return Err(error.into()),
         };
         match serde_json::from_slice::<SpotifyCatalog>(&bytes) {
-            Ok(catalog) if catalog.is_supported() => {
+            Ok(catalog) if catalog.validate().is_ok() => {
                 let counts = catalog.counts();
                 log::info!(
                     "Loaded Spotify catalog generation={} artists={} albums={} tracks={}",
@@ -652,10 +968,11 @@ impl FsSpotifyCatalogStore {
                 Ok(catalog)
             }
             Ok(catalog) => {
-                self.quarantine("unsupported version")?;
+                let reason = catalog.validate().unwrap_err();
+                self.quarantine(reason)?;
                 log::warn!(
-                    "Ignored unsupported Spotify catalog version {}; started empty",
-                    catalog.version
+                    "Ignored invalid Spotify catalog version {} ({reason}); started empty",
+                    catalog.version(),
                 );
                 Ok(SpotifyCatalog::default())
             }
@@ -668,12 +985,8 @@ impl FsSpotifyCatalogStore {
     }
 
     pub fn save(&self, catalog: &SpotifyCatalog) -> StoreResult<()> {
-        if !catalog.is_supported() {
-            return Err(StoreError::InvalidSettings(
-                "unsupported Spotify catalog version",
-            ));
-        }
-        atomic_write(&self.path, &serde_json::to_vec(catalog)?)?;
+        catalog.validate().map_err(StoreError::InvalidSettings)?;
+        atomic_write(&self.path, &serde_json::to_vec(catalog)?, None)?;
         let counts = catalog.counts();
         log::info!(
             "Saved Spotify catalog generation={} artists={} albums={} tracks={}",
@@ -699,50 +1012,245 @@ impl FsSpotifyCatalogStore {
     }
 }
 
-impl FsSyncStore {
+impl FsCooldownStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
-            cooldowns_path: app_data_dir.as_ref().join("cooldowns.json"),
-            artist_genres_path: app_data_dir.as_ref().join("artist-genres.json"),
-            spotify_library_path: app_data_dir.as_ref().join("spotify-library.json"),
+            path: app_data_dir.as_ref().join("cooldowns.json"),
+            state: Mutex::new(CooldownState::default()),
         }
     }
 
     pub fn cooldowns(&self, now: u64) -> StoreResult<BTreeMap<String, Cooldown>> {
-        let mut cooldowns: BTreeMap<String, Cooldown> = read_json_or_default(&self.cooldowns_path)?;
-        let original_len = cooldowns.len();
-        cooldowns.retain(|_, cooldown| cooldown.deadline > now);
-        if cooldowns.len() != original_len {
-            atomic_write(&self.cooldowns_path, &serde_json::to_vec(&cooldowns)?)?;
+        self.update_cooldowns(now, |cooldowns| cooldowns.clone())
+    }
+
+    pub fn update_cooldowns<R>(
+        &self,
+        now: u64,
+        update: impl FnOnce(&mut BTreeMap<String, Cooldown>) -> R,
+    ) -> StoreResult<R> {
+        self.load_cooldowns()?;
+        let mut state = self.state.lock().expect("cooldown state mutex poisoned");
+        let current = state.cooldowns.as_ref().expect("cooldowns were loaded");
+        let mut next = current.clone();
+        next.retain(|_, cooldown| cooldown.deadline > now);
+        let result = update(&mut next);
+        if &next != current {
+            atomic_write(&self.path, &serde_json::to_vec(&next)?, None)?;
+            state.cooldowns = Some(next);
         }
-        Ok(cooldowns)
+        Ok(result)
     }
 
+    #[cfg(test)]
     pub fn save_cooldowns(&self, cooldowns: &BTreeMap<String, Cooldown>) -> StoreResult<()> {
-        atomic_write(&self.cooldowns_path, &serde_json::to_vec(cooldowns)?)
+        self.load_cooldowns()?;
+        let mut state = self.state.lock().expect("cooldown state mutex poisoned");
+        if state.cooldowns.as_ref() != Some(cooldowns) {
+            atomic_write(&self.path, &serde_json::to_vec(cooldowns)?, None)?;
+            state.cooldowns = Some(cooldowns.clone());
+        }
+        Ok(())
     }
 
-    pub fn artist_genres(&self) -> StoreResult<BTreeMap<String, Vec<String>>> {
-        read_json_or_default(&self.artist_genres_path)
-    }
-
-    pub fn save_artist_genres(&self, genres: &BTreeMap<String, Vec<String>>) -> StoreResult<()> {
-        atomic_write(&self.artist_genres_path, &serde_json::to_vec(genres)?)
-    }
-
-    pub fn spotify_library(&self) -> StoreResult<SpotifyLibraryState> {
-        read_json_or_default(&self.spotify_library_path)
-    }
-
-    pub fn save_spotify_library(&self, state: &SpotifyLibraryState) -> StoreResult<()> {
-        atomic_write(&self.spotify_library_path, &serde_json::to_vec(state)?)
+    fn load_cooldowns(&self) -> StoreResult<()> {
+        if self
+            .state
+            .lock()
+            .expect("cooldown state mutex poisoned")
+            .cooldowns
+            .is_some()
+        {
+            return Ok(());
+        }
+        let cooldowns = read_json_or_default(&self.path, MAX_COOLDOWN_BYTES)?;
+        let mut state = self.state.lock().expect("cooldown state mutex poisoned");
+        state.cooldowns.get_or_insert(cooldowns);
+        Ok(())
     }
 }
 
-fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> StoreResult<T> {
-    match fs::read(path) {
+impl FsArtistGenresStore {
+    pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: app_data_dir.as_ref().join("artist-genres.json"),
+            state: Arc::new(Mutex::new(ArtistGenresState::default())),
+            #[cfg(test)]
+            save_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            save_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn artist_genres(&self) -> StoreResult<BTreeMap<String, Vec<String>>> {
+        self.load_artist_genres()?;
+        Ok(self
+            .state
+            .lock()
+            .expect("artist genres state mutex poisoned")
+            .genres
+            .as_ref()
+            .expect("artist genres were loaded")
+            .clone())
+    }
+
+    pub fn artist_genres_for(&self, artist_id: &str) -> StoreResult<Option<Vec<String>>> {
+        self.load_artist_genres()?;
+        Ok(self
+            .state
+            .lock()
+            .expect("artist genres state mutex poisoned")
+            .genres
+            .as_ref()
+            .expect("artist genres were loaded")
+            .get(artist_id)
+            .cloned())
+    }
+
+    #[cfg(test)]
+    pub fn save_artist_genres(&self, genres: &BTreeMap<String, Vec<String>>) -> StoreResult<()> {
+        self.load_artist_genres()?;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("artist genres state mutex poisoned");
+            if state.genres.as_ref() != Some(genres) {
+                state.genres = Some(genres.clone());
+                state.generation = state.generation.wrapping_add(1);
+            }
+        }
+        self.flush_artist_genres()
+    }
+
+    pub fn cache_artist_genres(&self, artist_id: String, genres: Vec<String>) -> StoreResult<()> {
+        self.load_artist_genres()?;
+        let mut state = self
+            .state
+            .lock()
+            .expect("artist genres state mutex poisoned");
+        let cache = state.genres.as_mut().expect("artist genres were loaded");
+        if cache.get(&artist_id) != Some(&genres) {
+            cache.insert(artist_id, genres);
+            state.generation = state.generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn flush_artist_genres(&self) -> StoreResult<()> {
+        loop {
+            let (generation, bytes) = {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("artist genres state mutex poisoned");
+                if state.persisted_generation == state.generation {
+                    return Ok(());
+                }
+                (
+                    state.generation,
+                    serde_json::to_vec(state.genres.as_ref().expect("artist genres were loaded"))?,
+                )
+            };
+            #[cfg(test)]
+            {
+                self.save_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(hook) = self.save_hook.lock().unwrap().take() {
+                    hook.pause()?;
+                }
+            }
+            atomic_write(&self.path, &bytes, None)?;
+            let mut state = self
+                .state
+                .lock()
+                .expect("artist genres state mutex poisoned");
+            state.persisted_generation = generation;
+            if state.generation == generation {
+                return Ok(());
+            }
+        }
+    }
+
+    fn load_artist_genres(&self) -> StoreResult<()> {
+        if self
+            .state
+            .lock()
+            .expect("artist genres state mutex poisoned")
+            .genres
+            .is_some()
+        {
+            return Ok(());
+        }
+        let genres = read_json_or_default(&self.path, MAX_ARTIST_GENRES_BYTES)?;
+        self.state
+            .lock()
+            .expect("artist genres state mutex poisoned")
+            .genres
+            .get_or_insert(genres);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
+        *self.save_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn save_count(&self) -> usize {
+        self.save_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl FsSpotifyLibraryStore {
+    pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: app_data_dir.as_ref().join("spotify-library.json"),
+            #[cfg(test)]
+            save_hook: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
+        *self.save_hook.lock().unwrap() = Some(hook);
+    }
+
+    pub fn load(&self) -> StoreResult<SpotifyLibraryState> {
+        read_json_or_default(&self.path, MAX_SPOTIFY_STATE_BYTES)
+    }
+
+    pub fn save(&self, state: &SpotifyLibraryState) -> StoreResult<()> {
+        #[cfg(test)]
+        if let Some(hook) = self.save_hook.lock().unwrap().take() {
+            hook.pause()?;
+        }
+        atomic_write(&self.path, &serde_json::to_vec(state)?, None).map_err(Into::into)
+    }
+}
+
+fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+    limit: u64,
+) -> StoreResult<T> {
+    match read_limited(path, limit) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let name = path
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("store path has no name"))?
+                .to_string_lossy();
+            let quarantined = path.with_file_name(format!("{name}.oversized-{stamp}"));
+            fs::rename(path, &quarantined)?;
+            log::warn!(
+                "Quarantined oversized reconstructible state at {}",
+                quarantined.display()
+            );
+            Ok(T::default())
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -751,11 +1259,18 @@ impl FsSettingsStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
             path: app_data_dir.as_ref().join("settings.json"),
+            #[cfg(test)]
+            save_hook: Arc::new(Mutex::new(None)),
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
+        *self.save_hook.lock().unwrap() = Some(hook);
+    }
+
     pub fn load(&self) -> StoreResult<Option<Settings>> {
-        match fs::read(&self.path) {
+        match read_limited(&self.path, MAX_SETTINGS_BYTES) {
             Ok(bytes) => {
                 let mut settings: Settings = serde_json::from_slice(&bytes)?;
                 settings.normalize();
@@ -768,10 +1283,133 @@ impl FsSettingsStore {
     }
 
     pub fn save(&self, settings: &Settings) -> StoreResult<()> {
+        #[cfg(test)]
+        if let Some(hook) = self.save_hook.lock().unwrap().take() {
+            hook.pause()?;
+        }
         let mut settings = settings.clone();
         settings.normalize();
         settings.validate()?;
-        atomic_write(&self.path, &serde_json::to_vec(&settings)?)
+        atomic_write(&self.path, &serde_json::to_vec(&settings)?, None).map_err(Into::into)
+    }
+}
+
+impl SettingsState {
+    #[cfg(test)]
+    pub fn new(current: Settings, store: FsSettingsStore) -> Self {
+        Self::new_with_restore_state(
+            current,
+            store,
+            Arc::new(crate::restore_latch::RestoreMutationState::default()),
+        )
+    }
+
+    pub(crate) fn new_with_restore_state(
+        current: Settings,
+        store: FsSettingsStore,
+        restore_mutations: Arc<crate::restore_latch::RestoreMutationState>,
+    ) -> Self {
+        Self {
+            current: Arc::new(Mutex::new(current)),
+            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            store,
+            restore_mutations,
+        }
+    }
+
+    pub fn snapshot(&self) -> Settings {
+        self.current
+            .lock()
+            .expect("settings mutex poisoned")
+            .clone()
+    }
+
+    pub(crate) async fn begin_restore(&self) -> Result<SettingsRestore<'_>, String> {
+        let mutation_guard = self.mutation_gate.lock().await;
+        self.restore_mutations.ensure_allowed()?;
+        Ok(SettingsRestore {
+            state: self,
+            _mutation_guard: mutation_guard,
+        })
+    }
+
+    pub(crate) async fn begin_sync_commit(&self) -> Result<SettingsSyncGuard, String> {
+        let mutation_guard = Arc::clone(&self.mutation_gate).lock_owned().await;
+        self.restore_mutations.ensure_allowed()?;
+        Ok(SettingsSyncGuard {
+            current: Arc::clone(&self.current),
+            _mutation_guard: mutation_guard,
+        })
+    }
+
+    pub async fn mutate<T>(
+        &self,
+        update: impl FnOnce(&mut Settings) -> Result<T, String>,
+        committed: impl FnOnce(&Settings, &Settings) -> Result<(), String>,
+    ) -> Result<(T, Settings), String> {
+        let mutation_guard = Arc::clone(&self.mutation_gate).lock_owned().await;
+        #[cfg(test)]
+        self.restore_mutations.after_wait();
+        self.restore_mutations.ensure_allowed()?;
+        let previous = self.snapshot();
+        let mut next = previous.clone();
+        let value = update(&mut next)?;
+        next.normalize();
+        next.validate().map_err(|error| error.to_string())?;
+        if next == previous {
+            return Ok((value, previous));
+        }
+        let store = self.store.clone();
+        let saved = next.clone();
+        let current = Arc::clone(&self.current);
+        let completion = tauri::async_runtime::spawn(async move {
+            tauri::async_runtime::spawn_blocking(move || store.save(&saved))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            *current.lock().expect("settings mutex poisoned") = next.clone();
+            Ok::<_, String>((mutation_guard, next))
+        });
+        let (_mutation_guard, next) = completion
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        committed(&previous, &next).map_err(|error| {
+            format!("Settings were saved, but a follow-up action failed: {error}")
+        })?;
+        Ok((value, next))
+    }
+}
+
+impl SettingsSyncGuard {
+    pub(crate) fn snapshot(&self) -> Settings {
+        self.current
+            .lock()
+            .expect("settings mutex poisoned")
+            .clone()
+    }
+
+    pub(crate) fn install(&self, next: Settings) {
+        *self.current.lock().expect("settings mutex poisoned") = next;
+    }
+}
+
+impl SettingsRestore<'_> {
+    pub(crate) fn snapshot(&self) -> Settings {
+        self.state.snapshot()
+    }
+
+    pub(crate) fn replace(&mut self, next: Settings) -> Result<(), String> {
+        self.state
+            .store
+            .save(&next)
+            .map_err(|error| error.to_string())?;
+        *self.state.current.lock().expect("settings mutex poisoned") = next;
+        Ok(())
+    }
+
+    pub(crate) fn install_recovered(&mut self, next: Settings) {
+        *self.state.current.lock().expect("settings mutex poisoned") = next;
     }
 }
 
@@ -779,7 +1417,14 @@ impl FsOverlayStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
             path: app_data_dir.as_ref().join("library.json"),
+            #[cfg(test)]
+            save_hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
+        *self.save_hook.lock().unwrap() = Some(hook);
     }
 
     pub fn quarantine_corrupt(&self) -> StoreResult<PathBuf> {
@@ -794,7 +1439,7 @@ impl FsOverlayStore {
 
 impl OverlayStore for FsOverlayStore {
     fn load(&self) -> StoreResult<Option<Library>> {
-        match fs::read(&self.path) {
+        match read_limited(&self.path, MAX_LIBRARY_BYTES) {
             Ok(bytes) => Ok(Some(import(&bytes)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
@@ -802,7 +1447,11 @@ impl OverlayStore for FsOverlayStore {
     }
 
     fn save(&self, library: &Library) -> StoreResult<()> {
-        atomic_write(&self.path, &export_json(library))
+        #[cfg(test)]
+        if let Some(hook) = self.save_hook.lock().unwrap().take() {
+            hook.pause()?;
+        }
+        atomic_write(&self.path, &export_json(library), None).map_err(Into::into)
     }
 }
 
@@ -811,12 +1460,61 @@ impl OverlayStore for FsOverlayStore {
 /// Release builds use encrypted tokens with a native credential-store key.
 pub struct FsTokenStore {
     path: PathBuf,
+    lifecycle: Mutex<()>,
 }
 
 impl FsTokenStore {
     pub fn new(app_data_dir: impl AsRef<Path>) -> Self {
         Self {
             path: app_data_dir.as_ref().join("dev-tokens.json"),
+            lifecycle: Mutex::new(()),
+        }
+    }
+
+    fn load_file(&self) -> retune_spotify::Result<Option<Tokens>> {
+        let file = match fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(token_error(error)),
+        };
+        let metadata = file.metadata().map_err(token_error)?;
+        if !metadata.is_file() {
+            return Err(token_error("development token path is not a regular file"));
+        }
+        #[cfg(unix)]
+        {
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .map_err(token_error)?;
+                if file.metadata().map_err(token_error)?.permissions().mode() & 0o777 != 0o600 {
+                    return Err(token_error(
+                        "development token permissions are not owner-only",
+                    ));
+                }
+            }
+        }
+        match read_limited_file(file, &self.path, MAX_CREDENTIAL_BYTES) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| retune_spotify::Error::TokenStoreCorrupt(error.to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                Err(retune_spotify::Error::TokenStoreCorrupt(error.to_string()))
+            }
+            Err(error) => Err(token_error(error)),
+        }
+    }
+
+    fn save_file(&self, tokens: &Tokens) -> retune_spotify::Result<()> {
+        let bytes = serde_json::to_vec(tokens).map_err(token_error)?;
+        atomic_write(&self.path, &bytes, Some(0o600)).map_err(token_error)
+    }
+
+    fn clear_file(&self) -> retune_spotify::Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(token_error(error)),
         }
     }
 }
@@ -827,63 +1525,416 @@ fn token_error(error: impl std::fmt::Display) -> retune_spotify::Error {
 
 impl TokenStore for FsTokenStore {
     fn load(&self) -> retune_spotify::Result<Option<Tokens>> {
-        match fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(token_error),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(token_error(error)),
-        }
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        self.load_file()
     }
 
     fn save(&self, tokens: &Tokens) -> retune_spotify::Result<()> {
-        let bytes = serde_json::to_vec(tokens).map_err(token_error)?;
-        atomic_write(&self.path, &bytes).map_err(token_error)?;
-        #[cfg(unix)]
-        {
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-                .map_err(token_error)?;
-        }
-        Ok(())
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        self.save_file(tokens)
     }
 
     fn clear(&self) -> retune_spotify::Result<()> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(token_error(error)),
-        }
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        self.clear_file()
     }
-}
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> StoreResult<()> {
-    fs::create_dir_all(path.parent().expect("store path has a parent"))?;
-    let temporary = path.with_extension("json.tmp");
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    fn replace_if_current(
+        &self,
+        expected: &Tokens,
+        tokens: &Tokens,
+    ) -> retune_spotify::Result<bool> {
+        let _guard = self.lifecycle.lock().map_err(token_error)?;
+        if self.load_file()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_file(tokens)?;
+        Ok(true)
     }
-    result.map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc, Arc, Barrier,
+        },
+        thread,
+    };
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use crate::fixture;
+
+    #[test]
+    fn delayed_user_patch_preserves_newer_sync_bookkeeping_in_memory_and_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsState::new(
+            Settings::default(),
+            FsSettingsStore::new(dir.path()),
+        ));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let user_settings = Arc::clone(&settings);
+        let user = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            tauri::async_runtime::block_on(user_settings.mutate(
+                |current| {
+                    SettingsPatch {
+                        theme: Some(Theme::Dark),
+                        ..SettingsPatch::default()
+                    }
+                    .apply(current);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            ))
+            .unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        tauri::async_runtime::block_on(settings.mutate(
+            |current| {
+                current.spotify_sync_completed = true;
+                current.last_full_sync = Some(42);
+                Ok(())
+            },
+            |_, _| Ok(()),
+        ))
+        .unwrap();
+        release_tx.send(()).unwrap();
+        user.join().unwrap();
+
+        let memory = settings.snapshot();
+        let disk = FsSettingsStore::new(dir.path()).load().unwrap().unwrap();
+        assert_eq!(memory, disk);
+        assert_eq!(memory.theme, Theme::Dark);
+        assert!(memory.spotify_sync_completed);
+        assert_eq!(memory.last_full_sync, Some(42));
+    }
+
+    #[test]
+    fn concurrent_disjoint_settings_mutations_both_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsState::new(
+            Settings::default(),
+            FsSettingsStore::new(dir.path()),
+        ));
+        let barrier = Arc::new(Barrier::new(3));
+        let workers = [
+            {
+                let settings = Arc::clone(&settings);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    tauri::async_runtime::block_on(settings.mutate(
+                        |current| {
+                            current.zebra = false;
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    ))
+                    .unwrap();
+                })
+            },
+            {
+                let settings = Arc::clone(&settings);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    tauri::async_runtime::block_on(settings.mutate(
+                        |current| {
+                            current.auto_connect = false;
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    ))
+                    .unwrap();
+                })
+            },
+        ];
+        barrier.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let memory = settings.snapshot();
+        let disk = FsSettingsStore::new(dir.path()).load().unwrap().unwrap();
+        assert_eq!(memory, disk);
+        assert!(!memory.zebra);
+        assert!(!memory.auto_connect);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paused_settings_save_serializes_latest_read_save_and_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let control = store.clone();
+        let settings = Arc::new(SettingsState::new(Settings::default(), store));
+        let hook = SaveHook::new(false);
+        control.arm_save(Arc::clone(&hook));
+
+        let first = {
+            let settings = Arc::clone(&settings);
+            tokio::spawn(async move {
+                settings
+                    .mutate(
+                        |current| {
+                            current.volume = 37;
+                            current.normalize_volume = true;
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    )
+                    .await
+            })
+        };
+        hook.wait_until_reached();
+        let second = {
+            let settings = Arc::clone(&settings);
+            tokio::spawn(async move {
+                settings
+                    .mutate(
+                        |current| {
+                            current.shuffle = true;
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    )
+                    .await
+            })
+        };
+
+        assert_eq!(settings.snapshot(), Settings::default());
+        assert!(FsSettingsStore::new(dir.path()).load().unwrap().is_none());
+        hook.release();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let memory = settings.snapshot();
+        let disk = FsSettingsStore::new(dir.path()).load().unwrap().unwrap();
+        assert_eq!(memory, disk);
+        assert_eq!(memory.volume, 37);
+        assert!(memory.normalize_volume);
+        assert!(memory.shuffle);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_settings_mutation_finishes_disk_and_memory_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        let control = store.clone();
+        let settings = Arc::new(SettingsState::new(Settings::default(), store));
+        let hook = SaveHook::new(false);
+        control.arm_save(Arc::clone(&hook));
+
+        let mutation = {
+            let settings = Arc::clone(&settings);
+            tokio::spawn(async move {
+                settings
+                    .mutate(
+                        |current| {
+                            current.volume = 37;
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    )
+                    .await
+            })
+        };
+        hook.wait_until_reached();
+        mutation.abort();
+        hook.release();
+        assert!(mutation.await.unwrap_err().is_cancelled());
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if settings.snapshot().volume == 37 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(control.load().unwrap().unwrap(), settings.snapshot());
+    }
+
+    #[tokio::test]
+    async fn post_commit_failure_reports_that_settings_remain_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = SettingsState::new(Settings::default(), FsSettingsStore::new(dir.path()));
+
+        let error = settings
+            .mutate(
+                |current| {
+                    current.volume = 23;
+                    Ok(())
+                },
+                |_, _| Err("event unavailable".into()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("Settings were saved"));
+        assert_eq!(settings.snapshot().volume, 23);
+        assert_eq!(
+            FsSettingsStore::new(dir.path())
+                .load()
+                .unwrap()
+                .unwrap()
+                .volume,
+            23
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_settings_save_changes_neither_memory_nor_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = Settings::default();
+        let store = FsSettingsStore::new(dir.path());
+        store.save(&before).unwrap();
+        let control = store.clone();
+        let settings = SettingsState::new(before.clone(), store);
+        let hook = SaveHook::new(true);
+        control.arm_save(Arc::clone(&hook));
+        let release = std::thread::spawn(move || {
+            hook.wait_until_reached();
+            hook.release();
+        });
+
+        assert!(settings
+            .mutate(
+                |current| {
+                    current.volume = 12;
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )
+            .await
+            .is_err());
+        release.join().unwrap();
+
+        assert_eq!(settings.snapshot(), before);
+        assert_eq!(
+            FsSettingsStore::new(dir.path()).load().unwrap(),
+            Some(before)
+        );
+    }
+
+    #[test]
+    fn queued_settings_mutation_checks_restore_latch_after_mutex_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let restore_mutations = Arc::new(crate::restore_latch::RestoreMutationState::default());
+        let settings = Arc::new(SettingsState::new_with_restore_state(
+            Settings::default(),
+            FsSettingsStore::new(dir.path()),
+            Arc::clone(&restore_mutations),
+        ));
+        let restore = tauri::async_runtime::block_on(settings.begin_restore()).unwrap();
+        let hook = restore_mutations.arm_after_wait();
+        let mutated = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let settings = Arc::clone(&settings);
+            let mutated = Arc::clone(&mutated);
+            thread::spawn(move || {
+                tauri::async_runtime::block_on(settings.mutate(
+                    |current| {
+                        mutated.store(true, Ordering::SeqCst);
+                        current.zebra = false;
+                        Ok(())
+                    },
+                    |_, _| Ok(()),
+                ))
+                .map(|_| ())
+            })
+        };
+
+        drop(restore);
+        hook.wait_until_reached();
+        restore_mutations.mark_recovery_required();
+        hook.release();
+
+        assert!(worker.join().unwrap().is_err());
+        assert!(!mutated.load(Ordering::SeqCst));
+        assert!(FsSettingsStore::new(dir.path()).load().unwrap().is_none());
+    }
+
+    #[test]
+    fn one_changed_settings_mutation_runs_one_commit_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = SettingsState::new(Settings::default(), FsSettingsStore::new(dir.path()));
+        let committed = AtomicUsize::new(0);
+
+        tauri::async_runtime::block_on(settings.mutate(
+            |current| {
+                current.zoom = 1.2;
+                Ok(())
+            },
+            |_, _| {
+                committed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        ))
+        .unwrap();
+        tauri::async_runtime::block_on(settings.mutate(
+            |current| {
+                current.zoom = 1.2;
+                Ok(())
+            },
+            |_, _| {
+                committed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(committed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn settings_ipc_types_exclude_private_bookkeeping() {
+        assert!(serde_json::from_value::<SettingsPatch>(serde_json::json!({
+            "spotifySyncCompleted": true
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<SettingsPatch>(serde_json::json!({
+            "lastFullSync": 42
+        }))
+        .is_err());
+
+        let value = serde_json::to_value(SettingsView::from(&Settings::default())).unwrap();
+        assert!(value.get("spotifySyncCompleted").is_none());
+        assert!(value.get("lastFullSync").is_none());
+        assert!(value.get("lastfmScrobblingProfile").is_none());
+
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "sortColumn": null
+        }))
+        .unwrap();
+        assert_eq!(patch.sort_column, Some(None));
+    }
+
+    #[test]
+    fn settings_patch_matches_the_shared_frontend_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../test/fixtures/ipc-contracts.json")).unwrap();
+        let patch: SettingsPatch =
+            serde_json::from_value(fixture["settingsPatch"].clone()).unwrap();
+
+        assert_eq!(patch.theme, Some(Theme::Dark));
+        assert_eq!(patch.sort_column, Some(None));
+        assert_eq!(patch.spotify_client_id.as_deref(), Some("fixture-client"));
+        assert_eq!(patch.playback_backend, Some(PlaybackBackend::Local));
+        assert_eq!(patch.streaming_bitrate, Some(320));
+        assert_eq!(patch.play_threshold_percent, Some(90));
+        assert_eq!(patch.lastfm_scrobbling, Some(false));
+    }
 
     #[test]
     fn round_trip() {
@@ -922,6 +1973,52 @@ mod tests {
         store.clear().unwrap();
         assert!(store.load().unwrap().is_none());
         store.clear().unwrap();
+
+        let path = dir.path().join("dev-tokens.json");
+        fs::write(&path, b"not json").unwrap();
+        assert!(matches!(
+            store.load(),
+            Err(retune_spotify::Error::TokenStoreCorrupt(_))
+        ));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            store.load(),
+            Err(retune_spotify::Error::TokenStore(_))
+        ));
+
+        fs::remove_dir(&path).unwrap();
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_CREDENTIAL_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            store.load(),
+            Err(retune_spotify::Error::TokenStoreCorrupt(_))
+        ));
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_store_repairs_legacy_permissions_before_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dev-tokens.json");
+        let tokens = Tokens {
+            access: "access".into(),
+            refresh: "refresh".into(),
+            expires_at: 42,
+            scopes: "streaming".into(),
+            playback_credentials: None,
+        };
+        fs::write(&path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(FsTokenStore::new(dir.path()).load().unwrap(), Some(tokens));
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -1029,8 +2126,8 @@ mod tests {
             spotify_client_id: "client-id".into(),
             spotify_sync_completed: true,
             last_full_sync: Some(42),
-            playback_backend: "local".into(),
-            repeat: "all".into(),
+            playback_backend: PlaybackBackend::Local,
+            repeat: RepeatMode::All,
             shuffle: true,
             volume: 40,
             streaming_bitrate: 160,
@@ -1066,7 +2163,7 @@ mod tests {
 
     #[test]
     fn fresh_settings_default_to_local_playback() {
-        assert_eq!(Settings::default().playback_backend, "local");
+        assert_eq!(Settings::default().playback_backend, PlaybackBackend::Local);
     }
 
     #[test]
@@ -1163,29 +2260,15 @@ mod tests {
     #[test]
     fn cooldowns_persist_and_expire_across_reloads() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FsSyncStore::new(dir.path());
-        store
-            .save_cooldowns(&BTreeMap::from([
-                (
-                    "/albums".into(),
-                    Cooldown {
-                        kind: CooldownKind::Quota,
-                        deadline: 200,
-                    },
-                ),
-                (
-                    "/shows".into(),
-                    Cooldown {
-                        kind: CooldownKind::Transient,
-                        deadline: 50,
-                    },
-                ),
-            ]))
-            .unwrap();
+        fs::write(
+            dir.path().join("cooldowns.json"),
+            br#"{"/albums":{"kind":"quota","deadline":200},"/shows":{"kind":"transient","deadline":50}}"#,
+        )
+        .unwrap();
 
-        let reloaded = FsSyncStore::new(dir.path());
+        let reloaded = FsCooldownStore::new(dir.path());
         assert_eq!(
-            reloaded.cooldowns(100).unwrap(),
+            reloaded.cooldowns(50).unwrap(),
             BTreeMap::from([(
                 "/albums".into(),
                 Cooldown {
@@ -1194,18 +2277,136 @@ mod tests {
                 },
             )])
         );
+        assert_eq!(
+            fs::read(dir.path().join("cooldowns.json")).unwrap(),
+            br#"{"/albums":{"kind":"quota","deadline":200}}"#
+        );
         assert_eq!(reloaded.cooldowns(201).unwrap(), BTreeMap::new());
+        assert_eq!(fs::read(dir.path().join("cooldowns.json")).unwrap(), b"{}");
+        assert!(dir.path().join("cooldowns.json").is_file());
+        assert!(!dir.path().join("artist-genres.json").exists());
+    }
+
+    #[test]
+    fn failed_cooldown_save_leaves_live_state_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsCooldownStore::new(dir.path());
+        assert!(store.cooldowns(0).unwrap().is_empty());
+        fs::create_dir(dir.path().join("cooldowns.json")).unwrap();
+
+        assert!(store
+            .update_cooldowns(0, |cooldowns| {
+                cooldowns.insert(
+                    "/albums".into(),
+                    Cooldown {
+                        kind: CooldownKind::Quota,
+                        deadline: 200,
+                    },
+                );
+            })
+            .is_err());
+
+        fs::remove_dir(dir.path().join("cooldowns.json")).unwrap();
+        assert!(store.cooldowns(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_cooldown_updates_and_cleanup_preserve_live_deadlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsCooldownStore::new(dir.path()));
+        store
+            .save_cooldowns(&BTreeMap::from([(
+                "/expired".into(),
+                Cooldown {
+                    kind: CooldownKind::Transient,
+                    deadline: 50,
+                },
+            )]))
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut threads = Vec::new();
+        for family in ["/albums", "/tracks"] {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .update_cooldowns(100, |cooldowns| {
+                        cooldowns.insert(
+                            family.into(),
+                            Cooldown {
+                                kind: CooldownKind::Quota,
+                                deadline: 200,
+                            },
+                        );
+                    })
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        store.cooldowns(100).unwrap();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            FsCooldownStore::new(dir.path()).cooldowns(100).unwrap(),
+            BTreeMap::from([
+                (
+                    "/albums".into(),
+                    Cooldown {
+                        kind: CooldownKind::Quota,
+                        deadline: 200,
+                    },
+                ),
+                (
+                    "/tracks".into(),
+                    Cooldown {
+                        kind: CooldownKind::Quota,
+                        deadline: 200,
+                    },
+                ),
+            ])
+        );
     }
 
     #[test]
     fn artist_genres_persist_across_reloads() {
         let dir = tempfile::tempdir().unwrap();
-        FsSyncStore::new(dir.path())
+        let raw = br#"{"artist-1":["rock"]}"#;
+        fs::write(dir.path().join("artist-genres.json"), raw).unwrap();
+        let store = FsArtistGenresStore::new(dir.path());
+
+        assert_eq!(store.artist_genres().unwrap()["artist-1"], ["rock"]);
+        store
             .save_artist_genres(&BTreeMap::from([("artist-1".into(), vec!["rock".into()])]))
             .unwrap();
-
         assert_eq!(
-            FsSyncStore::new(dir.path()).artist_genres().unwrap()["artist-1"],
+            fs::read(dir.path().join("artist-genres.json")).unwrap(),
+            raw
+        );
+        assert!(dir.path().join("artist-genres.json").is_file());
+        assert!(!dir.path().join("cooldowns.json").exists());
+    }
+
+    #[test]
+    fn failed_artist_genre_flush_remains_dirty_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsArtistGenresStore::new(dir.path());
+        store
+            .cache_artist_genres("artist-1".into(), vec!["rock".into()])
+            .unwrap();
+        let path = dir.path().join("artist-genres.json");
+        fs::create_dir(&path).unwrap();
+
+        assert!(store.flush_artist_genres().is_err());
+        fs::remove_dir(&path).unwrap();
+        store.flush_artist_genres().unwrap();
+
+        assert_eq!(store.save_count(), 2);
+        assert_eq!(
+            FsArtistGenresStore::new(dir.path())
+                .artist_genres()
+                .unwrap()["artist-1"],
             ["rock"]
         );
     }
@@ -1215,7 +2416,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FsSpotifyCatalogStore::new(dir.path());
         let mut catalog = SpotifyCatalog::default();
-        catalog.set_track_local_hint("spotify:track:one", "Artist — Album — One");
+        catalog.observe_artist(&retune_spotify::client::Artist {
+            id: "artist-1".into(),
+            name: "Artist".into(),
+            genres: vec!["rock".into()],
+            followers: None,
+            images: vec![],
+        });
 
         store.save(&catalog).unwrap();
 
@@ -1234,13 +2441,12 @@ mod tests {
 
         assert_eq!(catalog, SpotifyCatalog::default());
         assert!(!dir.path().join("spotify-catalog.json").exists());
-        assert!(fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .any(|entry| entry
+        assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|entry| {
+            entry
                 .file_name()
                 .to_string_lossy()
-                .contains("spotify-catalog.json.corrupt-")));
+                .contains("spotify-catalog.json.corrupt-")
+        }));
     }
 
     #[test]
@@ -1262,13 +2468,41 @@ mod tests {
             FsSpotifyCatalogStore::new(dir.path()).load().unwrap(),
             SpotifyCatalog::default()
         );
-        assert!(fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .any(|entry| entry
+        assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|entry| {
+            entry
                 .file_name()
                 .to_string_lossy()
-                .contains("spotify-catalog.json.corrupt-")));
+                .contains("spotify-catalog.json.corrupt-")
+        }));
+    }
+
+    #[test]
+    fn semantically_invalid_spotify_catalog_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("spotify-catalog.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "artists": {"wrong-key": {
+                    "id": "artist-1", "name": "Artist", "complete": false
+                }},
+                "albums": {},
+                "tracks": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            FsSpotifyCatalogStore::new(dir.path()).load().unwrap(),
+            SpotifyCatalog::default()
+        );
+        assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("spotify-catalog.json.corrupt-")
+        }));
     }
 
     #[test]
@@ -1291,12 +2525,12 @@ mod tests {
                 },
             )]),
         };
-        let store = FsSyncStore::new(dir.path());
+        let store = FsSpotifyLibraryStore::new(dir.path());
 
-        store.save_spotify_library(&state).unwrap();
+        store.save(&state).unwrap();
 
         assert_eq!(
-            FsSyncStore::new(dir.path()).spotify_library().unwrap(),
+            FsSpotifyLibraryStore::new(dir.path()).load().unwrap(),
             state
         );
         assert!(dir.path().join("spotify-library.json").is_file());
@@ -1421,8 +2655,8 @@ mod tests {
                 "releaseDate"
             ]
         );
-        assert_eq!(settings.playback_backend, "local");
-        assert_eq!(settings.repeat, "off");
+        assert_eq!(settings.playback_backend, PlaybackBackend::Local);
+        assert_eq!(settings.repeat, RepeatMode::Off);
         assert_eq!(settings.volume, 62);
         assert_eq!(settings.streaming_bitrate, 320);
         assert!(!settings.normalize_volume);
@@ -1660,8 +2894,8 @@ mod tests {
             "autoAddSpotifyLibrary": true
         }))
         .unwrap();
-        assert_eq!(settings.playback_backend, "local");
-        assert_eq!(settings.repeat, "off");
+        assert_eq!(settings.playback_backend, PlaybackBackend::Local);
+        assert_eq!(settings.repeat, RepeatMode::Off);
         assert_eq!(settings.streaming_bitrate, 320);
         assert!(!settings.normalize_volume);
         assert!(settings.gapless);
@@ -1669,10 +2903,36 @@ mod tests {
 
     #[test]
     fn invalid_repeat_is_rejected() {
-        let mut settings = Settings::default();
-        assert_eq!(settings.repeat, "off");
-        settings.repeat = "sometimes".into();
-        assert!(settings.validate().is_err());
+        let mut settings = serde_json::to_value(Settings::default()).unwrap();
+        settings["repeat"] = "sometimes".into();
+        assert!(serde_json::from_value::<Settings>(settings).is_err());
+        assert!(serde_json::from_str::<RepeatMode>("\"sometimes\"").is_err());
+    }
+
+    #[test]
+    fn playback_settings_and_view_keep_exact_lowercase_bytes() {
+        let settings = Settings {
+            playback_backend: PlaybackBackend::Connect,
+            repeat: RepeatMode::One,
+            ..Settings::default()
+        };
+        let bytes = serde_json::to_vec(&settings).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["playbackBackend"], "connect");
+        assert_eq!(value["repeat"], "one");
+        assert_eq!(
+            serde_json::from_slice::<Settings>(&bytes).unwrap(),
+            settings
+        );
+
+        let view = serde_json::to_value(SettingsView::from(&settings)).unwrap();
+        assert_eq!(view["playbackBackend"], "connect");
+        assert_eq!(view["repeat"], "one");
+        assert!(serde_json::from_str::<PlaybackBackend>("\"Connect\"").is_err());
+        assert!(serde_json::from_value::<SettingsPatch>(serde_json::json!({
+            "playbackBackend": "unknown"
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1835,5 +3095,65 @@ mod tests {
             .to_string_lossy()
             .starts_with("library.json.corrupt-"));
         assert_eq!(fs::read(corrupt).unwrap(), b"not json");
+    }
+
+    #[test]
+    fn oversized_user_state_is_rejected_without_removing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_SETTINGS_BYTES + 1)
+            .unwrap();
+
+        assert!(matches!(
+            FsSettingsStore::new(dir.path()).load(),
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+        ));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn oversized_reconstructible_catalog_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spotify-catalog.json");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_SPOTIFY_STATE_BYTES + 1)
+            .unwrap();
+
+        assert_eq!(
+            FsSpotifyCatalogStore::new(dir.path()).load().unwrap(),
+            SpotifyCatalog::default()
+        );
+        assert!(!path.exists());
+        assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("spotify-catalog.json.corrupt-")
+        }));
+    }
+
+    #[test]
+    fn oversized_reconstructible_json_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playlists.json");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_PLAYLIST_BYTES + 1)
+            .unwrap();
+
+        assert_eq!(
+            FsPlaylistStore::new(dir.path()).load().unwrap(),
+            PlaylistCache::default()
+        );
+        assert!(!path.exists());
+        assert!(fs::read_dir(dir.path()).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("playlists.json.oversized-")
+        }));
     }
 }

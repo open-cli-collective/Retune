@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-playlist-add-album"
+description = "Enables the playlist_add_album command without any pre-configured scope."
+commands.allow = ["playlist_add_album"]
+
+[[permission]]
+identifier = "deny-playlist-add-album"
+description = "Denies the playlist_add_album command without any pre-configured scope."
+commands.deny = ["playlist_add_album"]

@@ -10,9 +10,54 @@ use serde::{Deserialize, Serialize};
 
 const PLAYLIST_PAGE_SIZE: u32 = 50;
 const TRACK_PAGE_SIZE: u32 = 50;
+pub(crate) const MAX_PLAYLIST_NAME_BYTES: usize = 1024;
+pub(crate) const MAX_PLAYLIST_ID_BYTES: usize = 1024;
+pub(crate) const MAX_PLAYLIST_URI_BYTES: usize = 4096;
+pub(crate) const MAX_PLAYLIST_VECTOR_ITEMS: usize = 10_000;
 pub(crate) const TRACK_METADATA_VERSION: u8 = 1;
 pub const RECONNECT_HINT: &str = "Reconnect to Spotify to enable playlists (File → Account).";
 pub const STALE_PLAYLIST: &str = "Playlist changed elsewhere — reloaded.";
+
+pub(crate) fn validate_playlist_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > MAX_PLAYLIST_ID_BYTES {
+        return Err("Playlist ID is invalid or too long.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_playlist_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() || name.len() > MAX_PLAYLIST_NAME_BYTES {
+        return Err("Playlist name is required and must not be too long.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_playlist_ids(ids: &[String]) -> Result<(), String> {
+    if ids.len() > MAX_PLAYLIST_VECTOR_ITEMS {
+        return Err("Too many playlist IDs were supplied.".into());
+    }
+    ids.iter().try_for_each(|id| validate_playlist_id(id))
+}
+
+pub(crate) fn validate_playlist_uris(uris: &[String]) -> Result<(), String> {
+    if uris.len() > MAX_PLAYLIST_VECTOR_ITEMS {
+        return Err("Too many track URIs were supplied.".into());
+    }
+    if uris
+        .iter()
+        .any(|uri| uri.is_empty() || uri.len() > MAX_PLAYLIST_URI_BYTES)
+    {
+        return Err("A track URI is invalid or too long.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_playlist_indices(indices: &[u32]) -> Result<(), String> {
+    if indices.len() > MAX_PLAYLIST_VECTOR_ITEMS {
+        return Err("Too many playlist positions were supplied.".into());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct PlaylistCache {
@@ -59,10 +104,12 @@ pub async fn sync<T: Transport, S: TokenStore>(
     let mut refreshed = HashMap::new();
     let mut spotify_order = vec![];
     let mut offset = 0;
+    let mut incomplete = false;
     loop {
         let page = client
             .playlists(offset, PLAYLIST_PAGE_SIZE, &user_id)
             .await?;
+        incomplete |= page.skipped > 0;
         let count = (page.items.len() + page.skipped) as u32;
         for summary in page.items {
             let cached = current
@@ -115,7 +162,11 @@ pub async fn sync<T: Transport, S: TokenStore>(
     let mut playlists = current
         .playlists
         .iter()
-        .filter_map(|playlist| refreshed.remove(&playlist.id))
+        .filter_map(|playlist| {
+            refreshed
+                .remove(&playlist.id)
+                .or_else(|| incomplete.then(|| playlist.clone()))
+        })
         .collect::<Vec<_>>();
     playlists.extend(
         spotify_order
@@ -126,6 +177,7 @@ pub async fn sync<T: Transport, S: TokenStore>(
 }
 
 pub fn reorder_playlists(cache: &mut PlaylistCache, ids: &[String]) -> Result<(), String> {
+    validate_playlist_ids(ids)?;
     if ids.len() != cache.playlists.len()
         || ids.iter().collect::<HashSet<_>>().len() != ids.len()
         || ids
@@ -150,6 +202,7 @@ pub async fn unfollow<T: Transport, S: TokenStore>(
     cache: &mut PlaylistCache,
     id: &str,
 ) -> retune_spotify::Result<()> {
+    validate_playlist_id(id).map_err(Error::InvalidRequest)?;
     if !cache.playlists.iter().any(|playlist| playlist.id == id) {
         return Err(Error::InvalidRequest(format!("unknown playlist {id}")));
     }
@@ -163,6 +216,7 @@ pub async fn create<T: Transport, S: TokenStore>(
     cache: &mut PlaylistCache,
     name: &str,
 ) -> retune_spotify::Result<()> {
+    validate_playlist_name(name).map_err(Error::InvalidRequest)?;
     let created = client.create_playlist(name).await?;
     cache.playlists.push(CachedPlaylist {
         id: created.id,
@@ -185,6 +239,10 @@ pub async fn add<T: Transport, S: TokenStore>(
     id: &str,
     uris: Vec<String>,
 ) -> Result<(), PlaylistAddError> {
+    validate_playlist_id(id)
+        .map_err(|message| PlaylistAddError::Spotify(Error::InvalidRequest(message)))?;
+    validate_playlist_uris(&uris)
+        .map_err(|message| PlaylistAddError::Spotify(Error::InvalidRequest(message)))?;
     reject_local_uris(&uris, |uri| {
         library
             .tracks()
@@ -270,6 +328,7 @@ pub async fn reorder<T: Transport, S: TokenStore>(
     insert_before: u32,
     range_length: u32,
 ) -> Result<(), PlaylistMutationError> {
+    validate_playlist_id(id).map_err(PlaylistMutationError::Other)?;
     let playlist = cache
         .playlists
         .iter()
@@ -333,6 +392,12 @@ async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
 ) -> Result<String, PlaylistMutationError> {
     match result {
         Ok(snapshot) => Ok(snapshot),
+        Err(Error::AmbiguousMutation { .. }) => {
+            refresh_one(client, cache, id)
+                .await
+                .map_err(PlaylistMutationError::Spotify)?;
+            Err(PlaylistMutationError::Reloaded)
+        }
         Err(Error::Http {
             status: 400 | 409, ..
         }) => {
@@ -351,6 +416,8 @@ pub async fn remove<T: Transport, S: TokenStore>(
     id: &str,
     indices: &[u32],
 ) -> Result<(), PlaylistMutationError> {
+    validate_playlist_id(id).map_err(PlaylistMutationError::Other)?;
+    validate_playlist_indices(indices).map_err(PlaylistMutationError::Other)?;
     let playlist = cache
         .playlists
         .iter()
@@ -419,13 +486,19 @@ pub async fn remove<T: Transport, S: TokenStore>(
     Ok(())
 }
 
-pub fn map_error(error: Error, tokens: Option<&Tokens>) -> String {
+#[derive(Debug)]
+pub(crate) enum PlaylistFailure {
+    ReconnectRequired,
+    Spotify(Error),
+}
+
+pub(crate) fn classify_error(error: Error, tokens: Option<&Tokens>) -> PlaylistFailure {
     if matches!(error, Error::Http { status: 403, .. })
         && tokens.is_some_and(|tokens| !tokens.missing_scopes().is_empty())
     {
-        RECONNECT_HINT.into()
+        PlaylistFailure::ReconnectRequired
     } else {
-        error.to_string()
+        PlaylistFailure::Spotify(error)
     }
 }
 
@@ -691,6 +764,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forbidden_with_missing_scopes_is_typed_reconnect_regardless_of_body() {
+        let tokens = Tokens {
+            access: String::new(),
+            refresh: String::new(),
+            expires_at: 0,
+            scopes: "user-library-read".into(),
+            playback_credentials: None,
+        };
+        for body in ["Insufficient client scope", "different response wording"] {
+            assert!(matches!(
+                classify_error(
+                    Error::Http {
+                        endpoint: "/playlists/id/tracks".into(),
+                        status: 403,
+                        body: body.into(),
+                    },
+                    Some(&tokens),
+                ),
+                PlaylistFailure::ReconnectRequired
+            ));
+        }
+    }
+
+    #[test]
+    fn spotify_failure_containing_reconnect_copy_remains_spotify_failure() {
+        let error = Error::Http {
+            endpoint: "/playlists/id/tracks".into(),
+            status: 500,
+            body: RECONNECT_HINT.into(),
+        };
+
+        assert!(matches!(
+            classify_error(error, None),
+            PlaylistFailure::Spotify(Error::Http { status: 500, body, .. })
+                if body == RECONNECT_HINT
+        ));
+    }
+
     #[tokio::test]
     async fn add_rejects_mixed_local_uris_before_transport_or_playlist_validation() {
         let client = fake_client([], &retune_spotify::auth::SCOPES);
@@ -711,6 +823,121 @@ mod tests {
             matches!(error, PlaylistAddError::Local(message) if message.contains("Local song"))
         );
         assert!(client.transport().requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn playlist_ipc_limits_accept_large_ordered_add_and_reject_one_over_without_effects() {
+        let responses = (0..MAX_PLAYLIST_VECTOR_ITEMS / 100)
+            .map(|index| {
+                Response::json(201, serde_json::json!({"snapshot_id": format!("s{index}")}))
+            })
+            .chain([Response::json(
+                200,
+                serde_json::json!({"items": [], "next": null, "total": 0}),
+            )]);
+        let client = fake_client(responses, &retune_spotify::auth::SCOPES);
+        let mut cache = cached();
+        cache.playlists[0].track_count = 0;
+        cache.playlists[0].tracks.clear();
+        let uris = (0..MAX_PLAYLIST_VECTOR_ITEMS)
+            .map(|index| format!("spotify:track:{index}"))
+            .collect::<Vec<_>>();
+
+        add(
+            &client,
+            &mut cache,
+            &Library::new(),
+            "playlist",
+            uris.clone(),
+        )
+        .await
+        .unwrap();
+
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), MAX_PLAYLIST_VECTOR_ITEMS / 100 + 1);
+        let sent = requests[..MAX_PLAYLIST_VECTOR_ITEMS / 100]
+            .iter()
+            .flat_map(|request| {
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["uris"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|uri| uri.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sent, uris);
+
+        let rejected_client = fake_client([], &retune_spotify::auth::SCOPES);
+        let mut rejected_cache = cached();
+        let before = rejected_cache.clone();
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsPlaylistStore::new(directory.path());
+        store.save(&rejected_cache).unwrap();
+        let error = add(
+            &rejected_client,
+            &mut rejected_cache,
+            &Library::new(),
+            "playlist",
+            vec!["spotify:track:x".into(); MAX_PLAYLIST_VECTOR_ITEMS + 1],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PlaylistAddError::Spotify(Error::InvalidRequest(_))
+        ));
+        assert!(rejected_client.transport().requests().is_empty());
+        assert_eq!(rejected_cache, before);
+        assert_eq!(store.load().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn oversized_playlist_name_is_rejected_before_provider_or_cache_changes() {
+        let client = fake_client([], &retune_spotify::auth::SCOPES);
+        let mut cache = cached();
+        let before = cache.clone();
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsPlaylistStore::new(directory.path());
+        store.save(&cache).unwrap();
+
+        assert!(create(
+            &client,
+            &mut cache,
+            &"n".repeat(MAX_PLAYLIST_NAME_BYTES + 1)
+        )
+        .await
+        .is_err());
+
+        assert!(client.transport().requests().is_empty());
+        assert_eq!(cache, before);
+        assert_eq!(store.load().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn oversized_reorder_and_remove_vectors_are_rejected_without_effects() {
+        let mut reordered = ordered();
+        let before_reorder = reordered.clone();
+        assert!(reorder_playlists(
+            &mut reordered,
+            &vec!["playlist".into(); MAX_PLAYLIST_VECTOR_ITEMS + 1]
+        )
+        .is_err());
+        assert_eq!(reordered, before_reorder);
+
+        let client = fake_client([], &retune_spotify::auth::SCOPES);
+        let mut removed = cached();
+        let before_remove = removed.clone();
+        assert!(remove(
+            &client,
+            &mut removed,
+            "playlist",
+            &vec![0; MAX_PLAYLIST_VECTOR_ITEMS + 1]
+        )
+        .await
+        .is_err());
+        assert!(client.transport().requests().is_empty());
+        assert_eq!(removed, before_remove);
     }
 
     #[tokio::test]
@@ -951,9 +1178,9 @@ mod tests {
                 Response::json(200, serde_json::json!({"id": "user"})),
                 summaries(serde_json::json!([
                     summary("playlist"),
-                    summary("new-a"),
+                    summary("newa"),
                     summary("second"),
-                    summary("new-b")
+                    summary("newb")
                 ])),
                 Response::json(
                     200,
@@ -975,8 +1202,41 @@ mod tests {
                 .iter()
                 .map(|playlist| playlist.id.as_str())
                 .collect::<Vec<_>>(),
-            ["second", "playlist", "new-a", "new-b"]
+            ["second", "playlist", "newa", "newb"]
         );
+    }
+
+    #[tokio::test]
+    async fn skipped_playlist_summary_retains_unmatched_cached_playlists() {
+        let client = fake_client(
+            [
+                Response::json(200, serde_json::json!({"id": "user"})),
+                Response::json(
+                    200,
+                    serde_json::json!({
+                        "items": [{
+                            "id": "playlist", "name": "Current name", "snapshot_id": "same",
+                            "owner": {"id": "user"}, "tracks": {"total": 2}
+                        }, null],
+                        "next": null,
+                        "total": 2
+                    }),
+                ),
+            ],
+            &retune_spotify::auth::SCOPES,
+        );
+
+        let synced = sync(&client, &ordered()).await.unwrap();
+
+        assert_eq!(
+            synced
+                .playlists
+                .iter()
+                .map(|playlist| playlist.id.as_str())
+                .collect::<Vec<_>>(),
+            ["playlist", "second", "third"]
+        );
+        assert_eq!(synced.playlists[0].name, "Current name");
     }
 
     #[tokio::test]
@@ -1071,6 +1331,22 @@ mod tests {
         assert_eq!(cache.playlists[0].snapshot_id, "fresh");
         assert_eq!(cache.playlists[0].owner.as_deref(), Some("user"));
         assert_eq!(cache.playlists[0].tracks, ["spotify:track:fresh"]);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_reorder_refreshes_before_another_mutation_is_offered() {
+        let mut responses = stale_refresh_responses();
+        responses[0] = Response::json(500, serde_json::json!({}));
+        let client = fake_client(responses, &retune_spotify::auth::SCOPES);
+        let mut cache = cached();
+
+        let error = reorder(&client, &mut cache, "playlist", 0, 2, 1)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, PlaylistMutationError::Reloaded));
+        assert_eq!(cache.playlists[0].snapshot_id, "fresh");
+        assert_eq!(client.transport().requests().len(), 4);
     }
 
     #[tokio::test]
@@ -1200,23 +1476,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(cache.playlists[0].tracks, ["1", "4", "2", "3"]);
-    }
-
-    #[test]
-    fn forbidden_with_legacy_scopes_maps_to_reconnect_hint() {
-        let legacy = Tokens {
-            access: String::new(),
-            refresh: String::new(),
-            expires_at: 0,
-            scopes: "user-library-read".into(),
-            playback_credentials: None,
-        };
-        let error = Error::Http {
-            endpoint: "/playlists/id/tracks".into(),
-            status: 403,
-            body: "Insufficient client scope".into(),
-        };
-
-        assert_eq!(map_error(error, Some(&legacy)), RECONNECT_HINT);
     }
 }

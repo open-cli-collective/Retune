@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-spotify-follow-artist"
+description = "Enables the spotify_follow_artist command without any pre-configured scope."
+commands.allow = ["spotify_follow_artist"]
+
+[[permission]]
+identifier = "deny-spotify-follow-artist"
+description = "Denies the spotify_follow_artist command without any pre-configured scope."
+commands.deny = ["spotify_follow_artist"]

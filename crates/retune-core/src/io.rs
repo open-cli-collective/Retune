@@ -57,9 +57,7 @@ pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
         .get("library")
         .cloned()
         .ok_or(ImportError::MissingEnvelope)?;
-    let mut library: Library = serde_json::from_value(library)?;
-    library.validate_imported().map_err(ImportError::Invalid)?;
-    Ok(library)
+    Ok(serde_json::from_value(library)?)
 }
 
 #[cfg(test)]
@@ -78,18 +76,15 @@ mod tests {
             alb: "Album".into(),
             name: "Track".into(),
             duration: Duration::from_secs(42),
+            added_at: Some(1_600_000_000),
             kind: Some("Spotify".into()),
+            bitrate_kbps: Some(320),
             ..NewTrack::default()
         });
         library
             .click_track_star(id, Rating::new(5).unwrap())
             .unwrap();
-        let track = &mut library.tracks_mut()[0];
-        track.play_count = 3;
-        track.last_played_at = Some(1_700_000_000);
-        track.added_at = Some(1_600_000_000);
-        track.kind = Some("Spotify".into());
-        track.bitrate_kbps = Some(320);
+        library.merge_history_absolute("spotify:track:one", Some(3), None, Some(1_700_000_000));
         library.set_album_rating(
             AlbumKey::of(library.get(id).unwrap()),
             Some(Rating::new(4).unwrap()),
@@ -131,13 +126,13 @@ mod tests {
         let same_id = envelope(&format!("{},{}", dup(1, "a"), dup(1, "b")));
         assert!(matches!(
             import(same_id.as_bytes()),
-            Err(ImportError::Invalid(_))
+            Err(ImportError::Json(_))
         ));
 
         let same_uri = envelope(&format!("{},{}", dup(1, "a"), dup(2, "a")));
         assert!(matches!(
             import(same_uri.as_bytes()),
-            Err(ImportError::Invalid(_))
+            Err(ImportError::Json(_))
         ));
     }
 

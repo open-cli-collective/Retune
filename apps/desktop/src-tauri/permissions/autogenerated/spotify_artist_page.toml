@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-spotify-artist-page"
+description = "Enables the spotify_artist_page command without any pre-configured scope."
+commands.allow = ["spotify_artist_page"]
+
+[[permission]]
+identifier = "deny-spotify-artist-page"
+description = "Denies the spotify_artist_page command without any pre-configured scope."
+commands.deny = ["spotify_artist_page"]

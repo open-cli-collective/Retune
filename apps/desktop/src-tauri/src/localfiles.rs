@@ -1,15 +1,11 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use retune_audio::{audio_kind, import_file, scan_path, ImportedFile};
+use retune_audio::{audio_kind, import_file, scan_paths, ImportedFile, MAX_SCAN_FAILURE_DETAILS};
 use retune_core::model::{Library, NewTrack, SourceId};
 use retune_spotify::normalize::UNCATEGORIZED;
 use serde::Serialize;
 use url::Url;
 
-use crate::store::OverlayStore;
 use crate::unix_now;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -24,60 +20,65 @@ pub(crate) struct ImportSummary {
     pub imported: usize,
     pub duplicates: usize,
     pub failed: Vec<FailedImport>,
+    #[serde(rename = "failureCount")]
+    pub failure_count: usize,
 }
 
-pub(crate) fn import_paths(
-    library: &mut Library,
-    paths: impl IntoIterator<Item = impl AsRef<Path>>,
-) -> ImportSummary {
-    let mut uris = library
-        .tracks()
-        .iter()
-        .map(|track| track.uri.clone())
-        .collect::<HashSet<_>>();
-    let mut summary = ImportSummary::default();
-    for supplied in paths {
-        let supplied = supplied.as_ref();
-        if let Err(error) = std::fs::symlink_metadata(supplied) {
-            summary.failed.push(FailedImport {
-                path: supplied.display().to_string(),
-                reason: error.to_string(),
-            });
-            continue;
-        }
-        for path in scan_path(supplied) {
-            if !uris.insert(file_uri(&path)) {
-                summary.duplicates += 1;
-                continue;
-            }
-            match import_file(&path)
-                .map(map_file)
-                .map_err(|error| error.to_string())
-            {
-                Ok(track) => {
-                    library.add(track);
-                    summary.imported += 1;
-                }
-                Err(error) => summary.failed.push(FailedImport {
-                    path: path.display().to_string(),
-                    reason: error,
-                }),
-            }
+pub(crate) struct PreparedImport {
+    tracks: Vec<NewTrack>,
+    duplicates: usize,
+    failed: Vec<FailedImport>,
+    failure_count: usize,
+}
+
+pub(crate) fn prepare_paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> PreparedImport {
+    let scan = scan_paths(paths);
+    let mut prepared = PreparedImport {
+        tracks: Vec::with_capacity(scan.files.len()),
+        duplicates: scan.duplicates,
+        failed: scan
+            .failures
+            .into_iter()
+            .map(|failure| FailedImport {
+                path: failure.path.display().to_string(),
+                reason: failure.error.to_string(),
+            })
+            .collect(),
+        failure_count: scan.failure_count,
+    };
+    for path in scan.files {
+        match import_file(&path)
+            .map(map_file)
+            .map_err(|error| error.to_string())
+        {
+            Ok(track) => prepared.tracks.push(track),
+            Err(reason) => record_failure(&mut prepared, &path, reason),
         }
     }
+    prepared
+}
+
+pub(crate) fn commit_prepared(library: &mut Library, prepared: PreparedImport) -> ImportSummary {
+    let supplied = prepared.tracks.len();
+    let mut summary = ImportSummary {
+        duplicates: prepared.duplicates,
+        failed: prepared.failed,
+        failure_count: prepared.failure_count,
+        ..ImportSummary::default()
+    };
+    summary.imported = library.add_all(prepared.tracks);
+    summary.duplicates += supplied - summary.imported;
     summary
 }
 
-pub(crate) fn import_transaction(
-    store: &impl OverlayStore,
-    library: &mut Library,
-    paths: &[PathBuf],
-) -> Result<ImportSummary, String> {
-    let mut next = library.clone();
-    let summary = import_paths(&mut next, paths);
-    store.save(&next).map_err(|error| error.to_string())?;
-    *library = next;
-    Ok(summary)
+fn record_failure(prepared: &mut PreparedImport, path: &Path, reason: String) {
+    prepared.failure_count += 1;
+    if prepared.failed.len() < MAX_SCAN_FAILURE_DETAILS {
+        prepared.failed.push(FailedImport {
+            path: path.display().to_string(),
+            reason,
+        });
+    }
 }
 
 fn map_file(file: ImportedFile) -> NewTrack {
@@ -119,49 +120,43 @@ fn average_bitrate(bytes: u64, duration: std::time::Duration) -> Option<u32> {
 }
 
 pub(crate) fn backfill_metadata(library: &mut Library) -> bool {
-    let mut changed = false;
     let now = unix_now();
-    for track in library.tracks_mut() {
-        if track.added_at.is_none() {
-            track.added_at = Some(now);
-            changed = true;
-        }
-        if track.uri.starts_with("spotify:") {
-            if track.kind.is_none() {
-                track.kind = Some("Spotify".into());
-                changed = true;
-            }
-            continue;
-        }
-        if !track.uri.starts_with("file:") {
-            continue;
-        }
-        let Ok(path) = path_from_file_uri(&track.uri) else {
-            continue;
-        };
-        if track.kind.is_none() {
-            track.kind = audio_kind(None, &path).map(str::to_owned);
-            changed |= track.kind.is_some();
-        }
-        if track.bitrate_kbps.is_none() {
-            track.bitrate_kbps = std::fs::metadata(path)
-                .ok()
-                .and_then(|metadata| average_bitrate(metadata.len(), track.duration));
-            changed |= track.bitrate_kbps.is_some();
-        }
-    }
-    changed
-}
-
-pub(crate) fn backfill_transaction(
-    store: &impl OverlayStore,
-    library: &mut Library,
-) -> Result<bool, String> {
-    if !backfill_metadata(library) {
-        return Ok(false);
-    }
-    store.save(library).map_err(|error| error.to_string())?;
-    Ok(true)
+    let updates = library
+        .tracks()
+        .iter()
+        .map(|track| {
+            let (kind, bitrate_kbps) = if track.uri.starts_with("spotify:") {
+                (track.kind.is_none().then(|| "Spotify".into()), None)
+            } else if track.uri.starts_with("file:") {
+                path_from_file_uri(&track.uri).map_or((None, None), |path| {
+                    let kind = if track.kind.is_none() {
+                        audio_kind(None, &path).map(str::to_owned)
+                    } else {
+                        None
+                    };
+                    let bitrate_kbps = if track.bitrate_kbps.is_none() {
+                        std::fs::metadata(path)
+                            .ok()
+                            .and_then(|metadata| average_bitrate(metadata.len(), track.duration))
+                    } else {
+                        None
+                    };
+                    (kind, bitrate_kbps)
+                })
+            } else {
+                (None, None)
+            };
+            (track.id, kind, bitrate_kbps)
+        })
+        .collect::<Vec<_>>();
+    updates
+        .into_iter()
+        .fold(false, |changed, (id, kind, bitrate_kbps)| {
+            let filled = library
+                .fill_missing_metadata(id, Some(now), kind, bitrate_kbps)
+                .expect("metadata target came from this library");
+            filled || changed
+        })
 }
 
 pub(crate) fn file_uri(canonical_path: &Path) -> String {
@@ -185,11 +180,10 @@ fn nonempty(value: Option<String>, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::{fs, path::PathBuf};
 
     use super::*;
-    use crate::store::{FsOverlayStore, OverlayStore, StoreResult};
+    use crate::store::{FsOverlayStore, OverlayStore};
     use retune_audio::import_file;
     use retune_core::model::{Library, SourceId, TrackEdit};
     use tempfile::tempdir;
@@ -198,6 +192,13 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../crates/retune-audio/tests/fixtures")
             .join(name)
+    }
+
+    fn import_paths(
+        library: &mut Library,
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> ImportSummary {
+        commit_prepared(library, prepare_paths(paths))
     }
 
     #[test]
@@ -285,6 +286,27 @@ mod tests {
         assert!(summary.failed[0].path.ends_with("missing.mp3"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn directory_import_keeps_valid_file_and_reports_broken_child() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("visible");
+        fs::create_dir(&root).unwrap();
+        let good = root.join("good.mp3");
+        let broken = root.join("broken.mp3");
+        fs::copy(fixture("cc0-audio.mp3"), &good).unwrap();
+        symlink(root.join("missing.mp3"), &broken).unwrap();
+        let mut library = Library::new();
+
+        let summary = import_paths(&mut library, [&root]);
+
+        assert_eq!((summary.imported, summary.failed.len()), (1, 1));
+        assert_eq!(summary.failed[0].path, broken.display().to_string());
+        assert_eq!(library.tracks().len(), 1);
+    }
+
     #[test]
     fn reimporting_same_directory_counts_every_valid_file_as_duplicate() {
         let dir = tempdir().unwrap();
@@ -301,57 +323,18 @@ mod tests {
         assert_eq!((second.imported, second.duplicates), (0, 2));
     }
 
-    struct RecordingStore {
-        saves: Cell<usize>,
-        fail: bool,
-    }
-
-    impl OverlayStore for RecordingStore {
-        fn load(&self) -> StoreResult<Option<Library>> {
-            unreachable!()
-        }
-
-        fn save(&self, _library: &Library) -> StoreResult<()> {
-            self.saves.set(self.saves.get() + 1);
-            if self.fail {
-                Err(std::io::Error::other("save failed").into())
-            } else {
-                Ok(())
-            }
-        }
-    }
-
     #[test]
-    fn transaction_saves_once_and_does_not_swap_on_save_failure() {
-        let successful = RecordingStore {
-            saves: Cell::new(0),
-            fail: false,
-        };
+    fn detached_preparation_commits_against_latest_library() {
         let mut library = Library::new();
-        let summary = import_transaction(
-            &successful,
-            &mut library,
-            &[fixture("cc0-audio.mp3"), fixture("not-audio.mp3")],
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                summary.imported,
-                summary.duplicates,
-                summary.failed.len(),
-                successful.saves.get()
-            ),
-            (1, 0, 1, 1)
-        );
+        let prepared = prepare_paths([fixture("cc0-audio.mp3")]);
+        let mut concurrent = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
+        concurrent.name = "Concurrent edit wins".into();
+        library.add(concurrent);
 
-        let failing = RecordingStore {
-            saves: Cell::new(0),
-            fail: true,
-        };
-        let before = library.clone();
-        assert!(import_transaction(&failing, &mut library, &[fixture("cc0-audio.flac")]).is_err());
-        assert_eq!(failing.saves.get(), 1);
-        assert_eq!(library, before);
+        let summary = commit_prepared(&mut library, prepared);
+
+        assert_eq!((summary.imported, summary.duplicates), (0, 1));
+        assert_eq!(library.tracks()[0].name, "Concurrent edit wins");
     }
 
     #[test]
@@ -360,6 +343,7 @@ mod tests {
         let mut local = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
         local.kind = None;
         local.bitrate_kbps = None;
+        local.added_at = None;
         let local_id = library.add(local.clone());
         local.uri = file_uri(&std::env::temp_dir().join("definitely/missing/song.flac"));
         let missing_id = library.add(local);
@@ -367,10 +351,8 @@ mod tests {
         spotify.uri = "spotify:track:one".into();
         spotify.kind = None;
         spotify.bitrate_kbps = None;
+        spotify.added_at = None;
         let spotify_id = library.add(spotify);
-        for track in library.tracks_mut() {
-            track.added_at = None;
-        }
 
         assert!(backfill_metadata(&mut library));
         let local = library.get(local_id).unwrap();
@@ -387,24 +369,6 @@ mod tests {
         assert!(added.is_some());
         assert!(library.tracks().iter().all(|track| track.added_at == added));
         assert!(!backfill_metadata(&mut library));
-    }
-
-    #[test]
-    fn backfill_transaction_saves_once_only_when_changed() {
-        let store = RecordingStore {
-            saves: Cell::new(0),
-            fail: false,
-        };
-        let mut library = Library::new();
-        let mut track = map_file(import_file(fixture("cc0-audio.mp3")).unwrap());
-        track.added_at = None;
-        library.add(track);
-
-        assert_eq!(backfill_transaction(&store, &mut library), Ok(true));
-        assert_eq!(store.saves.get(), 1);
-        assert!(library.tracks()[0].added_at.is_some());
-        assert_eq!(backfill_transaction(&store, &mut library), Ok(false));
-        assert_eq!(store.saves.get(), 1);
     }
 
     #[test]

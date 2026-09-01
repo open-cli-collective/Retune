@@ -13,22 +13,22 @@ use crate::client::{Album, AlbumSummary, Artist, Followers, Image, Page, Simplif
 pub const CATALOG_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SpotifyCatalogV1 {
+struct SpotifyCatalogV1 {
     #[serde(default)]
-    pub artists: BTreeMap<String, CatalogArtist>,
+    artists: BTreeMap<String, CatalogArtist>,
     #[serde(default)]
-    pub albums: BTreeMap<String, CatalogAlbum>,
+    albums: BTreeMap<String, CatalogAlbum>,
     #[serde(default)]
-    pub tracks: BTreeMap<String, CatalogTrack>,
+    tracks: BTreeMap<String, CatalogTrack>,
 }
 
 /// Versioned on-disk wrapper. Maps are BTreeMaps so serialization is stable
 /// and diffs stay useful when the cache is inspected during development.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SpotifyCatalog {
-    pub version: u8,
+    version: u8,
     #[serde(flatten)]
-    pub v1: SpotifyCatalogV1,
+    v1: SpotifyCatalogV1,
     #[serde(skip)]
     generation: u64,
 }
@@ -52,8 +52,63 @@ impl Default for SpotifyCatalog {
 }
 
 impl SpotifyCatalog {
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
     pub fn is_supported(&self) -> bool {
         self.version == CATALOG_VERSION
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.is_supported() {
+            return Err("unsupported Spotify catalog version");
+        }
+        for (id, artist) in &self.v1.artists {
+            if id != &artist.id {
+                return Err("Spotify catalog artist key does not match its ID");
+            }
+            if artist.complete && (artist.genres.is_none() || artist.images.is_none()) {
+                return Err("complete Spotify catalog artist is missing fields");
+            }
+        }
+        for (uri, album) in &self.v1.albums {
+            if uri != &album.uri {
+                return Err("Spotify catalog album key does not match its URI");
+            }
+            if album.complete
+                && (album.artists.is_none()
+                    || album.images.is_none()
+                    || album.total_tracks.is_none()
+                    || album.tracks.as_ref().is_none_or(|tracks| !tracks.complete))
+            {
+                return Err("complete Spotify catalog album is missing fields");
+            }
+            let invalid_complete_tracks = album.tracks.as_ref().is_some_and(|tracks| {
+                tracks.complete
+                    && (tracks.uris.len() as u32 != tracks.total
+                        || album
+                            .total_tracks
+                            .is_some_and(|total| total != tracks.total)
+                        || tracks.uris.iter().collect::<BTreeSet<_>>().len() != tracks.uris.len()
+                        || tracks
+                            .uris
+                            .iter()
+                            .any(|uri| !self.v1.tracks.contains_key(uri)))
+            });
+            if invalid_complete_tracks {
+                return Err("complete Spotify catalog album track list is inconsistent");
+            }
+        }
+        for (uri, track) in &self.v1.tracks {
+            if uri != &track.uri {
+                return Err("Spotify catalog track key does not match its URI");
+            }
+            if track.complete && track.artists.is_none() {
+                return Err("complete Spotify catalog track is missing fields");
+            }
+        }
+        Ok(())
     }
 
     /// Monotonically increases when the catalog changes. It is intentionally
@@ -79,44 +134,72 @@ impl SpotifyCatalog {
     }
 
     pub fn observe_artist_summary(&mut self, artist: &Artist) {
+        if self.observe_artist_summary_inner(artist) {
+            self.bump();
+        }
+    }
+
+    fn observe_artist_summary_inner(&mut self, artist: &Artist) -> bool {
         let incoming = CatalogArtist::from_summary(artist);
-        self.v1
-            .artists
-            .entry(artist.id.clone())
-            .and_modify(|current| current.merge_summary(&incoming))
-            .or_insert(incoming);
-        self.bump();
+        match self.v1.artists.entry(artist.id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge_summary(&incoming)
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(incoming);
+                true
+            }
+        }
     }
 
     pub fn observe_artist(&mut self, artist: &Artist) {
         let incoming = CatalogArtist::from_full(artist);
-        self.v1
-            .artists
-            .entry(artist.id.clone())
-            .and_modify(|current| current.merge_full(&incoming))
-            .or_insert(incoming);
-        self.bump();
+        let changed = match self.v1.artists.entry(artist.id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge_full(&incoming)
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(incoming);
+                true
+            }
+        };
+        if changed {
+            self.bump();
+        }
     }
 
     pub fn observe_album_summary(&mut self, album: &Album) {
+        if self.observe_album_summary_inner(album) {
+            self.bump();
+        }
+    }
+
+    fn observe_album_summary_inner(&mut self, album: &Album) -> bool {
         let incoming = CatalogAlbum::from_summary(album);
-        self.v1
-            .albums
-            .entry(album.uri.clone())
-            .and_modify(|current| current.merge_summary(&incoming))
-            .or_insert(incoming);
-        self.bump();
+        match self.v1.albums.entry(album.uri.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge_summary(&incoming)
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(incoming);
+                true
+            }
+        }
     }
 
     /// Merge a complete album response. `tracks_complete` is supplied by the
     /// client after it has fetched every album-track page.
     pub fn observe_album(&mut self, album: &Album, tracks_complete: bool) {
         let incoming = CatalogAlbum::from_full(album, tracks_complete);
-        self.v1
-            .albums
-            .entry(album.uri.clone())
-            .and_modify(|current| current.merge_full(&incoming))
-            .or_insert(incoming);
+        let mut changed = match self.v1.albums.entry(album.uri.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge_full(&incoming)
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(incoming);
+                true
+            }
+        };
         if let Some(tracks) = album.tracks.as_ref() {
             if tracks_complete {
                 let parent = AlbumSummary {
@@ -129,12 +212,14 @@ impl SpotifyCatalog {
                 for track in &tracks.items {
                     let mut track = track.clone();
                     track.album = Some(parent.clone());
-                    self.observe_track(&track);
+                    changed |= self.observe_track_inner(&track);
                 }
             }
-            self.observe_album_track_page(&album.uri, 0, tracks, tracks_complete);
+            changed |= self.observe_album_track_page_inner(&album.uri, 0, tracks, tracks_complete);
         }
-        self.bump();
+        if changed {
+            self.bump();
+        }
     }
 
     /// Merge one page of album tracks. A complete ordered list is committed
@@ -146,61 +231,83 @@ impl SpotifyCatalog {
         page: &Page<Track>,
         complete: bool,
     ) {
-        let entry = self
-            .v1
-            .albums
-            .entry(album_uri.to_owned())
-            .or_insert_with(|| CatalogAlbum::stub(album_uri));
-        let tracks = entry.tracks.get_or_insert_with(CatalogTrackList::default);
-        let incoming_uris = page
-            .items
-            .iter()
-            .map(|track| track.uri.clone())
-            .collect::<Vec<_>>();
-        for uri in &incoming_uris {
-            tracks.observed_uris.insert(uri.clone());
+        if self.observe_album_track_page_inner(album_uri, offset, page, complete) {
+            self.bump();
         }
-        if complete {
-            tracks.uris = incoming_uris;
-            tracks.total = page.total;
-            tracks.observed_uris = tracks.uris.iter().cloned().collect();
-            tracks.complete = true;
-            entry.complete = entry.complete && entry.artists.is_some();
-        } else {
-            if !tracks.complete {
-                if offset == 0 {
-                    tracks.uris = incoming_uris;
-                } else if offset == tracks.uris.len() as u32 {
-                    tracks.uris.extend(incoming_uris);
-                }
-            }
-            tracks.total = tracks.total.max(page.total);
-            if page.next.is_none() && page.skipped == 0 && tracks.uris.len() as u32 == tracks.total
-            {
+    }
+
+    fn observe_album_track_page_inner(
+        &mut self,
+        album_uri: &str,
+        offset: u32,
+        page: &Page<Track>,
+        complete: bool,
+    ) -> bool {
+        let mut changed = {
+            let entry = self
+                .v1
+                .albums
+                .entry(album_uri.to_owned())
+                .or_insert_with(|| CatalogAlbum::stub(album_uri));
+            let before = entry.clone();
+            let tracks = entry.tracks.get_or_insert_with(CatalogTrackList::default);
+            let incoming_uris = page
+                .items
+                .iter()
+                .map(|track| track.uri.clone())
+                .collect::<Vec<_>>();
+            if complete {
+                tracks.uris = incoming_uris;
+                tracks.total = page.total;
                 tracks.complete = true;
                 entry.complete = entry.complete && entry.artists.is_some();
-                tracks.observed_uris = tracks.uris.iter().cloned().collect();
+            } else {
+                if !tracks.complete {
+                    if offset == 0 {
+                        tracks.uris = incoming_uris;
+                    } else if offset == tracks.uris.len() as u32 {
+                        tracks.uris.extend(incoming_uris);
+                    }
+                }
+                tracks.total = tracks.total.max(page.total);
+                if page.next.is_none()
+                    && page.skipped == 0
+                    && tracks.uris.len() as u32 == tracks.total
+                {
+                    tracks.complete = true;
+                    entry.complete = entry.complete && entry.artists.is_some();
+                }
             }
-        }
+            *entry != before
+        };
         for track in &page.items {
-            self.observe_track_summary(track);
+            changed |= self.observe_track_summary_inner(track);
         }
-        let _ = offset;
-        self.bump();
+        changed
     }
 
     pub fn observe_track_summary(&mut self, track: &Track) {
+        if self.observe_track_summary_inner(track) {
+            self.bump();
+        }
+    }
+
+    fn observe_track_summary_inner(&mut self, track: &Track) -> bool {
         let incoming = CatalogTrack::from_summary(track);
-        self.v1
-            .tracks
-            .entry(track.uri.clone())
-            .and_modify(|current| current.merge_summary(&incoming))
-            .or_insert(incoming);
+        let mut changed = match self.v1.tracks.entry(track.uri.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge_summary(&incoming)
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(incoming);
+                true
+            }
+        };
         if let Some(album) = track.album.as_ref() {
-            self.observe_album_summary(&album_to_stub(album));
+            changed |= self.observe_album_summary_inner(&album_to_stub(album));
         }
         for artist in &track.artists {
-            self.observe_artist_summary(&Artist {
+            changed |= self.observe_artist_summary_inner(&Artist {
                 id: artist.id.clone(),
                 name: artist.name.clone(),
                 genres: Vec::new(),
@@ -208,21 +315,31 @@ impl SpotifyCatalog {
                 images: Vec::new(),
             });
         }
-        self.bump();
+        changed
     }
 
     pub fn observe_track(&mut self, track: &Track) {
+        if self.observe_track_inner(track) {
+            self.bump();
+        }
+    }
+
+    fn observe_track_inner(&mut self, track: &Track) -> bool {
         let incoming = CatalogTrack::from_full(track);
-        self.v1
-            .tracks
-            .entry(track.uri.clone())
-            .and_modify(|current| current.merge_full(&incoming))
-            .or_insert(incoming);
+        let mut changed = match self.v1.tracks.entry(track.uri.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge_full(&incoming)
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(incoming);
+                true
+            }
+        };
         if let Some(album) = track.album.as_ref() {
-            self.observe_album_summary(&album_to_stub(album));
+            changed |= self.observe_album_summary_inner(&album_to_stub(album));
         }
         for artist in &track.artists {
-            self.observe_artist_summary(&Artist {
+            changed |= self.observe_artist_summary_inner(&Artist {
                 id: artist.id.clone(),
                 name: artist.name.clone(),
                 genres: Vec::new(),
@@ -230,37 +347,7 @@ impl SpotifyCatalog {
                 images: Vec::new(),
             });
         }
-        self.bump();
-    }
-
-    pub fn set_artist_local_hint(&mut self, artist_id: &str, hint: impl Into<String>) {
-        let entry = self
-            .v1
-            .artists
-            .entry(artist_id.to_owned())
-            .or_insert_with(|| CatalogArtist::stub(artist_id));
-        entry.local_hint = Some(hint.into());
-        self.bump();
-    }
-
-    pub fn set_album_local_hint(&mut self, album_uri: &str, hint: impl Into<String>) {
-        let entry = self
-            .v1
-            .albums
-            .entry(album_uri.to_owned())
-            .or_insert_with(|| CatalogAlbum::stub(album_uri));
-        entry.local_hint = Some(hint.into());
-        self.bump();
-    }
-
-    pub fn set_track_local_hint(&mut self, track_uri: &str, hint: impl Into<String>) {
-        let entry = self
-            .v1
-            .tracks
-            .entry(track_uri.to_owned())
-            .or_insert_with(|| CatalogTrack::stub(track_uri));
-        entry.local_hint = Some(hint.into());
-        self.bump();
+        changed
     }
 
     pub fn complete_artist(&self, id: &str) -> Option<Artist> {
@@ -293,6 +380,9 @@ impl SpotifyCatalog {
         offset: u32,
         limit: u32,
     ) -> Option<Page<Track>> {
+        if limit == 0 {
+            return None;
+        }
         let album = self.v1.albums.get(album_uri)?;
         let tracks = album.tracks.as_ref()?;
         if !tracks.complete {
@@ -365,8 +455,6 @@ pub struct CatalogArtist {
     #[serde(default)]
     pub images: Option<Vec<CatalogImage>>,
     pub complete: bool,
-    #[serde(default)]
-    pub local_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -377,8 +465,6 @@ pub struct CatalogTrackList {
     pub total: u32,
     #[serde(default)]
     pub complete: bool,
-    #[serde(default)]
-    pub observed_uris: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -399,8 +485,6 @@ pub struct CatalogAlbum {
     #[serde(default)]
     pub tracks: Option<CatalogTrackList>,
     pub complete: bool,
-    #[serde(default)]
-    pub local_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -418,25 +502,11 @@ pub struct CatalogTrack {
     #[serde(default)]
     pub album: Option<CatalogAlbumRef>,
     pub complete: bool,
-    #[serde(default)]
-    pub local_hint: Option<String>,
 }
 
 // ponytail: serde DTOs collapse omitted and explicit empty; preserve rich data
 // until presence-aware DTOs exist for intentional collection replacement.
 impl CatalogArtist {
-    fn stub(id: &str) -> Self {
-        Self {
-            id: id.into(),
-            name: String::new(),
-            genres: None,
-            followers: None,
-            images: None,
-            complete: false,
-            local_hint: None,
-        }
-    }
-
     fn from_summary(value: &Artist) -> Self {
         Self {
             id: value.id.clone(),
@@ -446,7 +516,6 @@ impl CatalogArtist {
             images: (!value.images.is_empty())
                 .then(|| value.images.iter().map(Into::into).collect()),
             complete: false,
-            local_hint: None,
         }
     }
 
@@ -458,20 +527,22 @@ impl CatalogArtist {
             followers: value.followers.as_ref().map(|followers| followers.total),
             images: Some(value.images.iter().map(Into::into).collect()),
             complete: true,
-            local_hint: None,
         }
     }
 
-    fn merge_summary(&mut self, incoming: &Self) {
+    fn merge_summary(&mut self, incoming: &Self) -> bool {
+        let before = self.clone();
         if self.name.is_empty() {
             self.name = incoming.name.clone();
         }
         if self.images.is_none() {
             self.images = incoming.images.clone();
         }
+        *self != before
     }
 
-    fn merge_full(&mut self, incoming: &Self) {
+    fn merge_full(&mut self, incoming: &Self) -> bool {
+        let before = self.clone();
         self.name = incoming.name.clone();
         if incoming
             .genres
@@ -493,6 +564,7 @@ impl CatalogArtist {
             self.images = incoming.images.clone();
         }
         self.complete = true;
+        *self != before
     }
 
     fn to_api(&self) -> Artist {
@@ -526,7 +598,6 @@ impl CatalogAlbum {
             total_tracks: None,
             tracks: None,
             complete: false,
-            local_hint: None,
         }
     }
 
@@ -544,7 +615,6 @@ impl CatalogAlbum {
             total_tracks: (value.total_tracks != 0).then_some(value.total_tracks),
             tracks: None,
             complete: false,
-            local_hint: None,
         }
     }
 
@@ -562,14 +632,13 @@ impl CatalogAlbum {
                 uris: tracks.items.iter().map(|track| track.uri.clone()).collect(),
                 total: tracks.total,
                 complete: tracks_complete,
-                observed_uris: tracks.items.iter().map(|track| track.uri.clone()).collect(),
             }),
             complete: tracks_complete && value.tracks.is_some(),
-            local_hint: None,
         }
     }
 
-    fn merge_summary(&mut self, incoming: &Self) {
+    fn merge_summary(&mut self, incoming: &Self) -> bool {
+        let before = self.clone();
         if self.id.is_empty() {
             self.id = incoming.id.clone();
         }
@@ -591,9 +660,11 @@ impl CatalogAlbum {
         if self.total_tracks.is_none() {
             self.total_tracks = incoming.total_tracks;
         }
+        *self != before
     }
 
-    fn merge_full(&mut self, incoming: &Self) {
+    fn merge_full(&mut self, incoming: &Self) -> bool {
+        let before = self.clone();
         self.id = incoming.id.clone();
         self.name = incoming.name.clone();
         if incoming
@@ -629,6 +700,7 @@ impl CatalogAlbum {
             self.tracks = incoming.tracks.clone();
         }
         self.complete |= incoming.complete;
+        *self != before
     }
 
     fn to_api(&self, catalog: &SpotifyCatalog) -> Option<Album> {
@@ -670,20 +742,6 @@ impl CatalogAlbum {
 }
 
 impl CatalogTrack {
-    fn stub(uri: &str) -> Self {
-        Self {
-            uri: uri.into(),
-            name: String::new(),
-            duration_ms: None,
-            track_number: None,
-            disc_number: None,
-            artists: None,
-            album: None,
-            complete: false,
-            local_hint: None,
-        }
-    }
-
     fn from_summary(value: &Track) -> Self {
         Self {
             uri: value.uri.clone(),
@@ -695,7 +753,6 @@ impl CatalogTrack {
                 .then(|| value.artists.iter().map(Into::into).collect()),
             album: value.album.as_ref().map(Into::into),
             complete: false,
-            local_hint: None,
         }
     }
 
@@ -709,11 +766,11 @@ impl CatalogTrack {
             artists: Some(value.artists.iter().map(Into::into).collect()),
             album: value.album.as_ref().map(Into::into),
             complete: true,
-            local_hint: None,
         }
     }
 
-    fn merge_summary(&mut self, incoming: &Self) {
+    fn merge_summary(&mut self, incoming: &Self) -> bool {
+        let before = self.clone();
         if self.name.is_empty() {
             self.name = incoming.name.clone();
         }
@@ -732,9 +789,11 @@ impl CatalogTrack {
         if self.album.is_none() {
             self.album = incoming.album.clone();
         }
+        *self != before
     }
 
-    fn merge_full(&mut self, incoming: &Self) {
+    fn merge_full(&mut self, incoming: &Self) -> bool {
+        let before = self.clone();
         self.name = incoming.name.clone();
         if incoming.duration_ms.is_some() {
             self.duration_ms = incoming.duration_ms;
@@ -757,6 +816,7 @@ impl CatalogTrack {
             self.album = incoming.album.clone();
         }
         self.complete = true;
+        *self != before
     }
 
     fn to_api(&self) -> Track {
@@ -885,6 +945,78 @@ mod tests {
             }],
             album: None,
         }
+    }
+
+    #[test]
+    fn logical_track_observation_bumps_once_only_when_changed() {
+        let mut catalog = SpotifyCatalog::default();
+        let original = track("one");
+
+        catalog.observe_track(&original);
+        assert_eq!(catalog.generation(), 1);
+
+        catalog.observe_track(&original);
+        assert_eq!(catalog.generation(), 1);
+
+        let mut changed = original;
+        changed.name = "renamed".into();
+        catalog.observe_track(&changed);
+        assert_eq!(catalog.generation(), 2);
+    }
+
+    #[test]
+    fn serialized_v1_shape_stays_flat_and_generation_stays_transient() {
+        let mut catalog = SpotifyCatalog::default();
+        catalog.observe_track(&track("one"));
+        let value = serde_json::to_value(&catalog).unwrap();
+
+        assert_eq!(value["version"], CATALOG_VERSION);
+        assert!(value.get("v1").is_none());
+        assert!(value["tracks"].get("spotify:track:one").is_some());
+        assert!(value.get("generation").is_none());
+
+        let restored: SpotifyCatalog = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, catalog);
+        assert_eq!(restored.generation(), 0);
+    }
+
+    #[test]
+    fn validate_rejects_semantically_corrupt_complete_catalogs() {
+        let cases = [
+            serde_json::json!({
+                "version": 1,
+                "artists": {"wrong": {"id": "artist", "name": "Artist", "complete": false}},
+                "albums": {}, "tracks": {}
+            }),
+            serde_json::json!({
+                "version": 1, "artists": {},
+                "albums": {"spotify:album:a": {
+                    "id": "a", "uri": "spotify:album:a", "name": "Album", "complete": true
+                }},
+                "tracks": {}
+            }),
+            serde_json::json!({
+                "version": 1, "artists": {},
+                "albums": {"spotify:album:a": {
+                    "id": "a", "uri": "spotify:album:a", "name": "Album", "complete": true,
+                    "artists": [], "images": [], "total_tracks": 2,
+                    "tracks": {"uris": ["spotify:track:missing"], "total": 2, "complete": true}
+                }},
+                "tracks": {}
+            }),
+            serde_json::json!({
+                "version": 1, "artists": {}, "albums": {},
+                "tracks": {"spotify:track:t": {
+                    "uri": "spotify:track:t", "name": "Track", "complete": true
+                }}
+            }),
+        ];
+
+        for value in cases {
+            let catalog: SpotifyCatalog = serde_json::from_value(value).unwrap();
+            assert!(catalog.validate().is_err());
+        }
+        assert!(SpotifyCatalog::default().validate().is_ok());
     }
 
     #[test]
@@ -1074,13 +1206,38 @@ mod tests {
             .unwrap();
         assert_eq!(last.items, tracks[2..]);
         assert!(last.next.is_none());
+        assert!(
+            catalog
+                .complete_album_tracks("spotify:album:a", 0, 0)
+                .is_none()
+        );
     }
 
     #[test]
-    fn local_hints_are_not_used_as_identity() {
-        let mut catalog = SpotifyCatalog::default();
-        catalog.set_track_local_hint("spotify:track:missing", "Artist — Album — Song");
-        assert!(catalog.complete_track("spotify:track:missing").is_none());
-        assert_eq!(catalog.v1.tracks.len(), 1);
+    fn removed_cache_fields_in_old_json_are_ignored() {
+        let catalog: SpotifyCatalog = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "artists": {},
+            "albums": {"spotify:album:a": {
+                "id": "a", "uri": "spotify:album:a", "name": "Album", "complete": false,
+                "local_hint": "Artist — Album",
+                "tracks": {"uris": [], "total": 0, "complete": false,
+                    "observed_uris": ["spotify:track:old"]}
+            }},
+            "tracks": {}
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(catalog).unwrap();
+        assert!(
+            value["albums"]["spotify:album:a"]
+                .get("local_hint")
+                .is_none()
+        );
+        assert!(
+            value["albums"]["spotify:album:a"]["tracks"]
+                .get("observed_uris")
+                .is_none()
+        );
     }
 }

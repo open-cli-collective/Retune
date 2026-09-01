@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-subscribe-main-events"
+description = "Enables the subscribe_main_events command without any pre-configured scope."
+commands.allow = ["subscribe_main_events"]
+
+[[permission]]
+identifier = "deny-subscribe-main-events"
+description = "Denies the subscribe_main_events command without any pre-configured scope."
+commands.deny = ["subscribe_main_events"]

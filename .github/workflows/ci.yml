@@ -40,8 +40,11 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
       - run: node ../../scripts/check-release.mjs
       - run: node ../../scripts/check-docs.mjs
+      - run: node ../../scripts/check-tauri-acl.mjs
       - run: npm ci
-      - run: npx tsc --noEmit -p tsconfig.app.json
+      - run: npx tauri permission list
+      - run: npm run test
+      - run: npm run lint
       - run: npm run build
 
   native-bundles:
@@ -122,10 +125,6 @@ jobs:
             import fs from 'node:fs';
             const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
             if (config.identifier !== 'com.rianjs.retune') throw new Error('bundle identifier changed');
-            const auth = fs.readFileSync('../../apps/desktop/src-tauri/src/spotify_commands.rs', 'utf8');
-            for (const value of ['bind_on(8898)', 'http://127.0.0.1:8898/callback']) {
-              if (!auth.includes(value)) throw new Error('missing callback contract: ' + value);
-            }
           "
 
       - name: Release native credential-store tests

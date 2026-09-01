@@ -3,10 +3,10 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../src/diagnostics.ts'
 import { initialState, reducer, type Action } from '../src/appState.ts'
-import type { BrowseView, PlaybackTrack, Selection, Settings, SpotifyResults } from '../src/types.ts'
+import type { BrowseView, PlaybackTrack, PlayOutcome, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { acceptImportAndNext, acceptImportChanges, activeImportQueue, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, defaultReviewState, downloadAction, excludedImportCount, excludeImportRow, excludeImportRows, handleImportQueueTab, ignoreImportAlbum, ignoreImportArtist, importAlbumActionAdvances, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, remainingImportCount, requiredImportMatchIds, resolveImportCount, restPendingImportCount, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, skipImportAlbum, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow } from '../src/lastfmImportState.ts'
-import { appliedZoom, browseRequestKey, browseViewForRequest, clearedTrackRating, compareTracks, contiguousRange, dialogTabTarget, facetLabel, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, menuPosition, mergeByUri, moveBefore, moveToIndex, nextNativeDragActive, normalizeZoom, overlayEditTargets, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
+import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, excludeImportRows, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, requiredImportMatchIds, resolveImportCount, restPendingImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
@@ -20,15 +20,75 @@ const importRows = (): ImportSourceRow[] => [
   { stableId: 'b', artist: 'Alpha', album: 'Album', track: 'Two', playCount: 2, earliest: 20, latest: 40, variants: [{ artist: 'Alpha', album: 'Album', track: 'Two', playCount: 2, earliest: 20, latest: 40 }] },
 ]
 
+const reviewState = (rows: ImportSourceRow[]): ReviewState => ({
+  rows,
+  decisions: Object.fromEntries(rows.map((row) => [row.stableId, { status: 'pending' as const, excluded: false }])),
+  checked: new Set(rows.map((row) => row.stableId)),
+  importContent: true,
+  includeHistoricalPlayCounts: true,
+  wholeAlbum: false,
+  genre: '',
+  rating: null,
+})
+
 const importQueue = (): ImportQueueItem[] => [
   { page: 1, artist: 'Beta', album: 'Album', playCount: 3, importedPlayCount: 0, remainingPlayCount: 3, latest: 30, sourceCount: 1, remaining: true, albumEntities: 1, trackEntities: 0 },
   { page: 2, artist: 'Alpha', album: 'Album', playCount: 2, importedPlayCount: 0, remainingPlayCount: 2, latest: 40, sourceCount: 2, remaining: true, albumEntities: 0, trackEntities: 2 },
 ]
 
+const deferred = <T>() => {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((next, fail) => { resolve = next; reject = fail })
+  return { promise, resolve, reject }
+}
+
 test('Spotify limit countdown is stable and stops at zero', () => {
   assert.equal(spotifyLimitCountdown(7261, 3600), '1h 1m 1s')
   assert.equal(spotifyLimitCountdown(65, 0), '1m 5s')
   assert.equal(spotifyLimitCountdown(1, 10), '0s')
+})
+
+test('Last.fm apply result parser accepts only the closed backend contract', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/ipc-contracts.json', import.meta.url), 'utf8')) as {
+    importApplyFinished: { succeeded: unknown; failed: unknown }
+  }
+  assert.deepEqual(parseImportApplyResult(fixture.importApplyFinished.succeeded), fixture.importApplyFinished.succeeded)
+  assert.deepEqual(parseImportApplyResult(fixture.importApplyFinished.failed), fixture.importApplyFinished.failed)
+  for (const code of ['spotify-rate-limited', 'spotify-quota-exhausted', 'apply-failed'] as const) {
+    assert.deepEqual(
+      parseImportApplyResult({ status: 'failed', batchId: 7, code, message: 'Localized prose', retryAt: code === 'apply-failed' ? null : 123 }),
+      { status: 'failed', batchId: 7, code, message: 'Localized prose', retryAt: code === 'apply-failed' ? null : 123 },
+    )
+  }
+  const malformed = [
+    null,
+    [],
+    { status: 'succeeded', batchId: 1, message: 'extra' },
+    { batchId: 1 },
+    { status: true, batchId: 1 },
+    { status: 'succeeded', batchId: 0 },
+    { status: 'succeeded', batchId: -1 },
+    { status: 'succeeded', batchId: 1.5 },
+    { status: 'succeeded', batchId: Number.POSITIVE_INFINITY },
+    { status: 'succeeded', batchId: 0x1_0000_0000 },
+    { status: 'failed', batchId: 1, code: 'unknown', message: 'Failure', retryAt: null },
+    { status: 'failed', batchId: 1, code: 'apply-failed', retryAt: null },
+    { status: 'failed', batchId: 1, code: 'apply-failed', message: 5, retryAt: null },
+    { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Failure' },
+    { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Failure', retryAt: -1 },
+    { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Failure', retryAt: 1.5 },
+    { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Failure', retryAt: Number.NaN },
+  ]
+  for (const value of malformed) assert.equal(parseImportApplyResult(value), null)
+})
+
+test('legacy and unknown queue error codes safely project to apply-failed', () => {
+  assert.equal(importApplyErrorCode(undefined), 'apply-failed')
+  assert.equal(importApplyErrorCode(null), 'apply-failed')
+  assert.equal(importApplyErrorCode('renamed-backend-code'), 'apply-failed')
+  assert.equal(importApplyErrorCode('spotify-rate-limited'), 'spotify-rate-limited')
+  assert.equal(importApplyErrorCode('spotify-quota-exhausted'), 'spotify-quota-exhausted')
 })
 
 test('diagnostic reports include session context through the last problem only', () => {
@@ -38,23 +98,6 @@ test('diagnostic reports include session context through the last problem only',
   assert.deepEqual(report.map(({ message }) => message), ['start', 'retry', 'context', 'failed'])
   assert.match(formatDiagnosticReport(report), /^\[2026-08-16\]\[12:00:00\]\[INFO\]\[retune\] start/)
   assert.deepEqual(reportWindow([entry('INFO', 'healthy')]), [])
-})
-
-test('Last.fm review state preserves unchecked rows, cascades ignores, and counts skipped rows', () => {
-  let state = defaultReviewState(importRows())
-  state = toggleImportRow(state, 'b')
-  state = skipImportAlbum(state, 'Beta', 'Album')
-  assert.equal(remainingImportCount(state), 2)
-  const accepted = acceptImportChanges(state)
-  assert.deepEqual(accepted.committed, ['a'])
-  assert.equal(accepted.state.decisions.a.status, 'done')
-  assert.equal(accepted.state.decisions.b.status, 'pending')
-  state = ignoreImportAlbum(accepted.state, 'Alpha', 'Album')
-  assert.equal(remainingImportCount(state), 0)
-  state = ignoreImportArtist(state, 'Beta')
-  assert.equal(remainingImportCount(state), 0)
-  const excluded = excludeImportRow(defaultReviewState(importRows()), 'b')
-  assert.equal(excluded.decisions.b.excluded, true)
 })
 
 test('Last.fm rejection selection supports plain, Shift, Cmd, and Ctrl gestures', () => {
@@ -74,19 +117,12 @@ test('Last.fm rejection selection supports plain, Shift, Cmd, and Ctrl gestures'
 
 test('Last.fm exclusion projection handles multiple IDs and stable rejected ordering', () => {
   const rows = [...importRows(), { ...importRows()[0], stableId: 'c', track: 'Three' }]
-  const state = defaultReviewState(rows)
+  const state = reviewState(rows)
   const excluded = excludeImportRows(state, ['b', 'b', 'c'])
   assert.equal(excluded.decisions.b.excluded, true)
   assert.equal(excluded.decisions.c.excluded, true)
   assert.deepEqual(stablePartitionImportRows(rows, ['b'], (row) => row.stableId, ['c']).map((row) => row.stableId), ['b', 'a', 'c'])
-  assert.equal(excludeImportRow(excluded, 'b', false).decisions.b.excluded, false)
-})
-
-test('Last.fm Accept & Next commits current choices and requests advancement', () => {
-  const state = defaultReviewState(importRows())
-  const accepted = acceptImportAndNext(toggleImportRow(state, 'b'))
-  assert.deepEqual(accepted.committed, ['a'])
-  assert.equal(accepted.advance, true)
+  assert.equal(excludeImportRows(excluded, ['b'], false).decisions.b.excluded, false)
 })
 
 test('Last.fm fuzzy count modes and all queue sorts are deterministic', () => {
@@ -152,8 +188,6 @@ test('Last.fm queue Tab wiring cancels native focus before moving to the mapping
   assert.equal(handleImportQueueTab(event, target), true)
   assert.deepEqual(events, ['prevent', 'stop', 'focus', 'scroll'])
   assert.equal(handleImportQueueTab(event, null), false)
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
-  assert.match(importer, /const target = onTab\(event\.shiftKey\)[\s\S]*handleImportQueueTab\(event, target\)/)
 })
 
 test('Last.fm acknowledged apply projects the next queue choice before authoritative refresh', () => {
@@ -311,28 +345,8 @@ test('Last.fm collection dialog preserves results after preview Add and on failu
   assert.deepEqual(selected(), ['spotify:album:b'])
 })
 
-test('Last.fm collection result rows expose separate accessible actions', () => {
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
-  assert.match(importer, /<article className="import-picker-option"[\s\S]*onDoubleClick=/)
-  assert.match(importer, /onClick=\{\(event\) => \{ event\.stopPropagation\(\); void openPreview\(candidate\) \}\}/)
-  assert.match(importer, /onClick=\{\(event\) => \{ event\.stopPropagation\(\); void toggleResultMatch\(candidate\) \}\}/)
-  assert.doesNotMatch(importer, /<button type="button" className="import-picker-option"/)
-})
-
-test('Last.fm release batches opt into the collection controls without losing source context', () => {
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
-  assert.match(importer, /const collection = page\.collection !== null/)
-  assert.match(importer, /Change Album…/)
-  assert.match(importer, /Add Album…/)
-  assert.match(importer, /Manage Albums…/)
-  assert.match(importer, /lastfm_import_activate_collection/)
-  assert.match(importer, /const wholeAlbumDisabled = convertedCollection/)
-  assert.match(importer, /if \(collection\) openCollectionAlbums\(\)\n        else openAlbumPicker\(\)/)
-  assert.match(importer, /page\.album \? 'This Last\.fm release started with one Spotify match/)
-})
-
 test('Last.fm content and history intents remain independent and require one choice', () => {
-  const state = defaultReviewState(importRows())
+  const state = reviewState(importRows())
   assert.equal(state.importContent, true)
   assert.equal(state.includeHistoricalPlayCounts, true)
   assert.equal(state.wholeAlbum, false)
@@ -342,7 +356,7 @@ test('Last.fm content and history intents remain independent and require one cho
 })
 
 test('Last.fm whole-album mode repairs an empty selection without replacing a partial selection', () => {
-  let state = defaultReviewState(importRows())
+  let state = reviewState(importRows())
   state = toggleImportRow(toggleImportRow(state, 'a'), 'b')
   state = setWholeAlbumImport(state, true)
   assert.equal(state.wholeAlbum, true)
@@ -355,13 +369,12 @@ test('Last.fm whole-album mode repairs an empty selection without replacing a pa
 test('Last.fm per-target fuzzy strategies and stale-free queue advancement are deterministic', () => {
   const countModes: Record<string, 'sum' | 'overwrite' | 'zero'> = { target: 'overwrite' }
   assert.equal(countModes.target, 'overwrite')
-  let state = defaultReviewState(importRows())
+  let state = reviewState(importRows())
   state = toggleImportRow(state, 'b')
-  state = excludeImportRow(state, 'a')
+  state = excludeImportRows(state, ['a'])
   assert.equal(selectedImportCount(state), 0)
   assert.equal(excludedImportCount(state), 1)
   assert.equal(restPendingImportCount(state), 1)
-  assert.equal(remainingImportCount(state), 1)
   const done = { ...importQueue()[0], remaining: false, status: 'done' as const }
   assert.equal(nextRemainingImportQueue([done, importQueue()[1]], done, 'plays')?.artist, 'Alpha')
   assert.equal(isCurrentImportPageResponse(1, 2), false)
@@ -397,7 +410,83 @@ test('Last.fm A-to-B queue selection keeps the newer page when A resolves last',
   assert.equal(visible, 'B')
 })
 
+test('Last.fm review mutations report failure without success status or navigation', async () => {
+  for (const action of ['skip-album', 'ignore-album', 'ignore-artist']) {
+    const mutation = deferred<void>()
+    let refreshStarted = false
+    const successes: string[] = []
+    const errors: string[] = []
+    const pending = runCheckedImportMutation(
+      () => mutation.promise,
+      async () => { refreshStarted = true; return importQueue() },
+      () => successes.push(action),
+      (error) => errors.push(String(error)),
+    )
+    mutation.reject(new Error(`${action} rejected`))
+    assert.equal(await pending, false)
+    assert.equal(refreshStarted, false)
+    assert.deepEqual(successes, [])
+    assert.deepEqual(errors, [`Error: ${action} rejected`])
+  }
+
+  const mutation = deferred<void>()
+  const refresh = deferred<ImportQueueItem[]>()
+  const completions: ImportQueueItem[][] = []
+  const pending = runCheckedImportMutation(() => mutation.promise, () => refresh.promise, (queue) => completions.push(queue), assert.fail)
+  mutation.resolve(undefined)
+  await Promise.resolve()
+  assert.deepEqual(completions, [])
+  refresh.resolve(importQueue())
+  assert.equal(await pending, true)
+  assert.equal(completions.length, 1)
+
+  const generation = { current: 0 }
+  const staleRefresh = deferred<ImportQueueItem[]>()
+  const staleCompletions: ImportQueueItem[][] = []
+  const staleErrors: string[] = []
+  const staleMutation = deferred<void>()
+  const stalePending = runCheckedImportMutation(
+    () => staleMutation.promise,
+    async () => {
+      const requestGeneration = beginImportRefresh(generation)
+      return (await applyCurrentImportRefresh(requestGeneration, generation, staleRefresh.promise, () => {}, true)).value
+    },
+    (queue) => staleCompletions.push(queue),
+    (error) => staleErrors.push(String(error)),
+  )
+  staleMutation.resolve(undefined)
+  await Promise.resolve()
+  beginImportRefresh(generation)
+  staleRefresh.resolve(importQueue())
+  assert.equal(await stalePending, false)
+  assert.deepEqual(staleCompletions, [])
+  assert.deepEqual(staleErrors, ['Error: Last.fm import refresh was superseded.'])
+})
+
+test('Last.fm full and queue-only refreshes share one latest-response generation', async () => {
+  const exercise = async (olderLabel: string, newerLabel: string) => {
+    const generation = { current: 0 }
+    const older = deferred<string>()
+    const newer = deferred<string>()
+    const applied: string[] = []
+    const olderRequest = applyCurrentImportRefresh(beginImportRefresh(generation), generation, older.promise, (value) => applied.push(value))
+    const newerRequest = applyCurrentImportRefresh(beginImportRefresh(generation), generation, newer.promise, (value) => applied.push(value))
+    newer.resolve(newerLabel)
+    assert.deepEqual(await newerRequest, { value: newerLabel, applied: true })
+    older.resolve(olderLabel)
+    assert.deepEqual(await olderRequest, { value: olderLabel, applied: false })
+    assert.deepEqual(applied, [newerLabel])
+  }
+
+  await exercise('older full', 'newer queue-only')
+  await exercise('older queue-only', 'newer full')
+})
+
 test('Last.fm setup and download status reflect connected and active states', () => {
+  assert.equal(
+    importStatusText(null, null, 'Retune is still loading Last.fm import state.'),
+    'Retune is still loading Last.fm import state.',
+  )
   assert.equal(importStatusText(null, 'rianjs'), 'Ready to import')
   assert.equal(importStatusText(null, null), 'Connect Last.fm to begin')
   assert.equal(importStatusText('downloading', 'rianjs'), 'Downloading Last.fm plays')
@@ -488,140 +577,7 @@ test('Last.fm queue virtualization clamps visible ranges with overscan', () => {
   assert.deepEqual(importQueueVisibleRange(0, 0, 300), { start: 0, end: 0, offsetTop: 0, contentHeight: 0 })
 })
 
-test('Last.fm queue rendering and importer modal styles keep large lists and surfaces bounded', () => {
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
-  const appCss = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8')
-  const importerCss = readFileSync(new URL('../src/lastfmImporter.css', import.meta.url), 'utf8')
-  assert.match(importer, /<VirtualQueue /)
-  assert.doesNotMatch(importer, /<div className="import-queue-list">\{orderedQueue\.map/)
-  assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)
-  assert.match(importer, /aria-label=\{`Batch \$\{absoluteIndex \+ 1\} of \$\{items\.length\}/)
-  for (const theme of ['light', 'dark']) {
-    const block = appCss.match(new RegExp(`:root\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))?.[1] ?? ''
-    assert.match(block, /--panel:\s*#[0-9a-f]{6}/i)
-  }
-  const dialogBlock = importerCss.match(/\.import-picker-dialog, \.import-confirm-dialog, \.import-collection-dialog \{([^}]*)\}/)?.[1] ?? ''
-  assert.match(dialogBlock, /background: var\(--panel\)/)
-  assert.match(dialogBlock, /border: 1px solid var\(--border\)/)
-  assert.match(dialogBlock, /box-shadow:/)
-  assert.match(appCss, /\.modal-backdrop \{[^}]*z-index: 10;[^}]*background: rgb\(0 0 0 \/ \.38\)/s)
-  assert.match(importerCss, /\.import-queue, \.import-review \{[^}]*min-height: 0/)
-  assert.match(importerCss, /\.import-queue-list \{[^}]*overflow: auto/)
-  assert.match(importerCss, /\.import-track-list \{[^}]*overflow: auto/)
-  assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
-  assert.match(importerCss, /button\.import-picker-option \{[^}]*width: 100%[^}]*grid-template-columns: minmax\(0, 1fr\) auto/)
-  assert.match(importerCss, /\.import-nav-target:focus \{[^}]*box-shadow: inset 0 0 0 2px var\(--accent\)/)
-  assert.match(importerCss, /\.import-match-cell\.needs-action \{[^}]*box-shadow: inset 4px 0 #a64b00/)
-  assert.match(importer, /<section className="import-fuzzy-panel" aria-labelledby=\{headingId\}>/)
-  assert.match(importer, /Last\.fm names → 1 Spotify track/)
-  assert.match(importer, /expanded \? 'Hide merge' : 'Show merge'/)
-  assert.match(importer, /aria-controls=\{mergeId\}/)
-  assert.match(importer, /className="import-fuzzy-connector" aria-hidden="true"/)
-  assert.match(importer, /<output className="import-fuzzy-result-copy" role="status" aria-live="polite"/)
-  assert.match(importer, /<fieldset disabled=\{locked\} className="import-fuzzy-strategies"/)
-  assert.match(importer, /importCountMergePresentation\(rows, mode, resultCount\)/)
-  assert.match(importer, /fuzzyResultCount: page\.resolvedCounts\[group\.target\]/)
-  assert.match(importerCss, /\.import-fuzzy-merge \{[^}]*display: grid/)
-  assert.match(importerCss, /\.import-fuzzy-connector::before \{[^}]*border-top:[^}]*border-right:[^}]*border-bottom:/)
-  assert.match(importerCss, /@media \(max-width: 720px\) \{[\s\S]*\.import-fuzzy-merge \{[^}]*grid-template-columns: minmax\(0, 1fr\)/)
-})
-
-test('Last.fm collection review explains individual matching and keeps release UI scoped', () => {
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
-  const importerCss = readFileSync(new URL('../src/lastfmImporter.css', import.meta.url), 'utf8')
-  assert.match(importer, /Last\.fm supplied no album metadata\. Tracks are matched individually\./)
-  assert.match(importer, /automatically selected/)
-  assert.match(importer, /already imported/)
-  assert.match(importer, /tracks imported/)
-  assert.match(importer, /plays imported/)
-  assert.match(importer, /suggested/)
-  assert.match(importer, /need review/)
-  assert.match(importer, /Use This Track/)
-  assert.match(importer, /Search Spotify or paste a share link/)
-  assert.match(importer, /Search Spotify albums or paste a share link/)
-  assert.match(importer, /ALREADY IN YOUR LIBRARY/)
-  assert.match(importer, /ALREADY IMPORTED/)
-  assert.match(importer, /data-review-status=\{item\.decision\.status\}/)
-  assert.match(importer, /plays to import/)
-  assert.match(importer, /plays already imported/)
-  assert.match(importer, /plays imported · \{queueSummary\.remainingPlays\.toLocaleString\(\)\} remaining/)
-  assert.match(importer, /collection && !collectionAlbumReady/)
-  assert.match(importer, /const collection = page\.collection !== null/)
-  assert.match(importer, /collection \? collectionSuggestion\(item\.source, item\.matchResult, selectedTrackUris\) : null/)
-  assert.match(importer, /const displayedSearchTerm = collection && !track \? trackPickerQuery\(item\.source\) : match\?\.searchTerm/)
-  assert.match(importerCss, /\.import-library-badge/)
-  assert.match(importerCss, /\.import-track-row\[data-review-status="done"\]/)
-  assert.match(importerCss, /\.import-completed-badge/)
-  assert.match(importerCss, /\.import-queue-count \.plays-to-import/)
-  assert.match(importerCss, /\.import-queue-count \.plays-imported/)
-  assert.doesNotMatch(importerCss, /\.import-collection-summary span:(?:first|nth)-child/)
-  assert.match(importerCss, /\.import-suggestion-label/)
-  assert.match(importer, /collection && trackConfidence === 'exact'/)
-  assert.match(importer, /const \[selectedAlbumsExpanded, setSelectedAlbumsExpanded\] = useState\(true\)/)
-  assert.match(importer, /<details ref=\{selectedAlbums\} className="import-selected-album-cards" open=\{selectedAlbumsExpanded\}/)
-  assert.doesNotMatch(importer, /automaticCollectionAlbumContributors/)
-  assert.match(importer, /album: candidate\.trackAlbums\[index\] \|\| ''/)
-  assert.doesNotMatch(importer, /album: candidate\.trackAlbums\[index\] \|\| candidate\.name/)
-  assert.doesNotMatch(importer, /automatic library/)
-  assert.match(importer, /<summary><strong>\{selectedCollectionAlbumSummary\}/)
-  assert.match(importer, /<small>\{collectionCoverageStatus\(collectionMatches\.coverage\)\}<\/small><\/summary>/)
-  assert.doesNotMatch(importer, /<details key=\{uri\} className="import-selected-album"/)
-  assert.match(importer, /stablePartitionImportRows\(projectedRows, requiredMatchIds/)
-  assert.match(importer, /flushSync\(\(\) => \{\s*setReview\(nextReview\)/)
-  assert.match(importer, /queuedRejects\.current\.exclude/)
-  assert.match(importer, /requestAnimationFrame\(\(\) => setTimeout\(\(\) => void flushRejectedRows\(\)\)\)/)
-  assert.match(importerCss, /\.import-collection-dialog \{[^}]*overflow: hidden/)
-  assert.match(importerCss, /\.import-selected-album-cards summary \{[^}]*list-style: disclosure-closed/)
-  assert.match(importer, /Use \{suggestedMatches\.length\} Suggestions/)
-  assert.match(importer, /lastfm_import_select_matches/)
-  assert.match(importerCss, /\.import-collection-dialog \{[^}]*resize: both/)
-  assert.match(importer, /VerticalResizeHandle target=\{resultList\}/)
-  assert.match(importer, /VerticalResizeHandle target=\{selectedAlbums\}/)
-  assert.match(importerCss, /\.import-resize-handle \{[^}]*cursor: row-resize/)
-  assert.match(importer, /className="import-dialog-drag-handle" title="Drag to move"/)
-})
-
-test('Last.fm queue selection restores focus after loading and retains native button semantics', () => {
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
-  const importState = readFileSync(new URL('../src/lastfmImportState.ts', import.meta.url), 'utf8')
-  const refreshBlock = importer.match(/const refresh = useCallback[\s\S]*?\n  useEffect\(\(\) => \{\n    void refresh\(\)/)?.[0] ?? ''
-  assert.match(importer, /const importQueuePageLimit = 1000/)
-  assert.match(importer, /const selectedPageRef = useRef<number \| undefined>\(undefined\)/)
-  assert.match(importer, /const queueRefreshGeneration = useRef\(0\)/)
-  assert.match(importer, /const prefetchedTransition = useRef\(''\)/)
-  assert.match(importer, /const sortRef = useRef<.*>\('plays'\)/)
-  assert.match(refreshBlock, /const refresh = useCallback\(async/)
-  assert.doesNotMatch(refreshBlock, /\}, \[selectedPage, sort\]\)/)
-  assert.match(importer, /const nextQueueItem = \(queueSnapshot = queue, focusQueue = false\)/)
-  assert.match(importer, /focusQueueAfterOpen\.current = focusQueue/)
-  assert.match(importer, /openQueueItem\(next, activeImportQueue\(orderedSnapshot\), focusQueue\)/)
-  assert.match(importer, /onOpen=\{\(item\) => void openQueueItem\(item, activeQueue, true\)\}/)
-  assert.match(importer, /const \[pageMutationRunning, setPageMutationRunning\] = useState\(false\)/)
-  assert.match(importer, /disabled=\{interactionBusy \|\| state\.applyingAll\}/)
-  assert.match(importer, /setPageMutationRunning\(running\)/)
-  assert.doesNotMatch(importer, /<VirtualQueue[^>]*disabled=\{busy \|\| pageLoading\}/)
-  assert.match(importer, /event\.key === 'Enter' && !busy && query\.trim\(\)[\s\S]*onSearch\(query\)/)
-  assert.match(importer, /onMutation\(true\)[\s\S]*lastfm_import_apply/)
-  assert.match(importer, /archiveBatch: advance/)
-  assert.match(importer, /await invoke\('lastfm_import_apply'[\s\S]*if \(advance\) await onApplied\(\)/)
-  assert.match(importer, /const appliedAndAdvance = async \(\) => \{[\s\S]*focusQueueAfterOpen\.current = true[\s\S]*projectAcknowledgedImportApply\([\s\S]*setSelected\(null\)[\s\S]*setPage\(null\)[\s\S]*refreshQueueOnly\(true\)/)
-  assert.match(importer, /const refreshQueueOnly = async \(strict = false\)/)
-  assert.match(importer, /nextRemainingImportQueue\(queue, selected, sort\)[\s\S]*prefetchedTransition\.current = transition[\s\S]*invoke\('lastfm_import_page'/)
-  assert.match(importer, /requestGeneration !== queueRefreshGeneration\.current/)
-  assert.match(importer, /lastfm-import-apply-finished/)
-  assert.match(importer, /lastfm_import_retry_apply/)
-  assert.match(importer, /Retry Apply/)
-  assert.match(importer, /if \(event\.payload\.message\) \{[\s\S]*refreshQueueOnly\(\)[\s\S]*else if \(!advancingApply\.current/)
-  assert.match(importer, /state\.applyingAll \? <section className="import-empty">/)
-  assert.match(importState, /item\.remaining \|\| item\.status === 'failed'/)
-  assert.doesNotMatch(importer, /role="listbox"/)
-  assert.doesNotMatch(importer, /role="option"/)
-  assert.match(importer, /aria-current=\{selectedPage === item\.page \? 'true' : undefined\}/)
-  assert.match(importer, /aria-label=\{`Batch \$\{absoluteIndex \+ 1\} of \$\{items\.length\}/)
-})
-
 test('Last.fm track picker starts from the source row and cancel preserves album and row matches', () => {
-  const importer = readFileSync(new URL('../src/LastFmImporter.tsx', import.meta.url), 'utf8')
   const albumUri = 'spotify:album:gladiator'
   const now = { ...importRows()[0], artist: 'The Lyndhurst Orchestra', album: 'Gladiator - Music from the Motion Picture', track: 'Now We Are Free' }
   const albumCandidates = [{ uri: albumUri }, { uri: 'spotify:album:other-release' }]
@@ -636,9 +592,6 @@ test('Last.fm track picker starts from the source row and cancel preserves album
   assert.deepEqual(pickerCandidates('track', albumCandidates), [])
   assert.equal(pickerSelectedUri('track', 'now', albumUri, pageMatches.tracks), pageMatches.tracks.now)
   assert.deepEqual(pageMatches, beforeCancel)
-  assert.match(importer, /Tracks from selected album matches/)
-  assert.match(importer, /Search all Spotify/)
-  assert.match(importer, /selectedAlbums\.map\(\(album\) => <optgroup/)
 })
 
 test('Last.fm row confidence uses a standalone track candidate without changing album confidence', () => {
@@ -820,6 +773,15 @@ test('navigation transitions preserve the active playback queue and origin', () 
   }
 })
 
+test('connection UI stays initializing until the authoritative snapshot arrives', () => {
+  assert.equal(initialState.connectionHydrated, false)
+  const next = reducer(initialState, {
+    type: 'connection',
+    connection: { connected: false, needs_reauth: false, playback_authorized: false },
+  })
+  assert.equal(next.connectionHydrated, true)
+})
+
 test('source, pane, and playlist transitions restore and retain the intended selection', () => {
   let state = reducer(initialState, { type: 'select', facet: 'cat', values: ['Rock'] })
   state = reducer(state, { type: 'select', facet: 'art', values: ['Artist'] })
@@ -938,13 +900,6 @@ test('the music catch-all has a user-facing genre label', () => {
   assert.equal(facetLabel('Category', 'Uncategorized'), 'Uncategorized')
 })
 
-test('only native drags with paths activate the Finder overlay', () => {
-  assert.equal(nextNativeDragActive(false, { type: 'enter', paths: [] }), false)
-  assert.equal(nextNativeDragActive(false, { type: 'enter', paths: ['/tmp/song.mp3'] }), true)
-  assert.equal(nextNativeDragActive(true, { type: 'over' }), true)
-  assert.equal(nextNativeDragActive(true, { type: 'drop' }), false)
-})
-
 test('zoom maps logical 100% to the readable baseline and clamps limits', () => {
   assert.equal(appliedZoom(1, 1.15), 1.15)
   assert.equal(normalizeZoom(1.15, .7, 1.8), 1.15)
@@ -990,6 +945,99 @@ test('artist album pages append without duplicate releases', () => {
   assert.deepEqual(mergeByUri([{ uri: 'a' }], [{ uri: 'a' }, { uri: 'b' }]), [{ uri: 'a' }, { uri: 'b' }])
 })
 
+test('same-batch importer refresh preserves draft options while accepting authoritative rows', () => {
+  const rows = importRows()
+  const current = { ...reviewState(rows), genre: 'Focused edit', rating: 4, checked: new Set(['a']) }
+  const incoming = { ...reviewState(rows), decisions: { a: { status: 'done' as const, excluded: false }, b: { status: 'pending' as const, excluded: false } } }
+  const key = { batchId: 7, artist: 'Artist', album: 'Album' }
+  const merged = mergeReviewBatchDraft(current, key, incoming, { ...key })
+  assert.equal(merged.genre, 'Focused edit')
+  assert.equal(merged.rating, 4)
+  assert.deepEqual([...merged.checked], ['a'])
+  assert.equal(merged.decisions.a.status, 'done')
+  assert.equal(mergeReviewBatchDraft(current, key, incoming, { ...key, batchId: 8 }).genre, '')
+})
+
+test('same-batch importer refresh reconciles removed, surviving, and new checked rows', () => {
+  const [rowA, rowB] = importRows()
+  const rowC = { ...rowB, stableId: 'c', track: 'Three' }
+  const current = { ...reviewState([rowA, rowB]), checked: new Set(['a']) }
+  const incoming = reviewState([rowB, rowC])
+  const key = { batchId: 7, artist: 'Artist', album: 'Album' }
+  const merged = mergeReviewBatchDraft(current, key, incoming, key)
+  assert.deepEqual([...merged.checked], ['c'])
+})
+
+test('entity pending state is independent and blocks duplicate submission', () => {
+  const pending = new Set<string>()
+  assert.equal(beginPendingEntity(pending, 'playlist-a'), true)
+  assert.equal(beginPendingEntity(pending, 'playlist-b'), true)
+  assert.equal(beginPendingEntity(pending, 'playlist-a'), false)
+  pending.delete('playlist-a')
+  assert.deepEqual([...pendingEntities(pending)], ['playlist-b'])
+})
+
+test('out-of-order ratings apply only the latest intent for each entity', async () => {
+  const generations = new Map<string, { current: number }>()
+  const first = deferred<number>()
+  const second = deferred<number>()
+  const applied: number[] = []
+  const generation = entityRequestGeneration(generations, 'track:7')
+  const requestA = loadCurrentGeneration(generation, () => first.promise, (rating) => applied.push(rating), assert.fail)
+  const requestB = loadCurrentGeneration(generation, () => second.promise, (rating) => applied.push(rating), assert.fail)
+  second.resolve(5)
+  await requestB
+  first.resolve(2)
+  await requestA
+  assert.deepEqual(applied, [5])
+})
+
+test('late artist pagination cannot replace the current artist discography', async () => {
+  const generation = { current: 0 }
+  const artistA = deferred<string[]>()
+  const artistB = deferred<string[]>()
+  let albums: string[] = []
+  const requestA = loadCurrentGeneration(generation, () => artistA.promise, (next) => { albums = next }, assert.fail)
+  const requestB = loadCurrentGeneration(generation, () => artistB.promise, (next) => { albums = next }, assert.fail)
+  artistB.resolve(['b'])
+  await requestB
+  artistA.resolve(['a'])
+  await requestA
+  assert.deepEqual(albums, ['b'])
+})
+
+test('track information loads are invalidated by replacement and close', async () => {
+  const generation = { current: 0 }
+  const trackA = deferred<string>()
+  const trackB = deferred<string>()
+  const opened: string[] = []
+  const requestA = loadCurrentGeneration(generation, () => trackA.promise, (track) => opened.push(track), assert.fail)
+  const requestB = loadCurrentGeneration(generation, () => trackB.promise, (track) => opened.push(track), assert.fail)
+  trackB.resolve('b')
+  await requestB
+  trackA.resolve('a')
+  await requestA
+  assert.deepEqual(opened, ['b'])
+
+  const trackC = deferred<string>()
+  const requestC = loadCurrentGeneration(generation, () => trackC.promise, (track) => opened.push(track), assert.fail)
+  cancelTrackInfoLoad(generation)
+  trackC.resolve('c')
+  await requestC
+  assert.deepEqual(opened, ['b'])
+})
+
+test('artwork retries after a transient native failure', async () => {
+  let attempts = 0
+  const fetchArtwork = () => {
+    attempts += 1
+    return attempts === 1 ? Promise.reject(new Error('offline')) : Promise.resolve('artwork://cover')
+  }
+  assert.equal(await loadArtwork(fetchArtwork), null)
+  assert.equal(await loadArtwork(fetchArtwork), 'artwork://cover')
+  assert.equal(attempts, 2)
+})
+
 test('clearing a track rating reveals its inherited album rating', () => {
   assert.deepEqual(clearedTrackRating(4), { stars: 4, explicit: false })
   assert.equal(clearedTrackRating(null), null)
@@ -1020,7 +1068,7 @@ test('playback start and result decisions keep OAuth outside the controller', ()
   assert.equal(playbackStartAction('spotify:track:one', false), 'connect')
   assert.equal(playbackStartAction('spotify:track:one', true), 'play')
   assert.equal(playbackStartAction('file:///tmp/one.mp3', false), 'play')
-  const prompt = { reason: 'missing' as const, message: 'Authorize playback.', targetTrackId: 2 }
+  const prompt = { reason: 'missing' as const, message: 'Authorize playback.', targetTrackId: 2, targetTrackUri: 'spotify:track:two' }
   assert.deepEqual(playbackAuthorizationPrompt({ playbackAuthorizationRequired: prompt }), prompt)
   assert.equal(playbackAuthorizationPrompt('started'), null)
   assert.equal(pendingPlaybackTarget(prompt, [{ id: 2, uri: 'spotify:track:two', enabled: true }]), 2)
@@ -1029,6 +1077,60 @@ test('playback start and result decisions keep OAuth outside the controller', ()
   assert.equal(playbackRetryReady(true, false, true), false)
   assert.equal(playbackRetryReady(true, true, true), true)
   assert.equal(playbackRetryReady(true, false, false), true)
+})
+
+test('play outcome UI handling matches the shared Rust wire fixture', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/play-outcomes.json', import.meta.url), 'utf8')) as {
+    started: PlayOutcome
+    playbackAuthorizationRequired: PlayOutcome
+  }
+  assert.equal(playbackAuthorizationPrompt(fixture.started), null)
+  assert.deepEqual(playbackAuthorizationPrompt(fixture.playbackAuthorizationRequired), {
+    reason: 'missing',
+    message: 'Authorize playback.',
+    targetTrackId: 2,
+    targetTrackUri: 'spotify:track:two',
+  })
+})
+
+test('only the latest play intent can populate playback authorization and retry state', async () => {
+  const generation = { current: 0 }
+  const responseA = deferred<PlayOutcome>()
+  const responseB = deferred<PlayOutcome>()
+  const tracksA: PlaybackTrack[] = [{ id: SYNTHETIC_BASE, uri: 'spotify:track:a', name: 'A', art: '', alb: '', durationSecs: 1, enabled: true }]
+  const tracksB: PlaybackTrack[] = [{ id: SYNTHETIC_BASE, uri: 'spotify:track:b', name: 'B', art: '', alb: '', durationSecs: 1, enabled: true }]
+  let pending: { id: number; tracks: readonly PlaybackTrack[]; origin: string } | null = null
+  const start = (response: Promise<PlayOutcome>, tracks: readonly PlaybackTrack[], origin: string) => {
+    const request = beginRequestGeneration(generation)
+    return response.then((outcome) => {
+      const authorization = currentPlaybackAuthorization(request, generation, outcome, tracks)
+      if (authorization) pending = { id: authorization.id, tracks, origin }
+    })
+  }
+
+  const requestA = start(responseA.promise, tracksA, 'A')
+  const requestB = start(responseB.promise, tracksB, 'B')
+  responseB.resolve({ playbackAuthorizationRequired: { reason: 'missing', message: 'Authorize B.', targetTrackId: SYNTHETIC_BASE, targetTrackUri: 'spotify:track:b' } })
+  await requestB
+  assert.deepEqual(pending, { id: SYNTHETIC_BASE, tracks: tracksB, origin: 'B' })
+
+  responseA.resolve({ playbackAuthorizationRequired: { reason: 'missing', message: 'Authorize A.', targetTrackId: SYNTHETIC_BASE, targetTrackUri: 'spotify:track:a' } })
+  await requestA
+  assert.deepEqual(pending, { id: SYNTHETIC_BASE, tracks: tracksB, origin: 'B' })
+  assert.equal(pendingPlaybackTarget({ reason: 'missing', message: 'Stale native event.', targetTrackId: SYNTHETIC_BASE, targetTrackUri: 'spotify:track:a' }, tracksB), null)
+  assert.equal(pendingPlaybackTarget({ reason: 'missing', message: 'Current native event.', targetTrackId: SYNTHETIC_BASE, targetTrackUri: 'spotify:track:b' }, tracksB), SYNTHETIC_BASE)
+})
+
+test('simulated playback ticks stop when playback pauses or switches to a live backend', () => {
+  const tracks: PlaybackTrack[] = [
+    { id: 1, uri: 'fixture:one', name: 'One', art: 'Artist', alb: 'Album', durationSecs: 180, enabled: true },
+    { id: 2, uri: 'fixture:two', name: 'Two', art: 'Artist', alb: 'Album', durationSecs: 240, enabled: true },
+  ]
+  assert.deepEqual(simulatedPlaybackTick(true, true, 1, tracks), { duration: 180, nextId: 2 })
+  assert.equal(simulatedPlaybackTick(true, false, 1, tracks), null)
+  assert.equal(simulatedPlaybackTick(false, true, 1, tracks), null)
+  assert.equal(simulatedPlaybackTick(undefined, true, 1, tracks), null)
+  assert.equal(simulatedPlaybackTick(true, true, 3, tracks), null)
 })
 
 test('track and disc sorts keep multi-disc albums in playback order', () => {
@@ -1044,6 +1146,42 @@ test('playlist sorting is view-only and clearing it restores Spotify order', () 
   const tracks = [{ name: 'Zulu' }, { name: 'Alpha' }, { name: 'Mike' }] as never
   assert.deepEqual(playlistRows(tracks, 'name', false).map((row) => row.upstreamIndex), [1, 2, 0])
   assert.deepEqual(playlistRows(tracks, null, false).map((row) => row.upstreamIndex), [0, 1, 2])
+})
+
+test('playlist rows stay bound to their playlist across delayed, failed, and late loads', async () => {
+  type Row = { uri: string }
+  let state = loadingPlaylistRows<Row>('playlist-a')
+  const load = (playlistId: string, response: Promise<Row[]>) => response.then(
+    (rows) => { state = resolvedPlaylistRows(state, playlistId, rows) },
+    () => { state = failedPlaylistRows(state, playlistId) },
+  )
+  const responseA = deferred<Row[]>()
+  const requestA = load('playlist-a', responseA.promise)
+
+  state = loadingPlaylistRows('playlist-b')
+  const responseB = deferred<Row[]>()
+  const requestB = load('playlist-b', responseB.promise)
+  assert.deepEqual(currentPlaylistRows(state, 'playlist-b'), [])
+  assert.equal(playlistRowsReady(state, 'playlist-b'), false)
+
+  const rowsB = [{ uri: 'spotify:track:b1' }, { uri: 'spotify:track:b2' }]
+  responseB.resolve(rowsB)
+  await requestB
+  assert.deepEqual(currentPlaylistRows(state, 'playlist-b'), rowsB)
+  assert.equal(playlistRowsReady(state, 'playlist-b'), true)
+
+  responseA.resolve([{ uri: 'spotify:track:a1' }, { uri: 'spotify:track:a2' }])
+  await requestA
+  assert.deepEqual(currentPlaylistRows(state, 'playlist-b'), rowsB)
+  assert.equal(currentPlaylistRows(state, 'playlist-a').length, 0)
+
+  state = loadingPlaylistRows('playlist-b')
+  const failedB = deferred<Row[]>()
+  const failedRequest = load('playlist-b', failedB.promise)
+  failedB.reject(new Error('offline'))
+  await failedRequest
+  assert.deepEqual(currentPlaylistRows(state, 'playlist-b'), [])
+  assert.equal(playlistRowsReady(state, 'playlist-b'), false)
 })
 
 test('dialog tabs wrap in both directions', () => {

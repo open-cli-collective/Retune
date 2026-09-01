@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-authorize-spotify-playback"
+description = "Enables the authorize_spotify_playback command without any pre-configured scope."
+commands.allow = ["authorize_spotify_playback"]
+
+[[permission]]
+identifier = "deny-authorize-spotify-playback"
+description = "Denies the authorize_spotify_playback command without any pre-configured scope."
+commands.deny = ["authorize_spotify_playback"]

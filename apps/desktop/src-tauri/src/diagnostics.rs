@@ -9,6 +9,8 @@ use tauri_plugin_opener::OpenerExt;
 
 pub(crate) const LOG_TARGET: &str = "retune::diagnostics";
 pub(crate) const SESSION_START_MARKER: &str = "retune.session.start";
+const MAX_DIAGNOSTIC_EMAIL_BODY_BYTES: usize = 256 * 1024;
+const MAX_DIAGNOSTIC_MAILTO_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -256,8 +258,13 @@ fn redact_message(message: &str) -> String {
         .unwrap_or(result)
 }
 
-fn redacted_mailto_url(email: &str, body: &str) -> String {
-    mailto_url(email, &redact_message(body))
+fn redacted_mailto_url(email: &str, body: &str) -> Result<String, String> {
+    diagnostic_mailto_url(
+        email,
+        body,
+        MAX_DIAGNOSTIC_EMAIL_BODY_BYTES,
+        MAX_DIAGNOSTIC_MAILTO_BYTES,
+    )
 }
 
 pub(crate) fn current_session_entries(contents: &str) -> Vec<DiagnosticEntry> {
@@ -318,19 +325,39 @@ fn mailto_url(email: &str, body: &str) -> String {
     format!("mailto:{email}?{query}")
 }
 
+fn diagnostic_mailto_url(
+    email: &str,
+    body: &str,
+    max_body_bytes: usize,
+    max_url_bytes: usize,
+) -> Result<String, String> {
+    if body.len() > max_body_bytes {
+        return Err("The diagnostic report is too large to email. Copy Logs instead.".into());
+    }
+    let url = mailto_url(email, &redact_message(body));
+    if url.len() > max_url_bytes {
+        return Err("The diagnostic email is too large to open. Copy Logs instead.".into());
+    }
+    Ok(url)
+}
+
 #[tauri::command]
-pub(super) fn load_diagnostics(app: tauri::AppHandle) -> Result<DiagnosticReport, String> {
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|error| format!("Could not locate the Retune log: {error}"))?;
-    let path = log_file_path(&log_dir, &app.package_info().name);
-    let entries = read_current_session(&path)
-        .map_err(|error| format!("Could not read the Retune log: {error}"))?;
-    Ok(DiagnosticReport {
-        entries,
-        email_available: support_email().is_some(),
+pub(super) async fn load_diagnostics(app: tauri::AppHandle) -> Result<DiagnosticReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let log_dir = app
+            .path()
+            .app_log_dir()
+            .map_err(|error| format!("Could not locate the Retune log: {error}"))?;
+        let path = log_file_path(&log_dir, &app.package_info().name);
+        let entries = read_current_session(&path)
+            .map_err(|error| format!("Could not read the Retune log: {error}"))?;
+        Ok(DiagnosticReport {
+            entries,
+            email_available: support_email().is_some(),
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -342,8 +369,9 @@ pub(super) fn email_diagnostics(app: tauri::AppHandle, body: String) -> Result<(
         "Email support is unavailable in this build. Copy Logs and share the report instead."
             .to_string()
     })?;
+    let url = redacted_mailto_url(email, &body)?;
     app.opener()
-        .open_url(redacted_mailto_url(email, &body), None::<String>)
+        .open_url(url, None::<String>)
         .map_err(|error| error.to_string())
 }
 
@@ -419,7 +447,7 @@ mod tests {
         let boundary = redact_message("access-tokenized=keep-access-tokenized");
         assert!(boundary.contains("keep-access-tokenized"));
 
-        let url = redacted_mailto_url("support@example.com", message);
+        let url = redacted_mailto_url("support@example.com", message).unwrap();
         assert!(!url.contains("access-canary"));
         assert!(!url.contains("lastfm-canary"));
 
@@ -481,5 +509,39 @@ mod tests {
         assert!(url.starts_with("mailto:support@example.com?"));
         assert!(url.contains("subject=Retune+diagnostic+report"));
         assert!(url.contains("body=%5BERROR%5D+failed+%26+retry"));
+    }
+
+    #[test]
+    fn diagnostic_email_limits_body_and_final_url_before_an_opener_effect() {
+        let email = "support@example.com";
+        let exact_body = "a".repeat(8);
+        let exact_url = mailto_url(email, &exact_body);
+        let mut opener_calls = 0;
+        let mut open = |result: Result<String, String>| {
+            if result.is_ok() {
+                opener_calls += 1;
+            }
+            result
+        };
+
+        assert_eq!(
+            open(diagnostic_mailto_url(
+                email,
+                &exact_body,
+                8,
+                exact_url.len()
+            ))
+            .unwrap(),
+            exact_url
+        );
+        assert!(open(diagnostic_mailto_url(
+            email,
+            &"a".repeat(9),
+            9,
+            exact_url.len()
+        ))
+        .is_err());
+        assert!(open(diagnostic_mailto_url(email, &"a".repeat(9), 8, usize::MAX)).is_err());
+        assert_eq!(opener_calls, 1);
     }
 }

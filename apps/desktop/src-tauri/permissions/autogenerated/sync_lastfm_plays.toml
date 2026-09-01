@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-lastfm-plays"
+description = "Enables the sync_lastfm_plays command without any pre-configured scope."
+commands.allow = ["sync_lastfm_plays"]
+
+[[permission]]
+identifier = "deny-sync-lastfm-plays"
+description = "Denies the sync_lastfm_plays command without any pre-configured scope."
+commands.deny = ["sync_lastfm_plays"]

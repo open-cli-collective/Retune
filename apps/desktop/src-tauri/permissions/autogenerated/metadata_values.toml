@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-metadata-values"
+description = "Enables the metadata_values command without any pre-configured scope."
+commands.allow = ["metadata_values"]
+
+[[permission]]
+identifier = "deny-metadata-values"
+description = "Denies the metadata_values command without any pre-configured scope."
+commands.deny = ["metadata_values"]

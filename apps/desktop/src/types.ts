@@ -26,7 +26,6 @@ export type Settings = {
   autoAddSpotifyLibrary: boolean
   autoConnect: boolean
   spotifyClientId: string
-  spotifySyncCompleted: boolean
   playbackBackend: PlaybackBackend
   repeat: RepeatMode
   shuffle: boolean
@@ -36,8 +35,10 @@ export type Settings = {
   gapless: boolean
   playThresholdPercent: PlayThresholdPercent
   lastfmScrobbling: boolean
-  lastfmScrobblingProfile: { username: string; startedAt: number } | null
 }
+
+export type SettingsPatch = Partial<Omit<Settings, 'repeat' | 'shuffle' | 'volume'>>
+export type Appearance = Pick<Settings, 'theme'>
 
 export type ConnectionState = { connected: boolean; needs_reauth: boolean; playback_authorized: boolean }
 export type LastFmState = {
@@ -80,9 +81,10 @@ export type PlaybackAuthorizationPrompt = {
   reason: 'missing' | 'rejected'
   message: string
   targetTrackId: number
+  targetTrackUri: string
 }
 export type PlayOutcome = 'started' | { playbackAuthorizationRequired: PlaybackAuthorizationPrompt }
-export type ImportSummary = { imported: number; duplicates: number; failed: { path: string; reason: string }[] }
+export type ImportSummary = { imported: number; duplicates: number; failed: { path: string; reason: string }[]; failureCount: number }
 export type PlaylistListView = {
   id: string
   name: string
