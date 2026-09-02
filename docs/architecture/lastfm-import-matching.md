@@ -145,11 +145,12 @@ prove the bound account, Retune shows the persisted page without membership
 reranking.
 
 Release search hydrates track lists only for summaries in the strongest
-album-title tier whose advertised track count can cover the source rows. At most
-three such summaries are hydrated, in deterministic title/count/artist/provider
-order. Exact artist credits precede loose compatible credits, which precede
-unrelated credits. An explicit album query may hydrate the requested result even when the
-automatic summary gate would reject it.
+album-title tier. Known advertised track counts are ranked by proximity to the
+source-row count, but a smaller release remains eligible because multiple source
+rows may collapse onto one Spotify track. At most three summaries are hydrated,
+in deterministic title/count/artist/provider order. Exact artist credits precede
+loose compatible credits, which precede unrelated credits. An explicit album
+query may hydrate a result outside the automatic summary gate.
 
 Search and album/track observations also enrich the shared materialized Spotify
 catalog. Exact search result identities persist there without expiry, scoped by

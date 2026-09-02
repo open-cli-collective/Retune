@@ -4854,6 +4854,69 @@ async fn unsupported_album_summaries_do_not_hydrate_tracks() {
 }
 
 #[tokio::test]
+async fn smaller_release_is_hydrated_and_selected_when_source_rows_collapse() {
+    let eleven_tracks = [
+        "Briefly",
+        "I Do",
+        "Juarez",
+        "Rolling",
+        "A Lifetime",
+        "Recognize",
+        "Get You In",
+        "Sincerely, Me",
+        "Extra Ordinary",
+        "King of New Orleans",
+        "Closer",
+    ];
+    let mut thirteen_tracks = eleven_tracks.to_vec();
+    thirteen_tracks.extend(["Bonus One", "Bonus Two"]);
+    let source_tracks = eleven_tracks
+        .into_iter()
+        .chain([
+            "Briefly - Closer",
+            "I Do - Closer",
+            "Juarez - Closer",
+            "Rolling - Closer",
+            "A Lifetime - Closer",
+        ])
+        .collect::<Vec<_>>();
+    let rows = source_tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| SourceRow {
+            stable_id: format!("closer-{index}"),
+            artist: "Better Than Ezra".into(),
+            album: "Closer".into(),
+            track: (*track).into(),
+            variants: Vec::new(),
+            play_count: 1,
+            earliest: 1,
+            latest: 1,
+        })
+        .collect::<Vec<_>>();
+    let client = fake_client(
+        [
+            album_search_response(vec![
+                album_summary_json("thirteen", "Closer", "Better Than Ezra", 13),
+                album_summary_json("eleven", "Closer", "Better Than Ezra", 11),
+            ]),
+            album_response("thirteen", "Closer", "Better Than Ezra", &thirteen_tracks),
+            album_response("eleven", "Closer", "Better Than Ezra", &eleven_tracks),
+        ],
+        "",
+    );
+
+    let matches = match_batch(&client, "Better Than Ezra", "Closer", false, &rows)
+        .await
+        .unwrap();
+
+    assert!(matches
+        .iter()
+        .all(|result| result.selected_uri.as_deref() == Some("spotify:album:eleven")));
+    assert_eq!(client.transport().requests().len(), 3);
+}
+
+#[tokio::test]
 async fn album_summary_gate_uses_strongest_tier_and_hydrates_only_three_in_order() {
     let summaries = vec![
         album_summary_json("wrongartist", "Target", "Other Artist", 3),

@@ -960,14 +960,11 @@ fn album_summary_title_tier(source: &str, candidate: &str) -> Option<u8> {
         .then_some(3)
 }
 
-fn album_summary_track_rank(source_count: usize, candidate_count: u32) -> Option<(u8, u32)> {
-    if source_count > 0 && candidate_count > 0 && (candidate_count as usize) < source_count {
-        return None;
-    }
+fn album_summary_track_rank(source_count: usize, candidate_count: u32) -> (u8, u32) {
     if candidate_count == 0 {
-        Some((1, u32::MAX))
+        (1, u32::MAX)
     } else {
-        Some((0, candidate_count.saturating_sub(source_count as u32)))
+        (0, candidate_count.abs_diff(source_count as u32))
     }
 }
 
@@ -982,7 +979,7 @@ pub(super) fn supported_album_summaries(
         .enumerate()
         .filter_map(|(spotify_order, album)| {
             let title_tier = album_summary_title_tier(source_album, &album.name)?;
-            let track_rank = album_summary_track_rank(source_track_names.len(), album.track_count)?;
+            let track_rank = album_summary_track_rank(source_track_names.len(), album.track_count);
             let artist_rank =
                 if normalize_catalog_text(source_artist) == normalize_catalog_text(&album.artist) {
                     0
