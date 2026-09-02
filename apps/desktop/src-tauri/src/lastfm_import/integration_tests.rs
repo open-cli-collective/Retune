@@ -4136,6 +4136,70 @@ async fn collection_page_open_does_not_refetch_legacy_album_search_rows() {
 }
 
 #[tokio::test]
+async fn cached_collection_page_reranks_with_unknown_spotify_membership() {
+    let directory = tempfile::tempdir().unwrap();
+    let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+    let mut rows = Vec::new();
+    aggregate_scrobbles(
+        &mut rows,
+        &[
+            scrobble("Artist", "", "One", 1),
+            scrobble("Artist", "", "Two", 2),
+            scrobble("Artist", "Closer", "One", 3),
+            scrobble("Artist", "Closer", "Two", 4),
+        ],
+    );
+    let mut session = collection_session(&rows);
+    let batch = review_batches(&session).remove(0);
+    let mut smaller = collection_album(
+        "spotify:album:smaller",
+        "Artist",
+        &[("One", "spotify:track:one"), ("Two", "spotify:track:two")],
+    );
+    smaller.matching.name = "Closer".into();
+    let mut larger = collection_album(
+        "spotify:album:larger",
+        "Artist",
+        &[
+            ("One", "spotify:track:large-one"),
+            ("Two", "spotify:track:large-two"),
+            ("Bonus", "spotify:track:bonus"),
+        ],
+    );
+    larger.matching.name = "Closer".into();
+    session.collection_album_matches.insert(
+        batch.page,
+        CollectionAlbumMatchState {
+            cached_candidates: vec![larger, smaller],
+            ..CollectionAlbumMatchState::default()
+        },
+    );
+    service.save(session).await.unwrap();
+
+    lazy_match_page(
+        service.as_ref(),
+        lastfm.as_ref(),
+        &state.spotify_membership,
+        &state.library,
+        &state.cooldown_store,
+        &|| Err::<Arc<crate::SpotifyProvider>, _>("provider should not be needed".into()),
+        &|| Ok(false),
+        ReviewBatchKey {
+            batch_id: batch.page,
+            artist: "Artist".into(),
+            album: "Closer".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        service.snapshot().await.unwrap().collection_album_matches[&batch.page].selected_album_uris,
+        vec!["spotify:album:smaller"]
+    );
+}
+
+#[tokio::test]
 async fn accept_all_skips_collection_batches_without_automatic_searches() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());

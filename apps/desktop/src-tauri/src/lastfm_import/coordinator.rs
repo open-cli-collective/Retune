@@ -536,10 +536,10 @@ where
         && !initial_needs_match
         && initial_session.spotify_account_id.is_some()
     {
-        match cached_spotify_binding_is_current(service, lastfm, spotify_membership).await? {
-            Some(false) => return Ok((None, false, false)),
-            None => return Ok((service.page(batch_id, artist, album).await, false, false)),
-            Some(true) => {}
+        if let Some(false) =
+            cached_spotify_binding_is_current(service, lastfm, spotify_membership).await?
+        {
+            return Ok((None, false, false));
         }
         let session = service
             .snapshot()

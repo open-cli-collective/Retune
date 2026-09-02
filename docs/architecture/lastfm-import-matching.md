@@ -140,9 +140,10 @@ albums' cached track union then drives local matching. Explicit collection-album
 search accepts ordinary user text as well as Spotify field syntax. Search
 returns album summaries; the first Preview or Add obtains the complete album,
 after which preview, add, remove, revisit, and reranking are local. Opening a
-cached collection page never resolves `/me`; if the install-local catalog cannot
-prove the bound account, Retune shows the persisted page without membership
-reranking.
+cached collection page never resolves `/me`. Its candidates and mappings remain
+scoped to the session's Spotify account ID, so an unknown or disconnected
+membership snapshot still permits local reranking; an explicitly different
+account suspends the session.
 
 Release search hydrates track lists only for summaries in the strongest
 album-title tier. Known advertised track counts are ranked by proximity to the
