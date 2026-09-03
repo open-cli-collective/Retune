@@ -288,7 +288,7 @@ The UI keeps the last resolved projection visible while the same selection is
 refreshed. A source, facet, search, or scope change invalidates it until that
 new projection resolves, so playback cannot consume rows from the prior view.
 Double-clicking a facet row waits for that exact projection, then starts its
-first visible track with the full projection as the new queue.
+first enabled visible track with the enabled projection as the new queue.
 
 ## Track sorting
 

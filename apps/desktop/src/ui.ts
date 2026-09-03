@@ -67,7 +67,7 @@ export const resizedPaneHeight = (startHeight: number, startY: number, clientY: 
 export const clearedTrackRating = (inherited: number | null) =>
   inherited === null ? null : { stars: inherited, explicit: false }
 
-export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId: number) =>
+export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId?: number) =>
   tracks.filter((track) => track.enabled || track.id === requestedId)
 
 export const playbackStartAction = (uri: string | undefined, connected: boolean) =>
