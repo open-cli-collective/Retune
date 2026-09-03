@@ -3,7 +3,9 @@
 The Tauri shell stores Retune state in the platform application-data directory.
 All JSON state writes use one shared primitive that creates a unique,
 same-directory temporary file without truncating an existing writer, syncs it,
-and atomically renames it into place. Open, write, sync, and rename failures
+and atomically renames it into place. Windows serializes the final replacement
+because simultaneous `MoveFileExW` calls can reject one another. Open, write,
+sync, and rename failures
 leave the previous destination intact and remove only that writer's temporary
 file. Secret temporaries are created with mode 0600 on Unix before any bytes are
 written; legacy secret permissions are repaired through the open descriptor
