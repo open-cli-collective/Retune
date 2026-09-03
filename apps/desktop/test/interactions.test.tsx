@@ -86,7 +86,7 @@ describe('mounted native interaction boundaries', () => {
       { ...track(1, 'Excluded'), uri: 'fixture:track:excluded', enabled: false },
       { ...track(2, 'Included'), uri: 'fixture:track:included', enabled: true },
     ]
-    const browse: BrowseView = {
+    let browse: BrowseView = {
       facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] },
       tracks,
       albumRating: null,
@@ -118,6 +118,14 @@ describe('mounted native interaction boundaries', () => {
 
     await act(async () => view.querySelector<HTMLButtonElement>('[data-facet="cat"] [data-row-index="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
     await waitFor(() => expect(view.querySelector('.lcd-copy .marquee')?.textContent).toBe('Included'))
+
+    browse = {
+      ...browse,
+      tracks: browse.tracks.map((track, index) => ({ ...track, id: index + 3, name: `No Playback ${index + 1}`, enabled: false })),
+    }
+    await act(async () => view.querySelector<HTMLButtonElement>('[data-facet="art"] [data-row-index="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    await waitFor(() => expect(view.querySelector('[data-track-id="3"]')?.textContent).toContain('No Playback 1'))
+    expect(view.querySelector('.lcd-copy .marquee')?.textContent).toBe('Included')
   })
 
   it('keeps unavailable artist follow state retryable and rejects a late stale retry', async () => {
