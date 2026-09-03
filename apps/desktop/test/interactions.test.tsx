@@ -3,11 +3,14 @@
 import { act, createRef, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ArtistPageView, SpotifyNavEntry, Track } from '../src/types.ts'
+import type { ArtistPageView, BrowseView, LastFmImportState, LastFmState, Settings, SpotifyNavEntry, Track } from '../src/types.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
 const nativeEventHandlers = vi.hoisted(() => new Map<string, (payload: unknown) => void>())
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: invokeMock,
+  Channel: class { onmessage: (event: unknown) => void; constructor(onmessage: (event: unknown) => void) { this.onmessage = onmessage } },
+}))
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
     nativeEventHandlers.set(name, (payload) => handler({ payload }))
@@ -16,7 +19,8 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn(async () => () => {}), setTitle: vi.fn(async () => {}) }) }))
 
-import { TransportBar } from '../src/App.tsx'
+import App, { TransportBar } from '../src/App.tsx'
+import { defaultSettings } from '../src/appState.ts'
 import LastFmImporter from '../src/LastFmImporter.tsx'
 import { TrackList } from '../src/libraryViews.tsx'
 import { SpotifySearch } from '../src/spotifyViews.tsx'
@@ -77,6 +81,45 @@ afterEach(async () => {
 })
 
 describe('mounted native interaction boundaries', () => {
+  it('starts a facet with its first enabled visible track', async () => {
+    const tracks = [
+      { ...track(1, 'Excluded'), uri: 'fixture:track:excluded', enabled: false },
+      { ...track(2, 'Included'), uri: 'fixture:track:included', enabled: true },
+    ]
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] },
+      tracks,
+      albumRating: null,
+      albumRatingArtist: null,
+      albumRatingAmbiguous: false,
+      counts: { tracks: tracks.length, totalSecs: 360, perSource: { music: tracks.length, podcasts: 0, audiobooks: 0 } },
+    }
+    const settings: Settings = { ...defaultSettings, theme: 'light' }
+    const lastfm: LastFmState = { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+    const lastfmImport: LastFmImportState = {
+      phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1,
+      totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0,
+      defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0,
+      retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0,
+      syncProblem: null, applyingAll: false, spotifyLimit: null,
+    }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'browse') return browse
+      if (command === 'get_settings') return settings
+      if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'lastfm_state') return lastfm
+      if (command === 'lastfm_import_state') return lastfmImport
+      if (command === 'playlists_list') return []
+      if (command === 'subscribe_main_events') return 1
+      return null
+    })
+    const view = await render(<App />)
+    await waitFor(() => expect(view.querySelector('[data-facet="cat"] [data-row-index="1"]')).not.toBeNull())
+
+    await act(async () => view.querySelector<HTMLButtonElement>('[data-facet="cat"] [data-row-index="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    await waitFor(() => expect(view.querySelector('.lcd-copy .marquee')?.textContent).toBe('Included'))
+  })
+
   it('keeps unavailable artist follow state retryable and rejects a late stale retry', async () => {
     const lateArtistA = deferred<ArtistPageView>()
     let artistACalls = 0

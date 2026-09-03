@@ -244,8 +244,9 @@ function App() {
     }
     if (state.viewKey !== browserPlayKey) return
     setBrowserPlayKey(undefined)
-    const first = displayedTracks[0]
-    if (first && tracklistVisible) player.start(first.id, displayedTracks, { kind: 'library', source: state.source })
+    const queue = playbackQueue(displayedTracks)
+    const first = queue[0]
+    if (first && tracklistVisible) player.start(first.id, queue, { kind: 'library', source: state.source })
   }, [browserPlayKey, browseKey, displayedTracks, player, state.source, state.viewKey, tracklistVisible])
   const setBrowserPanes = useCallback((browserPanes: BrowserPanes) => {
     for (const facet of ['cat', 'art', 'alb'] as const) {

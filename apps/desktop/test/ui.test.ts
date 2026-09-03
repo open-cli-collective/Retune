@@ -1043,13 +1043,14 @@ test('clearing a track rating reveals its inherited album rating', () => {
   assert.equal(clearedTrackRating(null), null)
 })
 
-test('sequential playback skips exclusions but an explicit start still plays one', () => {
+test('ordinary queues skip exclusions but an explicit start still plays one', () => {
   const tracks = [
     { id: 1, enabled: true },
     { id: 2, enabled: false },
     { id: 3, enabled: true },
   ] as never
-  assert.deepEqual(playbackQueue(tracks, 1).map((track) => track.id), [1, 3])
+  assert.deepEqual(playbackQueue(tracks).map((track) => track.id), [1, 3])
+  assert.deepEqual(playbackQueue(tracks.map((track) => ({ ...track, enabled: false }))).map((track) => track.id), [])
   assert.deepEqual(playbackQueue(tracks, 2).map((track) => track.id), [1, 2, 3])
 })
 
