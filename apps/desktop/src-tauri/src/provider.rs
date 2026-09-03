@@ -1,6 +1,6 @@
 use retune_core::model::NewTrack;
 use retune_spotify::{
-    client::{endpoint_family, Album, Artist, Image, Page, SpotifyClient, Transport},
+    client::{endpoint_family, Album, Artist, Image, Page, SearchSource, SpotifyClient, Transport},
     normalize,
     tokens::TokenStore,
 };
@@ -122,6 +122,11 @@ pub struct SearchResults {
     pub tracks: SearchGroup<SearchTrack>,
 }
 
+pub struct SearchResultsWithSource {
+    pub results: SearchResults,
+    pub source: SearchSource,
+}
+
 pub struct Snapshot {
     pub batches: Vec<Vec<NewTrack>>,
     pub genres_degraded: bool,
@@ -232,12 +237,8 @@ struct SyncRun<'a> {
 
 impl SyncRun<'_> {
     fn cooldown(&self, family: &str) -> Option<Cooldown> {
-        let cooldown = self
-            .cooldowns
-            .lock()
-            .expect("cooldown mutex poisoned")
-            .get(family)
-            .copied()
+        let cooldowns = self.cooldowns.lock().expect("cooldown mutex poisoned");
+        let cooldown = crate::store::cooldown_for_family_in_map(&cooldowns, family)
             .filter(|cooldown| cooldown.deadline > unix_now());
         if let Some(cooldown) = cooldown {
             self.note_deadline(cooldown.deadline);
@@ -250,18 +251,20 @@ impl SyncRun<'_> {
     }
 
     fn record_cooldown(&self, endpoint: &str, kind: CooldownKind, retry_after_secs: u64) {
-        let family = endpoint_family(endpoint);
-        let deadline = unix_now().saturating_add(retry_after_secs);
+        let now = unix_now();
+        let deadline = now.saturating_add(retry_after_secs);
+        let key = match kind {
+            CooldownKind::Transient => endpoint_family(endpoint),
+            CooldownKind::Quota => crate::store::GLOBAL_QUOTA_KEY.to_owned(),
+        };
         self.cooldowns
             .lock()
             .expect("cooldown mutex poisoned")
-            .insert(family.clone(), Cooldown { kind, deadline });
+            .insert(key, Cooldown { kind, deadline });
         self.note_deadline(deadline);
         if let Err(error) = self
             .cooldown_store
-            .update_cooldowns(unix_now(), |cooldowns| {
-                cooldowns.insert(family, Cooldown { kind, deadline });
-            })
+            .record_cooldown(endpoint, kind, deadline, now)
         {
             log::warn!("Could not persist Spotify cooldown: {error}");
         }
@@ -1095,23 +1098,101 @@ fn search_group<T, U>(page: Page<T>, offset: u32, map: impl FnMut(T) -> U) -> Se
     }
 }
 
+pub async fn search_with_source<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+    offset: u32,
+) -> Result<SearchResultsWithSource, String> {
+    let response = SpotifyClient::search_with_types_with_source(
+        client,
+        query,
+        "artist,album,track",
+        offset,
+        SEARCH_PAGE_SIZE,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let results = response.results;
+    Ok(SearchResultsWithSource {
+        results: SearchResults {
+            artists: search_group(results.artists, offset, |artist| SearchArtist {
+                id: artist.id.clone(),
+                descriptor: artist_descriptor(&artist),
+                image_url: image_url(&artist.images),
+                name: artist.name,
+            }),
+            albums: search_group(results.albums, offset, search_album),
+            tracks: search_group(results.tracks, offset, |track| SearchTrack {
+                uri: track.uri,
+                name: track.name,
+                artist: track
+                    .artists
+                    .first()
+                    .map(|artist| artist.name.clone())
+                    .unwrap_or_default(),
+                alb: track
+                    .album
+                    .as_ref()
+                    .map(|album| album.name.clone())
+                    .unwrap_or_default(),
+                duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
+                image_url: track
+                    .album
+                    .as_ref()
+                    .and_then(|album| image_url(&album.images)),
+                album_uri: track.album.map(|album| album.uri),
+                in_library: false,
+            }),
+        },
+        source: response.source,
+    })
+}
+
+#[cfg(test)]
 pub async fn search<T: Transport, S: TokenStore>(
     client: &SpotifyClient<T, S>,
     query: &str,
     offset: u32,
 ) -> Result<SearchResults, String> {
-    let results = SpotifyClient::search(client, query, offset, SEARCH_PAGE_SIZE)
+    search_with_source(client, query, offset)
         .await
-        .map_err(|error| error.to_string())?;
-    Ok(SearchResults {
-        artists: search_group(results.artists, offset, |artist| SearchArtist {
-            id: artist.id.clone(),
-            descriptor: artist_descriptor(&artist),
-            image_url: image_url(&artist.images),
-            name: artist.name,
-        }),
-        albums: search_group(results.albums, offset, search_album),
-        tracks: search_group(results.tracks, offset, |track| SearchTrack {
+        .map(|response| response.results)
+}
+
+pub async fn search_albums_with_source<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+) -> Result<(SearchGroup<SearchAlbum>, SearchSource), String> {
+    let response =
+        SpotifyClient::search_with_types_with_source(client, query, "album", 0, SEARCH_PAGE_SIZE)
+            .await
+            .map_err(|error| error.to_string())?;
+    Ok((
+        search_group(response.results.albums, 0, search_album),
+        response.source,
+    ))
+}
+
+#[cfg(test)]
+pub async fn search_albums<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+) -> Result<SearchGroup<SearchAlbum>, String> {
+    search_albums_with_source(client, query)
+        .await
+        .map(|(results, _)| results)
+}
+
+pub async fn search_tracks_with_source<T: Transport, S: TokenStore>(
+    client: &SpotifyClient<T, S>,
+    query: &str,
+) -> Result<(SearchGroup<SearchTrack>, SearchSource), String> {
+    let response =
+        SpotifyClient::search_with_types_with_source(client, query, "track", 0, SEARCH_PAGE_SIZE)
+            .await
+            .map_err(|error| error.to_string())?;
+    Ok((
+        search_group(response.results.tracks, 0, |track| SearchTrack {
             uri: track.uri,
             name: track.name,
             artist: track
@@ -1132,47 +1213,8 @@ pub async fn search<T: Transport, S: TokenStore>(
             album_uri: track.album.map(|album| album.uri),
             in_library: false,
         }),
-    })
-}
-
-pub async fn search_albums<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
-    query: &str,
-) -> Result<SearchGroup<SearchAlbum>, String> {
-    let results = SpotifyClient::search_with_types(client, query, "album", 0, SEARCH_PAGE_SIZE)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(search_group(results.albums, 0, search_album))
-}
-
-pub async fn search_tracks<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
-    query: &str,
-) -> Result<SearchGroup<SearchTrack>, String> {
-    let results = SpotifyClient::search_with_types(client, query, "track", 0, SEARCH_PAGE_SIZE)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(search_group(results.tracks, 0, |track| SearchTrack {
-        uri: track.uri,
-        name: track.name,
-        artist: track
-            .artists
-            .first()
-            .map(|artist| artist.name.clone())
-            .unwrap_or_default(),
-        alb: track
-            .album
-            .as_ref()
-            .map(|album| album.name.clone())
-            .unwrap_or_default(),
-        duration_secs: track.duration_ms.unwrap_or_default() / 1_000,
-        image_url: track
-            .album
-            .as_ref()
-            .and_then(|album| image_url(&album.images)),
-        album_uri: track.album.map(|album| album.uri),
-        in_library: false,
-    }))
+        response.source,
+    ))
 }
 
 pub async fn album_tracks<T: Transport, S: TokenStore>(
@@ -2054,7 +2096,8 @@ mod tests {
         let snapshot = provider_snapshot(&provider, LibraryKind::Tracks)
             .await
             .unwrap();
-        let cooldown = cooldown_store.cooldowns(unix_now()).unwrap()["/me/tracks"];
+        let cooldown =
+            cooldown_store.cooldowns(unix_now()).unwrap()[crate::store::GLOBAL_QUOTA_KEY];
 
         assert!(snapshot.partial);
         assert!(snapshot.quota_exhausted);

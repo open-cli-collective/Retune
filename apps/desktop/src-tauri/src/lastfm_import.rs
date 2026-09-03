@@ -28,6 +28,15 @@ const MAX_RAW_CACHE_BYTES: u64 = 100 * 1024 * 1024;
 const LASTFM_SYNC_VERSION: u8 = 1;
 pub(crate) const LASTFM_MAPPINGS_VERSION: u8 = 1;
 
+pub(super) fn clear_search_quota(
+    cooldown_store: &crate::store::FsCooldownStore,
+    source: retune_spotify::client::SearchSource,
+) -> Result<(), String> {
+    cooldown_store
+        .clear_quota_after_search(source, crate::unix_now())
+        .map_err(|error| error.to_string())
+}
+
 mod application;
 mod apply;
 mod clustering;
@@ -1272,6 +1281,57 @@ async fn enqueue_next_accept_all_job(service: &Service) -> Result<bool, String> 
             .await?;
         log::info!(target: "lastfm_import", "accept-all queued batch={}", batch.page);
         return Ok(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use retune_spotify::client::{fake_client, Response, SearchSource};
+
+    #[tokio::test]
+    async fn importer_network_search_clears_quota_but_cache_hit_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let cooldown_store = crate::store::FsCooldownStore::new(dir.path());
+        let now = crate::unix_now();
+        let deadline = now.saturating_add(300);
+        cooldown_store
+            .record_cooldown("/search", crate::store::CooldownKind::Quota, deadline, now)
+            .unwrap();
+        let client = fake_client(
+            [Response::json(
+                200,
+                serde_json::json!({
+                    "albums": {"items": [], "next": null, "total": 0}
+                }),
+            )],
+            "",
+        );
+
+        let (_, source) = album_candidates_with_source(&client, "Artist Album", None, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(source, SearchSource::Network);
+        clear_search_quota(&cooldown_store, source).unwrap();
+        assert!(cooldown_store.effective_cooldown(now).unwrap().is_none());
+
+        cooldown_store
+            .record_cooldown("/search", crate::store::CooldownKind::Quota, deadline, now)
+            .unwrap();
+        let (_, source) = album_candidates_with_source(&client, "Artist Album", None, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(source, SearchSource::Cache);
+        clear_search_quota(&cooldown_store, source).unwrap();
+        assert_eq!(
+            cooldown_store
+                .effective_cooldown(now)
+                .unwrap()
+                .unwrap()
+                .deadline,
+            deadline
+        );
+        assert_eq!(client.transport().requests().len(), 1);
     }
 }
 

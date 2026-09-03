@@ -786,29 +786,6 @@ impl Service {
         RunnerGuard::claim(&self.sync_running)
     }
 
-    pub(crate) async fn clear_sync_state(&self) -> Result<(), String> {
-        self.ensure_hydrated()?;
-        let active = self
-            .sync_snapshot()
-            .await
-            .active
-            .map(|range| range.cache_id);
-        if let Some(cache_id) = active {
-            self.remove_snapshot(&cache_id).await.map_err(|error| {
-                format!("Could not remove the Last.fm incremental cache: {error}")
-            })?;
-        }
-        self.mutate_sync(|state| {
-            *state = LastFmSyncState {
-                version: LASTFM_SYNC_VERSION,
-                ..LastFmSyncState::default()
-            };
-            Ok(())
-        })
-        .await?;
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(super) async fn save(&self, session: LastFmImportSessionV2) -> Result<(), String> {
         self.mutate_session(|_| Ok((Some(session), ()))).await
@@ -1675,6 +1652,7 @@ impl Service {
                 if state.selected_album_uris.len() == before {
                     return Err("That Spotify album is not in the match set.".into());
                 }
+                state.automatic_selection_disabled = true;
                 rerank_collection_session(&mut session, batch_id, membership, mappings)?;
                 Ok((session, ()))
             },

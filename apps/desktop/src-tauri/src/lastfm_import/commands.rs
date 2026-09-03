@@ -294,15 +294,18 @@ pub(crate) async fn lastfm_import_page(
     album: String,
 ) -> Result<Option<ImportPageView>, String> {
     let state = app.state::<crate::AppState>();
-    let (page, changed) = use_cases(&state)
+    let (page, changed, network_search) = use_cases(&state)
         .page(ReviewBatchKey {
             batch_id,
             artist,
             album,
         })
         .await?;
-    if changed {
+    if changed || network_search {
         let _ = emit_import_invalidated(&app);
+    }
+    if network_search {
+        crate::spotify_commands::emit_spotify_sync_status(&app)?;
     }
     Ok(page)
 }
@@ -415,10 +418,14 @@ pub(crate) async fn lastfm_import_collection_search_albums(
     query: String,
 ) -> Result<Vec<CollectionAlbumCandidate>, String> {
     let state = app.state::<crate::AppState>();
-    let result = use_cases(&state)
+    let (result, network_search) = use_cases(&state)
         .search_collection_albums(batch_id, &artist, &query)
-        .await;
-    result
+        .await?;
+    if network_search {
+        emit_import_invalidated(&app).map_err(|error| error.to_string())?;
+        crate::spotify_commands::emit_spotify_sync_status(&app)?;
+    }
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -474,9 +481,12 @@ pub(crate) async fn lastfm_import_change_track(
     query: String,
 ) -> Result<Option<ImportPageView>, String> {
     let state = app.state::<crate::AppState>();
-    let page = use_cases(&state)
+    let (page, network_search) = use_cases(&state)
         .change_track(batch_id, &id, &query)
         .await?;
+    if network_search {
+        crate::spotify_commands::emit_spotify_sync_status(&app)?;
+    }
     emit_import_invalidated(&app).map_err(|error| error.to_string())?;
     Ok(page)
 }
@@ -489,9 +499,12 @@ pub(crate) async fn lastfm_import_change_album(
     query: String,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
-    let view = use_cases(&state)
+    let (view, network_search) = use_cases(&state)
         .change_album(batch_id, &id, &query)
         .await?;
+    if network_search {
+        crate::spotify_commands::emit_spotify_sync_status(&app)?;
+    }
     emit_import_invalidated(&app).map_err(|error| error.to_string())?;
     Ok(view)
 }
@@ -582,9 +595,12 @@ pub(crate) async fn lastfm_import_prepare_accept_all(
     app: tauri::AppHandle,
 ) -> Result<AcceptAllSummary, String> {
     let state = app.state::<crate::AppState>();
-    let (summary, changed) = use_cases(&state).prepare_accept_all().await?;
-    if changed {
+    let (summary, changed, network_search) = use_cases(&state).prepare_accept_all().await?;
+    if changed || network_search {
         let _ = emit_import_invalidated(&app);
+    }
+    if network_search {
+        crate::spotify_commands::emit_spotify_sync_status(&app)?;
     }
     Ok(summary)
 }

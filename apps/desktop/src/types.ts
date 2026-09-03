@@ -41,6 +41,13 @@ export type SettingsPatch = Partial<Omit<Settings, 'repeat' | 'shuffle' | 'volum
 export type Appearance = Pick<Settings, 'theme'>
 
 export type ConnectionState = { connected: boolean; needs_reauth: boolean; playback_authorized: boolean }
+export type SpotifySyncStatus = {
+  connected: boolean
+  running: boolean
+  lastFullSync: number | null
+  nextSync: number | null
+  cooldown: { kind: 'transient' | 'quota'; deadline: number } | null
+}
 export type LastFmState = {
   available: boolean
   connected: boolean

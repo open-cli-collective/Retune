@@ -605,8 +605,9 @@ pub(super) fn rerank_collection_session(
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    let collection_shaped =
-        batch_is_collection_shaped(session, &batch, &rows.iter().collect::<Vec<_>>());
+    let row_refs = rows.iter().collect::<Vec<_>>();
+    let projection = batch_projection(&batch, &row_refs);
+    let collection_shaped = batch_is_collection_shaped(session, &batch, &row_refs);
     if !collection_shaped && !session.collection_album_matches.contains_key(&batch_id) {
         return Err("Album matching is available only for collection batches.".into());
     }
@@ -622,6 +623,32 @@ pub(super) fn rerank_collection_session(
                 .track_uris
                 .iter()
                 .any(|uri| membership.contains(uri));
+        }
+        if state.selected_album_uris.is_empty()
+            && !state.automatic_selection_disabled
+            && !projection.representative_album.is_empty()
+        {
+            let source_rows = rows
+                .iter()
+                .filter(|row| {
+                    row.artist == projection.representative_artist
+                        && row.album == projection.representative_album
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut candidates = state
+                .cached_candidates
+                .iter()
+                .map(|candidate| candidate.matching.clone())
+                .collect::<Vec<_>>();
+            classify_album_candidates_for_rows(&source_rows, &mut candidates);
+            if let Some(candidate) = automatic_album_candidate_for_rows(
+                &projection.representative_album,
+                &source_rows,
+                &candidates,
+            ) {
+                state.selected_album_uris.push(candidate.uri.clone());
+            }
         }
     }
     let selected = collection_selected_albums(session, batch_id)

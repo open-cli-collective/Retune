@@ -15,6 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use retune_core::io::{export_json, import};
 use retune_core::model::Library;
 use retune_spotify::catalog::SpotifyCatalog;
+use retune_spotify::client::{endpoint_family, SearchSource};
 use retune_spotify::tokens::{TokenStore, Tokens};
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,7 @@ const MAX_SPOTIFY_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LIBRARY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SETTINGS_PATCH_STRING_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_SETTINGS_PATCH_COLLECTION_ITEMS: usize = 4 * 1024;
+pub(crate) const GLOBAL_QUOTA_KEY: &str = "__global_quota__";
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -148,6 +150,8 @@ pub struct Settings {
     pub spotify_sync_completed: bool,
     #[serde(default)]
     pub last_full_sync: Option<u64>,
+    #[serde(default)]
+    pub next_spotify_sync: Option<u64>,
     #[serde(default)]
     pub playback_backend: PlaybackBackend,
     #[serde(default)]
@@ -424,6 +428,7 @@ impl Default for Settings {
             spotify_client_id: String::new(),
             spotify_sync_completed: false,
             last_full_sync: None,
+            next_spotify_sync: None,
             playback_backend: PlaybackBackend::default(),
             repeat: RepeatMode::default(),
             shuffle: false,
@@ -1024,6 +1029,52 @@ impl FsCooldownStore {
         self.update_cooldowns(now, |cooldowns| cooldowns.clone())
     }
 
+    pub fn effective_cooldown(&self, now: u64) -> StoreResult<Option<Cooldown>> {
+        self.cooldowns(now)
+            .map(|cooldowns| effective_cooldown_in_map(&cooldowns))
+    }
+
+    pub fn cooldown_for(&self, family: &str, now: u64) -> StoreResult<Option<Cooldown>> {
+        self.cooldowns(now)
+            .map(|cooldowns| cooldown_for_family_in_map(&cooldowns, family))
+    }
+
+    pub fn record_cooldown(
+        &self,
+        endpoint: &str,
+        kind: CooldownKind,
+        deadline: u64,
+        now: u64,
+    ) -> StoreResult<()> {
+        let key = match kind {
+            CooldownKind::Transient => endpoint_family(endpoint),
+            CooldownKind::Quota => GLOBAL_QUOTA_KEY.to_owned(),
+        };
+        self.update_cooldowns(now, |cooldowns| {
+            if deadline > now {
+                cooldowns.insert(key, Cooldown { kind, deadline });
+            } else {
+                cooldowns.remove(&key);
+            }
+        })
+    }
+
+    pub fn clear_quota(&self, now: u64) -> StoreResult<()> {
+        self.update_cooldowns(now, |cooldowns| {
+            cooldowns.retain(|key, cooldown| {
+                key != GLOBAL_QUOTA_KEY && cooldown.kind != CooldownKind::Quota
+            });
+        })
+    }
+
+    pub fn clear_quota_after_search(&self, source: SearchSource, now: u64) -> StoreResult<()> {
+        if source == SearchSource::Network {
+            self.clear_quota(now)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn update_cooldowns<R>(
         &self,
         now: u64,
@@ -1035,6 +1086,7 @@ impl FsCooldownStore {
         let mut next = current.clone();
         next.retain(|_, cooldown| cooldown.deadline > now);
         let result = update(&mut next);
+        coalesce_legacy_quota_entries(&mut next);
         if &next != current {
             atomic_write(&self.path, &serde_json::to_vec(&next)?, None)?;
             state.cooldowns = Some(next);
@@ -1063,11 +1115,75 @@ impl FsCooldownStore {
         {
             return Ok(());
         }
-        let cooldowns = read_json_or_default(&self.path, MAX_COOLDOWN_BYTES)?;
+        let mut cooldowns = read_json_or_default(&self.path, MAX_COOLDOWN_BYTES)?;
+        if coalesce_legacy_quota_entries(&mut cooldowns) {
+            atomic_write(&self.path, &serde_json::to_vec(&cooldowns)?, None)?;
+        }
         let mut state = self.state.lock().expect("cooldown state mutex poisoned");
         state.cooldowns.get_or_insert(cooldowns);
         Ok(())
     }
+}
+
+pub(crate) fn effective_cooldown_in_map(
+    cooldowns: &BTreeMap<String, Cooldown>,
+) -> Option<Cooldown> {
+    cooldowns.get(GLOBAL_QUOTA_KEY).copied().or_else(|| {
+        cooldowns
+            .values()
+            .min_by_key(|cooldown| cooldown.deadline)
+            .copied()
+    })
+}
+
+pub(crate) fn cooldown_for_family_in_map(
+    cooldowns: &BTreeMap<String, Cooldown>,
+    family: &str,
+) -> Option<Cooldown> {
+    cooldowns
+        .get(GLOBAL_QUOTA_KEY)
+        .copied()
+        .or_else(|| cooldowns.get(family).copied())
+}
+
+fn coalesce_legacy_quota_entries(cooldowns: &mut BTreeMap<String, Cooldown>) -> bool {
+    let legacy_deadline = cooldowns
+        .iter()
+        .filter(|(key, cooldown)| {
+            key.as_str() != GLOBAL_QUOTA_KEY && cooldown.kind == CooldownKind::Quota
+        })
+        .map(|(_, cooldown)| cooldown.deadline)
+        .max();
+    let Some(legacy_deadline) = legacy_deadline else {
+        return false;
+    };
+    let global_deadline = cooldowns
+        .get(GLOBAL_QUOTA_KEY)
+        .filter(|cooldown| cooldown.kind == CooldownKind::Quota)
+        .map(|cooldown| cooldown.deadline);
+    let deadline = global_deadline.map_or(legacy_deadline, |current| current.max(legacy_deadline));
+    let mut changed = false;
+    if global_deadline != Some(deadline) {
+        cooldowns.insert(
+            GLOBAL_QUOTA_KEY.to_owned(),
+            Cooldown {
+                kind: CooldownKind::Quota,
+                deadline,
+            },
+        );
+        changed = true;
+    }
+    let legacy_keys = cooldowns
+        .iter()
+        .filter(|(key, cooldown)| {
+            key.as_str() != GLOBAL_QUOTA_KEY && cooldown.kind == CooldownKind::Quota
+        })
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in legacy_keys {
+        changed |= cooldowns.remove(&key).is_some();
+    }
+    changed
 }
 
 impl FsArtistGenresStore {
@@ -1340,6 +1456,13 @@ impl SettingsState {
             current: Arc::clone(&self.current),
             _mutation_guard: mutation_guard,
         })
+    }
+
+    pub(crate) async fn mutate_private<T>(
+        &self,
+        update: impl FnOnce(&mut Settings) -> Result<T, String>,
+    ) -> Result<(T, Settings), String> {
+        self.mutate(update, |_, _| Ok(())).await
     }
 
     pub async fn mutate<T>(
@@ -2126,6 +2249,7 @@ mod tests {
             spotify_client_id: "client-id".into(),
             spotify_sync_completed: true,
             last_full_sync: Some(42),
+            next_spotify_sync: Some(86_442),
             playback_backend: PlaybackBackend::Local,
             repeat: RepeatMode::All,
             shuffle: true,
@@ -2270,7 +2394,7 @@ mod tests {
         assert_eq!(
             reloaded.cooldowns(50).unwrap(),
             BTreeMap::from([(
-                "/albums".into(),
+                GLOBAL_QUOTA_KEY.into(),
                 Cooldown {
                     kind: CooldownKind::Quota,
                     deadline: 200,
@@ -2279,7 +2403,7 @@ mod tests {
         );
         assert_eq!(
             fs::read(dir.path().join("cooldowns.json")).unwrap(),
-            br#"{"/albums":{"kind":"quota","deadline":200}}"#
+            br#"{"__global_quota__":{"kind":"quota","deadline":200}}"#
         );
         assert_eq!(reloaded.cooldowns(201).unwrap(), BTreeMap::new());
         assert_eq!(fs::read(dir.path().join("cooldowns.json")).unwrap(), b"{}");
@@ -2308,6 +2432,94 @@ mod tests {
 
         fs::remove_dir(dir.path().join("cooldowns.json")).unwrap();
         assert!(store.cooldowns(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_quota_entries_coalesce_to_the_latest_global_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("cooldowns.json"),
+            br#"{"/albums":{"kind":"quota","deadline":200},"/tracks":{"kind":"quota","deadline":300},"/me/tracks":{"kind":"transient","deadline":400}}"#,
+        )
+        .unwrap();
+
+        let store = FsCooldownStore::new(dir.path());
+        assert_eq!(
+            store.cooldowns(100).unwrap(),
+            BTreeMap::from([
+                (
+                    GLOBAL_QUOTA_KEY.into(),
+                    Cooldown {
+                        kind: CooldownKind::Quota,
+                        deadline: 300,
+                    },
+                ),
+                (
+                    "/me/tracks".into(),
+                    Cooldown {
+                        kind: CooldownKind::Transient,
+                        deadline: 400,
+                    },
+                ),
+            ])
+        );
+        assert_eq!(
+            fs::read(dir.path().join("cooldowns.json")).unwrap(),
+            br#"{"/me/tracks":{"kind":"transient","deadline":400},"__global_quota__":{"kind":"quota","deadline":300}}"#
+        );
+    }
+
+    #[test]
+    fn cooldown_policy_uses_global_quota_and_replaces_or_clears_deadlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsCooldownStore::new(dir.path());
+
+        store
+            .record_cooldown("/me/tracks", CooldownKind::Transient, 200, 100)
+            .unwrap();
+        store
+            .record_cooldown("/albums", CooldownKind::Quota, 300, 100)
+            .unwrap();
+        assert_eq!(
+            store.cooldown_for("/artists", 100).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 300,
+            })
+        );
+        assert_eq!(
+            store.cooldown_for("/me/tracks", 100).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 300,
+            })
+        );
+        assert_eq!(
+            store.effective_cooldown(100).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 300,
+            })
+        );
+
+        store
+            .record_cooldown("/me/tracks", CooldownKind::Transient, 250, 100)
+            .unwrap();
+        assert_eq!(
+            store.cooldown_for("/me/tracks", 100).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 300,
+            })
+        );
+
+        store
+            .record_cooldown("/me/tracks", CooldownKind::Transient, 100, 100)
+            .unwrap();
+        assert_eq!(store.cooldowns(100).unwrap().get("/me/tracks"), None);
+
+        store.clear_quota(100).unwrap();
+        assert!(store.cooldowns(100).unwrap().is_empty());
     }
 
     #[test]
@@ -2350,22 +2562,13 @@ mod tests {
         }
         assert_eq!(
             FsCooldownStore::new(dir.path()).cooldowns(100).unwrap(),
-            BTreeMap::from([
-                (
-                    "/albums".into(),
-                    Cooldown {
-                        kind: CooldownKind::Quota,
-                        deadline: 200,
-                    },
-                ),
-                (
-                    "/tracks".into(),
-                    Cooldown {
-                        kind: CooldownKind::Quota,
-                        deadline: 200,
-                    },
-                ),
-            ])
+            BTreeMap::from([(
+                GLOBAL_QUOTA_KEY.into(),
+                Cooldown {
+                    kind: CooldownKind::Quota,
+                    deadline: 200,
+                },
+            )])
         );
     }
 

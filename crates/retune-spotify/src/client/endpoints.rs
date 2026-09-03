@@ -11,7 +11,14 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn me(&self) -> Result<Profile> {
-        self.get("/me").await
+        let profile: Profile = self.get("/me").await?;
+        if let Some(account_id) = profile.account_id() {
+            self.catalog
+                .lock()
+                .expect("Spotify catalog mutex poisoned")
+                .bind_searches_to_account(account_id);
+        }
+        Ok(profile)
     }
 
     pub async fn playlists(
@@ -356,6 +363,18 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         offset: u32,
         limit: u32,
     ) -> Result<SearchResults> {
+        self.search_with_types_with_source(query, types, offset, limit)
+            .await
+            .map(|response| response.results)
+    }
+
+    pub async fn search_with_types_with_source(
+        &self,
+        query: &str,
+        types: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<crate::client::SearchResponse> {
         validate_search_input(query, offset)?;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", query)
@@ -363,18 +382,26 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
             .append_pair("offset", &offset.to_string())
             .append_pair("limit", &limit.min(10).to_string())
             .finish();
+        if let Some(results) = self
+            .catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .cached_search(&query)
+        {
+            return Ok(crate::client::SearchResponse {
+                results,
+                source: crate::client::SearchSource::Cache,
+            });
+        }
         let results: SearchResults = self.get(&format!("/search?{query}")).await?;
-        let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
-        for artist in &results.artists.items {
-            catalog.observe_artist_summary(artist);
-        }
-        for album in &results.albums.items {
-            catalog.observe_album_summary(album);
-        }
-        for track in &results.tracks.items {
-            catalog.observe_track(track);
-        }
-        Ok(results)
+        self.catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .observe_search(query, &results);
+        Ok(crate::client::SearchResponse {
+            results,
+            source: crate::client::SearchSource::Network,
+        })
     }
 
     pub async fn artist_albums(

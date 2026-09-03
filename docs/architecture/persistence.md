@@ -60,6 +60,25 @@ owners. Full Spotify sync receives both; content actions and importer policy
 receive only cooldown persistence. Their filenames and JSON formats are
 unchanged.
 
+`settings.json` retains `next_spotify_sync` as a serde-defaulted private Unix
+deadline. It is written with the rest of settings but is omitted from
+`SettingsView` and `SettingsPatch`, so the frontend cannot accidentally edit the
+automatic schedule. Completed and partial Spotify attempts record the next
+24-hour deadline; a connected fatal attempt records the same fallback before its
+error is returned. An active persisted cooldown overrides it; an empty cooldown
+leaves the daily value in place, and expired deadlines are cleared on
+observation. Disconnect and sign-out do not clear this scheduling state.
+
+`cooldowns.json` stores transient rate limits by endpoint family and one global
+Development Mode quota record under `__global_quota__`. Reads remove expired
+records and legacy per-endpoint quota records are coalesced to the latest global
+deadline atomically on load. An active global quota dominates transient family
+records; without it, callers use the relevant or earliest transient deadline.
+Callers use that effective persisted deadline for sync gating, Last.fm retry
+projections, and the Spotify status snapshot. Network-backed Spotify search
+clears only the global quota record, while a persistent catalog hit leaves all
+cooldown records intact.
+
 The official Tauri window-state plugin manages the main native window's size,
 position, and maximized state in machine-local application state. Its lifecycle
 handles restoring and saving this state; it is not part of backup/export.
@@ -143,22 +162,23 @@ that owned commit. If immediate recovery cannot restore coherence, the shared
 mutation latch rejects later writes until restart recovery succeeds.
 
 `spotify-catalog.json` is a versioned `SpotifyCatalog` V1 wrapper containing
-deterministic artist-ID, album-URI, and track-URI maps. It stores only reusable
-Spotify metadata and complete ordered album-track membership; query results,
-saved membership, ratings, plays, and Last.fm decisions remain elsewhere.
+deterministic artist-ID, album-URI, and track-URI maps plus exact search-result
+identity keyed by normalized request and immutable Spotify account ID. Search
+pages reference catalog entities instead of duplicating their payloads. Saved
+membership, ratings, plays, and Last.fm decisions remain elsewhere.
 Unknown versus known-empty collections and entity/relationship completeness are
 explicit; only validated Spotify IDs and URIs form identity. The shell constructs
 the shared client with an empty catalog and loads the persisted catalog on an
 owned blocking hydration task. The loaded snapshot installs only if the live
 catalog generation is still the startup baseline; observations made while disk
-parsing runs therefore win. Account reset also invalidates in-flight hydration
-before clearing, including when the empty startup catalog cannot bump. Hydration installation and periodic/exit flushes
+parsing runs therefore win. Hydration installation and periodic/exit flushes
 share the catalog flush gate, and successful installation publishes a Library
 invalidation so catalog-backed projections refresh. Load failures are reported
 without flushing the empty startup value over the source file. Dirty generations
 are written with atomic replacement at most every 30 seconds and at exit, and
-corrupt or unsupported files are quarantined. It is excluded from backup and is cleared on
-disconnect, OAuth grant replacement, or confirmed Spotify account mismatch.
+corrupt or unsupported files are quarantined. It is excluded from backup and has
+no expiry. Disconnect and OAuth grant replacement retain it; `/me` selects the
+search namespace belonging to the authenticated account.
 
 `lastfm-import.json` is `LastFmImportSessionV2`. It stores the immutable
 `historyTo`, an optional `downloadedThrough` timestamp, Last.fm username,

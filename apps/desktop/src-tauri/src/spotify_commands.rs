@@ -5,12 +5,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use crate::{
-    album_id, auth, clear_spotify_catalog_async, emit_connection_state_async, emit_main,
-    emit_main_event, empty_player_state, image_url,
+    album_id, auth, emit_connection_state_async, emit_main, emit_main_event, empty_player_state,
+    image_url,
     library_commands::{rating_view, RatingView},
     main_events, notify_error, playlist_commands,
     provider::{
@@ -29,7 +29,10 @@ use crate::{
 use librespot_core::{authentication::Credentials, config::SessionConfig, session::Session};
 use retune_core::model::{AlbumKey, Library, Rating, SourceId};
 use retune_spotify::{
-    client::{Album, HttpTransport, Profile, SpotifyClient, Track as SpotifyTrack, Transport},
+    client::{
+        Album, HttpTransport, Profile, SearchSource, SpotifyClient, Track as SpotifyTrack,
+        Transport,
+    },
     tokens::{PlaybackCredentials, TokenStore, Tokens},
 };
 use serde::{Deserialize, Serialize};
@@ -226,6 +229,7 @@ pub(super) async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(run) = state.sync_orchestrator.begin() else {
         return Ok(());
     };
+    let _ = emit_spotify_sync_status(app);
     run_sync_loop(app, run).await
 }
 
@@ -241,32 +245,77 @@ async fn run_sync_loop(
         if run.finish() {
             continue;
         }
+        let fallback_deadline = if result.is_err() {
+            record_failed_sync_schedule(app).await
+        } else {
+            None
+        };
+        let _ = emit_spotify_sync_status(app);
         if let Ok(SyncCompletion {
             auto_resume: Some(deadline),
             ..
         }) = &result
         {
             schedule_auto_resume(app, *deadline);
+        } else if let Some(deadline) = fallback_deadline {
+            schedule_auto_resume(app, deadline);
         }
         return result.map(|_| ());
     }
 }
 
-fn schedule_auto_resume(app: &tauri::AppHandle, deadline: u64) {
+async fn record_failed_sync_schedule(app: &tauri::AppHandle) -> Option<u64> {
+    let state = app.state::<AppState>();
+    let connected = match stored_connection_state(&state.token_store) {
+        Ok(connection) => connection.connected,
+        Err(error) => {
+            log::warn!("Could not inspect Spotify connection after sync failure: {error}");
+            false
+        }
+    };
+    if !connected {
+        return None;
+    }
     let now = unix_now();
-    let jitter = 30
-        + SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u64
-            % 61;
-    let delay = Duration::from_secs(deadline.saturating_sub(now).saturating_add(jitter));
+    let cooldown = match state.cooldown_store.effective_cooldown(now) {
+        Ok(cooldown) => cooldown,
+        Err(error) => {
+            log::warn!("Could not inspect Spotify cooldown after sync failure: {error}");
+            None
+        }
+    };
+    let cooldown_deadline = cooldown.map(|cooldown| cooldown.deadline);
+    let settings = match state
+        .settings
+        .mutate_private(|settings| {
+            record_sync_schedule(settings, true, now, cooldown_deadline);
+            Ok(())
+        })
+        .await
+    {
+        Ok((_, settings)) => settings,
+        Err(error) => {
+            log::warn!("Could not persist Spotify retry schedule after sync failure: {error}");
+            return None;
+        }
+    };
+    effective_sync_deadline(
+        scheduled_sync_deadline(settings.next_spotify_sync, settings.last_full_sync),
+        cooldown,
+        now,
+    )
+}
+
+pub(super) fn schedule_auto_resume(app: &tauri::AppHandle, deadline: u64) {
+    let now = unix_now();
+    let delay = Duration::from_secs(deadline.saturating_sub(now));
     let handle = app.clone();
     let retry = tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let state = handle.state::<AppState>();
         state.sync_orchestrator.retry_fired();
         if let Some(run) = state.sync_orchestrator.begin() {
+            let _ = emit_spotify_sync_status(&handle);
             if let Err(error) = Box::pin(run_sync_loop(&handle, run)).await {
                 notify_error(&handle, error);
             }
@@ -277,9 +326,110 @@ fn schedule_auto_resume(app: &tauri::AppHandle, deadline: u64) {
         .replace_retry(retry);
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SpotifySyncStatus {
+    connected: bool,
+    running: bool,
+    last_full_sync: Option<u64>,
+    next_sync: Option<u64>,
+    cooldown: Option<store::Cooldown>,
+}
+
+pub(super) fn spotify_sync_status_snapshot(
+    app: &tauri::AppHandle,
+) -> Result<SpotifySyncStatus, String> {
+    let state = app.state::<AppState>();
+    let now = unix_now();
+    let cooldown = state
+        .cooldown_store
+        .effective_cooldown(now)
+        .map_err(|error| error.to_string())?;
+    let settings = state.settings.snapshot();
+    let next_sync = scheduled_sync_deadline(settings.next_spotify_sync, settings.last_full_sync);
+    Ok(SpotifySyncStatus {
+        connected: stored_connection_state(&state.token_store)?.connected,
+        running: state.sync_orchestrator.running(),
+        last_full_sync: settings.last_full_sync,
+        next_sync: effective_sync_deadline(next_sync, cooldown, now),
+        cooldown,
+    })
+}
+
+pub(super) fn emit_spotify_sync_status(app: &tauri::AppHandle) -> Result<(), String> {
+    let status = spotify_sync_status_snapshot(app)?;
+    emit_main(app, "spotify-sync-status-changed", status).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(super) async fn spotify_sync_status(
+    app: tauri::AppHandle,
+) -> Result<SpotifySyncStatus, String> {
+    let state = app.state::<AppState>();
+    let now = unix_now();
+    if state
+        .settings
+        .snapshot()
+        .next_spotify_sync
+        .is_some_and(|deadline| deadline <= now)
+    {
+        state
+            .settings
+            .mutate_private(|settings| {
+                if settings
+                    .next_spotify_sync
+                    .is_some_and(|deadline| deadline <= now)
+                {
+                    settings.next_spotify_sync = None;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    spotify_sync_status_snapshot(&app)
+}
+
 struct SyncCompletion {
     partial: bool,
     auto_resume: Option<u64>,
+}
+
+pub(super) const SPOTIFY_SYNC_INTERVAL_SECS: u64 = 24 * 60 * 60;
+
+pub(super) fn scheduled_sync_deadline(
+    next_sync: Option<u64>,
+    last_full_sync: Option<u64>,
+) -> Option<u64> {
+    next_sync.or_else(|| last_full_sync.map(|last| last.saturating_add(SPOTIFY_SYNC_INTERVAL_SECS)))
+}
+
+pub(super) fn effective_sync_deadline(
+    next_sync: Option<u64>,
+    cooldown: Option<store::Cooldown>,
+    now: u64,
+) -> Option<u64> {
+    cooldown
+        .filter(|cooldown| cooldown.deadline > now)
+        .map(|cooldown| cooldown.deadline)
+        .or_else(|| next_sync.filter(|deadline| *deadline > now))
+}
+
+pub(super) fn record_sync_schedule(
+    settings: &mut Settings,
+    partial: bool,
+    now: u64,
+    cooldown_deadline: Option<u64>,
+) -> bool {
+    let completed = !partial;
+    settings.next_spotify_sync = Some(now.saturating_add(SPOTIFY_SYNC_INTERVAL_SECS));
+    if completed {
+        settings.spotify_sync_completed = true;
+        settings.last_full_sync = Some(now);
+    }
+    if let Some(deadline) = cooldown_deadline.filter(|deadline| *deadline > now) {
+        settings.next_spotify_sync = Some(deadline);
+    }
+    completed
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -402,7 +552,6 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
             let _ = emit_main(app, "sync-progress", phase);
         },
         &on_batch,
-        || clear_spotify_catalog_async(app),
         || {
             let tracks = sync_progress
                 .lock()
@@ -476,9 +625,17 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
     if let Err(error) = playlist_commands::sync_playlists(app, provider.as_ref()).await {
         log::warn!("Playlist sync failed: {error}");
     }
+    let next_sync = effective_sync_deadline(
+        state.settings.snapshot().next_spotify_sync,
+        state
+            .cooldown_store
+            .effective_cooldown(unix_now())
+            .map_err(|error| error.to_string())?,
+        unix_now(),
+    );
     Ok(SyncCompletion {
         partial,
-        auto_resume: partial.then_some(earliest_cooldown).flatten(),
+        auto_resume: next_sync,
     })
 }
 
@@ -507,18 +664,13 @@ struct SpotifySyncResult {
 }
 
 impl SpotifySyncApplication<'_> {
-    async fn execute<ClearCatalog, ClearCatalogFuture>(
+    async fn execute(
         &self,
         provider: &crate::SpotifyProvider,
         progress: impl FnMut(&str) + Send,
         on_batch: &(dyn Fn(SyncBatch) + Send + Sync),
-        clear_catalog: ClearCatalog,
         before_commit: impl FnOnce() -> Result<(), String>,
-    ) -> Result<SpotifySyncResult, String>
-    where
-        ClearCatalog: FnOnce() -> ClearCatalogFuture,
-        ClearCatalogFuture: std::future::Future<Output = Result<(), String>>,
-    {
+    ) -> Result<SpotifySyncResult, String> {
         let session_revision = self.session.revision();
         let baseline_membership = self.membership.snapshot();
         if !stored_connection_state(self.token_store)?.connected {
@@ -548,10 +700,7 @@ impl SpotifySyncApplication<'_> {
             .migrate_spotify_account_id(&profile.id, &account_id)
             .await?;
         let current = membership.snapshot();
-        let (reconciled, account_changed) = reconcile_spotify_account(current, &profile)?;
-        if account_changed {
-            clear_catalog().await?;
-        }
+        let (reconciled, _) = reconcile_spotify_account(current, &profile)?;
         let sync::SnapshotOutcome {
             tracks,
             genres_degraded,
@@ -606,6 +755,7 @@ impl SpotifySyncApplication<'_> {
             candidate,
             partial,
             unix_now(),
+            earliest_cooldown,
             session_commit,
             #[cfg(test)]
             None,
@@ -636,6 +786,7 @@ async fn commit_sync_state(
     next_library: Library,
     partial: bool,
     committed_at: u64,
+    cooldown_deadline: Option<u64>,
     session_commit: tokio::sync::OwnedMutexGuard<()>,
     #[cfg(test)] commit_hook: Option<(usize, Arc<crate::store::SaveHook>)>,
 ) -> Result<SyncCommitReceipt, String> {
@@ -646,7 +797,7 @@ async fn commit_sync_state(
         let library_changed = before_library != next_library;
         let before_settings = settings_guard.snapshot();
         let mut next_settings = before_settings.clone();
-        record_full_sync(&mut next_settings, partial, committed_at);
+        record_sync_schedule(&mut next_settings, partial, committed_at, cooldown_deadline);
         let journal = crate::spotify_sync_commit::Journal::applying(
             crate::spotify_sync_commit::Change {
                 before: before_membership,
@@ -776,13 +927,9 @@ fn normalize_sync_baseline(
     baseline
 }
 
+#[cfg(test)]
 pub(super) fn record_full_sync(settings: &mut Settings, partial: bool, now: u64) -> bool {
-    if partial {
-        return false;
-    }
-    settings.spotify_sync_completed = true;
-    settings.last_full_sync = Some(now);
-    true
+    record_sync_schedule(settings, partial, now, None)
 }
 
 pub(super) fn mark_album_membership(
@@ -837,10 +984,8 @@ pub(super) async fn artist_albums_outcome<T: Transport, S: TokenStore>(
     display_now: chrono::DateTime<chrono::Local>,
 ) -> Result<ArtistAlbumsPage, String> {
     if let Some(cooldown) = cooldown_store
-        .cooldowns(now)
+        .cooldown_for("/artists", now)
         .map_err(|error| error.to_string())?
-        .get("/artists")
-        .copied()
     {
         let time = provider::format_resume_time(cooldown.deadline, display_now);
         return Err(match cooldown.kind {
@@ -1150,7 +1295,6 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
         .replace_owned(SpotifyLibraryState::default(), commit)
         .await
         .map_err(|error| error.to_string())?;
-    clear_spotify_catalog_async(&app).await?;
     let tokens = web_oauth_tokens(
         token.access_token,
         refresh,
@@ -1307,7 +1451,6 @@ pub(super) async fn disconnect_spotify(app: tauri::AppHandle) -> Result<(), Stri
         .replace(SpotifyLibraryState::default())
         .await
         .map_err(|error| error.to_string())?;
-    clear_spotify_catalog_async(&app).await?;
     drop(membership);
     let token_store = Arc::clone(&state.token_store);
     tauri::async_runtime::spawn_blocking(move || token_store.clear())
@@ -1351,10 +1494,11 @@ pub(super) async fn sync_from_spotify(app: tauri::AppHandle) -> Result<(), Strin
 
 #[tauri::command]
 pub(super) async fn spotify_search(
-    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     query: String,
     offset: u32,
 ) -> Result<SearchResults, String> {
+    let state = app.state::<AppState>();
     retune_spotify::client::validate_search_input(&query, offset)
         .map_err(|error| error.to_string())?;
     if query.trim().is_empty() {
@@ -1380,7 +1524,15 @@ pub(super) async fn spotify_search(
         return Err("Connect to Spotify to search.".into());
     }
     let provider = provider_from(&state)?;
-    let mut results = provider::search(provider.as_ref(), query.trim(), offset).await?;
+    let response = provider::search_with_source(provider.as_ref(), query.trim(), offset).await?;
+    if response.source == SearchSource::Network {
+        state
+            .cooldown_store
+            .clear_quota_after_search(response.source, unix_now())
+            .map_err(|error| error.to_string())?;
+        let _ = emit_spotify_sync_status(&app);
+    }
+    let mut results = response.results;
     let spotify_library = state.spotify_membership.snapshot();
     mark_album_membership(
         &state.library.lock().expect("library mutex poisoned"),
@@ -1454,12 +1606,13 @@ pub(super) async fn spotify_follow_artist(
 
 #[tauri::command(rename_all = "camelCase")]
 pub(super) async fn spotify_artist_albums(
-    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     artist_id: String,
     offset: u32,
 ) -> Result<ArtistAlbumsPage, String> {
+    let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
-    let mut page = artist_albums_outcome(
+    let outcome = artist_albums_outcome(
         provider.as_ref(),
         &state.cooldown_store,
         &artist_id,
@@ -1467,7 +1620,9 @@ pub(super) async fn spotify_artist_albums(
         unix_now(),
         chrono::Local::now(),
     )
-    .await?;
+    .await;
+    let _ = emit_spotify_sync_status(&app);
+    let mut page = outcome?;
     mark_album_membership(
         &state.library.lock().expect("library mutex poisoned"),
         &state.spotify_membership.snapshot(),
@@ -2204,6 +2359,7 @@ mod tests {
             after_library.clone(),
             false,
             42,
+            None,
             session.commit_revision(session.revision()).await.unwrap(),
             Some((1, Arc::clone(&hook))),
         ));
@@ -2247,6 +2403,7 @@ mod tests {
             changed_again,
             false,
             43,
+            None,
             session.commit_revision(session.revision()).await.unwrap(),
             None,
         )

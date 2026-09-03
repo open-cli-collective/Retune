@@ -31,9 +31,10 @@ narrow worker/event callbacks. Lower stages never receive `AppHandle` or
 
 The Last.fm connector owns recent-track pagination policy and accepted-scrobble
 receipt metadata. The importer depends on those connector models; the connector
-does not depend on importer state. The application shell alone coordinates
-importer clearing and incremental scheduling when authorization finishes or an
-account disconnects.
+does not depend on importer state. The application shell coordinates incremental
+scheduling when authorization finishes or an account disconnects. Disconnect
+retains the username-scoped import session and incremental snapshot cache; a
+different authenticated username replaces that scoped state when sync resumes.
 
 Snapshot and incremental cache IDs are one non-empty normal path component and,
 when their identity inputs are available, must equal the recomputed ID. Cache
@@ -63,6 +64,14 @@ The matching boundary preserves these invariants:
   merging is intentional and independent of candidate ambiguity.
 - Matching never changes Spotify membership. Only explicit import acceptance
   may save an album or tracks.
+
+Last.fm state and queue projections read the shared cooldown store's authoritative
+effective deadline rather than retaining endpoint-specific retry timestamps. A
+rate-limited or quota-failed queue item projects that deadline, and clears its
+stale retry time when the persisted cooldown expires or is emptied; ordinary
+apply failures retain their own retry metadata. Searches still use the shared
+Spotify client: only a network-backed search can clear the global Development
+Mode quota, while a persistent catalog hit is side-effect free.
 
 ## Source shapes
 
@@ -131,21 +140,26 @@ albums' cached track union then drives local matching. Explicit collection-album
 search accepts ordinary user text as well as Spotify field syntax. Search
 returns album summaries; the first Preview or Add obtains the complete album,
 after which preview, add, remove, revisit, and reranking are local. Opening a
-cached collection page never resolves `/me`; if the install-local catalog cannot
-prove the bound account, Retune shows the persisted page without membership
-reranking.
+cached collection page never resolves `/me`. Its candidates and mappings remain
+scoped to the session's Spotify account ID, so an unknown or disconnected
+membership snapshot still permits local reranking; an explicitly different
+account suspends the session.
 
 Release search hydrates track lists only for summaries in the strongest
-album-title tier whose advertised track count can cover the source rows. At most
-three such summaries are hydrated, in deterministic title/count/artist/provider
-order. Exact artist credits precede loose compatible credits, which precede
-unrelated credits. An explicit album query may hydrate the requested result even when the
-automatic summary gate would reject it.
+album-title tier. Known advertised track counts are ranked by proximity to the
+source-row count, but a smaller release remains eligible because multiple source
+rows may collapse onto one Spotify track. At most three summaries are hydrated,
+in deterministic title/count/artist/provider order. Exact artist credits precede
+loose compatible credits, which precede unrelated credits. An explicit album
+query may hydrate a result outside the automatic summary gate.
 
 Search and album/track observations also enrich the shared materialized Spotify
-catalog. The import session separately persists the candidates and explicit
-choices needed to resume the workflow. The catalog is machine-local and
-discardable; accepted Last.fm mappings are portable profile data.
+catalog. Exact search result identities persist there without expiry, scoped by
+immutable Spotify account ID, so the same generated query can resolve locally
+across import sessions, app restarts, and disconnect/reconnect cycles. The import
+session separately persists the hydrated candidates and explicit choices needed
+to resume the workflow. The catalog is machine-local and discardable; accepted
+Last.fm mappings are portable profile data.
 
 After a visible batch resolves, React requests one lookahead batch in the active
 sort order. Retune does not match the entire queue eagerly. Accept All is the
@@ -205,12 +219,16 @@ non-empty track lists. A candidate is supported when either every source row
 maps one-to-one, or at least 80% of source rows map and those distinct targets
 cover at least 80% of the Spotify release.
 
-Supported candidates are ranked `Best match`, `Same songs`, `Superset`, then
-unclassified. Retune automatically selects the sole candidate at the strongest
-available rank. Weaker supported releases do not create false ambiguity. Thus a
-15-track `Best match` for `Babel (Deluxe Edition)` wins over a 12-track standard
-edition classified as `Same songs`; two distinct 15-track best matches still
-require a choice.
+Supported candidates are ranked first by the number of source rows they match,
+then by the fewest Spotify tracks. Retune automatically selects the sole
+candidate with the strongest coverage and tightest scope. Thus an edition that
+matches every source row wins over one that misses a row, and an 11-track
+release wins over a 13-track release when both cover the same source rows.
+Distinct releases tied on both measures still require a choice. Cached named
+collection candidates are reevaluated locally under the same rule; explicitly
+removing the selected album disables automatic reselection for that batch.
+Release dates do not break remaining ties because Spotify describes that value
+as the album's first release date, not a reliable edition or remaster date.
 
 Selecting a release remaps every compatible source row against that release.
 Rows not supported by its track set remain visible for individual review. Cached

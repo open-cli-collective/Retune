@@ -1,10 +1,11 @@
 import { tauriInvoker, type Invoker } from './ipc.ts'
-import type { AlbumPageView, ArtistAlbumsPage, ArtistPageView, ConnectionState, PlaylistListView, PlaylistTrack, SpotifyNavEntry, SpotifyResults } from './types.ts'
+import type { AlbumPageView, ArtistAlbumsPage, ArtistPageView, ConnectionState, PlaylistListView, PlaylistTrack, SpotifyNavEntry, SpotifyResults, SpotifySyncStatus } from './types.ts'
 
 export const spotifyEvents = {
   connectionChanged: 'connection-changed',
   syncProgress: 'sync-progress',
   syncProgressCount: 'sync-progress-count',
+  syncStatusChanged: 'spotify-sync-status-changed',
   playlistsChanged: 'playlists-changed',
 } as const
 
@@ -14,6 +15,7 @@ export function createSpotifyGateway(invoke: Invoker) {
     connect: () => invoke<void>('connect_spotify'),
     authorizePlayback: () => invoke<void>('authorize_spotify_playback'),
     sync: () => invoke<void>('sync_from_spotify'),
+    syncStatus: () => invoke<SpotifySyncStatus>('spotify_sync_status'),
     search: (query: string, offset: number) => invoke<SpotifyResults>('spotify_search', { query, offset }),
     albumPage: (uri: string) => invoke<AlbumPageView>('spotify_album_page', { uri }),
     artistPage: (artistId: string) => invoke<ArtistPageView>('spotify_artist_page', { artistId }),

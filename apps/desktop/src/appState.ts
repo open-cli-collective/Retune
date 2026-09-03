@@ -1,5 +1,5 @@
 import { LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, rememberSelection, restoreSelection, selectionAfterFacet } from './ui.ts'
-import type { BrowseView, BrowserPanes, ConnectionState, ImportSummary, InfoDialog, LastFmImportState, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults } from './types.ts'
+import type { BrowseView, BrowserPanes, ConnectionState, ImportSummary, InfoDialog, LastFmImportState, LastFmState, PlaybackAuthorizationPrompt, PlaybackOrigin, PlaybackTrack, PlayerState, Playing, Selection, Settings, Source, SpotifyNavEntry, SpotifyResults, SpotifySyncStatus } from './types.ts'
 
 const emptyTracks: PlaybackTrack[] = []
 
@@ -26,6 +26,7 @@ export type State = {
   playbackAuthorization: PlaybackAuthorizationPrompt | null
   connection: ConnectionState
   connectionHydrated: boolean
+  spotifySyncStatus: SpotifySyncStatus
   lastfm: LastFmState
   lastfmImport: LastFmImportState
   spotifyResults: SpotifyResults | null
@@ -66,6 +67,7 @@ export type Action =
   | { type: 'setup'; open: boolean }
   | { type: 'playbackAuthorization'; prompt: PlaybackAuthorizationPrompt | null }
   | { type: 'connection'; connection: ConnectionState }
+  | { type: 'spotifySyncStatus'; status: SpotifySyncStatus }
   | { type: 'lastfm'; lastfm: LastFmState }
   | { type: 'lastfmImport'; lastfmImport: LastFmImportState }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
@@ -128,6 +130,7 @@ export const initialState: State = {
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
   connectionHydrated: false,
+  spotifySyncStatus: { connected: false, running: false, lastFullSync: null, nextSync: null, cooldown: null },
   lastfm: { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null },
   lastfmImport: { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: null, applyingAll: false, spotifyLimit: null },
   spotifyResults: null,
@@ -221,7 +224,15 @@ export function reducer(state: State, action: Action): State {
         ? { ...state, playbackAuthorization: action.prompt, info: undefined, preferences: false, setup: false }
         : { ...state, playbackAuthorization: null }
     case 'connection':
-      return { ...state, connection: action.connection, connectionHydrated: true, playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization }
+      return {
+        ...state,
+        connection: action.connection,
+        connectionHydrated: true,
+        spotifySyncStatus: { ...state.spotifySyncStatus, connected: action.connection.connected },
+        playbackAuthorization: action.connection.playback_authorized ? null : state.playbackAuthorization,
+      }
+    case 'spotifySyncStatus':
+      return { ...state, spotifySyncStatus: action.status }
     case 'lastfm':
       return { ...state, lastfm: action.lastfm }
     case 'lastfmImport':

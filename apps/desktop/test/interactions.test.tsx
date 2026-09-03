@@ -3,7 +3,7 @@
 import { act, createRef, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ArtistPageView, BrowseView, LastFmImportState, LastFmState, Settings, SpotifyNavEntry, Track } from '../src/types.ts'
+import type { ArtistPageView, BrowseView, LastFmImportState, LastFmState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track } from '../src/types.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
 const nativeEventHandlers = vi.hoisted(() => new Map<string, (payload: unknown) => void>())
@@ -19,7 +19,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn(async () => () => {}), setTitle: vi.fn(async () => {}) }) }))
 
-import App, { TransportBar } from '../src/App.tsx'
+import App, { StatusBar, TransportBar } from '../src/App.tsx'
 import { defaultSettings } from '../src/appState.ts'
 import LastFmImporter from '../src/LastFmImporter.tsx'
 import { TrackList } from '../src/libraryViews.tsx'
@@ -80,6 +80,106 @@ afterEach(async () => {
   invokeMock.mockClear()
 })
 
+const idleLastFmImport = (): LastFmImportState => ({
+  phase: null,
+  username: null,
+  spotifyAccountId: null,
+  historyTo: null,
+  downloadedThrough: null,
+  nextPage: 1,
+  totalPages: null,
+  downloadedPages: 0,
+  totalScrobbles: 0,
+  includedScrobbles: 0,
+  processedScrobbles: 0,
+  defaults: { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false },
+  remaining: 0,
+  retryableError: null,
+  searchTerms: false,
+  syncing: false,
+  lastSyncedAt: null,
+  pendingReview: 0,
+  syncProblem: null,
+  applyingAll: false,
+  spotifyLimit: null,
+})
+
+const spotifyStatus = (overrides: Partial<SpotifySyncStatus> = {}): SpotifySyncStatus => ({
+  connected: true,
+  running: false,
+  lastFullSync: 1_700_000_000,
+  nextSync: 1_700_003_600,
+  cooldown: null,
+  ...overrides,
+})
+
+describe('Spotify and Last.fm status bar', () => {
+  it('composes clickable normal Spotify and Last.fm work segments', async () => {
+    const onSpotifySync = vi.fn()
+    const onLastfmImport = vi.fn()
+    const lastfm = { ...idleLastFmImport(), syncing: true }
+    const view = await render(<StatusBar
+      view={null}
+      unit="track"
+      spotifySyncStatus={spotifyStatus()}
+      lastfmImport={lastfm}
+      lastfmRemaining={0}
+      onSpotifySync={onSpotifySync}
+      onLastfmImport={onLastfmImport}
+      empty={false}
+    />)
+
+    expect(view.textContent).toContain('Spotify · last full sync')
+    expect(view.textContent).toContain('· next')
+    expect(view.textContent).toContain('Syncing Last.fm plays')
+    expect(view.querySelector('.status-separator')?.textContent).toBe('·')
+
+    await act(async () => view.querySelector<HTMLButtonElement>('.status-sync-link')?.click())
+    await act(async () => view.querySelector<HTMLButtonElement>('.status-import-link')?.click())
+    expect(onSpotifySync).toHaveBeenCalledTimes(1)
+    expect(onLastfmImport).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders cooldown as authoritative non-clickable Spotify status while preserving running progress', async () => {
+    const onSpotifySync = vi.fn()
+    const cooldownStatus = spotifyStatus({
+      running: false,
+      nextSync: 1_700_003_600,
+      cooldown: { kind: 'quota', deadline: 1_700_000_120 },
+    })
+    const cooldownView = await render(<StatusBar
+      view={null}
+      unit="track"
+      spotifySyncStatus={cooldownStatus}
+      lastfmImport={idleLastFmImport()}
+      lastfmRemaining={0}
+      onSpotifySync={onSpotifySync}
+      onLastfmImport={() => {}}
+      empty={false}
+    />)
+    expect(cooldownView.textContent).toContain('Spotify paused until')
+    expect(cooldownView.querySelector('.status-cooldown')?.tagName).toBe('SPAN')
+    expect(cooldownView.querySelector('.status-sync-link')).toBeNull()
+
+    await act(async () => root?.render(<StatusBar
+      view={null}
+      unit="track"
+      syncPhase="Syncing saved albums…"
+      syncProgress={{ tracks: 42, fraction: 0.5 }}
+      spotifySyncStatus={spotifyStatus({ running: true, cooldown: cooldownStatus.cooldown })}
+      lastfmImport={idleLastFmImport()}
+      lastfmRemaining={0}
+      onSpotifySync={onSpotifySync}
+      onLastfmImport={() => {}}
+      empty={false}
+    />))
+    expect(cooldownView.textContent).toContain('Syncing saved albums')
+    expect(cooldownView.textContent).toContain('42 tracks synced')
+    expect(cooldownView.querySelector('.status-sync-link')).toBeNull()
+    expect(onSpotifySync).not.toHaveBeenCalled()
+  })
+})
+
 describe('mounted native interaction boundaries', () => {
   it('starts a facet with its first enabled visible track', async () => {
     const tracks = [
@@ -107,6 +207,7 @@ describe('mounted native interaction boundaries', () => {
       if (command === 'browse') return browse
       if (command === 'get_settings') return settings
       if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'spotify_sync_status') return spotifyStatus()
       if (command === 'lastfm_state') return lastfm
       if (command === 'lastfm_import_state') return lastfmImport
       if (command === 'playlists_list') return []

@@ -215,29 +215,30 @@ fn automatic_album_candidate_with<'a, T>(
     let source_count = source.len();
     let mut supported = candidates
         .iter()
-        .filter(|candidate| {
+        .filter_map(|candidate| {
             if candidate.relation.is_none()
                 || !titles_share_contained_words(album, &candidate.name)
                 || source_count == 0
                 || candidate.track_names.is_empty()
             {
-                return false;
+                return None;
             }
             let matched = source
                 .iter()
                 .filter_map(|source| match_index(source, &candidate.track_names))
                 .collect::<Vec<_>>();
             let unique_targets = matched.iter().copied().collect::<BTreeSet<_>>().len();
-            (matched.len() == source_count && unique_targets == source_count)
+            ((matched.len() == source_count && unique_targets == source_count)
                 || (matched.len() * 5 >= source_count * 4
-                    && unique_targets * 5 >= candidate.track_names.len() * 4)
+                    && unique_targets * 5 >= candidate.track_names.len() * 4))
+                .then_some((candidate, matched.len(), candidate.track_names.len()))
         })
         .collect::<Vec<_>>();
-    supported.sort_by_key(|candidate| candidate_rank(candidate.relation));
-    let candidate = *supported.first()?;
+    supported.sort_by_key(|(_, matched, tracks)| (std::cmp::Reverse(*matched), *tracks));
+    let (candidate, matched, tracks) = *supported.first()?;
     supported
         .get(1)
-        .is_none_or(|next| candidate_rank(next.relation) > candidate_rank(candidate.relation))
+        .is_none_or(|next| (matched, tracks) != (next.1, next.2))
         .then_some(candidate)
 }
 
@@ -959,14 +960,11 @@ fn album_summary_title_tier(source: &str, candidate: &str) -> Option<u8> {
         .then_some(3)
 }
 
-fn album_summary_track_rank(source_count: usize, candidate_count: u32) -> Option<(u8, u32)> {
-    if source_count > 0 && candidate_count > 0 && (candidate_count as usize) < source_count {
-        return None;
-    }
+fn album_summary_track_rank(source_count: usize, candidate_count: u32) -> (u8, u32) {
     if candidate_count == 0 {
-        Some((1, u32::MAX))
+        (1, u32::MAX)
     } else {
-        Some((0, candidate_count.saturating_sub(source_count as u32)))
+        (0, candidate_count.abs_diff(source_count as u32))
     }
 }
 
@@ -981,7 +979,7 @@ pub(super) fn supported_album_summaries(
         .enumerate()
         .filter_map(|(spotify_order, album)| {
             let title_tier = album_summary_title_tier(source_album, &album.name)?;
-            let track_rank = album_summary_track_rank(source_track_names.len(), album.track_count)?;
+            let track_rank = album_summary_track_rank(source_track_names.len(), album.track_count);
             let artist_rank =
                 if normalize_catalog_text(source_artist) == normalize_catalog_text(&album.artist) {
                     0
@@ -1211,6 +1209,45 @@ pub(super) fn preserve_match_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_album_selection_prefers_coverage_then_tightest_release() {
+        let candidate = |uri: &str, tracks: &[&str]| AlbumCandidate {
+            uri: uri.into(),
+            name: "Closer".into(),
+            track_names: tracks.iter().map(|track| (*track).into()).collect(),
+            ..AlbumCandidate::default()
+        };
+
+        let source = ["One", "Two", "Three", "Four", "Five"]
+            .map(str::to_owned)
+            .to_vec();
+        let mut candidates = vec![
+            candidate("four-of-five", &["One", "Two", "Three", "Four"]),
+            candidate(
+                "all-five",
+                &["One", "Two", "Three", "Four", "Five", "Bonus"],
+            ),
+        ];
+        classify_album_candidates_by_name(&source, &mut candidates);
+        assert_eq!(
+            automatic_album_candidate("Closer", &source, &candidates)
+                .map(|album| album.uri.as_str()),
+            Some("all-five")
+        );
+
+        let source = ["Briefly", "Rolling"].map(str::to_owned).to_vec();
+        let mut candidates = vec![
+            candidate("eleven-track", &["Briefly", "Rolling", "Extra"]),
+            candidate("thirteen-track", &["Briefly", "Rolling", "Extra", "Bonus"]),
+        ];
+        classify_album_candidates_by_name(&source, &mut candidates);
+        assert_eq!(
+            automatic_album_candidate("Closer", &source, &candidates)
+                .map(|album| album.uri.as_str()),
+            Some("eleven-track")
+        );
+    }
 
     #[test]
     fn release_matching_uses_known_suffixes_and_unique_significant_tokens() {

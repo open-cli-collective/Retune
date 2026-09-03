@@ -18,6 +18,7 @@ const APP_COMMANDS: &[&str] = &[
     "authorize_spotify_playback",
     "disconnect_spotify",
     "sync_from_spotify",
+    "spotify_sync_status",
     "spotify_search",
     "spotify_album_page",
     "spotify_artist_page",
