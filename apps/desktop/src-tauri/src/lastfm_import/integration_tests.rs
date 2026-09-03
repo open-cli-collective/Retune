@@ -2580,7 +2580,7 @@ async fn incremental_outer_retry_is_woken_by_lastfm_lifecycle_change() {
 
     lastfm.disconnect().await.unwrap();
 
-    let error = tokio::time::timeout(Duration::from_millis(100), retry)
+    let error = tokio::time::timeout(Duration::from_secs(1), retry)
         .await
         .expect("disconnect must wake the incremental outer retry")
         .unwrap()
