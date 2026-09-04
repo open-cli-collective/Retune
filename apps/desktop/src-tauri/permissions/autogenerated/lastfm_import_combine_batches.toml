@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-import-combine-batches"
+description = "Enables the lastfm_import_combine_batches command without any pre-configured scope."
+commands.allow = ["lastfm_import_combine_batches"]
+
+[[permission]]
+identifier = "deny-lastfm-import-combine-batches"
+description = "Denies the lastfm_import_combine_batches command without any pre-configured scope."
+commands.deny = ["lastfm_import_combine_batches"]

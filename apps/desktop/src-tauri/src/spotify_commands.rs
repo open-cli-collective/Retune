@@ -695,6 +695,7 @@ impl SpotifySyncApplication<'_> {
         if !stored_connection_state(self.token_store)?.connected {
             return Err("The Spotify connection changed during sync. Try again.".into());
         }
+        remember_playback_profile_id(self.token_store, &profile.id)?;
         let membership = self.membership.lock().await;
         self.lastfm_import
             .migrate_spotify_account_id(&profile.id, &account_id)
@@ -1221,6 +1222,40 @@ fn web_oauth_tokens(access: String, refresh: String, expires_at: u64, scopes: St
     }
 }
 
+fn remember_playback_profile_id(
+    token_store: &impl TokenStore,
+    profile_id: &str,
+) -> Result<(), String> {
+    let mut expected = token_store
+        .load()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Connect to Spotify before syncing.".to_string())?;
+    loop {
+        if expected
+            .playback_credentials
+            .as_ref()
+            .is_some_and(|credentials| credentials.username == profile_id)
+        {
+            return Ok(());
+        }
+        let mut replacement = expected.clone();
+        replacement.playback_credentials = Some(PlaybackCredentials {
+            username: profile_id.to_owned(),
+            auth_data: vec![],
+        });
+        if token_store
+            .replace_if_current(&expected, &replacement)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(());
+        }
+        expected = token_store
+            .load()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "The Spotify connection changed during sync. Try again.".to_string())?;
+    }
+}
+
 #[tauri::command]
 pub(super) async fn connection_state(app: tauri::AppHandle) -> Result<ConnectionState, String> {
     let token_store = Arc::clone(&app.state::<AppState>().token_store);
@@ -1385,11 +1420,23 @@ pub(super) async fn authorize_spotify_playback(app: tauri::AppHandle) -> Result<
     let playback_auth_data = session.auth_data();
     session.shutdown();
 
-    let web_account_id = provider
-        .me()
-        .await
-        .map_err(|error| format!("Could not identify the connected Spotify account: {error}"))?
-        .id;
+    let web_account_id = match expected_tokens
+        .playback_credentials
+        .as_ref()
+        .map(|credentials| credentials.username.trim())
+        .filter(|username| !username.is_empty())
+    {
+        Some(username) => username.to_owned(),
+        None => {
+            provider
+                .me()
+                .await
+                .map_err(|error| {
+                    format!("Could not identify the connected Spotify account: {error}")
+                })?
+                .id
+        }
+    };
     let playback_credentials =
         playback_credentials(&web_account_id, playback_username, playback_auth_data)?;
     let _commit = attempt.commit(&expected_tokens.access).await?;
@@ -1847,12 +1894,16 @@ mod tests {
     };
 
     use retune_core::model::{AlbumKey, EffectiveRating, Library, NewTrack, Rating, SourceId};
-    use retune_spotify::client::{Album, Image, Page, SimplifiedArtist, Track};
+    use retune_spotify::{
+        client::{Album, Image, Page, SimplifiedArtist, Track},
+        tokens::{InMemoryTokenStore, TokenStore},
+    };
 
     use super::{
         album_page_view, commit_sync_state, normalize_sync_baseline, playback_credentials,
-        rating_view, rebase_sync_membership, required_artist_follow_state,
-        validate_spotify_track_uris, web_oauth_tokens, SpotifySession,
+        rating_view, rebase_sync_membership, remember_playback_profile_id,
+        required_artist_follow_state, validate_spotify_track_uris, web_oauth_tokens,
+        SpotifySession,
     };
     use crate::{
         library_state::LibraryState,
@@ -2061,6 +2112,22 @@ mod tests {
             .unwrap();
 
         assert!(error.contains("different Spotify account"));
+    }
+
+    #[test]
+    fn sync_retains_profile_id_for_playback_authorization() {
+        let store = InMemoryTokenStore::new(Some(web_oauth_tokens(
+            "access".into(),
+            "refresh".into(),
+            10,
+            "scope".into(),
+        )));
+
+        remember_playback_profile_id(&store, "web-user").unwrap();
+
+        let cached = store.load().unwrap().unwrap().playback_credentials.unwrap();
+        assert_eq!(cached.username, "web-user");
+        assert!(cached.auth_data.is_empty());
     }
 
     #[test]

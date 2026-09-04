@@ -311,6 +311,17 @@ pub(crate) async fn lastfm_import_page(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn lastfm_import_combine_batches(
+    app: tauri::AppHandle,
+    batch_ids: Vec<u32>,
+) -> Result<Option<ImportPageView>, String> {
+    let state = app.state::<crate::AppState>();
+    let page = use_cases(&state).combine_batches(&batch_ids).await?;
+    emit_import_invalidated(&app).map_err(|error| error.to_string())?;
+    Ok(page)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
     batch_id: u32,
@@ -468,6 +479,22 @@ pub(crate) async fn lastfm_import_collection_remove_album(
     let state = app.state::<crate::AppState>();
     let page = use_cases(&state)
         .remove_collection_album(batch_id, &artist, &uri)
+        .await?;
+    let _ = emit_import_invalidated(&app);
+    Ok(page)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn lastfm_import_collection_set_album_import(
+    app: tauri::AppHandle,
+    batch_id: u32,
+    artist: String,
+    uri: String,
+    enabled: bool,
+) -> Result<Option<ImportPageView>, String> {
+    let state = app.state::<crate::AppState>();
+    let page = use_cases(&state)
+        .set_collection_album_import(batch_id, &artist, &uri, enabled)
         .await?;
     let _ = emit_import_invalidated(&app);
     Ok(page)

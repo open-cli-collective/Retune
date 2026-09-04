@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::{playback::SnapshotTrack, playlists::PlaylistCache};
 
-pub(crate) const MAX_PLAYBACK_QUEUE: usize = 1_000;
+pub(crate) const MAX_PLAYBACK_QUEUE: usize = 100_000;
 const MAX_RESOURCE_URI_BYTES: usize = 2_048;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -246,6 +246,18 @@ mod tests {
             &SpotifyCatalog::default(),
         )
         .is_err());
+        assert_eq!(
+            resolve_cached(
+                &vec![resource(1, "spotify:track:abc123"); 1_001],
+                0,
+                &library,
+                &PlaylistCache::default(),
+                &SpotifyCatalog::default(),
+            )
+            .unwrap()
+            .len(),
+            1_001
+        );
         assert!(resolve_cached(
             &vec![resource(1, "spotify:track:abc"); MAX_PLAYBACK_QUEUE + 1],
             0,

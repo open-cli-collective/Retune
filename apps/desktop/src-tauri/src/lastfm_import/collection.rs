@@ -770,6 +770,60 @@ where
     Ok((page, view))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn set_collection_album_import<T, S>(
+    service: &Service,
+    lastfm: &crate::lastfm::Service,
+    spotify_membership: &crate::spotify_membership::SpotifyMembership,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    connection_state: impl FnOnce() -> Result<bool, String>,
+    batch_id: u32,
+    artist: &str,
+    uri: &str,
+    enabled: bool,
+) -> Result<(Option<ImportPageView>, ImportStateView), String>
+where
+    T: retune_spotify::client::Transport,
+    S: retune_spotify::tokens::TokenStore,
+{
+    if !valid_collection_album_uri(uri) {
+        return Err("Choose a valid Spotify album URI.".into());
+    }
+    ensure_review_mutable(service).await?;
+    let guard = spotify_membership.lock().await;
+    let binding = current_account_binding(
+        service,
+        lastfm,
+        &guard,
+        provider,
+        connection_state,
+        false,
+        true,
+        false,
+    )
+    .await?
+    .0;
+    service
+        .set_collection_album_import(
+            &binding.lastfm_username,
+            &binding.spotify_account_id,
+            batch_id,
+            artist,
+            uri,
+            enabled,
+        )
+        .await?;
+    let session = service
+        .snapshot()
+        .await
+        .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+    let (_, actual_album) = requested_collection_batch_with_album(&session, batch_id, artist)?;
+    let page = service.page(batch_id, artist, &actual_album).await;
+    let view = service.state().await;
+    drop(guard);
+    Ok((page, view))
+}
+
 pub(super) async fn activate_collection<T, S>(
     service: &Service,
     lastfm: &crate::lastfm::Service,

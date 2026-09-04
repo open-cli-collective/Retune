@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, PlayOutcome, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, excludeImportRows, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, requiredImportMatchIds, resolveImportCount, restPendingImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
+import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, excludeImportRows, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, requiredImportMatchIds, resolveImportCount, restPendingImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
 import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -257,6 +257,19 @@ test('Last.fm visible rows keep required work first with stable source order', (
   assert.deepEqual(stablePartitionImportRows(rows, [], (row) => row.stableId).map((row) => row.stableId), ['a', 'b'])
 })
 
+test('Last.fm queue filter matches all scalar batch data across search terms', () => {
+  const queue = [
+    { page: 1, artist: 'Linkin Park', album: 'Hybrid Theory', playCount: 724, importedPlayCount: 0, remainingPlayCount: 724, latest: 30, sourceCount: 14, remaining: true, albumEntities: 1, trackEntities: 0, status: 'failed' as const, error: 'Spotify quota' },
+    { page: 2, artist: 'Creed', album: 'Human Clay', playCount: 165, importedPlayCount: 0, remainingPlayCount: 165, latest: 20, sourceCount: 24, remaining: true, albumEntities: 1, trackEntities: 0 },
+  ]
+  assert.equal(filterImportQueue(queue, 'linkin theory')[0]?.page, 1)
+  assert.equal(filterImportQueue(queue, 'QUOTA')[0]?.page, 1)
+  assert.equal(filterImportQueue(queue, '165')[0]?.page, 2)
+  assert.equal(filterImportQueue([{ ...queue[0], artist: 'Ashley Tisdale', album: 'Still into You' }], 'alesti').length, 0)
+  assert.equal(filterImportQueue(queue, 'missing').length, 0)
+  assert.equal(filterImportQueue(queue, '   '), queue)
+})
+
 test('Last.fm collection ambiguities rank exact selected-album choices by existing coverage', () => {
   const candidates = [
     { uri: 'spotify:track:album-a', artist: 'Artist', inLibrary: false, relation: 'best-match' as const },
@@ -265,15 +278,15 @@ test('Last.fm collection ambiguities rank exact selected-album choices by existi
   ]
   const match = { selectedUri: null, trackMatches: {}, candidates }
   const albums = [
-    { uri: 'spotify:album:a', name: 'Album A', trackUris: ['spotify:track:album-a', ...Array.from({ length: 15 }, (_, index) => `spotify:track:a-${index}`)] },
-    { uri: 'spotify:album:b', name: 'Album B', trackUris: ['spotify:track:album-b', ...Array.from({ length: 11 }, (_, index) => `spotify:track:b-${index}`)] },
+    { uri: 'spotify:album:a', name: 'Album A', trackUris: ['spotify:track:album-a', ...Array.from({ length: 15 }, (_, index) => `spotify:track:a-${index}`)], trackNames: ['Track A'] },
+    { uri: 'spotify:album:b', name: 'Album B', trackUris: ['spotify:track:album-b', ...Array.from({ length: 11 }, (_, index) => `spotify:track:b-${index}`)], trackNames: ['Track B'] },
   ]
   assert.deepEqual(collectionAmbiguousChoices('source', match, albums, albums.map((album) => album.uri), [
     { uri: 'spotify:album:a', matched: 14, uniqueCoverage: 14 },
     { uri: 'spotify:album:b', matched: 9, uniqueCoverage: 9 },
   ]), [
-    { uri: 'spotify:track:album-a', album: 'Album A', projectedMatches: 15, totalTracks: 16, recommended: true },
-    { uri: 'spotify:track:album-b', album: 'Album B', projectedMatches: 10, totalTracks: 12, recommended: false },
+    { uri: 'spotify:track:album-a', track: 'Track A', album: 'Album A', projectedMatches: 15, totalTracks: 16, recommended: true },
+    { uri: 'spotify:track:album-b', track: 'Track B', album: 'Album B', projectedMatches: 10, totalTracks: 12, recommended: false },
   ])
   assert.equal(collectionAmbiguousChoices('source', { ...match, trackMatches: { source: 'spotify:track:album-a' } }, albums, albums.map((album) => album.uri), []).length, 0)
   assert.equal(collectionAmbiguousChoices('source', match, albums, ['spotify:album:a'], []).length, 0)

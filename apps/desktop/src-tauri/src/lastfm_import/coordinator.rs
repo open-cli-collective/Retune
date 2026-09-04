@@ -861,15 +861,26 @@ pub(super) fn accept_all_entity_uris(
         if !options.import_content {
             continue;
         }
-        if options.whole_album {
-            if collection_shaped {
-                if let Some(uri) = selected_collection_album(session, batch.page)
-                    .map(|candidate| candidate.matching.uri.clone())
+        if collection_shaped {
+            let full_albums = collection_full_albums(session, batch.page);
+            let covered_tracks = full_albums
+                .iter()
+                .flat_map(|album| album.matching.track_uris.iter())
+                .collect::<BTreeSet<_>>();
+            album_uris.extend(full_albums.iter().map(|album| album.matching.uri.clone()));
+            for row in selected {
+                if let Some(uri) = session
+                    .matches
+                    .get(&row.stable_id)
+                    .and_then(|result| matched_track_uri_for_row(result, row, true))
+                    .filter(|uri| !covered_tracks.contains(uri))
                 {
-                    album_uris.insert(uri);
+                    track_uris.insert(uri);
                 }
-                continue;
             }
+            continue;
+        }
+        if options.whole_album {
             for row in selected {
                 if let Some(uri) = session
                     .matches

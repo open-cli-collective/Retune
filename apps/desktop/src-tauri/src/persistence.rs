@@ -10,6 +10,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(windows)]
+static ATOMIC_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     read_limited_file(File::open(path)?, path, limit)
 }
@@ -129,6 +132,11 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+
+    // ponytail: serialize Windows replaces globally; use per-path locks if write throughput matters.
+    let _guard = ATOMIC_REPLACE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;

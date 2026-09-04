@@ -10,20 +10,180 @@ use super::matching::{
 };
 use super::model::{
     AlbumCandidate, ApplyJobStatus, CollectionAlbumCandidate, CollectionAlbumCoverage,
-    CollectionAlbumPreviewCoverage, CollectionCoverage, CollectionMatchView,
-    CollectionTrackMatchStatus, CollectionTrackStatus, ImportBatch, ImportPhase, ImportQueueItem,
-    LastFmImportSessionV2, LastFmMappings, MatchResult, PageOptions, QueueStatus, ReviewApplyJob,
-    RowDecision, RowStatus, SourceRow,
+    CollectionAlbumMatchState, CollectionAlbumPreviewCoverage, CollectionCoverage,
+    CollectionMatchView, CollectionTrackMatchStatus, CollectionTrackStatus, ImportBatch,
+    ImportPhase, ImportQueueItem, LastFmImportSessionV2, LastFmMappings, MatchResult, PageOptions,
+    QueueStatus, ReviewApplyJob, RowDecision, RowStatus, SourceRow,
 };
 use super::{
     batch_is_collection_shaped, batch_options_key, batch_projection, batch_rows, best_candidate,
-    exact_album_match_for_rows, is_converted_collection_batch, matched_track_uri,
-    matched_track_uri_for_row, reconciliation::source_album_key, requested_batch, review_batches,
-    review_batches_for_read, source_row_map,
+    derived_batch_projection, exact_album_match_for_rows, is_converted_collection_batch,
+    matched_track_uri, matched_track_uri_for_row, normalize_catalog_text,
+    reconciliation::source_album_key, requested_batch, review_batches, review_batches_for_read,
+    source_row_map, LASTFM_REVIEW_BATCH_SIZE,
 };
 
 pub(crate) fn default_decision(session: &LastFmImportSessionV2, id: &str) -> RowDecision {
     session.decisions.get(id).cloned().unwrap_or_default()
+}
+
+pub(super) fn combine_review_batches(
+    session: &mut LastFmImportSessionV2,
+    batch_ids: &[u32],
+) -> Result<(u32, String, String), String> {
+    let requested = batch_ids.iter().copied().collect::<BTreeSet<_>>();
+    if requested.len() < 2 || requested.len() != batch_ids.len() {
+        return Err("Choose at least two distinct Last.fm batches to combine.".into());
+    }
+    let batches = review_batches(session);
+    let selected = batches
+        .iter()
+        .filter(|batch| requested.contains(&batch.page))
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected.len() != requested.len() {
+        return Err("A selected Last.fm batch is no longer available.".into());
+    }
+    let rows_by_id = source_row_map(session);
+    let rows = selected
+        .iter()
+        .flat_map(|batch| batch_rows(batch, &rows_by_id))
+        .collect::<Vec<_>>();
+    let source_ids = rows
+        .iter()
+        .map(|row| row.stable_id.clone())
+        .collect::<BTreeSet<_>>();
+    if source_ids.len()
+        != selected
+            .iter()
+            .map(|batch| batch.source_ids.len())
+            .sum::<usize>()
+    {
+        return Err(
+            "A selected Last.fm batch contains unavailable or duplicate source rows.".into(),
+        );
+    }
+    if source_ids.len() > LASTFM_REVIEW_BATCH_SIZE {
+        return Err(format!(
+            "A custom Last.fm batch can contain at most {LASTFM_REVIEW_BATCH_SIZE} source tracks."
+        ));
+    }
+    let projections = selected
+        .iter()
+        .map(|batch| batch_projection(batch, &batch_rows(batch, &rows_by_id)))
+        .collect::<Vec<_>>();
+    let artist_keys = rows
+        .iter()
+        .map(|row| normalize_catalog_text(&row.artist))
+        .collect::<BTreeSet<_>>();
+    let combined_projection = derived_batch_projection(&rows);
+    let representative_artist = if artist_keys.len() == 1 {
+        combined_projection.representative_artist
+    } else {
+        "Various Artists".into()
+    };
+    let target_page = *requested.first().expect("two requested batches");
+    let options = selected
+        .iter()
+        .zip(&projections)
+        .map(|(batch, projection)| {
+            session.options_for_page_batch(
+                batch,
+                &projection.representative_artist,
+                &projection.representative_album,
+                &batch_rows(batch, &rows_by_id),
+            )
+        })
+        .collect::<Vec<_>>();
+    let first_options = &options[0];
+    if options.iter().skip(1).any(|option| {
+        option.import_content != first_options.import_content
+            || option.include_historical_play_counts != first_options.include_historical_play_counts
+            || option.genre != first_options.genre
+            || option.rating != first_options.rating
+    }) {
+        return Err(
+            "Selected batches have different import options; make them match before combining."
+                .into(),
+        );
+    }
+    let mut combined_options = first_options.clone();
+    combined_options.whole_album = false;
+    combined_options.selected_track_ids = options
+        .iter()
+        .flat_map(|option| option.selected_track_ids.iter().cloned())
+        .collect();
+    let album_labels = combined_projection.album_labels;
+    let mut combined_collection = CollectionAlbumMatchState {
+        automatic_selection_disabled: true,
+        ..CollectionAlbumMatchState::default()
+    };
+    for batch_id in &requested {
+        let Some(state) = session.collection_album_matches.get(batch_id) else {
+            continue;
+        };
+        for candidate in &state.cached_candidates {
+            if !combined_collection
+                .cached_candidates
+                .iter()
+                .any(|existing| existing.matching.uri == candidate.matching.uri)
+            {
+                combined_collection
+                    .cached_candidates
+                    .push(candidate.clone());
+            }
+        }
+        for uri in &state.selected_album_uris {
+            if !combined_collection.selected_album_uris.contains(uri) {
+                combined_collection.selected_album_uris.push(uri.clone());
+            }
+        }
+        for (uri, enabled) in &state.full_album_choices {
+            combined_collection
+                .full_album_choices
+                .entry(uri.clone())
+                .and_modify(|current| *current |= enabled)
+                .or_insert(*enabled);
+        }
+        for (source_id, uris) in &state.injected_candidate_uris {
+            combined_collection
+                .injected_candidate_uris
+                .entry(source_id.clone())
+                .or_default()
+                .extend(uris.iter().cloned());
+        }
+    }
+    let ordered_source_ids = session
+        .rows
+        .iter()
+        .filter(|row| source_ids.contains(&row.stable_id))
+        .map(|row| row.stable_id.clone())
+        .collect();
+    session.batches = batches
+        .into_iter()
+        .filter(|batch| !requested.contains(&batch.page))
+        .collect();
+    session.batches.push(ImportBatch {
+        page: target_page,
+        source_ids: ordered_source_ids,
+        custom: true,
+        collection_shaped: Some(true),
+        representative_artist: Some(representative_artist.clone()),
+        representative_album: Some(String::new()),
+        album_labels,
+    });
+    session.batches.sort_by_key(|batch| batch.page);
+    for batch_id in &requested {
+        session.page_options.remove(&batch_options_key(*batch_id));
+        session.collection_album_matches.remove(batch_id);
+    }
+    session
+        .page_options
+        .insert(batch_options_key(target_page), combined_options);
+    session
+        .collection_album_matches
+        .insert(target_page, combined_collection);
+    Ok((target_page, representative_artist, String::new()))
 }
 
 pub(super) fn refresh_cached_album_matches(session: &mut LastFmImportSessionV2) -> bool {
@@ -160,6 +320,25 @@ pub(super) fn collection_selected_albums(
                 .cached_candidates
                 .iter()
                 .find(|candidate| candidate.matching.uri == *uri)
+        })
+        .collect()
+}
+
+pub(super) fn collection_full_albums(
+    session: &LastFmImportSessionV2,
+    batch_id: u32,
+) -> Vec<&CollectionAlbumCandidate> {
+    let Some(state) = session.collection_album_matches.get(&batch_id) else {
+        return Vec::new();
+    };
+    collection_selected_albums(session, batch_id)
+        .into_iter()
+        .filter(|album| {
+            state
+                .full_album_choices
+                .get(&album.matching.uri)
+                .copied()
+                .unwrap_or(album.matching.in_library)
         })
         .collect()
 }
@@ -380,6 +559,10 @@ pub(super) fn collection_match_view(
         .cloned()
         .unwrap_or_default();
     let selected = collection_selected_albums(session, batch_id);
+    let full_album_uris = collection_full_albums(session, batch_id)
+        .into_iter()
+        .map(|album| album.matching.uri.clone())
+        .collect();
     let membership = CollectionMembership::default();
     let selected_tracks = collection_track_candidates(&selected, &membership);
     let eligible = rows
@@ -439,6 +622,7 @@ pub(super) fn collection_match_view(
     CollectionMatchView {
         cached_albums: state.cached_candidates,
         selected_album_uris: state.selected_album_uris,
+        full_album_uris,
         coverage: CollectionCoverage {
             matched,
             ambiguous,
@@ -618,11 +802,7 @@ pub(super) fn rerank_collection_session(
         .unwrap_or_default();
     if let Some(state) = session.collection_album_matches.get_mut(&batch_id) {
         for candidate in &mut state.cached_candidates {
-            candidate.matching.in_library = candidate
-                .matching
-                .track_uris
-                .iter()
-                .any(|uri| membership.contains(uri));
+            candidate.matching.in_library = membership.contains_album(&candidate.matching.uri);
         }
         if state.selected_album_uris.is_empty()
             && !state.automatic_selection_disabled
@@ -650,6 +830,9 @@ pub(super) fn rerank_collection_session(
                 state.selected_album_uris.push(candidate.uri.clone());
             }
         }
+        state
+            .full_album_choices
+            .retain(|uri, _| state.selected_album_uris.contains(uri));
     }
     let selected = collection_selected_albums(session, batch_id)
         .into_iter()
@@ -734,7 +917,9 @@ pub(super) fn collection_membership_from(
         .map(|track| track.uri.clone())
         .collect::<BTreeSet<_>>();
     let spotify_library = spotify_membership.snapshot();
+    let mut album_uris = BTreeSet::new();
     if spotify_library.is_exact() {
+        album_uris.extend(spotify_library.saved_albums.keys().cloned());
         track_uris.extend(spotify_library.saved_tracks.into_keys());
         track_uris.extend(
             spotify_library
@@ -743,7 +928,10 @@ pub(super) fn collection_membership_from(
                 .flat_map(|album| album.track_uris),
         );
     }
-    CollectionMembership { track_uris }
+    CollectionMembership {
+        track_uris,
+        album_uris,
+    }
 }
 
 pub(super) fn locked_count_modes(session: &LastFmImportSessionV2) -> BTreeSet<String> {
@@ -809,10 +997,25 @@ pub(super) fn queue_item(
     let mut album_entities = 0;
     let mut track_uris = BTreeSet::new();
     if options.import_content {
-        if options.whole_album {
-            if collection_shaped {
-                album_entities = selected_collection_album(session, batch.page).is_some() as u32;
-            } else if !is_converted_collection_batch(session, batch.page, &album) {
+        if collection_shaped {
+            let full_albums = collection_full_albums(session, batch.page);
+            let covered_tracks = full_albums
+                .iter()
+                .flat_map(|album| album.matching.track_uris.iter())
+                .collect::<BTreeSet<_>>();
+            album_entities = full_albums.len() as u32;
+            for row in &selected {
+                if let Some(uri) = session
+                    .matches
+                    .get(&row.stable_id)
+                    .and_then(|result| matched_track_uri_for_row(result, row, true))
+                    .filter(|uri| !covered_tracks.contains(uri))
+                {
+                    track_uris.insert(uri);
+                }
+            }
+        } else if options.whole_album {
+            if !is_converted_collection_batch(session, batch.page, &album) {
                 album_entities = selected
                     .iter()
                     .filter_map(|row| session.matches.get(&row.stable_id))
@@ -843,6 +1046,7 @@ pub(super) fn queue_item(
         page: batch.page,
         artist,
         album,
+        custom_batch: batch.custom,
         collection_shaped,
         album_label_count: projection.album_labels.len(),
         play_count: rows
@@ -964,6 +1168,9 @@ pub(super) fn batch_scope_source_ids(
     session: &LastFmImportSessionV2,
     batch: &ImportBatch,
 ) -> Vec<String> {
+    if batch.custom {
+        return batch.source_ids.clone();
+    }
     let rows_by_id = source_row_map(session);
     let target = batch_projection(batch, &batch_rows(batch, &rows_by_id));
     review_batches_for_read(session)

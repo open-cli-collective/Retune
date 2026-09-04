@@ -123,6 +123,30 @@ where
         .await
     }
 
+    pub(super) async fn combine_batches(
+        &self,
+        batch_ids: &[u32],
+    ) -> Result<Option<ImportPageView>, String> {
+        if !self.readable().await? {
+            return Err("The Last.fm import is not available for this account.".into());
+        }
+        super::ensure_review_mutable(self.service).await?;
+        let session = self
+            .service
+            .snapshot()
+            .await
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+        let spotify_account_id = session
+            .spotify_account_id
+            .as_deref()
+            .ok_or_else(|| "Connect Spotify before changing Last.fm batches.".to_string())?;
+        let (batch_id, artist, album) = self
+            .service
+            .combine_batches(&session.lastfm_username, spotify_account_id, batch_ids)
+            .await?;
+        Ok(self.service.page(batch_id, &artist, &album).await)
+    }
+
     pub(super) async fn review(
         &self,
         key: ReviewBatchKey,
@@ -275,6 +299,28 @@ where
             batch_id,
             artist,
             uri,
+        )
+        .await
+        .map(|(page, _)| page)
+    }
+
+    pub(super) async fn set_collection_album_import(
+        &self,
+        batch_id: u32,
+        artist: &str,
+        uri: &str,
+        enabled: bool,
+    ) -> Result<Option<ImportPageView>, String> {
+        super::set_collection_album_import(
+            self.service,
+            self.lastfm,
+            self.membership,
+            &self.provider,
+            &self.connected,
+            batch_id,
+            artist,
+            uri,
+            enabled,
         )
         .await
         .map(|(page, _)| page)
@@ -744,6 +790,7 @@ mod tests {
             page: 1,
             artist: "Artist".into(),
             album: "Album".into(),
+            custom_batch: false,
             collection_shaped: false,
             album_label_count: 0,
             play_count: 0,

@@ -382,10 +382,21 @@ describe('mounted native interaction boundaries', () => {
     await waitFor(() => expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(2))
     await waitFor(() => expect(view.textContent).toContain('Release One'))
 
-    const queueRows = [...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')]
+    let queueRows = [...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')]
     expect(queueRows[0].getAttribute('aria-label')).toContain('Batch 1 of 2')
     expect(queueRows[0].getAttribute('aria-current')).toBe('true')
     expect(invokeMock.mock.calls.some(([command, args]) => command === 'lastfm_import_page' && args?.batchId === 2)).toBe(true)
+
+    const filter = view.querySelector<HTMLInputElement>('input[aria-label="Filter import queue"]')!
+    expect(filter.placeholder).toBe('Filter')
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(filter, 'Release Two')
+    await act(async () => filter.dispatchEvent(new Event('input', { bubbles: true })))
+    await waitFor(() => expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(1))
+    expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')?.textContent).toContain('Release Two')
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(filter, '')
+    await act(async () => filter.dispatchEvent(new Event('input', { bubbles: true })))
+    await waitFor(() => expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(2))
+    queueRows = [...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')]
 
     queueRows[0].focus()
     const tab = key(queueRows[0], 'Tab')
@@ -396,6 +407,80 @@ describe('mounted native interaction boundaries', () => {
     await waitFor(() => expect(view.textContent).toContain('Release Two'))
     expect(queueRows[1].getAttribute('aria-current')).toBe('true')
     expect(document.activeElement).toBe(queueRows[1])
+
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(filter, 'Release Two')
+    await act(async () => filter.dispatchEvent(new Event('input', { bubbles: true })))
+    const releaseOneLoads = () => invokeMock.mock.calls.filter(([command, args]) => command === 'lastfm_import_page' && args?.batchId === 1).length
+    const beforeApply = releaseOneLoads()
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Accept & Next Batch')!.click())
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command, args]) => command === 'lastfm_import_apply' && args?.batchId === 2)).toBe(true))
+    expect(releaseOneLoads()).toBe(beforeApply)
+  })
+
+  it('retries queue pagination once when an apply changes the queue mid-load', async () => {
+    const { state, queue, pages } = importerFixtures()
+    const largeQueue = Array.from({ length: 1001 }, (_, index) => ({ ...queue[0], page: index + 1, album: `Release ${index + 1}` }))
+    let queueCalls = 0
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return state
+      if (command === 'lastfm_import_queue') {
+        queueCalls += 1
+        const cursor = Number(args?.cursor)
+        if (queueCalls === 2) return { cursor, items: [], total: 1000, nextCursor: null }
+        return { cursor, items: largeQueue.slice(cursor, cursor + 1000), total: largeQueue.length, nextCursor: cursor + 1000 < largeQueue.length ? cursor + 1000 : null }
+      }
+      if (command === 'lastfm_import_page') return pages.get(1)
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(queueCalls).toBe(4))
+    expect(view.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('combines the selected filtered queue results into one collection batch', async () => {
+    const fixtures = importerFixtures()
+    let currentQueue = fixtures.queue
+    const combinedPage = {
+      ...fixtures.pages.get(1)!,
+      album: '',
+      customBatch: true,
+      albumLabelCount: 2,
+      rows: [...fixtures.pages.get(1)!.rows, ...fixtures.pages.get(2)!.rows],
+      collection: { cachedAlbums: [], selectedAlbumUris: [], fullAlbumUris: [], wholeAlbumReady: false, coverage: { matched: 0, ambiguous: 0, unresolved: 2, selectedAlbums: [], previews: [] } },
+    }
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: currentQueue, total: currentQueue.length, nextCursor: null }
+      if (command === 'lastfm_import_page') return fixtures.pages.get(Number(args?.batchId))
+      if (command === 'lastfm_import_combine_batches') {
+        currentQueue = [{ ...fixtures.queue[0], album: '', customBatch: true, sourceCount: 2 }]
+        return combinedPage
+      }
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelectorAll('[data-import-nav="queue"]')).toHaveLength(2))
+
+    const selectAll = view.querySelector<HTMLInputElement>('input[aria-label="Select all filtered batches"]')!
+    const firstBatch = view.querySelector<HTMLInputElement>('input[aria-label="Select Release One by Artist"]')!
+    await act(async () => firstBatch.click())
+    expect(selectAll.indeterminate).toBe(true)
+    expect(selectAll.parentElement?.textContent).toContain('Select all 2 results')
+    await act(async () => selectAll.click())
+    const combine = [...view.querySelectorAll('button')].find((button) => button.textContent === 'Combine selected (2)')!
+    expect(combine.disabled).toBe(false)
+    await act(async () => combine.click())
+
+    await waitFor(() => expect(view.querySelector('input[aria-label="Select Custom batch by Artist"]')).not.toBeNull())
+    expect(invokeMock).toHaveBeenCalledWith('lastfm_import_combine_batches', { batchIds: [1, 2] })
+    expect(view.textContent).toContain('You combined these Last.fm batches.')
+    expect(view.textContent).toContain('Add albums…')
+    expect([...view.querySelectorAll('button')].some((button) => button.textContent === 'Skip Batch')).toBe(true)
+    expect([...view.querySelectorAll('button')].some((button) => button.textContent?.startsWith('Ignore '))).toBe(false)
   })
 
   it('refreshes only the selected batch for a valid apply success and cleans up native listeners', async () => {
@@ -490,6 +575,7 @@ describe('mounted native interaction boundaries', () => {
       if (command === 'lastfm_import_collection_search_albums') return [fixtures.searchCandidate]
       if (command === 'lastfm_import_collection_preview_album') return fixtures.collectionPage
       if (command === 'lastfm_import_collection_add_album') return fixtures.collectionPage
+      if (command === 'lastfm_import_collection_set_album_import') return { ...fixtures.collectionPage, collection: { ...fixtures.collectionPage.collection, fullAlbumUris: [fixtures.collectionPage.collection.selectedAlbumUris[0]] } }
       return null
     })
     const view = await render(<LastFmImporter />)
@@ -505,7 +591,16 @@ describe('mounted native interaction boundaries', () => {
     await act(async () => addAlbum.click())
     await waitFor(() => expect(view.textContent).toContain('Manage Albums…'))
     expect(invokeMock).toHaveBeenCalledWith('lastfm_import_activate_collection', expect.objectContaining({ batchId: 1 }))
-    expect(view.querySelector<HTMLInputElement>('input[aria-label="Import whole album"]')?.disabled).toBe(true)
+    expect(view.querySelector<HTMLInputElement>('input[aria-label="Import whole album"]')).toBeNull()
+    const importFullAlbum = view.querySelector<HTMLInputElement>('input[aria-label="Import full album: Selected Release"]')!
+    const albumCard = importFullAlbum.closest('article')!
+    expect(importFullAlbum.checked).toBe(false)
+    expect(albumCard.textContent).toContain('MATCH SET')
+    expect(albumCard.textContent).toContain('Matched tracks only')
+    await act(async () => importFullAlbum.click())
+    await waitFor(() => expect(importFullAlbum.checked).toBe(true))
+    expect(albumCard.textContent).toContain('Full album')
+    expect(invokeMock).toHaveBeenCalledWith('lastfm_import_collection_set_album_import', expect.objectContaining({ uri: 'spotify:album:selected', enabled: true }))
 
     await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Manage Albums…')!.click())
     const query = view.querySelector<HTMLInputElement>('#collection-album-query')!
@@ -556,7 +651,7 @@ function importerFixtures() {
   })
   const pages = new Map([[1, page(1, 'Release One')], [2, page(2, 'Release Two')]])
   const collection = {
-    cachedAlbums: [selectedCandidate], selectedAlbumUris: [selectedCandidate.uri], wholeAlbumReady: false,
+    cachedAlbums: [selectedCandidate], selectedAlbumUris: [selectedCandidate.uri], fullAlbumUris: [], wholeAlbumReady: false,
     coverage: { matched: 1, ambiguous: 0, unresolved: 0, selectedAlbums: [{ uri: selectedCandidate.uri, matched: 1, uniqueCoverage: 1 }], previews: [] },
   }
   const collectionPage = { ...pages.get(1)!, collection }
