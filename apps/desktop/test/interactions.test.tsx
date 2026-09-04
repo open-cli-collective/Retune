@@ -450,7 +450,7 @@ describe('mounted native interaction boundaries', () => {
       rows: [...fixtures.pages.get(1)!.rows, ...fixtures.pages.get(2)!.rows],
       collection: { cachedAlbums: [], selectedAlbumUris: [], fullAlbumUris: [], wholeAlbumReady: false, coverage: { matched: 0, ambiguous: 0, unresolved: 2, selectedAlbums: [], previews: [] } },
     }
-    invokeMock.mockImplementation(async (command, args) => {
+    invokeMock.mockImplementation(async (command) => {
       if (command === 'lastfm_import_state') return fixtures.state
       if (command === 'lastfm_import_queue') return { cursor: 0, items: currentQueue, total: currentQueue.length, nextCursor: null }
       if (command === 'lastfm_import_page') return fixtures.pages.get(Number(args?.batchId))
@@ -614,6 +614,50 @@ describe('mounted native interaction boundaries', () => {
     expect(actions.map((button) => button.textContent)).toEqual(['Preview', 'Add to album matches'])
     await act(async () => actions[1].click())
     expect(invokeMock).toHaveBeenCalledWith('lastfm_import_collection_add_album', expect.objectContaining({ uri: fixtures.searchCandidate.uri }))
+  })
+
+  it('maps selected Last.fm rows to one Spotify track', async () => {
+    const fixtures = importerFixtures()
+    const base = fixtures.collectionPage.rows[0]
+    const trackUri = 'spotify:track:one-recording'
+    const trackCandidate = { ...base.matchResult.candidates[0], uri: trackUri, name: 'One recording', relation: null, trackUris: [trackUri] }
+    const rows = ['source-a', 'source-b', 'source-c'].map((stableId, index) => ({
+      ...base,
+      source: { ...base.source, stableId, track: `Source spelling ${index + 1}` },
+      matchResult: index < 2 ? null : { ...base.matchResult, sourceId: stableId, selectedUri: trackUri, candidates: [trackCandidate], trackMatches: { [stableId]: trackUri } },
+    }))
+    const page = {
+      ...fixtures.collectionPage,
+      rows,
+      collection: { ...fixtures.collectionPage.collection, cachedAlbums: [], selectedAlbumUris: [], coverage: { ...fixtures.collectionPage.collection.coverage, selectedAlbums: [] } },
+      options: { ...fixtures.collectionPage.options, selectedTrackIds: rows.map((item) => item.source.stableId) },
+    }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'lastfm_import_select_matches') return page
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.textContent).toContain('Source spelling 3'))
+
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Select all rows')!.click())
+    const map = [...view.querySelectorAll('button')].find((button) => button.textContent === 'Map selected (3)…')!
+    expect(map.disabled).toBe(false)
+    await act(async () => map.click())
+    expect(view.textContent).toContain('Choose one Spotify track for 3 Last.fm rows')
+
+    const choice = view.querySelector<HTMLInputElement>('input[type="radio"]')!
+    expect(choice.closest('label')?.textContent).toContain('One recording')
+    await act(async () => choice.click())
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Use This Track')!.click())
+    expect(invokeMock).toHaveBeenCalledWith('lastfm_import_select_matches', {
+      batchId: 1,
+      selections: rows.map((item) => ({ id: item.source.stableId, uri: trackUri })),
+    })
   })
 })
 

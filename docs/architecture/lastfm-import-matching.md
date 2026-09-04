@@ -257,6 +257,9 @@ The track picker first offers tracks already cached for the selected release or
 selected collection album set, then offers global Spotify search as a fallback.
 Choosing a cached track makes no Spotify request; Rust verifies that its URI
 belongs to a currently selected album before persisting the mapping.
+One explicitly chosen track candidate may be applied to multiple source rows in
+the same review batch; each row keeps its own source identity and contributes to
+the normal target-wide count merge.
 
 ## Collection matching
 

@@ -105,6 +105,9 @@
 .import-options input[type="text"] { width: 120px; padding: 3px 5px; }
 .import-options select { padding: 3px 5px; }
 .import-exclusion-note { margin: 0; padding: 7px 16px; color: var(--dim); background: color-mix(in srgb, #c88 8%, transparent); font-size: 10.5px; }
+.import-track-actions { display: flex; align-items: center; gap: 7px; padding: 7px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.import-track-actions button { min-height: 22px; padding: 2px 7px; }
+.import-track-actions span { margin-left: auto; color: var(--dim); font-size: 10px; }
 .import-track-list { min-height: 0; flex: 1; overflow: auto; }
 .import-track-row { min-height: 65px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .import-track-row.selected .import-source-cell { box-shadow: inset 3px 0 var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }

@@ -5428,6 +5428,36 @@ fn collection_match_set_maps_unique_union_and_deduplicates_track_uris() {
 }
 
 #[test]
+fn manual_track_candidate_can_map_multiple_rows_in_one_batch() {
+    let rows = vec![
+        collection_test_row("One"),
+        collection_test_row("One (alternate)"),
+    ];
+    let mut session = collection_session(&rows);
+    session
+        .matches
+        .get_mut(&rows[0].stable_id)
+        .unwrap()
+        .candidates = vec![AlbumCandidate {
+        uri: "spotify:track:one".into(),
+        name: "One".into(),
+        artist: "Artist".into(),
+        track_uris: vec!["spotify:track:one".into()],
+        track_names: vec!["One".into()],
+        track_artists: vec!["Artist".into()],
+        track_albums: vec!["Release".into()],
+        ..AlbumCandidate::default()
+    }];
+
+    select_match_in_session(&mut session, 1, &rows[1].stable_id, "spotify:track:one").unwrap();
+
+    assert_eq!(
+        session.matches[&rows[1].stable_id].track_matches[&rows[1].stable_id],
+        "spotify:track:one"
+    );
+}
+
+#[test]
 fn collection_match_set_keeps_distinct_editions_ambiguous() {
     let row = collection_test_row("One");
     let first = collection_album(
