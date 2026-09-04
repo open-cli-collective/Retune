@@ -219,11 +219,10 @@ journal is persisted before the atomic library write and records checkpoint,
 backlog, and receipt effects. Recovery applies the before state, finalizes the
 after state, or exposes a typed conflict; it never guesses.
 
-Review batches are stable 1-based `ImportBatch` pages capped at 100 source rows.
-Normal albums under the cap remain one batch; larger albums and singles split
-deterministically, and command arguments must identify the requested batch and
-its artist/album identity. Row actions also require a source ID; album-level
-actions can operate without one. Queue summaries cross the IPC boundary as
+Review batches are stable 1-based `ImportBatch` pages that preserve complete
+source clusters without a row-count cap, and command arguments must identify
+the requested batch and its artist/album identity. Row actions also require a
+source ID; album-level actions can operate without one. Queue summaries cross the IPC boundary as
 bounded cursor/limit pages with `sourceCount`, not source IDs. Queued and
 running apply jobs are omitted from the active projection; failed jobs reappear
 with their frozen choices and an explicit retry action. A failed Accept All job

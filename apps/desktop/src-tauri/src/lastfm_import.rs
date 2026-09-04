@@ -20,7 +20,6 @@ use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use crate::lastfm::{AcceptedScrobbleReceipt, ScrobbleMetadata};
 
 pub(crate) const SESSION_VERSION: u8 = 2;
-pub(crate) const LASTFM_REVIEW_BATCH_SIZE: usize = 100;
 const LASTFM_PAGE_WINDOW_SIZE: u32 = 4;
 const LASTFM_QUEUE_PAGE_LIMIT: usize = 1000;
 pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
