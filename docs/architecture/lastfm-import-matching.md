@@ -99,7 +99,8 @@ row-scoped matches or decisions. Review then has two shapes:
   `Add Album…`; choosing it switches that batch to collection matching using
   the cached release candidate, without another Spotify request. The source
   album label remains visible, but the batch thereafter uses the collection
-  album controls and cannot use whole-album mode.
+  album controls. Each selected album independently chooses full-album library
+  membership; that choice does not affect the album union used for matching.
 - An empty Last.fm album is **collection-shaped** and displayed as `Singles`.
   Retune matches each source row against individual tracks. The user may build a
   set of Spotify albums whose track union constrains and improves those matches.
@@ -117,6 +118,16 @@ reusable mappings once. Track exclusions do not rebuild the incremental backlog
 on the review click path; the normal incremental-sync entrypoint applies those
 durable mappings before fetching more plays. Album and artist cascades still
 sweep applicable backlog immediately.
+
+The user may combine any two or more queue batches into one custom
+collection-shaped batch, still capped at 100 source rows. A mixed-artist batch
+is labeled `Various Artists`. Combining preserves row decisions, matches,
+compatible batch options, and any existing collection album choices;
+whole-release mode becomes the per-album choice used by collections. Custom
+batch membership is persisted and retained when incremental sync rebuilds the
+remaining automatic batches. Skip affects exactly the custom batch's source
+rows. Album- and artist-wide ignore are unavailable because the arbitrary
+grouping does not represent one source entity.
 
 ## Search and cache boundary
 
@@ -185,6 +196,8 @@ most specific evidence first:
    source artist or source album that exactly matches the batch metadata;
 6. one unique best target sharing at least two tokens longer than three
    characters and at least half the meaningful tokens of the shorter title.
+   Collection matching applies this final fallback across the selected album
+   union and leaves equally strong distinct tracks ambiguous.
 
 This ordering prevents a broad match from hiding a more specific edition. For
 example, `Raise Your Banner (feat. Anders Fridén) [Single Edit]` selects
@@ -276,7 +289,9 @@ behavior.
 
 Adding or removing an album reranks unresolved automatic rows locally while
 preserving accepted mappings and explicit manual choices. Coverage summaries
-are derived from the selected union, not from all search results.
+are derived from the selected union, not from all search results. A separate
+pressed `Add to library` state selects any subset of that union for full-album
+membership and defaults on for albums already in the library.
 
 The review UI groups already-selected library track matches by their Spotify
 album as automatic contributors. These groups are informational: only albums
@@ -305,9 +320,11 @@ with the selected count mode.
 
 ## Acceptance and reusable mappings
 
-Accepting a batch freezes an account- and session-bound apply plan. Whole-album
-mode saves one album URI; selected-track mode saves the distinct resolved track
-URIs. Counts-only mode performs no Spotify membership write. The asynchronous
+Accepting a batch freezes an account- and session-bound apply plan. Release
+whole-album mode saves one album URI. A collection plan saves every pressed
+album in full plus distinct resolved track URIs not covered by those albums;
+unpressed albums still participate in matching. Counts-only mode performs no
+Spotify membership write. The asynchronous
 Rust worker then applies remote membership, local materialization and history,
 metadata, reusable mappings, and review decisions in checkpointed order.
 

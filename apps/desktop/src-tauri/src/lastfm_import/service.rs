@@ -686,7 +686,55 @@ impl Service {
                 .matches
                 .retain(|id, _| row_ids.contains(id.as_str()));
             let previous_batches = session.batches.clone();
-            let next_batches = build_review_batches(&session.rows);
+            let mut custom_batches = previous_batches
+                .iter()
+                .filter(|batch| batch.custom)
+                .cloned()
+                .collect::<Vec<_>>();
+            for batch in &mut custom_batches {
+                batch
+                    .source_ids
+                    .retain(|source_id| row_ids.contains(source_id.as_str()));
+            }
+            custom_batches.retain(|batch| !batch.source_ids.is_empty());
+            let custom_source_ids = custom_batches
+                .iter()
+                .flat_map(|batch| batch.source_ids.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            let regular_rows = session
+                .rows
+                .iter()
+                .filter(|row| !custom_source_ids.contains(&row.stable_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let reserved_pages = custom_batches
+                .iter()
+                .map(|batch| batch.page)
+                .collect::<BTreeSet<_>>();
+            let mut next_page = 1;
+            let mut next_batches = build_review_batches(&regular_rows);
+            for batch in &mut next_batches {
+                while reserved_pages.contains(&next_page) {
+                    next_page += 1;
+                }
+                batch.page = next_page;
+                next_page += 1;
+            }
+            next_batches.extend(custom_batches);
+            next_batches.sort_by_key(|batch| batch.page);
+            session.page_options.retain(|key, _| {
+                let Some(batch_id) = key
+                    .strip_prefix("batch:")
+                    .and_then(|value| value.parse::<u32>().ok())
+                else {
+                    return true;
+                };
+                let previous = previous_batches.iter().find(|batch| batch.page == batch_id);
+                let next = next_batches.iter().find(|batch| batch.page == batch_id);
+                previous
+                    .zip(next)
+                    .is_some_and(|(previous, next)| previous.source_ids == next.source_ids)
+            });
             session.collection_album_matches.retain(|batch_id, _| {
                 let Some(previous) = previous_batches
                     .iter()
@@ -1652,8 +1700,42 @@ impl Service {
                 if state.selected_album_uris.len() == before {
                     return Err("That Spotify album is not in the match set.".into());
                 }
+                state.full_album_choices.remove(uri);
                 state.automatic_selection_disabled = true;
                 rerank_collection_session(&mut session, batch_id, membership, mappings)?;
+                Ok((session, ()))
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn set_collection_album_import(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        batch_id: u32,
+        artist: &str,
+        uri: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |mut session| {
+                requested_collection_batch(&session, batch_id, artist)?;
+                let state = session
+                    .collection_album_matches
+                    .get_mut(&batch_id)
+                    .ok_or_else(|| "That Spotify album is not in the match set.".to_string())?;
+                if !state
+                    .selected_album_uris
+                    .iter()
+                    .any(|selected| selected == uri)
+                {
+                    return Err("That Spotify album is not in the match set.".into());
+                }
+                state.full_album_choices.insert(uri.to_owned(), enabled);
                 Ok((session, ()))
             },
         )
@@ -1947,6 +2029,7 @@ impl Service {
             batch_id,
             artist: artist.to_owned(),
             album: album.to_owned(),
+            custom_batch: batch.custom,
             collection_shaped,
             album_label_count: projection.album_labels.len(),
             page_number,
@@ -2012,6 +2095,40 @@ impl Service {
         .await
     }
 
+    pub(super) async fn combine_batches(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        batch_ids: &[u32],
+    ) -> Result<(u32, String, String), String> {
+        let blocked = self
+            .sync_snapshot()
+            .await
+            .apply_queue
+            .into_iter()
+            .filter(|job| {
+                batch_ids.contains(&job.plan.batch_id)
+                    && matches!(
+                        job.status,
+                        ApplyJobStatus::Queued | ApplyJobStatus::Running | ApplyJobStatus::Failed
+                    )
+            })
+            .count();
+        if blocked > 0 {
+            return Err("A selected Last.fm batch has pending or failed apply work.".into());
+        }
+        self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |mut session| {
+                let result = combine_review_batches(&mut session, batch_ids)?;
+                Ok((session, result))
+            },
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn review_action(
         &self,
@@ -2066,6 +2183,16 @@ impl Service {
             let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
                 return Err("Unknown Last.fm import review batch.".into());
             };
+            if batch.custom
+                && matches!(
+                    action,
+                    ReviewAction::IgnoreAlbum | ReviewAction::IgnoreArtist
+                )
+            {
+                return Err(
+                    "Album- and artist-wide ignore are unavailable for a custom batch.".into(),
+                );
+            }
             let scoped_ids = batch_scope_source_ids(&session, &batch);
             let mapping_album_keys = source_album_keys_for_ids(&session, &scoped_ids);
             let mapping_track_ids = ids.as_ref().map(|ids| {

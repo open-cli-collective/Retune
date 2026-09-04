@@ -44,7 +44,8 @@ Navigation and resolved Library projections are view-only; they never mutate or
 replace the active queue. An explicit Library, playlist, or other play/start
 action establishes the canonical queue and current position. Repeat off stops
 at that queue's end, repeat all may wrap, and repeat one remains on the current
-track.
+track. The playback IPC accepts queues up to 100,000 tracks as a resource-safety
+boundary; backend-specific request windows do not truncate the canonical queue.
 
 The reducer emits only neutral, listening-generation-scoped facts: natural
 start, cumulative forward listening, discontinuity/seek, and completion. The

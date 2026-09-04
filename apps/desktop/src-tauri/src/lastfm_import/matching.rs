@@ -162,29 +162,31 @@ pub(super) fn significant_title_tokens(value: &str) -> BTreeSet<String> {
 }
 
 fn unique_significant_token_match(source: &str, targets: &[String]) -> Option<usize> {
-    let source = significant_title_tokens(source);
     let mut scored = targets.iter().enumerate().filter_map(|(index, target)| {
-        let target = significant_title_tokens(target);
-        let overlap = source.intersection(&target).count();
-        let shorter = source.len().min(target.len());
-        (overlap >= 2 && overlap * 2 >= shorter).then_some((index, overlap, shorter))
+        significant_token_match_score(source, target).map(|score| (index, score))
     });
     let best = scored.next()?;
     let mut tied = false;
     let best = scored.fold(best, |best, candidate| {
-        let best_score = (best.1 * 100 / best.2, best.1);
-        let candidate_score = (candidate.1 * 100 / candidate.2, candidate.1);
-        if candidate_score > best_score {
+        if candidate.1 > best.1 {
             tied = false;
             candidate
         } else {
-            if candidate_score == best_score {
+            if candidate.1 == best.1 {
                 tied = true;
             }
             best
         }
     });
     (!tied).then_some(best.0)
+}
+
+fn significant_token_match_score(source: &str, target: &str) -> Option<(usize, usize)> {
+    let source = significant_title_tokens(source);
+    let target = significant_title_tokens(target);
+    let overlap = source.intersection(&target).count();
+    let shorter = source.len().min(target.len());
+    (overlap >= 2 && overlap * 2 >= shorter).then(|| (overlap * 100 / shorter, overlap))
 }
 
 #[cfg(test)]
@@ -245,11 +247,16 @@ fn automatic_album_candidate_with<'a, T>(
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CollectionMembership {
     pub(super) track_uris: BTreeSet<String>,
+    pub(super) album_uris: BTreeSet<String>,
 }
 
 impl CollectionMembership {
     pub(super) fn contains(&self, uri: &str) -> bool {
         self.track_uris.contains(uri)
+    }
+
+    pub(super) fn contains_album(&self, uri: &str) -> bool {
+        self.album_uris.contains(uri)
     }
 }
 
@@ -538,14 +545,39 @@ pub(super) fn collection_best_title_matches<'a>(
         .iter()
         .filter(|candidate| collection_candidate_is_exact(row, candidate))
         .collect::<Vec<_>>();
-    if exact.is_empty() {
-        candidates
-            .iter()
-            .filter(|candidate| collection_candidate_is_same_songs(row, candidate))
-            .collect()
-    } else {
-        exact
+    if !exact.is_empty() {
+        return exact;
     }
+    let compatible = candidates
+        .iter()
+        .filter(|candidate| collection_candidate_is_same_songs(row, candidate))
+        .collect::<Vec<_>>();
+    if !compatible.is_empty() {
+        return compatible;
+    }
+    let source_titles = std::iter::once(row.track.as_str())
+        .chain(row.variants.iter().map(|variant| variant.track.as_str()));
+    let scored = candidates
+        .iter()
+        .filter_map(|candidate| {
+            source_titles
+                .clone()
+                .flat_map(|source| {
+                    std::iter::once(candidate.name.as_str())
+                        .chain(candidate.track_names.iter().map(String::as_str))
+                        .filter_map(move |target| significant_token_match_score(source, target))
+                })
+                .max()
+                .map(|score| (candidate, score))
+        })
+        .collect::<Vec<_>>();
+    let Some(best) = scored.iter().map(|(_, score)| *score).max() else {
+        return Vec::new();
+    };
+    scored
+        .into_iter()
+        .filter_map(|(candidate, score)| (score == best).then_some(candidate))
+        .collect()
 }
 
 fn collection_title_confidence(row: &SourceRow, candidate: &AlbumCandidate) -> Confidence {
@@ -1047,7 +1079,7 @@ pub(super) fn collection_album_candidate(
         uri: album.uri.clone(),
         name: album.name.clone(),
         artist: artist.clone(),
-        in_library: tracks.iter().any(|track| membership.contains(&track.uri)),
+        in_library: membership.contains_album(&album.uri),
         track_uris: tracks.iter().map(|track| track.uri.clone()).collect(),
         track_names: tracks.iter().map(|track| track.name.clone()).collect(),
         track_artists: tracks

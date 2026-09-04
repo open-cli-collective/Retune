@@ -912,6 +912,7 @@ pub(super) fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
             batches.push(ImportBatch {
                 page,
                 source_ids: chunk.to_vec(),
+                custom: false,
                 collection_shaped: Some(cluster.collection_shaped),
                 representative_artist: Some(cluster.representative_artist.clone()),
                 representative_album: Some(cluster.representative_album.clone()),
@@ -1233,6 +1234,7 @@ mod tests {
             ImportBatch {
                 page: 7,
                 source_ids: vec![protected_id.clone()],
+                custom: false,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,
@@ -1241,6 +1243,7 @@ mod tests {
             ImportBatch {
                 page: 9,
                 source_ids: pending_ids.clone(),
+                custom: false,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,
@@ -1334,6 +1337,7 @@ mod tests {
             ImportBatch {
                 page: 7,
                 source_ids: vec![first_id.clone()],
+                custom: false,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,
@@ -1342,6 +1346,7 @@ mod tests {
             ImportBatch {
                 page: 9,
                 source_ids: vec![second_id.clone()],
+                custom: false,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,

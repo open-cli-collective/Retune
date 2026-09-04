@@ -5,12 +5,12 @@ use std::{
 };
 
 use super::{
-    batch_is_collection_shaped, batch_options_key, batch_rows, collection_selected_albums,
-    exact_album_match_for_rows, historical_counts_for_targets, is_actionable,
-    is_converted_collection_batch, matched_track_uri, matched_track_uri_for_row,
+    batch_is_collection_shaped, batch_options_key, batch_rows, collection_full_albums,
+    collection_selected_albums, exact_album_match_for_rows, historical_counts_for_targets,
+    is_actionable, is_converted_collection_batch, matched_track_uri, matched_track_uri_for_row,
     membership_uris_for_import,
     model::{
-        AcceptAllCursor, ApplyFailure, ApplyFailureCode, ApplyJobStage, ApplyJobStatus,
+        AcceptAllCursor, ApplyAlbum, ApplyFailure, ApplyFailureCode, ApplyJobStage, ApplyJobStatus,
         ApplyMapping, ApplyMembership, ApplyPlan, HistoryUpdate, ImportApplyFinished,
         ImportStateView, LastFmImportSessionV2, LastFmMappings, PageOptions, ReviewApplyJob,
         RowDecision, RowStatus, SourceRow,
@@ -236,7 +236,35 @@ pub(super) fn build_apply_plan(
     }
 
     let mut metadata_uris = target_by_source.values().cloned().collect::<BTreeSet<_>>();
-    let membership = if options.import_content && options.whole_album {
+    let full_albums = if options.import_content {
+        collection_full_albums(session, batch_id)
+    } else {
+        Vec::new()
+    };
+    let membership = if options.import_content && collection_shaped && !full_albums.is_empty() {
+        let covered_tracks = full_albums
+            .iter()
+            .flat_map(|album| album.matching.track_uris.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        metadata_uris.extend(covered_tracks.iter().cloned());
+        ApplyMembership::AlbumsAndTracks {
+            albums: full_albums
+                .iter()
+                .map(|album| ApplyAlbum {
+                    uri: album.matching.uri.clone(),
+                    name: album.matching.name.clone(),
+                    artist: album.matching.artist.clone(),
+                })
+                .collect(),
+            tracks: target_by_source
+                .values()
+                .filter(|uri| !covered_tracks.contains(*uri))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    } else if options.import_content && options.whole_album {
         if collection_shaped {
             let row_refs = rows.iter().collect::<Vec<_>>();
             let candidate = selected_collection_album_for_rows(session, batch_id, &row_refs)
@@ -325,6 +353,40 @@ pub(super) fn build_apply_plan(
         .filter_map(|row| {
             let target_uri = target_by_source.get(&row.stable_id)?.clone();
             let result = session.matches.get(&row.stable_id);
+            let album_uri = if collection_shaped {
+                full_albums
+                    .iter()
+                    .find(|album| album.matching.track_uris.contains(&target_uri))
+                    .map(|album| album.matching.uri.clone())
+                    .or_else(|| {
+                        if options.whole_album {
+                            selected_collection_album_for_rows(
+                                session,
+                                batch_id,
+                                &rows.iter().collect::<Vec<_>>(),
+                            )
+                            .map(|album| album.matching.uri)
+                        } else {
+                            None
+                        }
+                    })
+            } else if converted_collection || (album.is_empty() && !options.whole_album) {
+                None
+            } else if album.is_empty() && options.whole_album {
+                selected_collection_album(session, batch_id)
+                    .map(|candidate| candidate.matching.uri.clone())
+                    .or_else(|| {
+                        result
+                            .and_then(|result| result.selected_uri.as_deref())
+                            .filter(|uri| uri.starts_with("spotify:album:"))
+                            .map(ToOwned::to_owned)
+                    })
+            } else {
+                result
+                    .and_then(|result| result.selected_uri.as_deref())
+                    .filter(|uri| uri.starts_with("spotify:album:"))
+                    .map(ToOwned::to_owned)
+            };
             Some(ApplyMapping {
                 source_key: session
                     .incremental_source_keys
@@ -335,33 +397,7 @@ pub(super) fn build_apply_plan(
                 album: row.album.clone(),
                 track: row.track.clone(),
                 target_uri,
-                album_uri: if converted_collection
-                    || (collection_shaped && !options.whole_album)
-                    || (album.is_empty() && !options.whole_album)
-                {
-                    None
-                } else if collection_shaped && options.whole_album {
-                    selected_collection_album_for_rows(
-                        session,
-                        batch_id,
-                        &rows.iter().collect::<Vec<_>>(),
-                    )
-                    .map(|candidate| candidate.matching.uri)
-                } else if album.is_empty() && options.whole_album {
-                    selected_collection_album(session, batch_id)
-                        .map(|candidate| candidate.matching.uri.clone())
-                        .or_else(|| {
-                            result
-                                .and_then(|result| result.selected_uri.as_deref())
-                                .filter(|uri| uri.starts_with("spotify:album:"))
-                                .map(ToOwned::to_owned)
-                        })
-                } else {
-                    result
-                        .and_then(|result| result.selected_uri.as_deref())
-                        .filter(|uri| uri.starts_with("spotify:album:"))
-                        .map(ToOwned::to_owned)
-                },
+                album_uri,
             })
         })
         .collect();
@@ -893,6 +929,44 @@ pub(super) async fn run_apply_upstream_effect<
                 added_at,
             )
             .await?;
+        }
+        ApplyMembership::AlbumsAndTracks { albums, tracks } => {
+            for album in albums {
+                let saved = crate::spotify_membership::save_album_locked(
+                    provider,
+                    membership,
+                    library_owner,
+                    cooldown_store,
+                    &album.uri,
+                    &album.name,
+                    &album.artist,
+                    added_at,
+                )
+                .await?;
+                if saved.album_uri != album.uri {
+                    return Err(
+                        "Spotify returned a different album than the selected match.".into(),
+                    );
+                }
+            }
+            if !tracks.is_empty() {
+                let cached_tracks = service
+                    .snapshot()
+                    .await
+                    .as_ref()
+                    .map(|session| cached_collection_tracks_for_apply(session, plan, added_at))
+                    .unwrap_or_default();
+                crate::spotify_membership::save_tracks_locked(
+                    provider,
+                    membership,
+                    library_owner,
+                    cooldown_store,
+                    tracks.clone(),
+                    cached_tracks,
+                    added_at,
+                )
+                .await?;
+            }
         }
     }
     log::info!(target: "lastfm_import", "apply upstream complete batch={}", plan.batch_id);

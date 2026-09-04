@@ -20,6 +20,14 @@ reusable credential is stored alongside the Web API token state. Web-token
 refresh preserves it. A playback rejection clears only that credential; an
 explicit Spotify disconnect clears the whole token record.
 
+A successful Web API profile check retains the verified public profile ID in
+the playback-credential slot even before built-in playback is authorized. A
+playback rejection clears the reusable secret but retains that ID. Playback
+authorization compares librespot's canonical username with this cached ID, so
+renewing built-in playback does not depend on Web API quota availability. A new
+Web OAuth grant clears both values and must reach `/me` once before this cached
+path is available.
+
 There is one shared `SpotifyClient`. Access-token refresh is coalesced behind a
 refresh lock; a request that receives 401 refreshes once and retries once. The
 public `client` facade keeps transport, request policy, wire models, and endpoint
@@ -171,8 +179,9 @@ enter the shared token store, then exposes the new connection and queries
 credentials. A new Web OAuth grant also clears reusable playback credentials;
 the user must explicitly authorize built-in playback for that account. Playback
 authorization holds the same gate while comparing librespot's canonical
-username with the connected Web API `/me` user ID, and refuses to persist a
-credential minted for a different account.
+username with the connected Web API user ID previously verified by `/me`, and
+refuses to persist a credential minted for a different account. Legacy grants
+without that cached ID fall back to `/me` once.
 
 The current profile's immutable `account_id` is preferred for account binding
 when Spotify supplies it; profile `id` is the compatibility identity when it is

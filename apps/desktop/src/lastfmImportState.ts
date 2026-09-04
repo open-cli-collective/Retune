@@ -109,6 +109,9 @@ export type ImportQueueItem = {
   page: number
   artist: string
   album: string
+  customBatch?: boolean
+  collectionShaped?: boolean
+  albumLabelCount?: number
   playCount: number
   importedPlayCount: number
   remainingPlayCount: number
@@ -151,6 +154,15 @@ export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[]
 
 export function activeImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
   return items.filter((item) => item.remaining || item.status === 'failed')
+}
+
+export function filterImportQueue(items: ImportQueueItem[], query: string): ImportQueueItem[] {
+  const terms = query.split(/\s+/u).map(normalizeImportMatch).filter(Boolean)
+  if (!terms.length) return items
+  return items.filter((item) => {
+    const searchable = Object.values(item).filter((value) => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean').map((value) => normalizeImportMatch(String(value)))
+    return terms.every((term) => searchable.some((value) => value.includes(term)))
+  })
 }
 
 export function importQueueTabTarget(shiftKey: boolean): { kind: 'source' | 'match'; row: 0 } {
@@ -198,6 +210,7 @@ export type ImportCollectionSuggestionMatch = {
 
 export type CollectionAmbiguousChoice = {
   uri: string
+  track: string
   album: string
   projectedMatches: number
   totalTracks: number
@@ -207,7 +220,7 @@ export type CollectionAmbiguousChoice = {
 export function collectionAmbiguousChoices(
   sourceId: string,
   match: ImportCollectionSuggestionMatch | null,
-  albums: Array<{ uri: string; name: string; trackUris: string[] }>,
+  albums: Array<{ uri: string; name: string; trackUris: string[]; trackNames: string[] }>,
   selectedAlbumUris: string[],
   coverage: Array<{ uri: string; matched: number; uniqueCoverage: number }>,
 ): CollectionAmbiguousChoice[] {
@@ -217,14 +230,15 @@ export function collectionAmbiguousChoices(
   const choices = albums.flatMap((album, order) => {
     if (!selected.has(album.uri)) return []
     const albumCoverage = coverage.find((entry) => entry.uri === album.uri)
-    return album.trackUris.filter((uri) => supportedUris.has(uri)).map((uri) => ({
+    return album.trackUris.flatMap((uri, index) => supportedUris.has(uri) ? [{
       uri,
+      track: album.trackNames[index] || `Track ${index + 1}`,
       album: album.name,
       projectedMatches: Math.min(album.trackUris.length, (albumCoverage?.matched ?? 0) + 1),
       totalTracks: album.trackUris.length,
       uniqueCoverage: albumCoverage?.uniqueCoverage ?? 0,
       order,
-    }))
+    }] : [])
   })
   if (choices.length < 2) return []
   choices.sort((left, right) => right.projectedMatches - left.projectedMatches || right.uniqueCoverage - left.uniqueCoverage || left.order - right.order)

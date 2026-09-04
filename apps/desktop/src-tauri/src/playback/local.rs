@@ -325,13 +325,15 @@ fn session_error(client: &LiveClient, error: LibrespotError) -> PlaybackError {
         return PlaybackError::message(error.to_string());
     }
     log::warn!(
-        "Spotify playback authorization rejected during session verification; clearing stored credential (kind={:?}, error={error:?})",
+        "Spotify playback authorization rejected during session verification; clearing stored credential secret (kind={:?}, error={error:?})",
         error.kind
     );
     match client.token_store().load() {
         Ok(Some(current)) => {
             let mut cleared = current.clone();
-            cleared.playback_credentials = None;
+            if let Some(credentials) = cleared.playback_credentials.as_mut() {
+                credentials.auth_data.clear();
+            }
             match client
                 .token_store()
                 .replace_if_current(&current, &cleared)
@@ -608,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_playback_rejection_clears_only_playback_credentials() {
+    fn semantic_playback_rejection_retains_verified_username() {
         let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(Some(Tokens {
             access: "web-access".into(),
             refresh: "web-refresh".into(),
@@ -636,7 +638,9 @@ mod tests {
         let saved = store.load().unwrap().unwrap();
         assert_eq!(saved.access, "web-access");
         assert_eq!(saved.refresh, "web-refresh");
-        assert!(saved.playback_credentials.is_none());
+        let playback = saved.playback_credentials.unwrap();
+        assert_eq!(playback.username, "user");
+        assert!(playback.auth_data.is_empty());
     }
 
     #[test]

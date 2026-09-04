@@ -171,6 +171,7 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
   await lastfm.state()
   await lastfm.queue(100, 25)
   await lastfm.page(batch)
+  await lastfm.combineBatches([7, 8])
   await lastfm.review({ ...batch, action: 'skip-album' })
   await lastfm.review({ ...batch, action: 'exclude', ids: ['source-a', 'source-b'] })
   await lastfm.saveOptions(batch, options)
@@ -182,6 +183,7 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
   await lastfm.collectionPreviewAlbum(7, 'Artist', 'spotify:album:one')
   await lastfm.collectionAddAlbum(7, 'Artist', 'spotify:album:one')
   await lastfm.collectionRemoveAlbum(7, 'Artist', 'spotify:album:one')
+  await lastfm.collectionSetAlbumImport(7, 'Artist', 'spotify:album:one', true)
   await lastfm.changeTrack(7, 'source-a', 'track query')
   await lastfm.changeAlbum(7, 'source-a', 'album query')
   await lastfm.selectMatch(7, 'source-a', 'spotify:track:one')
@@ -201,6 +203,7 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
     ['lastfm_import_state', undefined],
     ['lastfm_import_queue', { cursor: 100, limit: 25 }],
     ['lastfm_import_page', batch],
+    ['lastfm_import_combine_batches', { batchIds: [7, 8] }],
     ['lastfm_import_review', { ...batch, action: 'skip-album' }],
     ['lastfm_import_review', { ...batch, ids: ['source-a', 'source-b'], action: 'exclude' }],
     ['lastfm_import_options', { ...batch, options }],
@@ -212,6 +215,7 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
     ['lastfm_import_collection_preview_album', { batchId: 7, artist: 'Artist', uri: 'spotify:album:one' }],
     ['lastfm_import_collection_add_album', { batchId: 7, artist: 'Artist', uri: 'spotify:album:one' }],
     ['lastfm_import_collection_remove_album', { batchId: 7, artist: 'Artist', uri: 'spotify:album:one' }],
+    ['lastfm_import_collection_set_album_import', { batchId: 7, artist: 'Artist', uri: 'spotify:album:one', enabled: true }],
     ['lastfm_import_change_track', { batchId: 7, id: 'source-a', query: 'track query' }],
     ['lastfm_import_change_album', { batchId: 7, id: 'source-a', query: 'album query' }],
     ['lastfm_import_select_match', { batchId: 7, id: 'source-a', uri: 'spotify:track:one' }],

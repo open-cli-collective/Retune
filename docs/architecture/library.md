@@ -66,9 +66,13 @@ selected-track mode stores explicit track ratings only.
 
 Each page has two independent intents: import Spotify content and include
 historical play counts. Both default on, at least one must remain on, and
-whole-album is a separate page-level content mode. It defaults on only when one
-Spotify album maps every included source track one-to-one with no extra tracks;
-the user's persisted page choice then wins. Content-only
+whole-album is a separate page-level content mode for release-shaped batches. It
+defaults on only when one Spotify album maps every included source track
+one-to-one with no extra tracks; the user's persisted page choice then wins.
+Collection batches instead keep matching and membership independent: every
+album in the selected match set has its own `Add to library` toggle, and an
+album already in the library defaults on. Pressed albums are saved in full;
+resolved tracks not covered by a pressed album are saved individually. Content-only
 acceptance saves membership and applies source `added_at` without changing
 plays or `last_played_at`; counts-only performs no Spotify write and updates
 only already-materialized matched Retune tracks.
@@ -235,8 +239,8 @@ exactly the next batch in the active sort order as a one-item lookahead; an
 overlapping foreground open joins the same importer lock and cached result.
 Correctly cached collection batches reopen
 without an API call; only legacy empty-album rows with album-shaped cached
-search terms refetch. Whole-album import stays disabled for a collection until
-one coherent release is explicitly chosen. Accept All prepares all remaining
+search terms refetch. Collection album cards independently choose which matched
+albums are saved in full. Accept All prepares all remaining
 batches sequentially before
 showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
 source-history decisions and can be undone before acceptance; they never remove
@@ -259,11 +263,11 @@ that classification. Legacy failed jobs without a known code retain their
 message, deadline, frozen plan, stage, and attempt and project as `apply-failed`;
 Retune never derives policy by parsing display text.
 
-Track-mode collection applies materialize missing local records from the
+Collection applies materialize missing local records from the
 persisted selected-album preview cache before the Spotify membership write.
 Only targets absent from that cache fall back to individual Spotify metadata
 reads, so retrying a frozen cached job does not repeat `/tracks/{id}` requests.
-Both album- and track-mode applies call the shared Spotify membership owner;
+Both full-album and individual-track writes call the shared Spotify membership owner;
 the importer does not depend on Tauri command implementations. Its account
 identity recheck and remote membership write share the same owner-issued guard.
 

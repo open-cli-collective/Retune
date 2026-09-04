@@ -169,6 +169,8 @@ pub(crate) struct CollectionAlbumMatchState {
     pub selected_album_uris: Vec<String>,
     #[serde(default)]
     pub automatic_selection_disabled: bool,
+    #[serde(default)]
+    pub full_album_choices: BTreeMap<String, bool>,
     /// Candidate URIs inserted by the selected-album rerank, keyed by source row.
     /// Baseline search/library candidates are deliberately not recorded here.
     #[serde(default)]
@@ -228,6 +230,7 @@ pub(crate) struct CollectionCoverage {
 pub(crate) struct CollectionMatchView {
     pub cached_albums: Vec<CollectionAlbumCandidate>,
     pub selected_album_uris: Vec<String>,
+    pub full_album_uris: BTreeSet<String>,
     pub coverage: CollectionCoverage,
     pub whole_album_ready: bool,
 }
@@ -337,6 +340,8 @@ pub(crate) struct RetryableError {
 pub(crate) struct ImportBatch {
     pub page: u32,
     pub source_ids: Vec<String>,
+    #[serde(default)]
+    pub custom: bool,
     /// `None` identifies batches written before source clustering was persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_shaped: Option<bool>,
@@ -463,6 +468,7 @@ pub(crate) struct ImportQueueItem {
     pub page: u32,
     pub artist: String,
     pub album: String,
+    pub custom_batch: bool,
     pub collection_shaped: bool,
     pub album_label_count: usize,
     pub play_count: u64,
@@ -510,6 +516,7 @@ pub(crate) struct ImportPageView {
     pub batch_id: u32,
     pub artist: String,
     pub album: String,
+    pub custom_batch: bool,
     pub collection_shaped: bool,
     pub album_label_count: usize,
     pub page_number: usize,
@@ -692,6 +699,18 @@ pub(super) enum ApplyMembership {
         artist: String,
     },
     Tracks(Vec<String>),
+    AlbumsAndTracks {
+        albums: Vec<ApplyAlbum>,
+        tracks: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApplyAlbum {
+    pub(super) uri: String,
+    pub(super) name: String,
+    pub(super) artist: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
