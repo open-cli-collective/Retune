@@ -65,8 +65,8 @@ Pure option, count-strategy, review-action, and match-selection transformations
 return candidate records to the service for publication and persistence.
 Persisted session, mapping, apply-job, and journal records remain owned by their
 existing stores.
-Review option, count-mode, and search-term edits publish the validated in-memory
-session first. A service-owned ordered writer coalesces compatible metadata
+Ordinary review mutations publish the validated in-memory session first. A
+service-owned ordered writer coalesces compatible metadata
 snapshots and performs disk writes afterward, so ordinary controls do not wait
 on filesystem latency; apply and recovery continue to use the durable journal.
 Account binding is checked before provider work and again after network search;

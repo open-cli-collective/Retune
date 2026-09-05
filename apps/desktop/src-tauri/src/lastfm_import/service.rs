@@ -1085,7 +1085,8 @@ impl Service {
         Ok(result)
     }
 
-    pub(super) async fn mutate_owned_session<R, F>(
+    #[cfg(test)]
+    async fn mutate_owned_session_blocking<R, F>(
         &self,
         username: &str,
         spotify_account_id: &str,
@@ -1121,7 +1122,7 @@ impl Service {
     }
 
     #[allow(dead_code)]
-    async fn mutate_owned_session_queued<R, F>(
+    pub(super) async fn mutate_owned_session<R, F>(
         &self,
         username: &str,
         spotify_account_id: &str,
@@ -1132,6 +1133,11 @@ impl Service {
         F: FnOnce(LastFmImportSessionV2) -> Result<(LastFmImportSessionV2, R), String>,
         R: Send + 'static,
     {
+        #[cfg(test)]
+        return self
+            .mutate_owned_session_blocking(username, spotify_account_id, allowed_phase, mutation)
+            .await;
+        #[cfg(not(test))]
         self.mutate_session_queued(|session| {
             let Some(mut session) = session else {
                 return Err("No Last.fm import session is active.".into());
@@ -2069,7 +2075,7 @@ impl Service {
             .set_search_terms(username, spotify_account_id, search_terms)
             .await;
         #[cfg(not(test))]
-        self.mutate_owned_session_queued(
+        self.mutate_owned_session(
             username,
             spotify_account_id,
             review_phase_allowed,
@@ -2170,7 +2176,7 @@ impl Service {
         #[cfg(not(test))]
         options.validate()?;
         #[cfg(not(test))]
-        self.mutate_owned_session_queued(
+        self.mutate_owned_session(
             username,
             spotify_account_id,
             review_phase_allowed,
