@@ -919,6 +919,51 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "type-ahead audit; run with --release --ignored --nocapture"]
+    fn audit_typeahead_browse_costs() {
+        use std::{hint::black_box, time::Instant};
+        for size in [10_000, 50_000] {
+            let mut library = Library::new();
+            library.add_all((0..size).map(|index| NewTrack {
+                name: format!("Track {index}"),
+                ..metadata_track(
+                    &format!("spotify:track:{index}"),
+                    "Rock",
+                    &format!("Artist {}", index % 500),
+                    &format!("Album {}", index % 5000),
+                )
+            }));
+            for query in ["", "track", "missing-match"] {
+                let mut samples = Vec::new();
+                for iteration in 0..6 {
+                    let start = Instant::now();
+                    let snapshot = library.clone();
+                    let result = browse_view(
+                        &snapshot,
+                        SourceId::Music,
+                        SelectionDto {
+                            cat: vec![],
+                            art: vec![],
+                            alb: vec![],
+                        },
+                        Some(query.into()),
+                    );
+                    assert_eq!(
+                        result.tracks.len(),
+                        if query == "missing-match" { 0 } else { size }
+                    );
+                    black_box(result);
+                    if iteration > 0 {
+                        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                println!("TYPEAHEAD browse rows={size} query={query:?} median_ms={:.2} min={:.2} max={:.2}", samples[2], samples[0], samples[4]);
+            }
+        }
+    }
+
+    #[test]
     fn fixture_counts_cover_visible_tracks_and_global_overlay_edits() {
         let library = fixture::library();
         let selection = Selection::default();

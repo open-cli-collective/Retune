@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef, useState } from 'react'
+import { act, createRef, Profiler, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ArtistPageView, BrowseView, LastFmImportState, LastFmState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track } from '../src/types.ts'
@@ -22,6 +22,8 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDrop
 import App, { StatusBar, TransportBar } from '../src/App.tsx'
 import { defaultSettings } from '../src/appState.ts'
 import LastFmImporter from '../src/LastFmImporter.tsx'
+import { GetInfo } from '../src/dialogViews.tsx'
+import { filterImportQueue } from '../src/lastfmImportState.ts'
 import { TrackList } from '../src/libraryViews.tsx'
 import { SpotifySearch } from '../src/spotifyViews.tsx'
 import { labels, routeGlobalShortcut } from '../src/ui.ts'
@@ -658,6 +660,218 @@ describe('mounted native interaction boundaries', () => {
       batchId: 1,
       selections: rows.map((item) => ({ id: item.source.stableId, uri: trackUri })),
     })
+  })
+})
+
+// Opt-in characterization for docs/lastfm-interaction-audit.md; no timing claims from jsdom.
+describe.skipIf(!process.env.RETUNE_INTERACTION_AUDIT)('Last.fm interaction audit', () => {
+  it('refreshes state, queue and page on a collection command event despite its page response', async () => {
+    const fixtures = importerFixtures()
+    const preview = deferred<unknown>()
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return fixtures.collectionPage
+      if (command === 'lastfm_import_collection_preview_album') return preview.promise
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector('.import-selected-album-card')).not.toBeNull())
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Manage Albums…')!.click())
+    const before = invokeMock.mock.calls.length
+    await act(async () => view.querySelector<HTMLButtonElement>('.import-collection-dialog .import-selected-album button')!.click())
+    await emitNativeEvent('lastfm-import-changed', null)
+    await waitFor(() => expect(invokeMock.mock.calls.slice(before).map(([command]) => command)).toContain('lastfm_import_page'))
+    const calls = invokeMock.mock.calls.slice(before).map(([command]) => command)
+    expect(calls).toContain('lastfm_import_state')
+    expect(calls).toContain('lastfm_import_queue')
+    await act(async () => preview.resolve(fixtures.collectionPage))
+    console.log('AUDIT: collection preview + its invalidation event invoke', calls.join(', '))
+  })
+
+  it('holds unrelated controls through option save and queue refresh; keyboard bypasses busy', async () => {
+    const fixtures = importerFixtures()
+    const save = deferred<unknown>()
+    const refreshedQueue = deferred<unknown>()
+    let holdRefresh = false
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return holdRefresh ? refreshedQueue.promise : { cursor: 0, items: fixtures.queue, total: 2, nextCursor: null }
+      if (command === 'lastfm_import_page') return fixtures.pages.get(Number(args?.batchId))
+      if (command === 'lastfm_import_options') return save.promise
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector('[data-import-nav="source"][data-import-row="1"]')).not.toBeNull())
+    const include = view.querySelector<HTMLInputElement>('input[aria-label="Include Track 1"]')!
+    expect(include).not.toBeNull()
+    holdRefresh = true
+    await act(async () => include.click())
+    expect(include.checked).toBe(false)
+    const queueButton = view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')!
+    expect(queueButton.disabled).toBe(true)
+    const before = invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_options').length
+    await act(async () => key(view.querySelector('[data-import-nav="source"][data-import-row="1"]')!, ' '))
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_options')).toHaveLength(before + 1)
+    await act(async () => save.resolve(null))
+    expect(queueButton.disabled).toBe(true)
+    await act(async () => refreshedQueue.resolve({ cursor: 0, items: fixtures.queue, total: 2, nextCursor: null }))
+    await waitFor(() => expect(queueButton.disabled).toBe(false))
+    console.log('AUDIT: include updates locally; queue stays disabled through save AND refresh; Space submits another save while busy.')
+  })
+
+  it('updates exclusion before acknowledgement and keeps undo available', async () => {
+    const fixtures = importerFixtures()
+    const save = deferred<unknown>()
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: fixtures.queue, total: 2, nextCursor: null }
+      if (command === 'lastfm_import_page') return fixtures.pages.get(Number(args?.batchId))
+      if (command === 'lastfm_import_review') return save.promise
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector('[data-import-nav="source"][data-import-row="1"]')).not.toBeNull())
+    await act(async () => key(view.querySelector('[data-import-nav="source"][data-import-row="1"]')!, 'x'))
+    const undo = view.querySelector<HTMLButtonElement>('button[aria-label="Undo exclusion"]')!
+    expect(undo).not.toBeNull()
+    expect(undo.disabled).toBe(false)
+    expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')!.disabled).toBe(true)
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_review')).toBe(true))
+    await act(async () => save.resolve(fixtures.state))
+    console.log('AUDIT: exclusion updates the DOM before IPC acknowledgement; undo remains enabled; queue navigation is still disabled.')
+  })
+})
+
+describe.skipIf(!process.env.RETUNE_TYPEAHEAD_AUDIT)('type-ahead audit', () => {
+  it('measures queue filtering without rendering or IPC', () => {
+    const fixture = importerFixtures().queue[0]
+    for (const size of [1000, 10000, 50000]) {
+      const rows = Array.from({ length: size }, (_, index) => ({ ...fixture, page: index, artist: `Artist ${index}`, album: `Album ${index}` }))
+      const samples: number[] = []
+      for (let iteration = 0; iteration < 6; iteration++) {
+        const start = performance.now()
+        const result = filterImportQueue(rows, 'artist')
+        const elapsed = performance.now() - start
+        expect(result).toHaveLength(size)
+        if (iteration > 0) samples.push(elapsed)
+      }
+      samples.sort((a, b) => a - b)
+      console.log(`TYPEAHEAD filter rows=${size} median-ms=${samples[2].toFixed(2)} min=${samples[0].toFixed(2)} max=${samples[4].toFixed(2)}`)
+    }
+  })
+  const type = async (input: HTMLInputElement, value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.setSelectionRange(value.length, value.length)
+    await act(async () => input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value.at(-1) })))
+  }
+  it.each([25, 250, 1000])('profiles importer genre typing with %i visible source rows', async (size) => {
+    const fixtures = importerFixtures()
+    const base = fixtures.pages.get(1)!
+    const rows = Array.from({ length: size }, (_, index) => ({
+      ...base.rows[0],
+      source: { ...base.rows[0].source, stableId: `source-${index}`, track: `Track ${index}` },
+      matchResult: null,
+    }))
+    const page = { ...base, rows, options: { ...base.options, selectedTrackIds: rows.map((row) => row.source.stableId) } }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'genre_values') return Array.from({ length: 200 }, (_, index) => `Genre ${index}`)
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const durations: number[] = []
+    const view = await render(<Profiler id="importer" onRender={(_, __, duration) => durations.push(duration)}><LastFmImporter /></Profiler>)
+    await waitFor(() => expect(view.querySelectorAll('.import-track-row')).toHaveLength(size))
+    const input = view.querySelector<HTMLInputElement>('input[aria-label="Import genre"]')!
+    input.focus()
+    const before = invokeMock.mock.calls.length
+    const samples: number[] = []
+    for (let index = 1; index <= 6; index++) {
+      durations.length = 0
+      await type(input, 'z'.repeat(index))
+      if (index > 1) samples.push(durations.reduce((sum, duration) => sum + duration, 0))
+    }
+    expect(invokeMock.mock.calls.length).toBe(before)
+    samples.sort((a, b) => a - b)
+    console.log(`TYPEAHEAD importer rows=${size} React-render-ms median=${samples[2].toFixed(2)} min=${samples[0].toFixed(2)} max=${samples[4].toFixed(2)} IPC=0`)
+  })
+  it('profiles main Get Info autocomplete with 20000 artist suggestions', async () => {
+    invokeMock.mockImplementation(async (command) => command === 'metadata_values'
+      ? { arts: Array.from({ length: 20000 }, (_, index) => `Artist ${index}`), albs: [], cats: [] } : null)
+    const durations: number[] = []
+    const view = await render(<Profiler id="info" onRender={(_, __, duration) => durations.push(duration)}><GetInfo
+      track={{ id: 1, uri: 'fixture:track:1', localPath: null, source: 'music', name: 'Track', art: '', alb: '', cat: '', origCat: null, rating: null, inheritedRating: null, genres: [] }}
+      onCancel={() => {}} onSaved={() => {}} onError={() => {}}
+    /></Profiler>)
+    const input = [...view.querySelectorAll('label')].find((label) => label.textContent === 'Artist')!.querySelector('input')!
+    const elapsed: number[] = []
+    const renders: number[] = []
+    for (let index = 1; index <= 6; index++) {
+      durations.length = 0
+      const start = performance.now()
+      await type(input, 'z'.repeat(index))
+      if (index > 1) { elapsed.push(performance.now() - start); renders.push(durations.reduce((a, b) => a + b, 0)) }
+    }
+    elapsed.sort((a, b) => a - b); renders.sort((a, b) => a - b)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'metadata_values')).toHaveLength(1)
+    console.log(`TYPEAHEAD GetInfo artists=20000 event-to-DOM-ms median=${elapsed[2].toFixed(2)} range=${elapsed[0].toFixed(2)}..${elapsed[4].toFixed(2)} render-median=${renders[2].toFixed(2)}`)
+  })
+  it('issues one browse per search keystroke even in Spotify scope and hides old rows', async () => {
+    const browse: BrowseView = { facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks: [track(1, 'Track')], albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false, counts: { tracks: 1, totalSecs: 180, perSource: { music: 1, podcasts: 0, audiobooks: 0 } } }
+    let pending = deferred<BrowseView>()
+    let held = false
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'browse') return held ? pending.promise : browse
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return []
+      if (command === 'subscribe_main_events') return 1
+      return null
+    })
+    const view = await render(<App />)
+    await waitFor(() => expect(view.querySelector('[data-track-id="1"]')).not.toBeNull())
+    const row = view.querySelector<HTMLElement>('[data-track-id="1"]')!
+    await act(async () => { row.focus(); key(row, 't') })
+    expect(row.classList.contains('selected')).toBe(false)
+    const facet = view.querySelector<HTMLElement>('[data-facet="art"]')!
+    await act(async () => facet.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })))
+    held = true
+    await act(async () => key(document.body, 'a'))
+    expect(view.querySelector('[data-facet="art"] [data-row-index="1"]')).not.toBeNull()
+    expect(view.querySelector('[data-track-id="1"]')).toBeNull()
+    const duringFacet = invokeMock.mock.calls.length
+    await act(async () => key(document.body, 'r'))
+    expect(invokeMock.mock.calls.length).toBe(duringFacet)
+    await act(async () => pending.resolve(browse))
+    pending = deferred<BrowseView>()
+    console.log('TYPEAHEAD focused track row ignores letters; old facets remain visible but next letter issues no refinement while browse is held.')
+    const input = view.querySelector<HTMLInputElement>('input.search')!
+    held = true
+    const before = invokeMock.mock.calls.length
+    for (const value of ['r', 'ro', 'roc']) await type(input, value)
+    expect(view.querySelector('[data-track-id="1"]')).toBeNull()
+    expect(invokeMock.mock.calls.slice(before).filter(([command]) => command === 'browse')).toHaveLength(3)
+    await act(async () => pending.resolve(browse))
+    held = false
+    await act(async () => [...view.querySelectorAll<HTMLButtonElement>('.scope-pills button')].find((button) => button.textContent === 'Spotify')!.click())
+    const spotifyBefore = invokeMock.mock.calls.length
+    for (const value of ['p', 'po', 'pop']) await type(input, value)
+    const calls = invokeMock.mock.calls.slice(spotifyBefore).filter(([command]) => command === 'browse')
+    expect(calls).toHaveLength(3)
+    expect(calls.every(([, args]) => args?.query === undefined)).toBe(true)
+    console.log('TYPEAHEAD 3 library characters => 3 browse calls, prior rows hidden; 3 Spotify characters => 3 unfiltered library browse calls.')
   })
 })
 

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "revision": "4312e1d",
+  "auditedRevisionWithIdenticalTree": "bdfc933",
+  "recordedAt": "2026-09-05",
+  "environment": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "node": "v26.8.1",
+    "build": "release for Rust; Vitest/jsdom development render for React"
+  },
+  "fixtures": {
+    "library-v1": {
+      "source": "apps/desktop/src-tauri/src/library_commands.rs#audit_typeahead_browse_costs",
+      "sizes": [10000, 50000],
+      "artists": 500,
+      "albums": 5000
+    },
+    "import-session-v1": {
+      "source": "apps/desktop/src-tauri/src/lastfm_import/integration_tests.rs#audit_lastfm_interaction_costs",
+      "batchSizes": [100, 1000, 5000],
+      "rowsPerBatch": 3,
+      "candidateTracksPerRow": 3
+    },
+    "mounted-import-v1": {
+      "source": "apps/desktop/test/interactions.test.tsx#type-ahead audit",
+      "visibleRowSizes": [25, 250, 1000],
+      "genreSuggestions": 200,
+      "queueSizes": [1000, 10000, 50000],
+      "controlledBoundaries": ["deferred IPC", "held save", "held queue refresh"]
+    },
+    "get-info-v1": {
+      "source": "apps/desktop/test/interactions.test.tsx#type-ahead audit",
+      "artistSuggestions": 20000
+    }
+  },
+  "measurements": [
+    {"metric":"browse.total","fixture":"library-v1","size":10000,"variant":"empty","unit":"ms","sampleCount":5,"median":37.68,"spread":{"min":36.17,"max":39.46}},
+    {"metric":"browse.total","fixture":"library-v1","size":10000,"variant":"track","unit":"ms","sampleCount":5,"median":37.87,"spread":{"min":36.74,"max":38.47}},
+    {"metric":"browse.total","fixture":"library-v1","size":10000,"variant":"missing-match","unit":"ms","sampleCount":5,"median":9.69,"spread":{"min":9.68,"max":9.80}},
+    {"metric":"browse.total","fixture":"library-v1","size":50000,"variant":"empty","unit":"ms","sampleCount":5,"median":753.08,"spread":{"min":738.42,"max":788.36}},
+    {"metric":"browse.total","fixture":"library-v1","size":50000,"variant":"track","unit":"ms","sampleCount":5,"median":758.61,"spread":{"min":746.23,"max":791.47}},
+    {"metric":"browse.total","fixture":"library-v1","size":50000,"variant":"missing-match","unit":"ms","sampleCount":5,"median":68.71,"spread":{"min":68.55,"max":70.49}},
+    {"metric":"import.snapshot","fixture":"import-session-v1","size":100,"unit":"ms","sampleCount":3,"median":0.247,"spread":null},
+    {"metric":"import.page","fixture":"import-session-v1","size":100,"unit":"ms","sampleCount":3,"median":0.358,"spread":null},
+    {"metric":"import.queue1000","fixture":"import-session-v1","size":100,"unit":"ms","sampleCount":3,"median":0.272,"spread":null},
+    {"metric":"import.options-save","fixture":"import-session-v1","size":100,"unit":"ms","sampleCount":3,"median":7.683,"spread":null},
+    {"metric":"import.options-noop","fixture":"import-session-v1","size":100,"unit":"ms","sampleCount":3,"median":0.603,"spread":null},
+    {"metric":"import.snapshot","fixture":"import-session-v1","size":1000,"unit":"ms","sampleCount":3,"median":2.431,"spread":null},
+    {"metric":"import.page","fixture":"import-session-v1","size":1000,"unit":"ms","sampleCount":3,"median":1.197,"spread":null},
+    {"metric":"import.queue1000","fixture":"import-session-v1","size":1000,"unit":"ms","sampleCount":3,"median":2.845,"spread":null},
+    {"metric":"import.options-save","fixture":"import-session-v1","size":1000,"unit":"ms","sampleCount":3,"median":17.696,"spread":null},
+    {"metric":"import.options-noop","fixture":"import-session-v1","size":1000,"unit":"ms","sampleCount":3,"median":5.356,"spread":null},
+    {"metric":"import.snapshot","fixture":"import-session-v1","size":5000,"unit":"ms","sampleCount":3,"median":13.073,"spread":null},
+    {"metric":"import.page","fixture":"import-session-v1","size":5000,"unit":"ms","sampleCount":3,"median":6.217,"spread":null},
+    {"metric":"import.queue1000","fixture":"import-session-v1","size":5000,"unit":"ms","sampleCount":3,"median":4.042,"spread":null},
+    {"metric":"import.options-save","fixture":"import-session-v1","size":5000,"unit":"ms","sampleCount":3,"median":64.203,"spread":null},
+    {"metric":"import.options-noop","fixture":"import-session-v1","size":5000,"unit":"ms","sampleCount":3,"median":29.385,"spread":null}
+  ],
+  "behavioralEvidence": [
+    "Each typed local-library character starts a browse and hides prior rows while held.",
+    "Each Spotify-scope character starts an unfiltered local browse.",
+    "Importer option controls stay busy through held save and queue refresh.",
+    "Exclusion updates the mounted DOM before acknowledgement while unrelated queue navigation stays disabled."
+  ],
+  "gaps": [
+    "Import service spread was not emitted by the original runner; null is unknown, not zero.",
+    "No isolated native WebKit input-to-paint, cached navigation, Accept & Next, or bulk Get Info baseline exists yet.",
+    "Mounted React/jsdom measurements are not native paint evidence.",
+    "The exploratory audit_hotpaths example copies old kernels and is not production regression proof."
+  ]
+}

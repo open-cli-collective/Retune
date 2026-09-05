@@ -17,6 +17,108 @@ use std::{
     time::Duration,
 };
 
+// Opt-in synthetic evidence for docs/lastfm-interaction-audit.md.
+#[tokio::test]
+#[ignore = "audit benchmark; run with --release --ignored --nocapture"]
+async fn audit_lastfm_interaction_costs() {
+    use std::time::Instant;
+    for batches in [100, 1000, 5000] {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let (template, _, _) = selected_release_session();
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 100);
+        session.phase = ImportPhase::Review;
+        for index in 0..batches {
+            let album = format!("Release {index}");
+            for original in &template.rows {
+                let mut row = original.clone();
+                row.album = album.clone();
+                row.stable_id = source_id(&row.artist, &row.album, &row.track);
+                let mut matched = template.matches[&original.stable_id].clone();
+                matched.source_id = row.stable_id.clone();
+                matched.selected_uri = matched.selected_uri.map(|uri| format!("{uri}-{index}"));
+                for candidate in &mut matched.candidates {
+                    candidate.uri = format!("{}-{index}", candidate.uri);
+                    for uri in &mut candidate.track_uris {
+                        *uri = format!("{uri}-{index}");
+                    }
+                }
+                matched.track_matches = matched
+                    .track_matches
+                    .into_values()
+                    .map(|uri| (row.stable_id.clone(), format!("{uri}-{index}")))
+                    .collect();
+                session.matches.insert(row.stable_id.clone(), matched);
+                session.rows.push(row);
+            }
+            let mut batch = template.batches[0].clone();
+            batch.page = index + 1;
+            batch.source_ids = session
+                .rows
+                .iter()
+                .rev()
+                .take(3)
+                .map(|row| row.stable_id.clone())
+                .collect();
+            batch.representative_album = Some(album.clone());
+            batch.album_labels = vec![album];
+            session.batches.push(batch);
+        }
+        let batch = session.batches[0].clone();
+        let row = session
+            .rows
+            .iter()
+            .find(|row| batch.source_ids.contains(&row.stable_id))
+            .unwrap();
+        let artist = row.artist.clone();
+        let album = row.album.clone();
+        let bytes = serde_json::to_vec(&session).unwrap().len();
+        service.save(session).await.unwrap();
+        let mut measurements = Vec::new();
+        for iteration in 0..3 {
+            let start = Instant::now();
+            std::hint::black_box(service.snapshot().await);
+            let snapshot = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let page = service.page(batch.page, &artist, &album).await.unwrap();
+            let page_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            std::hint::black_box(service.queue_page(0, 1000).await.unwrap());
+            let queue_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let mut options = page.options;
+            options.genre = Some(format!("Audit {iteration}"));
+            let start = Instant::now();
+            service
+                .update_options(
+                    "user",
+                    "spotify",
+                    batch.page,
+                    &artist,
+                    &album,
+                    options.clone(),
+                )
+                .await
+                .unwrap();
+            let save_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            service
+                .update_options("user", "spotify", batch.page, &artist, &album, options)
+                .await
+                .unwrap();
+            let noop_ms = start.elapsed().as_secs_f64() * 1000.0;
+            measurements.push([snapshot, page_ms, queue_ms, save_ms, noop_ms]);
+        }
+        let medians: Vec<_> = (0..5)
+            .map(|column| {
+                let mut values: Vec<_> = measurements.iter().map(|row| row[column]).collect();
+                values.sort_by(f64::total_cmp);
+                values[1]
+            })
+            .collect();
+        println!("AUDIT batches={batches} rows={} json_bytes={bytes} median_ms snapshot/page/queue1000/options_save/options_noop={medians:.3?}", batches * 3);
+    }
+}
+
 fn test_spotify_membership(path: &Path) -> Arc<SpotifyMembership> {
     Arc::new(SpotifyMembership::new(
         SpotifyLibraryState::default(),
