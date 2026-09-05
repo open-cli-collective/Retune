@@ -106,11 +106,10 @@ row-scoped matches or decisions. Review then has two shapes:
   set of Spotify albums whose track union constrains and improves those matches.
   A literal album actually named `Singles` remains release-shaped.
 
-Persisted batches are capped at 100 source rows. Queue projections report
-imported and remaining play totals separately so a cluster containing completed
-rows does not present its full history as new work. A large artist/album group can
-span batches without changing its artist-level ignore behavior. The visible
-batch is the unit of lazy Spotify work and review. Review exclude/undo actions
+Persisted batches preserve complete source clusters without a row-count cap.
+Queue projections report imported and remaining play totals separately so a
+cluster containing completed rows does not present its full history as new
+work. The visible batch is the unit of lazy Spotify work and review. Review exclude/undo actions
 may address one or more source IDs, but every ID must belong to the requested
 batch and remain reviewable; empty, cross-batch, and completed-row requests are
 rejected before any decision changes. A bulk action persists the session and
@@ -120,8 +119,9 @@ durable mappings before fetching more plays. Album and artist cascades still
 sweep applicable backlog immediately.
 
 The user may combine any two or more queue batches into one custom
-collection-shaped batch, still capped at 100 source rows. A mixed-artist batch
-is labeled `Various Artists`. Combining preserves row decisions, matches,
+collection-shaped batch without a row-count cap. Bulk row actions likewise
+accept the whole custom batch. A mixed-artist batch is labeled
+`Various Artists`. Combining preserves row decisions, matches,
 compatible batch options, and any existing collection album choices;
 whole-release mode becomes the per-album choice used by collections. Custom
 batch membership is persisted and retained when incremental sync rebuilds the
@@ -257,6 +257,9 @@ The track picker first offers tracks already cached for the selected release or
 selected collection album set, then offers global Spotify search as a fallback.
 Choosing a cached track makes no Spotify request; Rust verifies that its URI
 belongs to a currently selected album before persisting the mapping.
+One explicitly chosen track candidate may be applied to multiple source rows in
+the same review batch; each row keeps its own source identity and contributes to
+the normal target-wide count merge.
 
 ## Collection matching
 

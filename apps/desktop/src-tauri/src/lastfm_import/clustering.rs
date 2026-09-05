@@ -900,28 +900,23 @@ pub(super) fn source_clusters_with_stats(rows: &[SourceRow]) -> (Vec<SourceClust
 }
 
 pub(super) fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
-    let mut page = 1;
-    let mut batches = Vec::new();
-    for cluster in source_clusters(rows) {
-        let source_ids = cluster
-            .row_indices
-            .iter()
-            .map(|index| rows[*index].stable_id.clone())
-            .collect::<Vec<_>>();
-        for chunk in source_ids.chunks(LASTFM_REVIEW_BATCH_SIZE) {
-            batches.push(ImportBatch {
-                page,
-                source_ids: chunk.to_vec(),
-                custom: false,
-                collection_shaped: Some(cluster.collection_shaped),
-                representative_artist: Some(cluster.representative_artist.clone()),
-                representative_album: Some(cluster.representative_album.clone()),
-                album_labels: cluster.album_labels.clone(),
-            });
-            page += 1;
-        }
-    }
-    batches
+    source_clusters(rows)
+        .into_iter()
+        .enumerate()
+        .map(|(index, cluster)| ImportBatch {
+            page: index as u32 + 1,
+            source_ids: cluster
+                .row_indices
+                .iter()
+                .map(|index| rows[*index].stable_id.clone())
+                .collect(),
+            custom: false,
+            collection_shaped: Some(cluster.collection_shaped),
+            representative_artist: Some(cluster.representative_artist),
+            representative_album: Some(cluster.representative_album),
+            album_labels: cluster.album_labels,
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests {

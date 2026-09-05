@@ -188,7 +188,7 @@ nullable Spotify `/me` account ID, snapshot cache ID, descending page cursor,
 downloaded/total pages, totals, retryable error and attempt, session defaults
 for the two independent intents (content and historical play counts) plus
 whole-album mode, compact aggregated rows, decisions, stable 1-based
-`ImportBatch` pages capped at 100 source rows, batch options, match
+`ImportBatch` pages that preserve complete source clusters, batch options, match
 results/candidates/selected URIs, a
 reusable default plus frozen Spotify-target-to-Sum/Overwrite/Zero map, and the
 session-level search-term display preference. Match candidates include the

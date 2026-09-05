@@ -2143,11 +2143,6 @@ impl Service {
         let ids = if action.requires_ids() {
             let ids =
                 ids.ok_or_else(|| "A source row ID is required for this action.".to_string())?;
-            if ids.len() > LASTFM_REVIEW_BATCH_SIZE {
-                return Err(format!(
-                    "A Last.fm review action accepts at most {LASTFM_REVIEW_BATCH_SIZE} source row IDs."
-                ));
-            }
             let mut deduped = Vec::with_capacity(ids.len());
             let mut seen = BTreeSet::new();
             for id in ids {

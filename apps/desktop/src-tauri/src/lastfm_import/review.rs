@@ -20,7 +20,7 @@ use super::{
     derived_batch_projection, exact_album_match_for_rows, is_converted_collection_batch,
     matched_track_uri, matched_track_uri_for_row, normalize_catalog_text,
     reconciliation::source_album_key, requested_batch, review_batches, review_batches_for_read,
-    source_row_map, LASTFM_REVIEW_BATCH_SIZE,
+    source_row_map,
 };
 
 pub(crate) fn default_decision(session: &LastFmImportSessionV2, id: &str) -> RowDecision {
@@ -62,11 +62,6 @@ pub(super) fn combine_review_batches(
         return Err(
             "A selected Last.fm batch contains unavailable or duplicate source rows.".into(),
         );
-    }
-    if source_ids.len() > LASTFM_REVIEW_BATCH_SIZE {
-        return Err(format!(
-            "A custom Last.fm batch can contain at most {LASTFM_REVIEW_BATCH_SIZE} source tracks."
-        ));
     }
     let projections = selected
         .iter()

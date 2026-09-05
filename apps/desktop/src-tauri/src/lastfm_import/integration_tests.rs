@@ -1273,36 +1273,6 @@ async fn bulk_exclusion_is_atomic_and_persists_reusable_mappings() {
     let mut reset = saved.clone();
     reset.decisions.clear();
     service.save(reset.clone()).await.unwrap();
-    let oversized = vec![rows[0].stable_id.clone(); LASTFM_REVIEW_BATCH_SIZE + 1];
-    let oversized_error = service
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            Some(oversized.as_slice()),
-            ReviewAction::Exclude,
-            "Artist",
-            "",
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        oversized_error,
-        format!(
-            "A Last.fm review action accepts at most {LASTFM_REVIEW_BATCH_SIZE} source row IDs."
-        )
-    );
-    assert!(!service
-        .snapshot()
-        .await
-        .unwrap()
-        .decisions
-        .values()
-        .any(|decision| decision.excluded));
-    assert_eq!(
-        service.export_mappings().await.mappings.excluded_tracks,
-        expected_exclusions
-    );
     assert!(service
         .review_action(
             "user",
@@ -3738,7 +3708,7 @@ fn visible_batch_matching_is_lazy_and_accept_all_is_the_bulk_plan() {
 }
 
 #[test]
-fn review_batches_split_large_single_groups_into_stable_bounded_pages() {
+fn review_batches_keep_large_single_groups_together() {
     let rows = (0..205)
         .map(|index| SourceRow {
             stable_id: format!("source-{index}"),
@@ -3753,21 +3723,15 @@ fn review_batches_split_large_single_groups_into_stable_bounded_pages() {
         .collect::<Vec<_>>();
     let batches = build_review_batches(&rows);
 
-    assert_eq!(batches.len(), 3);
-    assert_eq!(
-        batches.iter().map(|batch| batch.page).collect::<Vec<_>>(),
-        [1, 2, 3]
-    );
-    assert_eq!(batches[0].source_ids.len(), LASTFM_REVIEW_BATCH_SIZE);
-    assert_eq!(batches[1].source_ids.len(), LASTFM_REVIEW_BATCH_SIZE);
-    assert_eq!(batches[2].source_ids.len(), 5);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].page, 1);
+    assert_eq!(batches[0].source_ids.len(), 205);
     assert_eq!(batches[0].source_ids[0], "source-0");
-    assert_eq!(batches[1].source_ids[0], "source-100");
-    assert_eq!(batches[2].source_ids[0], "source-200");
+    assert_eq!(batches[0].source_ids[204], "source-204");
 }
 
 #[tokio::test]
-async fn split_batch_default_options_are_local_and_each_batch_can_commit() {
+async fn large_batch_default_options_include_every_row_and_commit_once() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
     let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
@@ -3780,33 +3744,32 @@ async fn split_batch_default_options_are_local_and_each_batch_can_commit() {
     session.phase = ImportPhase::Review;
     service.save(session).await.unwrap();
 
-    for batch_id in 1..=3 {
-        let page = service.page(batch_id, "Artist", "Album").await.unwrap();
-        let source_ids = page
-            .rows
-            .iter()
-            .map(|item| item.source.stable_id.clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(page.options.selected_track_ids, source_ids);
-        let selected_ids = page
-            .options
-            .selected_track_ids
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        service
-            .commit_rows(
-                "user",
-                "spotify",
-                batch_id,
-                &selected_ids,
-                "Artist",
-                "Album",
-                page.options,
-            )
-            .await
-            .unwrap();
-    }
+    let page = service.page(1, "Artist", "Album").await.unwrap();
+    let source_ids = page
+        .rows
+        .iter()
+        .map(|item| item.source.stable_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(source_ids.len(), 205);
+    assert_eq!(page.options.selected_track_ids, source_ids);
+    let selected_ids = page
+        .options
+        .selected_track_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    service
+        .commit_rows(
+            "user",
+            "spotify",
+            1,
+            &selected_ids,
+            "Artist",
+            "Album",
+            page.options,
+        )
+        .await
+        .unwrap();
 
     assert_eq!(service.snapshot().await.unwrap().phase, ImportPhase::Done);
 }
@@ -3818,9 +3781,11 @@ async fn queue_pages_are_bounded_and_validate_cursor_and_limit() {
     let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
     aggregate_scrobbles(
         &mut session.rows,
-        &(0..205)
-            .map(|index| scrobble("Artist", "Album", &format!("Track {index}"), index + 1))
-            .collect::<Vec<_>>(),
+        &[
+            scrobble("Artist A", "Album A", "Track A", 1),
+            scrobble("Artist B", "Album B", "Track B", 2),
+            scrobble("Artist C", "Album C", "Track C", 3),
+        ],
     );
     session.phase = ImportPhase::Review;
     service.save(session).await.unwrap();
@@ -3834,7 +3799,7 @@ async fn queue_pages_are_bounded_and_validate_cursor_and_limit() {
             .iter()
             .map(|item| item.source_count)
             .collect::<Vec<_>>(),
-        [100, 100]
+        [1, 1]
     );
     assert_eq!(first.next_cursor, Some(2));
     let second = service
@@ -3847,7 +3812,7 @@ async fn queue_pages_are_bounded_and_validate_cursor_and_limit() {
             .iter()
             .map(|item| item.source_count)
             .collect::<Vec<_>>(),
-        [5]
+        [1]
     );
     assert_eq!(second.next_cursor, None);
     assert!(service.queue_page(0, 0).await.is_err());
@@ -3917,6 +3882,73 @@ async fn selected_release_batches_combine_into_one_persisted_collection_batch() 
         .batches
         .iter()
         .any(|batch| batch.page == batch_id && batch.custom));
+}
+
+#[tokio::test]
+async fn large_release_batches_can_combine_and_accept_bulk_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(dir.path());
+    let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
+    let scrobbles = (0..202)
+        .map(|index| {
+            let album = if index < 101 { "Alpha" } else { "Beta" };
+            scrobble("Artist", album, &format!("Track {index}"), index as u64)
+        })
+        .collect::<Vec<_>>();
+    aggregate_scrobbles(&mut session.rows, &scrobbles);
+    session.batches = build_review_batches(&session.rows);
+    assert_eq!(session.batches.len(), 2);
+    assert_eq!(session.batches[0].source_ids.len(), 101);
+    assert_eq!(session.batches[1].source_ids.len(), 101);
+    let batch_ids = session
+        .batches
+        .iter()
+        .map(|batch| batch.page)
+        .collect::<Vec<_>>();
+    let source_ids = session
+        .rows
+        .iter()
+        .map(|row| row.stable_id.clone())
+        .collect::<Vec<_>>();
+    session.phase = ImportPhase::Review;
+    service.save(session).await.unwrap();
+
+    let (batch_id, artist, album) = service
+        .combine_batches("user", "spotify", &batch_ids)
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .page(batch_id, &artist, &album)
+            .await
+            .unwrap()
+            .rows
+            .len(),
+        202
+    );
+    service
+        .review_action(
+            "user",
+            "spotify",
+            batch_id,
+            Some(&source_ids),
+            ReviewAction::Exclude,
+            &artist,
+            &album,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .snapshot()
+            .await
+            .unwrap()
+            .decisions
+            .values()
+            .filter(|decision| decision.excluded)
+            .count(),
+        202
+    );
 }
 
 #[tokio::test]
@@ -5425,6 +5457,36 @@ fn collection_match_set_maps_unique_union_and_deduplicates_track_uris() {
         "spotify:track:not-selected",
     )
     .is_err());
+}
+
+#[test]
+fn manual_track_candidate_can_map_multiple_rows_in_one_batch() {
+    let rows = vec![
+        collection_test_row("One"),
+        collection_test_row("One (alternate)"),
+    ];
+    let mut session = collection_session(&rows);
+    session
+        .matches
+        .get_mut(&rows[0].stable_id)
+        .unwrap()
+        .candidates = vec![AlbumCandidate {
+        uri: "spotify:track:one".into(),
+        name: "One".into(),
+        artist: "Artist".into(),
+        track_uris: vec!["spotify:track:one".into()],
+        track_names: vec!["One".into()],
+        track_artists: vec!["Artist".into()],
+        track_albums: vec!["Release".into()],
+        ..AlbumCandidate::default()
+    }];
+
+    select_match_in_session(&mut session, 1, &rows[1].stable_id, "spotify:track:one").unwrap();
+
+    assert_eq!(
+        session.matches[&rows[1].stable_id].track_matches[&rows[1].stable_id],
+        "spotify:track:one"
+    );
 }
 
 #[test]
@@ -8548,7 +8610,7 @@ async fn fully_excluded_review_action_reaches_done_and_has_view_only_queue_statu
 }
 
 #[tokio::test]
-async fn album_review_actions_cascade_across_split_batches_and_restore_from_any_batch() {
+async fn album_review_actions_cover_an_unbounded_release_batch() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
     let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
@@ -8603,7 +8665,7 @@ async fn album_review_actions_cascade_across_split_batches_and_restore_from_any_
         .await
         .unwrap()
         .items;
-    assert_eq!(queue.len(), 3);
+    assert_eq!(queue.len(), 1);
     assert!(queue
         .iter()
         .all(|item| item.status == Some(QueueStatus::IgnoredAlbum) && !item.remaining));
@@ -8612,7 +8674,7 @@ async fn album_review_actions_cascade_across_split_batches_and_restore_from_any_
         .review_action(
             "user",
             "spotify",
-            2,
+            1,
             None,
             ReviewAction::Restore,
             "Artist",
@@ -8633,7 +8695,7 @@ async fn album_review_actions_cascade_across_split_batches_and_restore_from_any_
         .review_action(
             "user",
             "spotify",
-            3,
+            1,
             None,
             ReviewAction::SkipAlbum,
             "Artist",

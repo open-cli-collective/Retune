@@ -20,7 +20,6 @@ use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use crate::lastfm::{AcceptedScrobbleReceipt, ScrobbleMetadata};
 
 pub(crate) const SESSION_VERSION: u8 = 2;
-pub(crate) const LASTFM_REVIEW_BATCH_SIZE: usize = 100;
 const LASTFM_PAGE_WINDOW_SIZE: u32 = 4;
 const LASTFM_QUEUE_PAGE_LIMIT: usize = 1000;
 pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
@@ -673,7 +672,22 @@ fn select_match_in_session(
                 .find(|candidate| candidate.uri == uri)
                 .cloned()
         })
-        .or_else(|| selected_album_track_candidate(session, batch_id, source_id, &row_album, uri));
+        .or_else(|| selected_album_track_candidate(session, batch_id, source_id, &row_album, uri))
+        .or_else(|| {
+            uri.starts_with("spotify:track:")
+                .then(|| {
+                    batch.source_ids.iter().find_map(|id| {
+                        session
+                            .matches
+                            .get(id)?
+                            .candidates
+                            .iter()
+                            .find(|candidate| candidate.uri == uri)
+                            .cloned()
+                    })
+                })
+                .flatten()
+        });
     let Some(candidate) = candidate else {
         return Err("This source row has no Spotify candidates.".into());
     };
