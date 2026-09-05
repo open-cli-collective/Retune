@@ -7,10 +7,10 @@ use super::{
     apply::{apply_frozen_mappings, apply_page, commit_apply_plan, run_apply_upstream_effect},
     apply_history_updates, apply_metadata, current_account_binding,
     current_spotify_binding_is_current, ensure_import_readable, lastfm_username, lazy_match_page,
-    prepare_accept_all_batches, requires_spotify_ownership, run_incremental_sync, set_sync_problem,
-    AcceptAllCursor, AcceptAllSummary, ApplyJobStage, CollectionAlbumCandidate, CountMode,
-    ImportDefaults, ImportMatchSelection, ImportPageView, ImportPhase, ImportQueuePage,
-    ImportStateView, PageOptions, ReviewAction, ReviewBatchKey, Service,
+    prepare_accept_all_batches, run_incremental_sync, set_sync_problem, AcceptAllCursor,
+    AcceptAllSummary, ApplyJobStage, CollectionAlbumCandidate, CountMode, ImportDefaults,
+    ImportMatchSelection, ImportPageView, ImportPhase, ImportQueuePage, ImportStateView,
+    PageOptions, ReviewAction, ReviewBatchKey, Service,
 };
 
 pub(super) struct UseCases<'a, Provider, Connected> {
@@ -64,7 +64,7 @@ where
     }
 
     pub(super) async fn state(&self, now: u64) -> Result<ImportStateView, String> {
-        if self.service.snapshot().await.is_some() {
+        if self.service.has_session().await {
             let _ = self.readable().await?;
         }
         let mut view = self.service.state().await;
@@ -131,18 +131,18 @@ where
             return Err("The Last.fm import is not available for this account.".into());
         }
         super::ensure_review_mutable(self.service).await?;
-        let session = self
+        let owner = self
             .service
-            .snapshot()
+            .owner_phase()
             .await
             .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-        let spotify_account_id = session
+        let spotify_account_id = owner
             .spotify_account_id
             .as_deref()
             .ok_or_else(|| "Connect Spotify before changing Last.fm batches.".to_string())?;
         let (batch_id, artist, album) = self
             .service
-            .combine_batches(&session.lastfm_username, spotify_account_id, batch_ids)
+            .combine_batches(&owner.lastfm_username, spotify_account_id, batch_ids)
             .await?;
         Ok(self.service.page(batch_id, &artist, &album).await)
     }
@@ -406,9 +406,9 @@ where
         let username = lastfm_username(self.lastfm).await?;
         let history_to =
             crate::settings_commands::history_cutoff_for_import(self.settings, &username).await?;
-        if let Some(session) = self.service.snapshot().await {
-            if session.phase == ImportPhase::Suspended
-                && requires_spotify_ownership(&session)
+        if let Some(owner) = self.service.owner_phase().await {
+            if owner.phase == ImportPhase::Suspended
+                && owner.requires_spotify_ownership()
                 && !current_spotify_binding_is_current(
                     self.service,
                     self.lastfm,
@@ -501,6 +501,7 @@ where
             false,
         )
         .await?;
+        drop(membership);
         let view = apply_page(
             self.service,
             key.batch_id,
@@ -510,7 +511,6 @@ where
             options,
         )
         .await?;
-        drop(membership);
         start_worker();
         changed();
         Ok(view)
@@ -538,6 +538,7 @@ where
             false,
         )
         .await?;
+        drop(membership);
         let session_id = self
             .service
             .snapshot()
@@ -553,7 +554,6 @@ where
                 &binding.spotify_account_id,
             )
             .await?;
-        drop(membership);
         start_worker();
         changed();
         Ok(view)
@@ -607,13 +607,13 @@ where
         StartWorker: FnMut(),
         Changed: FnMut(),
     {
-        let session = self
+        let owner = self
             .service
-            .snapshot()
+            .owner_phase()
             .await
             .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-        let username = session.lastfm_username.clone();
-        let spotify_account_id = session
+        let username = owner.lastfm_username.clone();
+        let spotify_account_id = owner
             .spotify_account_id
             .clone()
             .ok_or_else(|| "Prepare Spotify matches before accepting all imports.".to_string())?;
@@ -623,7 +623,7 @@ where
         self.service
             .mutate_sync(|sync| {
                 sync.accept_all = Some(AcceptAllCursor {
-                    session_id: session.cache_id.clone(),
+                    session_id: owner.cache_id.clone(),
                     lastfm_username: username.clone(),
                     spotify_account_id: spotify_account_id.clone(),
                     next_batch_index: 0,

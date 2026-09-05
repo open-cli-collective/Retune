@@ -17,6 +17,8 @@ the behavior you are changing:
 | Install, upgrade, uninstall, Spotify setup | [Installation](docs/INSTALL.md) |
 | Completed SOLID audit evidence | [SOLID audit record](docs/SOLID.md) |
 | Completed Rust audit evidence | [Rust audit record](docs/rust.md) |
+| Current responsiveness work | [Responsiveness plan](docs/plans/responsiveness-burndown.md) |
+| Responsiveness audit evidence | [Rust performance audit](docs/rust-slop-performance-audit.md), [Last.fm interaction audit](docs/lastfm-interaction-audit.md), [type-ahead audit](docs/typeahead-performance-audit.md) |
 
 ## Invariants
 

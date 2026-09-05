@@ -143,10 +143,10 @@ where
         false,
     )
     .await?;
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Err("No Last.fm import session is active.".into());
     };
-    if !review_phase_allowed(session.phase) {
+    if !review_phase_allowed(owner.phase) {
         return Err("Last.fm matching is available only after source review begins.".into());
     }
     Ok(current)
@@ -172,18 +172,18 @@ pub(super) async fn cached_spotify_binding_is_current(
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
 ) -> Result<Option<bool>, String> {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(Some(false));
     };
-    let Some(expected) = session.spotify_account_id.as_deref() else {
+    let Some(expected) = owner.spotify_account_id.as_deref() else {
         return Ok(Some(true));
     };
     let cached = spotify_membership.snapshot();
     match cached_spotify_identity_matches(expected, &cached) {
         Some(true)
-            if review_phase_allowed(session.phase)
+            if review_phase_allowed(owner.phase)
                 && lastfm_username(lastfm).await.as_deref()
-                    == Ok(session.lastfm_username.as_str()) =>
+                    == Ok(owner.lastfm_username.as_str()) =>
         {
             Ok(Some(true))
         }
@@ -530,32 +530,6 @@ where
         return Ok((page, changed, network_search));
     }
     let initial_collection_shaped = batch_is_collection_shaped_for_id(&initial_session, batch_id);
-    let initial_needs_match =
-        !batch_match_plan(&initial_session, Some((batch_id, artist, album))).is_empty();
-    if initial_collection_shaped
-        && !initial_needs_match
-        && initial_session.spotify_account_id.is_some()
-    {
-        if let Some(false) =
-            cached_spotify_binding_is_current(service, lastfm, spotify_membership).await?
-        {
-            return Ok((None, false, false));
-        }
-        let session = service
-            .snapshot()
-            .await
-            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
-        let account_id = session.spotify_account_id.clone();
-        let _membership_guard = spotify_membership.lock().await;
-        let membership = collection_membership_from(library, spotify_membership);
-        let mappings = service
-            .mappings_for(&session.lastfm_username, account_id.as_deref())
-            .await?;
-        service
-            .rerank_collection_batch(batch_id, &membership, &mappings)
-            .await?;
-        return Ok((service.page(batch_id, artist, album).await, false, false));
-    }
     let session = service
         .snapshot()
         .await
@@ -565,6 +539,32 @@ where
             == Some(false)
         {
             return Ok((None, false, false));
+        }
+        if initial_collection_shaped && session.spotify_account_id.is_some() {
+            let account_id = session.spotify_account_id.clone();
+            let membership_snapshot = spotify_membership.snapshot();
+            let cached_membership_stale = session
+                .collection_album_matches
+                .get(&batch_id)
+                .is_some_and(|state| {
+                    state.cached_candidates.iter().any(|candidate| {
+                        candidate.matching.in_library
+                            != membership_snapshot
+                                .saved_albums
+                                .contains_key(&candidate.matching.uri)
+                    })
+                });
+            if !membership_snapshot.is_exact() || cached_membership_stale {
+                let _membership_guard = spotify_membership.lock().await;
+                let membership = collection_membership_from(library, spotify_membership);
+                let mappings = service
+                    .mappings_for(&session.lastfm_username, account_id.as_deref())
+                    .await?;
+                service
+                    .rerank_collection_batch(batch_id, &membership, &mappings)
+                    .await?;
+            }
+            return Ok((service.page(batch_id, artist, album).await, false, false));
         }
         return Ok((service.page(batch_id, artist, album).await, false, false));
     }

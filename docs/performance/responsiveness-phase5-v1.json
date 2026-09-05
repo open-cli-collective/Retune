@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "baseRevision": "7dbb806",
+  "candidate": { "branch": "codex/responsiveness-burndown", "checkpoint": 5 },
+  "environment": { "build": "optimized Rust release test" },
+  "measurements": [
+    {
+      "metric": "queued-session-admission",
+      "unit": "behavior",
+      "sampleCount": 1,
+      "candidate": { "result": "in-memory publication completes before queued writer" }
+    }
+  ],
+  "correctness": {
+    "importerTestsPassed": 228,
+    "ignored": 2,
+    "writer": "ordered coalescing session and review writers",
+    "persistence": "apply and recovery journal paths unchanged"
+  },
+  "limits": [
+    "No wall-clock admission claim is made here; native input-to-paint remains open.",
+    "Queued metadata writes are best-effort after acknowledgement; an accepted unflushed edit can be lost on process crash."
+  ]
+}

@@ -213,6 +213,9 @@ impl LibraryOwner {
         self.restore_mutations.ensure_allowed()?;
         let mut next = self.library.lock().expect("library mutex poisoned").clone();
         let value = mutation(&mut next)?;
+        if *self.library.lock().expect("library mutex poisoned") == next {
+            return Ok(value);
+        }
         self.store.save(&next).map_err(|error| error.to_string())?;
         *self.library.lock().expect("library mutex poisoned") = next;
         drop(write_gate);
@@ -245,6 +248,9 @@ impl LibraryOwner {
                 restore_mutations.ensure_allowed()?;
                 let mut next = library.lock().expect("library mutex poisoned").clone();
                 let value = mutation(&mut next)?;
+                if *library.lock().expect("library mutex poisoned") == next {
+                    return Ok((value, owner));
+                }
                 store.save(&next).map_err(|error| error.to_string())?;
                 *library.lock().expect("library mutex poisoned") = next;
                 Ok::<_, String>((value, owner))
@@ -355,6 +361,19 @@ mod tests {
     use retune_core::model::NewTrack;
 
     use super::*;
+
+    #[tokio::test]
+    async fn unchanged_mutations_skip_the_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = LibraryState::new(Library::new(), FsOverlayStore::new(directory.path()));
+
+        assert_eq!(state.mutate(|_| Ok(7)).unwrap(), 7);
+        assert_eq!(state.mutate_async(|_| Ok(8)).await.unwrap(), 8);
+        assert!(FsOverlayStore::new(directory.path())
+            .load()
+            .unwrap()
+            .is_none());
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn transaction_save_does_not_block_tokio_and_publishes_atomically() {

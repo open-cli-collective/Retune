@@ -151,7 +151,7 @@ impl TrackInfoView {
             alb: track.alb.clone(),
             cat: track.cat.clone(),
             orig_cat: track.orig_cat.clone(),
-            rating: library.effective_rating(track.id).map(rating_view),
+            rating: library.effective_rating(track).map(rating_view),
             inherited_rating: library
                 .album_rating(&AlbumKey::of(track))
                 .map(Rating::stars),
@@ -280,6 +280,19 @@ fn collect_metadata_values(library: &Library) -> MetadataValues {
     }
 }
 
+fn collect_genre_values(library: &Library) -> Vec<String> {
+    let mut cats = library
+        .tracks()
+        .iter()
+        .filter(|track| !track.cat.is_empty() && track.cat != UNCATEGORIZED)
+        .map(|track| track.cat.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    cats.sort_by_key(|value| value.to_lowercase());
+    cats
+}
+
 fn album_rating_view(
     library: &Library,
     selection: &Selection,
@@ -403,16 +416,20 @@ fn apply_track_infos(
     if ids.is_empty() {
         return Err("at least one track id is required".into());
     }
-    for &id in ids {
-        if library.get(TrackId(id)).is_none() {
-            return Err(format!("unknown track id {id}"));
-        }
-    }
     let rating_change = rating_change(edit)?;
-    for &id in ids {
-        apply_track_info(library, id, edit, rating_change)?;
-    }
-    Ok(())
+    let ids = ids.iter().copied().map(TrackId).collect::<Vec<_>>();
+    library
+        .edit_all(
+            &ids,
+            &TrackEdit {
+                name: edit.name.clone(),
+                art: edit.art.clone(),
+                alb: edit.alb.clone(),
+                cat: edit.cat.clone(),
+            },
+            rating_change,
+        )
+        .map_err(|error| error.to_string())
 }
 
 fn run_local_import(
@@ -547,7 +564,7 @@ fn browse_view(
     let counts = counts(library, &selected_tracks);
     let tracks = selected_tracks
         .into_iter()
-        .map(|track| TrackView::from_track(track, library.effective_rating(track.id)))
+        .map(|track| TrackView::from_track(track, library.effective_rating(track)))
         .collect();
 
     BrowseView {
@@ -576,7 +593,12 @@ pub(super) async fn metadata_values(app: tauri::AppHandle) -> Result<MetadataVal
 
 #[tauri::command]
 pub(super) async fn genre_values(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    Ok(metadata_values(app).await?.cats)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        project_library(&state.library, collect_genre_values)
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -916,6 +938,52 @@ mod tests {
         assert_eq!(values.arts, ["Alpha", "zebra"]);
         assert_eq!(values.albs, ["beta", "Yellow"]);
         assert_eq!(values.cats, ["Jazz", "rock"]);
+        assert_eq!(collect_genre_values(&library), values.cats);
+    }
+
+    #[test]
+    #[ignore = "type-ahead audit; run with --release --ignored --nocapture"]
+    fn audit_typeahead_browse_costs() {
+        use std::{hint::black_box, time::Instant};
+        for size in [10_000, 50_000] {
+            let mut library = Library::new();
+            library.add_all((0..size).map(|index| NewTrack {
+                name: format!("Track {index}"),
+                ..metadata_track(
+                    &format!("spotify:track:{index}"),
+                    "Rock",
+                    &format!("Artist {}", index % 500),
+                    &format!("Album {}", index % 5000),
+                )
+            }));
+            for query in ["", "track", "missing-match"] {
+                let mut samples = Vec::new();
+                for iteration in 0..6 {
+                    let start = Instant::now();
+                    let snapshot = library.clone();
+                    let result = browse_view(
+                        &snapshot,
+                        SourceId::Music,
+                        SelectionDto {
+                            cat: vec![],
+                            art: vec![],
+                            alb: vec![],
+                        },
+                        Some(query.into()),
+                    );
+                    assert_eq!(
+                        result.tracks.len(),
+                        if query == "missing-match" { 0 } else { size }
+                    );
+                    black_box(result);
+                    if iteration > 0 {
+                        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                println!("TYPEAHEAD browse rows={size} query={query:?} median_ms={:.2} min={:.2} max={:.2}", samples[2], samples[0], samples[4]);
+            }
+        }
     }
 
     #[test]

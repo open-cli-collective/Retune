@@ -29,6 +29,9 @@ same text merges their Retune album group.
 - Shell callers read track records immutably. Core methods record plays, merge
   history with saturating counts and monotonic timestamps, and fill only missing
   technical metadata without exposing mutable identity fields.
+- Projections compute effective ratings from their already-resolved canonical
+  track record. Batch Get Info and technical-metadata fills validate every ID
+  before mutating, then use one transient ID index for the batch.
 - Restoring replaces the library after validating the imported envelope.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
@@ -36,7 +39,8 @@ Overlay edits never mutate source-file tags or Spotify metadata.
 The desktop shell composes the live `Library`, its filesystem store, write
 gate, and long-running transaction exclusion as one concrete `LibraryState`.
 Ordinary changes clone the current library, save the candidate, and only then
-swap live memory. Spotify membership receives a borrowed `LibraryOwner`
+swap live memory. An unchanged candidate completes under the same mutation and
+restore gates without writing or replacing the live value. Spotify membership receives a borrowed `LibraryOwner`
 capability for that same boundary; it does not acquire unrelated application
 state. Local import and multi-component restore use narrow owner-held exclusive
 seams so their established transaction and lock ordering remains explicit.
@@ -54,6 +58,24 @@ persistence; `source` and `clustering` own ingestion and review grouping;
 `matching`, `collection`, and `review` own candidate and page projection;
 `apply`, `incremental`, and `reconciliation` own durable execution; and
 `coordinator` plus `commands` own application orchestration and Tauri adaptation.
+The service holds the session lock while it clones a sync snapshot, then pure
+review functions build queue and page command DTOs from the borrowed session
+and owned snapshot. Those functions perform no filesystem or provider access.
+Pure option, count-strategy, review-action, and match-selection transformations
+return candidate records to the service for publication and persistence.
+Persisted session, mapping, apply-job, and journal records remain owned by their
+existing stores.
+Ordinary review mutations publish the validated in-memory session first. A
+service-owned ordered writer coalesces compatible metadata
+snapshots and performs disk writes afterward, so ordinary controls do not wait
+on filesystem latency; apply and recovery continue to use the durable journal.
+Account binding is checked before provider work and again after network search;
+membership guards are released before local metadata admission and durable apply
+job handoff.
+Read-only cooldown projections hydrate the shared cooldown store once, filter
+expired entries in memory, and never rewrite the file. Mutating cooldown
+operations normalize legacy quota keys before applying their update and retain
+the existing atomic persistence boundary.
 `retune-core` remains
 a pure, deterministic mutation target. History is an absolute baseline: resolved source
 counts use one reusable account-bound Sum, highest-played spelling Overwrite, or
@@ -280,18 +302,26 @@ albums, both, or neither.
 
 The three-column browser is a pure projection over `Library`. `Selection`
 contains source/category/artist/album filters; `Facets` and visible tracks are
-derived from it. Choosing a broader facet clears invalid narrower selections.
+derived from it. Facets deduplicate borrowed exact values and cache normalized
+sort keys before owning their result strings. Choosing a broader facet clears invalid narrower selections.
 When a resolved projection proves a preserved value stale, the UI falls back
 hierarchically by clearing category, artist, and album for a missing category,
 or artist and album for a missing artist or album.
 Alternate views should consume the same library rather than introduce another
 canonical model.
 
-The UI keeps the last resolved projection visible while the same selection is
-refreshed. A source, facet, search, or scope change invalidates it until that
-new projection resolves, so playback cannot consume rows from the prior view.
-Double-clicking a facet row waits for that exact projection, then starts its
-first enabled visible track with the enabled projection as the new queue.
+The UI keeps the last resolved projection visible while the same source and
+facet selection is refreshed or its Library query changes. Source or facet
+changes hide incompatible track rows until the new projection resolves. A
+single-flight browse boundary admits one request at a time, replaces queued
+work with the latest query, and ignores late responses. Spotify-scope typing
+does not issue or invalidate a local browse; source, facet, and revision changes
+still refresh the local projection used when Spotify search is closed. Category
+prefix candidates depend on source, artist candidates on source and category,
+and album candidates on source, category, and artist, so a focused pane can
+finish a prefix while its own selection request is pending. Double-clicking a
+facet row waits for that exact projection, then starts its first enabled visible
+track with the enabled projection as the new queue.
 
 ## Track sorting
 

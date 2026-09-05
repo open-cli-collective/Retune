@@ -8,6 +8,7 @@ export type State = {
   sel: Selection
   savedSelections: Record<Source, Selection>
   query: string
+  queryReset: number
   scope: 'library' | 'spotify'
   selectedTrackIds: Set<number>
   selectionAnchor?: number
@@ -17,6 +18,7 @@ export type State = {
   systemDark: boolean
   view: BrowseView | null
   viewKey?: string
+  browsePending: boolean
   revision: number
   error?: string
   notice?: string
@@ -41,6 +43,7 @@ export type State = {
 
 export type Action =
   | { type: 'view'; view: BrowseView; key: string }
+  | { type: 'browsePending'; pending: boolean }
   | { type: 'error'; error: string }
   | { type: 'clear-error' }
   | { type: 'source'; source: Source }
@@ -116,6 +119,7 @@ export const initialState: State = {
   sel: {},
   savedSelections: { music: {}, podcasts: {}, audiobooks: {} },
   query: '',
+  queryReset: 0,
   scope: 'library',
   selectedTrackIds: new Set(),
   playing: null,
@@ -124,6 +128,7 @@ export const initialState: State = {
   systemDark: false,
   view: null,
   viewKey: undefined,
+  browsePending: false,
   revision: 0,
   preferences: false,
   setup: false,
@@ -141,13 +146,15 @@ export const initialState: State = {
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'view':
-      return { ...state, view: action.view, viewKey: action.key, error: undefined }
+      return { ...state, view: action.view, viewKey: action.key, browsePending: false, error: undefined }
+    case 'browsePending':
+      return { ...state, browsePending: action.pending }
     case 'error':
       return { ...state, error: action.error, syncProgress: undefined }
     case 'clear-error':
       return { ...state, error: undefined }
     case 'source':
-      return { ...state, source: action.source, sel: restoreSelection(state.savedSelections, action.source), query: '', spotifyNavigation: undefined, selectedPlaylist: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, source: action.source, sel: restoreSelection(state.savedSelections, action.source), query: '', queryReset: state.queryReset + 1, spotifyNavigation: undefined, selectedPlaylist: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'playlist':
       return { ...state, selectedPlaylist: action.id, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'select': {
@@ -242,7 +249,7 @@ export function reducer(state: State, action: Action): State {
     case 'spotifySearching':
       return { ...state, spotifySearching: action.searching }
     case 'spotifyNavigate':
-      return { ...state, scope: 'spotify', query: '', spotifyNavigation: action.entry, selectedPlaylist: undefined }
+      return { ...state, scope: 'spotify', query: '', queryReset: state.queryReset + 1, spotifyNavigation: action.entry, selectedPlaylist: undefined }
     case 'syncPhase':
       return { ...state, syncPhase: action.phase, syncProgress: action.phase ? state.syncProgress : undefined }
     case 'syncProgress':

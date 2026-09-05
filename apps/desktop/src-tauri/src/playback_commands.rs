@@ -107,11 +107,11 @@ pub(super) async fn play_tracks(
         .clone();
     let client = provider_from(&state).ok();
     let (snapshot, start_index) = resolve_resources(
-        &resources,
+        resources,
         start_index,
-        &library,
-        &playlists,
-        &catalog,
+        library,
+        playlists,
+        catalog,
         client.as_deref(),
     )
     .await?;
@@ -133,15 +133,25 @@ pub(super) async fn play_tracks(
 }
 
 async fn resolve_resources<T: Transport, S: TokenStore>(
-    resources: &[PlaybackResource],
+    resources: Vec<PlaybackResource>,
     start_index: usize,
-    library: &Library,
-    playlists: &crate::playlists::PlaylistCache,
-    catalog: &SpotifyCatalog,
+    library: Library,
+    playlists: crate::playlists::PlaylistCache,
+    catalog: SpotifyCatalog,
     client: Option<&SpotifyClient<T, S>>,
 ) -> Result<(Vec<crate::playback::SnapshotTrack>, usize), String> {
-    let mut resolved =
-        playback_resources::resolve_cached(resources, start_index, library, playlists, catalog)?;
+    let (resources, mut resolved, enabled) = tauri::async_runtime::spawn_blocking(move || {
+        let (resolved, enabled) = playback_resources::resolve_cached(
+            &resources,
+            start_index,
+            &library,
+            &playlists,
+            &catalog,
+        )?;
+        Ok::<_, String>((resources, resolved, enabled))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     for (resource, track) in resources.iter().zip(&mut resolved) {
         if track.is_some() {
             continue;
@@ -162,13 +172,7 @@ async fn resolve_resources<T: Transport, S: TokenStore>(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| "Playback resource metadata is unavailable.".to_string())?;
-    let (snapshot, start_index) = playback_resources::finish(tracks, start_index, |track| {
-        library
-            .tracks()
-            .iter()
-            .find(|candidate| candidate.uri == track.uri)
-            .is_none_or(|candidate| candidate.enabled)
-    })?;
+    let (snapshot, start_index) = playback_resources::finish(tracks, start_index, &enabled)?;
     Ok((snapshot, start_index))
 }
 
@@ -330,11 +334,11 @@ mod tests {
             ("spotify:track:track1", "Playlist Track"),
         ] {
             let (tracks, index) = resolve_resources(
-                &[resource(7, uri)],
+                vec![resource(7, uri)],
                 0,
-                &Library::new(),
-                &playlist_track(uri, name),
-                &SpotifyCatalog::default(),
+                Library::new(),
+                playlist_track(uri, name),
+                SpotifyCatalog::default(),
                 Some(&client),
             )
             .await
@@ -360,11 +364,11 @@ mod tests {
             "",
         );
         let (tracks, _) = resolve_resources(
-            &[resource(8, "spotify:track:track2")],
+            vec![resource(8, "spotify:track:track2")],
             0,
-            &Library::new(),
-            &PlaylistCache::default(),
-            &SpotifyCatalog::default(),
+            Library::new(),
+            PlaylistCache::default(),
+            SpotifyCatalog::default(),
             Some(&client),
         )
         .await
@@ -391,11 +395,11 @@ mod tests {
             resource(9, "spotify:track:track3"),
         ];
         let (tracks, index) = resolve_resources(
-            &resources,
+            resources.to_vec(),
             1,
-            &library,
-            &playlist_track("spotify:track:track3", "Spotify"),
-            &SpotifyCatalog::default(),
+            library,
+            playlist_track("spotify:track:track3", "Spotify"),
+            SpotifyCatalog::default(),
             Some(&client),
         )
         .await

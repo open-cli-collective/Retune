@@ -30,12 +30,31 @@ impl MappingsRestore {
     }
 }
 
+#[cfg(test)]
 pub(super) fn requires_spotify_ownership(session: &LastFmImportSessionV2) -> bool {
     session.spotify_account_id.is_some()
         && matches!(
             session.phase,
             ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended
         )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ImportOwnerPhase {
+    pub(super) cache_id: String,
+    pub(super) lastfm_username: String,
+    pub(super) spotify_account_id: Option<String>,
+    pub(super) phase: ImportPhase,
+}
+
+impl ImportOwnerPhase {
+    pub(super) fn requires_spotify_ownership(&self) -> bool {
+        self.spotify_account_id.is_some()
+            && matches!(
+                self.phase,
+                ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended
+            )
+    }
 }
 
 pub(crate) struct Service {
@@ -48,6 +67,9 @@ pub(crate) struct Service {
     sync_mutation_gate: Arc<Mutex<()>>,
     pub(super) mappings: Arc<Mutex<PersistedLastFmMappings>>,
     persistence_gate: Arc<Mutex<()>>,
+    session_writes: Arc<SessionWriteQueue>,
+    #[allow(dead_code)]
+    review_writes: Arc<ReviewWriteQueue>,
     pub(super) reconciliation_lock: Mutex<()>,
     pub(super) lazy_match_lock: Mutex<()>,
     pub(super) running: Arc<AtomicBool>,
@@ -58,6 +80,36 @@ pub(crate) struct Service {
 }
 
 pub(super) struct RunnerGuard(Arc<AtomicBool>);
+
+// ponytail: one coalescing writer is enough for local importer metadata.
+struct SessionWriteQueue {
+    pending: Arc<Mutex<Option<LastFmImportSessionV2>>>,
+    running: Arc<AtomicBool>,
+}
+
+#[allow(dead_code)]
+struct ReviewWriteQueue {
+    pending: Arc<Mutex<Option<(LastFmImportSessionV2, PersistedLastFmMappings)>>>,
+    running: Arc<AtomicBool>,
+}
+
+impl ReviewWriteQueue {
+    fn new() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl SessionWriteQueue {
+    fn new() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 impl RunnerGuard {
     pub(super) fn claim(running: &Arc<AtomicBool>) -> Option<Self> {
@@ -161,6 +213,8 @@ impl Service {
             sync_mutation_gate: Arc::new(Mutex::new(())),
             mappings: Arc::new(Mutex::new(mappings)),
             persistence_gate: Arc::new(Mutex::new(())),
+            session_writes: Arc::new(SessionWriteQueue::new()),
+            review_writes: Arc::new(ReviewWriteQueue::new()),
             reconciliation_lock: Mutex::new(()),
             lazy_match_lock: Mutex::new(()),
             running: Arc::new(AtomicBool::new(false)),
@@ -193,6 +247,8 @@ impl Service {
                 ..PersistedLastFmMappings::default()
             })),
             persistence_gate: Arc::new(Mutex::new(())),
+            session_writes: Arc::new(SessionWriteQueue::new()),
+            review_writes: Arc::new(ReviewWriteQueue::new()),
             reconciliation_lock: Mutex::new(()),
             lazy_match_lock: Mutex::new(()),
             running: Arc::new(AtomicBool::new(false)),
@@ -310,6 +366,23 @@ impl Service {
 
     pub(super) async fn snapshot(&self) -> Option<LastFmImportSessionV2> {
         self.session.lock().await.clone()
+    }
+
+    pub(super) async fn owner_phase(&self) -> Option<ImportOwnerPhase> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| ImportOwnerPhase {
+                cache_id: session.cache_id.clone(),
+                lastfm_username: session.lastfm_username.clone(),
+                spotify_account_id: session.spotify_account_id.clone(),
+                phase: session.phase,
+            })
+    }
+
+    pub(super) async fn has_session(&self) -> bool {
+        self.session.lock().await.is_some()
     }
 
     pub(super) async fn snapshot_with_sync(
@@ -472,23 +545,93 @@ impl Service {
         tauri::async_runtime::spawn(async move {
             tauri::async_runtime::spawn_blocking(move || {
                 transactions.save(&transaction)?;
-                if let Some(session) = transaction.session.as_ref() {
-                    sessions.save(session)?;
-                }
+                sessions.save(transaction.session.as_ref().expect("transaction session"))?;
                 mappings.save(&transaction.mappings)?;
                 transactions.clear()
             })
             .await
             .map_err(|_| "Last.fm review transaction persistence task stopped.".to_string())??;
-            let mut session = current_session.lock().await;
-            let mut mappings = current_mappings.lock().await;
-            *session = Some(next_session);
-            *mappings = next_mappings;
+            *current_session.lock().await = Some(next_session);
+            *current_mappings.lock().await = next_mappings;
             drop(persistence_gate);
             Ok::<_, String>(result)
         })
         .await
         .map_err(|error| error.to_string())?
+    }
+
+    #[allow(dead_code)]
+    async fn mutate_review_state_queued<R, F>(&self, mutation: F) -> Result<R, String>
+    where
+        F: FnOnce(
+            Option<LastFmImportSessionV2>,
+            PersistedLastFmMappings,
+        ) -> Result<(LastFmImportSessionV2, PersistedLastFmMappings, R), String>,
+        R: Send + 'static,
+    {
+        self.ensure_hydrated()?;
+        let persistence_gate = Arc::clone(&self.persistence_gate).lock_owned().await;
+        let persistence_gate = self
+            .recover_pending_review_transaction(persistence_gate)
+            .await?;
+        let previous_session = self.session.lock().await.clone();
+        let previous_mappings = self.mappings.lock().await.clone();
+        let (next_session, next_mappings, result) =
+            mutation(previous_session.clone(), previous_mappings.clone())?;
+        if previous_session.as_ref() == Some(&next_session) && previous_mappings == next_mappings {
+            drop(persistence_gate);
+            return Ok(result);
+        }
+        self.restore_mutations.ensure_allowed()?;
+        *self.session.lock().await = Some(next_session.clone());
+        *self.mappings.lock().await = next_mappings.clone();
+        let queue = Arc::clone(&self.review_writes);
+        *queue.pending.lock().await = Some((next_session, next_mappings));
+        if !queue.running.swap(true, Ordering::AcqRel) {
+            let transactions = self.review_transaction_store.clone();
+            let sessions = self.store.clone();
+            let mappings = self.mappings_store.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let (session, persisted) = {
+                        let mut pending = queue.pending.lock().await;
+                        match pending.take() {
+                            Some(next) => next,
+                            None => {
+                                queue.running.store(false, Ordering::Release);
+                                return;
+                            }
+                        }
+                    };
+                    let transaction = ReviewTransaction::new(session, persisted);
+                    let transactions = transactions.clone();
+                    let sessions = sessions.clone();
+                    let mappings = mappings.clone();
+                    let result = tauri::async_runtime::spawn_blocking(move || {
+                        transactions.save(&transaction)?;
+                        if let Some(session) = transaction.session.as_ref() {
+                            sessions.save(session)?;
+                        }
+                        mappings.save(&transaction.mappings)?;
+                        transactions.clear()
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => log::warn!(
+                            target: "lastfm_import",
+                            "queued review save failed: {error}"
+                        ),
+                        Err(error) => log::warn!(
+                            target: "lastfm_import",
+                            "queued review save task stopped: {error}"
+                        ),
+                    }
+                }
+            });
+        }
+        drop(persistence_gate);
+        Ok(result)
     }
 
     pub(super) async fn save_mappings_for(
@@ -839,6 +982,45 @@ impl Service {
         self.mutate_session(|_| Ok((Some(session), ()))).await
     }
 
+    async fn enqueue_session_save(&self, session: LastFmImportSessionV2) {
+        let queue = Arc::clone(&self.session_writes);
+        *queue.pending.lock().await = Some(session);
+        if queue.running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let store = self.store.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let next = {
+                    let mut pending = queue.pending.lock().await;
+                    match pending.take() {
+                        Some(next) => next,
+                        None => {
+                            queue.running.store(false, Ordering::Release);
+                            return;
+                        }
+                    }
+                };
+                let result = tauri::async_runtime::spawn_blocking({
+                    let store = store.clone();
+                    move || store.save(&next)
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => log::warn!(
+                        target: "lastfm_import",
+                        "queued metadata save failed: {error}"
+                    ),
+                    Err(error) => log::warn!(
+                        target: "lastfm_import",
+                        "queued metadata save task stopped: {error}"
+                    ),
+                }
+            }
+        });
+    }
+
     pub(super) async fn mutate_session<R, F>(&self, mutation: F) -> Result<R, String>
     where
         F: FnOnce(
@@ -857,11 +1039,17 @@ impl Service {
             let store = self.store.clone();
             let current = Arc::clone(&self.session);
             return tauri::async_runtime::spawn(async move {
-                if let Some(session) = next.clone() {
-                    tauri::async_runtime::spawn_blocking(move || store.save(&session))
+                let next = if let Some(session) = next {
+                    Some(
+                        tauri::async_runtime::spawn_blocking(move || {
+                            store.save(&session).map(|()| session)
+                        })
                         .await
-                        .map_err(|_| "Last.fm import persistence task stopped.".to_string())??;
-                }
+                        .map_err(|_| "Last.fm import persistence task stopped.".to_string())??,
+                    )
+                } else {
+                    None
+                };
                 *current.lock().await = next;
                 drop(persistence_gate);
                 Ok::<_, String>(result)
@@ -872,7 +1060,33 @@ impl Service {
         Ok(result)
     }
 
-    pub(super) async fn mutate_owned_session<R, F>(
+    async fn mutate_session_queued<R, F>(&self, mutation: F) -> Result<R, String>
+    where
+        F: FnOnce(
+            Option<LastFmImportSessionV2>,
+        ) -> Result<(Option<LastFmImportSessionV2>, R), String>,
+        R: Send + 'static,
+    {
+        self.ensure_hydrated()?;
+        let persistence_gate = Arc::clone(&self.persistence_gate).lock_owned().await;
+        let persistence_gate = self
+            .recover_pending_review_transaction(persistence_gate)
+            .await?;
+        let previous = self.session.lock().await.clone();
+        let (next, result) = mutation(previous.clone())?;
+        if next != previous {
+            self.restore_mutations.ensure_allowed()?;
+            *self.session.lock().await = next.clone();
+            if let Some(session) = next {
+                self.enqueue_session_save(session).await;
+            }
+        }
+        drop(persistence_gate);
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    async fn mutate_owned_session_blocking<R, F>(
         &self,
         username: &str,
         spotify_account_id: &str,
@@ -884,6 +1098,47 @@ impl Service {
         R: Send + 'static,
     {
         self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.lastfm_username != username
+                || session
+                    .spotify_account_id
+                    .as_deref()
+                    .is_some_and(|bound| bound != spotify_account_id)
+                || !allowed_phase(session.phase)
+            {
+                return Err(
+                    "The Last.fm import is no longer active for this account or phase.".into(),
+                );
+            }
+            if session.spotify_account_id.is_none() {
+                session.spotify_account_id = Some(spotify_account_id.to_owned());
+            }
+            let (session, result) = mutation(session)?;
+            Ok((Some(session), result))
+        })
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn mutate_owned_session<R, F>(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        allowed_phase: fn(ImportPhase) -> bool,
+        mutation: F,
+    ) -> Result<R, String>
+    where
+        F: FnOnce(LastFmImportSessionV2) -> Result<(LastFmImportSessionV2, R), String>,
+        R: Send + 'static,
+    {
+        #[cfg(test)]
+        return self
+            .mutate_owned_session_blocking(username, spotify_account_id, allowed_phase, mutation)
+            .await;
+        #[cfg(not(test))]
+        self.mutate_session_queued(|session| {
             let Some(mut session) = session else {
                 return Err("No Last.fm import session is active.".into());
             };
@@ -1742,6 +1997,7 @@ impl Service {
         .await
     }
 
+    #[cfg(test)]
     pub(super) async fn set_count_mode(
         &self,
         username: &str,
@@ -1750,72 +2006,75 @@ impl Service {
         mode: CountMode,
     ) -> Result<(), String> {
         self.mutate_review_state(|session, persisted| {
-            let Some(mut session) = session else {
-                return Err("No Last.fm import session is active.".into());
-            };
-            if session.lastfm_username != username
-                || session
-                    .spotify_account_id
-                    .as_deref()
-                    .is_some_and(|bound| bound != spotify_account_id)
-                || !review_phase_allowed(session.phase)
-            {
-                return Err(
-                    "The Last.fm import is no longer active for this account or phase.".into(),
-                );
-            }
-            if persisted
-                .lastfm_username
-                .as_deref()
-                .is_some_and(|existing| existing != username)
-                || persisted
-                    .spotify_account_id
-                    .as_deref()
-                    .is_some_and(|existing| existing != spotify_account_id)
-            {
-                return Err("Last.fm mappings belong to another account and are dormant.".into());
-            }
-            if session.spotify_account_id.is_none() {
-                session.spotify_account_id = Some(spotify_account_id.to_owned());
-            }
-            let current = session
-                .count_modes
-                .get(target_uri)
-                .copied()
-                .unwrap_or(session.default_count_mode);
-            if current != mode && locked_count_modes(&session).contains(target_uri) {
-                return Err(
-                    "This Spotify target's play-count strategy is locked after import.".into(),
-                );
-            }
-            let locked = locked_count_modes(&session);
-            session.default_count_mode = mode;
-            session
-                .count_modes
-                .retain(|target, _| locked.contains(target));
-            let mut mappings = persisted.mappings;
-            mappings.default_count_mode = mode;
-            Ok((
+            let (session, persisted) = set_count_mode_in_review(
                 session,
-                PersistedLastFmMappings {
-                    version: LASTFM_MAPPINGS_VERSION,
-                    lastfm_username: Some(username.to_owned()),
-                    spotify_account_id: Some(spotify_account_id.to_owned()),
-                    dormant: false,
-                    mappings,
-                },
-                (),
-            ))
+                persisted,
+                username,
+                spotify_account_id,
+                target_uri,
+                mode,
+            )?;
+            Ok((session, persisted, ()))
         })
         .await
     }
 
+    pub(super) async fn set_count_mode_queued(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        target_uri: &str,
+        mode: CountMode,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        return self
+            .set_count_mode(username, spotify_account_id, target_uri, mode)
+            .await;
+        #[cfg(not(test))]
+        self.mutate_review_state_queued(|session, persisted| {
+            let (session, persisted) = set_count_mode_in_review(
+                session,
+                persisted,
+                username,
+                spotify_account_id,
+                target_uri,
+                mode,
+            )?;
+            Ok((session, persisted, ()))
+        })
+        .await
+    }
+
+    #[cfg(test)]
     pub(super) async fn set_search_terms(
         &self,
         username: &str,
         spotify_account_id: &str,
         search_terms: bool,
     ) -> Result<(), String> {
+        self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |mut session| {
+                session.search_terms = search_terms;
+                Ok((session, ()))
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn set_search_terms_queued(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        search_terms: bool,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        return self
+            .set_search_terms(username, spotify_account_id, search_terms)
+            .await;
+        #[cfg(not(test))]
         self.mutate_owned_session(
             username,
             spotify_account_id,
@@ -1839,66 +2098,19 @@ impl Service {
             ));
         }
         let session_guard = self.session.lock().await;
-        let Some(session) = session_guard.as_ref() else {
-            return Ok(ImportQueuePage {
-                items: Vec::new(),
+        if session_guard
+            .as_ref()
+            .is_none_or(|session| session.phase == ImportPhase::Suspended)
+        {
+            return queue_page_view(
+                session_guard.as_ref(),
+                &LastFmSyncState::default(),
                 cursor,
-                next_cursor: None,
-                total: 0,
-            });
-        };
-        if session.phase == ImportPhase::Suspended {
-            return Ok(ImportQueuePage {
-                items: Vec::new(),
-                cursor,
-                next_cursor: None,
-                total: 0,
-            });
+                limit,
+            );
         }
         let sync = self.sync_snapshot().await;
-        let hidden = sync
-            .apply_queue
-            .iter()
-            .filter(|job| {
-                job.plan.session_id == session.cache_id
-                    && matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
-            })
-            .map(|job| job.plan.batch_id)
-            .collect::<BTreeSet<_>>();
-        let batches = review_batches_for_read(session)
-            .iter()
-            .filter(|batch| !hidden.contains(&batch.page))
-            .cloned()
-            .collect::<Vec<_>>();
-        let total = batches.len();
-        if cursor > total {
-            return Err("Last.fm import queue cursor is out of range.".into());
-        }
-        let end = cursor.saturating_add(limit).min(total);
-        let requested_batches = &batches[cursor..end];
-        let requested_ids = requested_batches
-            .iter()
-            .flat_map(|batch| batch.source_ids.iter().map(String::as_str))
-            .collect::<HashSet<_>>();
-        let rows_by_id = session
-            .rows
-            .iter()
-            .filter(|row| requested_ids.contains(row.stable_id.as_str()))
-            .map(|row| (row.stable_id.as_str(), row))
-            .collect::<HashMap<_, _>>();
-        let items = requested_batches
-            .iter()
-            .filter_map(|batch| {
-                let rows = batch_rows(batch, &rows_by_id);
-                queue_item(session, batch, &rows, &sync.apply_queue)
-            })
-            .collect();
-        Ok(ImportQueuePage {
-            items,
-            cursor,
-            next_cursor: (end < total).then_some(end),
-            total,
-        })
+        queue_page_view(session_guard.as_ref(), &sync, cursor, limit)
     }
 
     pub(crate) async fn page(
@@ -1908,142 +2120,17 @@ impl Service {
         album: &str,
     ) -> Option<ImportPageView> {
         let session_guard = self.session.lock().await;
-        let session = session_guard.as_ref()?;
-        if session.phase == ImportPhase::Suspended {
+        if session_guard
+            .as_ref()
+            .is_none_or(|session| session.phase == ImportPhase::Suspended)
+        {
             return None;
         }
         let sync = self.sync_snapshot().await;
-        let hidden = sync
-            .apply_queue
-            .iter()
-            .filter(|job| {
-                job.plan.session_id == session.cache_id
-                    && matches!(job.status, ApplyJobStatus::Queued | ApplyJobStatus::Running)
-            })
-            .map(|job| job.plan.batch_id)
-            .collect::<BTreeSet<_>>();
-        let batches = review_batches_for_read(session)
-            .iter()
-            .filter(|batch| !hidden.contains(&batch.page))
-            .cloned()
-            .collect::<Vec<_>>();
-        let batch = batches.iter().find(|batch| batch.page == batch_id)?;
-        let requested_ids = batch
-            .source_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        let rows_by_id = session
-            .rows
-            .iter()
-            .filter(|row| requested_ids.contains(row.stable_id.as_str()))
-            .map(|row| (row.stable_id.as_str(), row))
-            .collect::<HashMap<_, _>>();
-        let rows = batch_rows(batch, &rows_by_id);
-        if rows.len() != batch.source_ids.len() {
-            return None;
-        }
-        let projection = batch_projection(batch, &rows);
-        if projection.representative_artist != artist || projection.representative_album != album {
-            return None;
-        }
-        let collection_shaped = batch_is_collection_shaped(session, batch, &rows);
-        let page_number = batches
-            .iter()
-            .position(|candidate| candidate.page == batch_id)?
-            + 1;
-        let options = session.options_for_page_batch(batch, artist, album, &rows);
-        let required_ids = required_import_match_ids(session, &options, &rows);
-        let ordered_rows = rows
-            .iter()
-            .filter(|row| required_ids.contains(&row.stable_id))
-            .chain(
-                rows.iter()
-                    .filter(|row| !required_ids.contains(&row.stable_id)),
-            )
-            .copied();
-        let items = ordered_rows
-            .map(|row| ImportPageItem {
-                source: row.clone(),
-                decision: default_decision(session, &row.stable_id),
-                match_result: session.matches.get(&row.stable_id).cloned(),
-            })
-            .collect();
-        let mut fuzzy_groups = BTreeMap::<String, Vec<SourceRow>>::new();
-        let mut count_rows = BTreeMap::<String, Vec<&SourceRow>>::new();
-        for row in &rows {
-            let decision = default_decision(session, &row.stable_id);
-            let participates = !decision.excluded
-                && match decision.status {
-                    RowStatus::Done => true,
-                    RowStatus::Pending | RowStatus::Skipped => {
-                        options.selected_track_ids.contains(&row.stable_id)
-                    }
-                    RowStatus::IgnoredAlbum | RowStatus::IgnoredArtist => false,
-                };
-            if !participates {
-                continue;
-            }
-            let Some(target_uri) = session
-                .matches
-                .get(&row.stable_id)
-                .and_then(|result| matched_track_uri(result, &row.stable_id))
-            else {
-                continue;
-            };
-            count_rows.entry(target_uri.clone()).or_default().push(*row);
-            fuzzy_groups
-                .entry(target_uri)
-                .or_default()
-                .push((*row).clone());
-        }
-        fuzzy_groups
-            .retain(|_, rows| rows.len() > 1 || rows.iter().any(|row| row.variants.len() > 1));
-        let visible_targets = fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>();
-        let count_modes = visible_targets
-            .iter()
-            .map(|target| {
-                (
-                    target.clone(),
-                    session
-                        .count_modes
-                        .get(target)
-                        .copied()
-                        .unwrap_or(session.default_count_mode),
-                )
-            })
-            .collect();
-        let locked_count_modes = locked_count_modes(session)
-            .into_iter()
-            .filter(|target| visible_targets.contains(target))
-            .collect();
-        let resolved_counts = historical_counts_for_targets(session, &count_rows)
-            .into_iter()
-            .filter(|(target, _)| visible_targets.contains(target))
-            .collect();
-        let collection = (collection_shaped
-            || session.collection_album_matches.contains_key(&batch_id))
-        .then(|| collection_match_view(session, batch_id, &rows));
-        Some(ImportPageView {
-            state: state_view(Some(session)),
-            batch_id,
-            artist: artist.to_owned(),
-            album: album.to_owned(),
-            custom_batch: batch.custom,
-            collection_shaped,
-            album_label_count: projection.album_labels.len(),
-            page_number,
-            page_count: batches.len(),
-            rows: items,
-            options,
-            fuzzy_groups,
-            count_modes,
-            resolved_counts,
-            locked_count_modes,
-            collection,
-        })
+        page_view(session_guard.as_ref(), &sync, batch_id, artist, album)
     }
 
+    #[cfg(test)]
     pub(super) async fn update_options(
         &self,
         username: &str,
@@ -2058,38 +2145,44 @@ impl Service {
             username,
             spotify_account_id,
             review_phase_allowed,
-            |mut session| {
-                let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
-                    return Err("Unknown Last.fm import review batch.".into());
-                };
-                let rows_by_id = source_row_map(&session);
-                let rows = batch_rows(&batch, &rows_by_id);
-                let collection_shaped = batch_is_collection_shaped(&session, &batch, &rows);
-                if is_converted_collection_batch(&session, batch_id, album) && options.whole_album {
-                    return Err(
-                        "Whole-album import is unavailable after switching to album matches."
-                            .into(),
-                    );
-                }
-                if collection_shaped
-                    && options.whole_album
-                    && !exact_album_match_for_rows(&session, batch_id, &rows)
-                {
-                    if !session.collection_album_matches.contains_key(&batch_id) {
-                        return Err(
-                            "Choose one supported Spotify album match before importing a collection as a whole album."
-                                .into(),
-                        );
-                    }
-                    return Err(
-                        "Choose one coherent Spotify album before importing a collection as a whole album."
-                            .into(),
-                    );
-                }
-                session
-                    .page_options
-                    .insert(batch_options_key(batch_id), options);
-                Ok((session, ()))
+            |session| {
+                update_options_in_session(session, batch_id, artist, album, options)
+                    .map(|session| (session, ()))
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn update_options_queued(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        batch_id: u32,
+        artist: &str,
+        album: &str,
+        options: PageOptions,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        return self
+            .update_options(
+                username,
+                spotify_account_id,
+                batch_id,
+                artist,
+                album,
+                options,
+            )
+            .await;
+        #[cfg(not(test))]
+        options.validate()?;
+        #[cfg(not(test))]
+        self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |session| {
+                update_options_in_session(session, batch_id, artist, album, options)
+                    .map(|session| (session, ()))
             },
         )
         .await
@@ -2140,179 +2233,20 @@ impl Service {
         artist: &str,
         album: &str,
     ) -> Result<(), String> {
-        let ids = if action.requires_ids() {
-            let ids =
-                ids.ok_or_else(|| "A source row ID is required for this action.".to_string())?;
-            let mut deduped = Vec::with_capacity(ids.len());
-            let mut seen = BTreeSet::new();
-            for id in ids {
-                if seen.insert(id) {
-                    deduped.push(id.clone());
-                }
-            }
-            if deduped.is_empty() {
-                return Err("A source row ID is required for this action.".into());
-            }
-            Some(deduped)
-        } else {
-            None
-        };
+        validate_review_action_input(action, ids)?;
         self.mutate_review_state(|session, persisted| {
-            let Some(mut session) = session else {
-                return Err("No Last.fm import session is active.".into());
-            };
-            if session.lastfm_username != username
-                || session
-                    .spotify_account_id
-                    .as_deref()
-                    .is_some_and(|bound| bound != spotify_account_id)
-                || !review_phase_allowed(session.phase)
-            {
-                return Err(
-                    "The Last.fm import is no longer active for this account or phase.".into(),
-                );
-            }
-            if session.spotify_account_id.is_none() {
-                session.spotify_account_id = Some(spotify_account_id.to_owned());
-            }
-            let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
-                return Err("Unknown Last.fm import review batch.".into());
-            };
-            if batch.custom
-                && matches!(
-                    action,
-                    ReviewAction::IgnoreAlbum | ReviewAction::IgnoreArtist
-                )
-            {
-                return Err(
-                    "Album- and artist-wide ignore are unavailable for a custom batch.".into(),
-                );
-            }
-            let scoped_ids = batch_scope_source_ids(&session, &batch);
-            let mapping_album_keys = source_album_keys_for_ids(&session, &scoped_ids);
-            let mapping_track_ids = ids.as_ref().map(|ids| {
-                ids.iter()
-                    .map(|id| {
-                        session
-                            .incremental_source_keys
-                            .get(id)
-                            .cloned()
-                            .unwrap_or_else(|| id.clone())
-                    })
-                    .collect::<Vec<_>>()
-            });
-            match action {
-                ReviewAction::Exclude | ReviewAction::UndoExclude => {
-                    let ids = ids.as_ref().expect("exclude actions require row IDs");
-                    if ids
-                        .iter()
-                        .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
-                    {
-                        return Err("The source row does not belong to this review batch.".into());
-                    }
-                    if ids.iter().any(|id| !is_reviewable(&session, id)) {
-                        return Err("The source row is not reviewable.".into());
-                    }
-                    for id in ids {
-                        exclude_row(&mut session, id, action == ReviewAction::Exclude);
-                    }
-                }
-                ReviewAction::IgnoreAlbum => {
-                    for source_id in &scoped_ids {
-                        if is_actionable(&session, source_id) {
-                            session.decisions.insert(
-                                source_id.clone(),
-                                RowDecision {
-                                    status: RowStatus::IgnoredAlbum,
-                                    excluded: false,
-                                },
-                            );
-                        }
-                    }
-                }
-                ReviewAction::IgnoreArtist => ignore_artist(&mut session, artist),
-                ReviewAction::SkipAlbum => {
-                    for source_id in &scoped_ids {
-                        if is_actionable(&session, source_id) {
-                            session.decisions.insert(
-                                source_id.clone(),
-                                RowDecision {
-                                    status: RowStatus::Skipped,
-                                    excluded: false,
-                                },
-                            );
-                        }
-                    }
-                }
-                ReviewAction::Restore => {
-                    for source_id in &scoped_ids {
-                        let decision = default_decision(&session, source_id);
-                        if !decision.excluded
-                            && matches!(
-                                decision.status,
-                                RowStatus::IgnoredAlbum | RowStatus::Skipped
-                            )
-                        {
-                            session
-                                .decisions
-                                .insert(source_id.clone(), RowDecision::default());
-                        }
-                    }
-                }
-            }
-            update_review_phase(&mut session);
-            if action == ReviewAction::SkipAlbum {
-                return Ok((session, persisted, ()));
-            }
-            if persisted
-                .lastfm_username
-                .as_deref()
-                .is_some_and(|existing| existing != username)
-                || persisted
-                    .spotify_account_id
-                    .as_deref()
-                    .is_some_and(|existing| existing != spotify_account_id)
-            {
-                return Err("Last.fm mappings belong to another account and are dormant.".into());
-            }
-            let mut mappings = persisted.mappings;
-            match action {
-                ReviewAction::Exclude => {
-                    if let Some(ids) = mapping_track_ids.as_ref() {
-                        mappings.excluded_tracks.extend(ids.iter().cloned());
-                    }
-                }
-                ReviewAction::UndoExclude => {
-                    if let Some(ids) = mapping_track_ids.as_ref() {
-                        for id in ids {
-                            mappings.excluded_tracks.remove(id);
-                        }
-                    }
-                }
-                ReviewAction::IgnoreAlbum => {
-                    mappings.ignored_albums.extend(mapping_album_keys);
-                }
-                ReviewAction::Restore => {
-                    for key in mapping_album_keys {
-                        mappings.ignored_albums.remove(&key);
-                    }
-                }
-                ReviewAction::IgnoreArtist => {
-                    mappings.ignored_artists.insert(normalize_for_match(artist));
-                }
-                ReviewAction::SkipAlbum => unreachable!(),
-            }
-            Ok((
+            let (session, persisted) = apply_review_action(
                 session,
-                PersistedLastFmMappings {
-                    version: LASTFM_MAPPINGS_VERSION,
-                    lastfm_username: Some(username.to_owned()),
-                    spotify_account_id: Some(spotify_account_id.to_owned()),
-                    dormant: false,
-                    mappings,
-                },
-                (),
-            ))
+                persisted,
+                username,
+                spotify_account_id,
+                batch_id,
+                ids,
+                action,
+                artist,
+                album,
+            )?;
+            Ok((session, persisted, ()))
         })
         .await
     }
@@ -2413,20 +2347,7 @@ impl Service {
             username,
             spotify_account_id,
             review_phase_allowed,
-            |mut session| {
-                let mut batch_identity = None;
-                for (source_id, uri) in selections {
-                    let identity = select_match_in_session(&mut session, batch_id, source_id, uri)?;
-                    if batch_identity
-                        .as_ref()
-                        .is_some_and(|current| current != &identity)
-                    {
-                        return Err("Spotify matches must belong to one review batch.".into());
-                    }
-                    batch_identity = Some(identity);
-                }
-                Ok((session, batch_identity.expect("selections are non-empty")))
-            },
+            |session| select_matches_in_session(session, batch_id, selections),
         )
         .await
     }
@@ -2515,5 +2436,17 @@ mod hydration_tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_session_mutation_publishes_memory_immediately() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = super::LastFmImportSessionV2::new("user".into(), "spotify".into(), 1);
+        service
+            .mutate_session_queued(|_| Ok((Some(session.clone()), ())))
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await, Some(session));
     }
 }

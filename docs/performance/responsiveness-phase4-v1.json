@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "baseRevision": "27cd1cf",
+  "candidate": {
+    "branch": "codex/responsiveness-burndown",
+    "checkpoint": 4
+  },
+  "environment": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "build": "optimized Rust release test"
+  },
+  "runners": {
+    "collectionProjection": "lastfm_import::integration_tests::audit_collection_projection_cost"
+  },
+  "measurements": [
+    {
+      "metric": "collection-coverage-projection",
+      "rows": 1000,
+      "cachedAlbums": 8,
+      "selectedAlbums": 4,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": { "median": 26958.487, "min": 26926.472, "max": 27480.118 },
+      "candidate": { "median": 3227.314, "min": 3191.0, "max": 3237.0 }
+    }
+  ],
+  "correctness": {
+    "matched": 100,
+    "ambiguous": 0,
+    "unresolved": 900,
+    "selectedCoverage": 4,
+    "cachedPreviewCount": 8
+  },
+  "limits": [
+    "This measures the pure coverage projection only; selected-track candidate injection, page payload size, persistence, and native paint remain separate evidence gaps.",
+    "Native WebKit input-to-paint was not measured because the Mac was locked during the GUI run."
+  ]
+}
