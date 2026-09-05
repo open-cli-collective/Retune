@@ -205,6 +205,7 @@ where
     )
     .await?
     .0;
+    drop(membership_guard);
     service
         .review_action(
             &binding.lastfm_username,
@@ -225,7 +226,6 @@ where
             )
             .await?;
     }
-    drop(membership_guard);
     current_import_view(service, lastfm).await
 }
 
@@ -256,8 +256,9 @@ where
     )
     .await?
     .0;
+    drop(membership_guard);
     service
-        .update_options(
+        .update_options_queued(
             &binding.lastfm_username,
             &binding.spotify_account_id,
             key.batch_id,
@@ -266,7 +267,6 @@ where
             options,
         )
         .await?;
-    drop(membership_guard);
     current_import_view(service, lastfm).await
 }
 
@@ -297,15 +297,15 @@ where
     )
     .await?
     .0;
+    drop(membership_guard);
     service
-        .set_count_mode(
+        .set_count_mode_queued(
             &binding.lastfm_username,
             &binding.spotify_account_id,
             target_uri,
             mode,
         )
         .await?;
-    drop(membership_guard);
     current_import_view(service, lastfm).await
 }
 
@@ -334,10 +334,10 @@ where
     )
     .await?
     .0;
-    service
-        .set_search_terms(&binding.lastfm_username, &binding.spotify_account_id, show)
-        .await?;
     drop(membership_guard);
+    service
+        .set_search_terms_queued(&binding.lastfm_username, &binding.spotify_account_id, show)
+        .await?;
     current_import_view(service, lastfm).await
 }
 

@@ -67,6 +67,9 @@ pub(crate) struct Service {
     sync_mutation_gate: Arc<Mutex<()>>,
     pub(super) mappings: Arc<Mutex<PersistedLastFmMappings>>,
     persistence_gate: Arc<Mutex<()>>,
+    session_writes: Arc<SessionWriteQueue>,
+    #[allow(dead_code)]
+    review_writes: Arc<ReviewWriteQueue>,
     pub(super) reconciliation_lock: Mutex<()>,
     pub(super) lazy_match_lock: Mutex<()>,
     pub(super) running: Arc<AtomicBool>,
@@ -77,6 +80,36 @@ pub(crate) struct Service {
 }
 
 pub(super) struct RunnerGuard(Arc<AtomicBool>);
+
+// ponytail: one coalescing writer is enough for local importer metadata.
+struct SessionWriteQueue {
+    pending: Arc<Mutex<Option<LastFmImportSessionV2>>>,
+    running: Arc<AtomicBool>,
+}
+
+#[allow(dead_code)]
+struct ReviewWriteQueue {
+    pending: Arc<Mutex<Option<(LastFmImportSessionV2, PersistedLastFmMappings)>>>,
+    running: Arc<AtomicBool>,
+}
+
+impl ReviewWriteQueue {
+    fn new() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl SessionWriteQueue {
+    fn new() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 impl RunnerGuard {
     pub(super) fn claim(running: &Arc<AtomicBool>) -> Option<Self> {
@@ -180,6 +213,8 @@ impl Service {
             sync_mutation_gate: Arc::new(Mutex::new(())),
             mappings: Arc::new(Mutex::new(mappings)),
             persistence_gate: Arc::new(Mutex::new(())),
+            session_writes: Arc::new(SessionWriteQueue::new()),
+            review_writes: Arc::new(ReviewWriteQueue::new()),
             reconciliation_lock: Mutex::new(()),
             lazy_match_lock: Mutex::new(()),
             running: Arc::new(AtomicBool::new(false)),
@@ -212,6 +247,8 @@ impl Service {
                 ..PersistedLastFmMappings::default()
             })),
             persistence_gate: Arc::new(Mutex::new(())),
+            session_writes: Arc::new(SessionWriteQueue::new()),
+            review_writes: Arc::new(ReviewWriteQueue::new()),
             reconciliation_lock: Mutex::new(()),
             lazy_match_lock: Mutex::new(()),
             running: Arc::new(AtomicBool::new(false)),
@@ -508,23 +545,93 @@ impl Service {
         tauri::async_runtime::spawn(async move {
             tauri::async_runtime::spawn_blocking(move || {
                 transactions.save(&transaction)?;
-                if let Some(session) = transaction.session.as_ref() {
-                    sessions.save(session)?;
-                }
+                sessions.save(transaction.session.as_ref().expect("transaction session"))?;
                 mappings.save(&transaction.mappings)?;
                 transactions.clear()
             })
             .await
             .map_err(|_| "Last.fm review transaction persistence task stopped.".to_string())??;
-            let mut session = current_session.lock().await;
-            let mut mappings = current_mappings.lock().await;
-            *session = Some(next_session);
-            *mappings = next_mappings;
+            *current_session.lock().await = Some(next_session);
+            *current_mappings.lock().await = next_mappings;
             drop(persistence_gate);
             Ok::<_, String>(result)
         })
         .await
         .map_err(|error| error.to_string())?
+    }
+
+    #[allow(dead_code)]
+    async fn mutate_review_state_queued<R, F>(&self, mutation: F) -> Result<R, String>
+    where
+        F: FnOnce(
+            Option<LastFmImportSessionV2>,
+            PersistedLastFmMappings,
+        ) -> Result<(LastFmImportSessionV2, PersistedLastFmMappings, R), String>,
+        R: Send + 'static,
+    {
+        self.ensure_hydrated()?;
+        let persistence_gate = Arc::clone(&self.persistence_gate).lock_owned().await;
+        let persistence_gate = self
+            .recover_pending_review_transaction(persistence_gate)
+            .await?;
+        let previous_session = self.session.lock().await.clone();
+        let previous_mappings = self.mappings.lock().await.clone();
+        let (next_session, next_mappings, result) =
+            mutation(previous_session.clone(), previous_mappings.clone())?;
+        if previous_session.as_ref() == Some(&next_session) && previous_mappings == next_mappings {
+            drop(persistence_gate);
+            return Ok(result);
+        }
+        self.restore_mutations.ensure_allowed()?;
+        *self.session.lock().await = Some(next_session.clone());
+        *self.mappings.lock().await = next_mappings.clone();
+        let queue = Arc::clone(&self.review_writes);
+        *queue.pending.lock().await = Some((next_session, next_mappings));
+        if !queue.running.swap(true, Ordering::AcqRel) {
+            let transactions = self.review_transaction_store.clone();
+            let sessions = self.store.clone();
+            let mappings = self.mappings_store.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let (session, persisted) = {
+                        let mut pending = queue.pending.lock().await;
+                        match pending.take() {
+                            Some(next) => next,
+                            None => {
+                                queue.running.store(false, Ordering::Release);
+                                return;
+                            }
+                        }
+                    };
+                    let transaction = ReviewTransaction::new(session, persisted);
+                    let transactions = transactions.clone();
+                    let sessions = sessions.clone();
+                    let mappings = mappings.clone();
+                    let result = tauri::async_runtime::spawn_blocking(move || {
+                        transactions.save(&transaction)?;
+                        if let Some(session) = transaction.session.as_ref() {
+                            sessions.save(session)?;
+                        }
+                        mappings.save(&transaction.mappings)?;
+                        transactions.clear()
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => log::warn!(
+                            target: "lastfm_import",
+                            "queued review save failed: {error}"
+                        ),
+                        Err(error) => log::warn!(
+                            target: "lastfm_import",
+                            "queued review save task stopped: {error}"
+                        ),
+                    }
+                }
+            });
+        }
+        drop(persistence_gate);
+        Ok(result)
     }
 
     pub(super) async fn save_mappings_for(
@@ -875,6 +982,45 @@ impl Service {
         self.mutate_session(|_| Ok((Some(session), ()))).await
     }
 
+    async fn enqueue_session_save(&self, session: LastFmImportSessionV2) {
+        let queue = Arc::clone(&self.session_writes);
+        *queue.pending.lock().await = Some(session);
+        if queue.running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let store = self.store.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let next = {
+                    let mut pending = queue.pending.lock().await;
+                    match pending.take() {
+                        Some(next) => next,
+                        None => {
+                            queue.running.store(false, Ordering::Release);
+                            return;
+                        }
+                    }
+                };
+                let result = tauri::async_runtime::spawn_blocking({
+                    let store = store.clone();
+                    move || store.save(&next)
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => log::warn!(
+                        target: "lastfm_import",
+                        "queued metadata save failed: {error}"
+                    ),
+                    Err(error) => log::warn!(
+                        target: "lastfm_import",
+                        "queued metadata save task stopped: {error}"
+                    ),
+                }
+            }
+        });
+    }
+
     pub(super) async fn mutate_session<R, F>(&self, mutation: F) -> Result<R, String>
     where
         F: FnOnce(
@@ -914,6 +1060,31 @@ impl Service {
         Ok(result)
     }
 
+    async fn mutate_session_queued<R, F>(&self, mutation: F) -> Result<R, String>
+    where
+        F: FnOnce(
+            Option<LastFmImportSessionV2>,
+        ) -> Result<(Option<LastFmImportSessionV2>, R), String>,
+        R: Send + 'static,
+    {
+        self.ensure_hydrated()?;
+        let persistence_gate = Arc::clone(&self.persistence_gate).lock_owned().await;
+        let persistence_gate = self
+            .recover_pending_review_transaction(persistence_gate)
+            .await?;
+        let previous = self.session.lock().await.clone();
+        let (next, result) = mutation(previous.clone())?;
+        if next != previous {
+            self.restore_mutations.ensure_allowed()?;
+            *self.session.lock().await = next.clone();
+            if let Some(session) = next {
+                self.enqueue_session_save(session).await;
+            }
+        }
+        drop(persistence_gate);
+        Ok(result)
+    }
+
     pub(super) async fn mutate_owned_session<R, F>(
         &self,
         username: &str,
@@ -926,6 +1097,42 @@ impl Service {
         R: Send + 'static,
     {
         self.mutate_session(|session| {
+            let Some(mut session) = session else {
+                return Err("No Last.fm import session is active.".into());
+            };
+            if session.lastfm_username != username
+                || session
+                    .spotify_account_id
+                    .as_deref()
+                    .is_some_and(|bound| bound != spotify_account_id)
+                || !allowed_phase(session.phase)
+            {
+                return Err(
+                    "The Last.fm import is no longer active for this account or phase.".into(),
+                );
+            }
+            if session.spotify_account_id.is_none() {
+                session.spotify_account_id = Some(spotify_account_id.to_owned());
+            }
+            let (session, result) = mutation(session)?;
+            Ok((Some(session), result))
+        })
+        .await
+    }
+
+    #[allow(dead_code)]
+    async fn mutate_owned_session_queued<R, F>(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        allowed_phase: fn(ImportPhase) -> bool,
+        mutation: F,
+    ) -> Result<R, String>
+    where
+        F: FnOnce(LastFmImportSessionV2) -> Result<(LastFmImportSessionV2, R), String>,
+        R: Send + 'static,
+    {
+        self.mutate_session_queued(|session| {
             let Some(mut session) = session else {
                 return Err("No Last.fm import session is active.".into());
             };
@@ -1784,6 +1991,7 @@ impl Service {
         .await
     }
 
+    #[cfg(test)]
     pub(super) async fn set_count_mode(
         &self,
         username: &str,
@@ -1805,6 +2013,33 @@ impl Service {
         .await
     }
 
+    pub(super) async fn set_count_mode_queued(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        target_uri: &str,
+        mode: CountMode,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        return self
+            .set_count_mode(username, spotify_account_id, target_uri, mode)
+            .await;
+        #[cfg(not(test))]
+        self.mutate_review_state_queued(|session, persisted| {
+            let (session, persisted) = set_count_mode_in_review(
+                session,
+                persisted,
+                username,
+                spotify_account_id,
+                target_uri,
+                mode,
+            )?;
+            Ok((session, persisted, ()))
+        })
+        .await
+    }
+
+    #[cfg(test)]
     pub(super) async fn set_search_terms(
         &self,
         username: &str,
@@ -1812,6 +2047,29 @@ impl Service {
         search_terms: bool,
     ) -> Result<(), String> {
         self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |mut session| {
+                session.search_terms = search_terms;
+                Ok((session, ()))
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn set_search_terms_queued(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        search_terms: bool,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        return self
+            .set_search_terms(username, spotify_account_id, search_terms)
+            .await;
+        #[cfg(not(test))]
+        self.mutate_owned_session_queued(
             username,
             spotify_account_id,
             review_phase_allowed,
@@ -1866,6 +2124,7 @@ impl Service {
         page_view(session_guard.as_ref(), &sync, batch_id, artist, album)
     }
 
+    #[cfg(test)]
     pub(super) async fn update_options(
         &self,
         username: &str,
@@ -1877,6 +2136,41 @@ impl Service {
     ) -> Result<(), String> {
         options.validate()?;
         self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |session| {
+                update_options_in_session(session, batch_id, artist, album, options)
+                    .map(|session| (session, ()))
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn update_options_queued(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        batch_id: u32,
+        artist: &str,
+        album: &str,
+        options: PageOptions,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        return self
+            .update_options(
+                username,
+                spotify_account_id,
+                batch_id,
+                artist,
+                album,
+                options,
+            )
+            .await;
+        #[cfg(not(test))]
+        options.validate()?;
+        #[cfg(not(test))]
+        self.mutate_owned_session_queued(
             username,
             spotify_account_id,
             review_phase_allowed,
@@ -2136,5 +2430,17 @@ mod hydration_tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_session_mutation_publishes_memory_immediately() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        let session = super::LastFmImportSessionV2::new("user".into(), "spotify".into(), 1);
+        service
+            .mutate_session_queued(|_| Ok((Some(session.clone()), ())))
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await, Some(session));
     }
 }

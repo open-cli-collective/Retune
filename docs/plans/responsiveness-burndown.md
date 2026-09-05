@@ -188,6 +188,6 @@ owning architecture documents.
 | 2 Typing/keyboard | Complete | [Phase 2 results](../performance/responsiveness-phase2-v1.json); native/full-App render gate remains open |
 | 3 Importer extraction | Complete | Pure review transformation and borrowed projection tests; [Library architecture](../architecture/library.md) |
 | 4 Narrow reads | Complete | Collection coverage projection 26,958 ms → 3,227 ms on the paired 1,000-row fixture; owner-phase reads and read-only cooldown projections verified with provider/write guards; full selected-track payload cost remains open |
-| 5 Draft acknowledgement | Pending | — |
+| 5 Draft acknowledgement | Complete | [Phase 5 results](../performance/responsiveness-phase5-v1.json); queued session/review writers publish memory before disk and coalesce compatible snapshots |
 | 6 Foreground isolation | Pending | — |
 | 7 Re-audit/ratchet | Pending | — |
