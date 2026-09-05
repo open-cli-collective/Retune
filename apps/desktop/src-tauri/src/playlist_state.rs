@@ -131,23 +131,26 @@ impl PlaylistState {
     ) -> Result<PlaylistOperation, String> {
         self.restore_mutations.ensure_allowed()?;
         let store = self.store.clone();
-        let saved = next.clone();
         let current = Arc::clone(&self.current);
         let completion = tauri::async_runtime::spawn(async move {
-            let result = tauri::async_runtime::spawn_blocking(move || store.save(&saved))
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string());
-            if let Err(error) = result {
-                if invalidate_on_failure || operation.remote_outcome_uncertain {
-                    current
-                        .lock()
-                        .expect("playlist mutex poisoned")
-                        .authoritative = false;
+            let result =
+                tauri::async_runtime::spawn_blocking(move || store.save(&next).map(|()| next))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string());
+            let next = match result {
+                Ok(next) => next,
+                Err(error) => {
+                    if invalidate_on_failure || operation.remote_outcome_uncertain {
+                        current
+                            .lock()
+                            .expect("playlist mutex poisoned")
+                            .authoritative = false;
+                    }
+                    operation.remote_resolved();
+                    return Err(error);
                 }
-                operation.remote_resolved();
-                return Err(error);
-            }
+            };
             *current.lock().expect("playlist mutex poisoned") = CurrentPlaylistCache {
                 cache: next,
                 authoritative: true,

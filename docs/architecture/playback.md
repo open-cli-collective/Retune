@@ -46,6 +46,11 @@ action establishes the canonical queue and current position. Repeat off stops
 at that queue's end, repeat all may wrap, and repeat one remains on the current
 track. The playback IPC accepts queues up to 100,000 tracks as a resource-safety
 boundary; backend-specific request windows do not truncate the canonical queue.
+Queue preparation runs on the blocking pool. It builds transient URI indexes
+only for requested resources, preserves the first cached-playlist match and
+duplicate queue entries, and carries an enabled flag beside each prepared row so
+filtering does not rescan the library. Provider misses are hydrated afterward
+through the shared Spotify client.
 
 The reducer emits only neutral, listening-generation-scoped facts: natural
 start, cumulative forward listening, discontinuity/seek, and completion. The

@@ -126,7 +126,8 @@ owning architecture documents.
   per action: returned data or an event, not both. Avoid repeated whole-queue
   loads and keep display preferences out of review processing.
 - Prove prepared reads perform zero writes/provider calls and verify invalidation
-  and UI IPC counts.
+  and UI IPC counts, including an expired-cooldown read that must not prune and
+  persist as a side effect.
 
 ### 5. Acknowledge drafts immediately
 
@@ -182,8 +183,8 @@ owning architecture documents.
 
 | Checkpoint | Status | Evidence |
 | --- | --- | --- |
-| 0 Audit/baseline | In review | Audit diagnostics, raw v1 baseline, native gap recorded |
-| 1 Rust hot paths | Pending | — |
+| 0 Audit/baseline | Complete | Issue #67, commit `ecd4185`, draft PR #68; native gate remains open |
+| 1 Rust hot paths | Complete | [Phase 1 results](../performance/responsiveness-phase1-v1.json) |
 | 2 Typing/keyboard | Pending | — |
 | 3 Importer extraction | Pending | — |
 | 4 Narrow reads | Pending | — |

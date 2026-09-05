@@ -29,6 +29,9 @@ same text merges their Retune album group.
 - Shell callers read track records immutably. Core methods record plays, merge
   history with saturating counts and monotonic timestamps, and fill only missing
   technical metadata without exposing mutable identity fields.
+- Projections compute effective ratings from their already-resolved canonical
+  track record. Batch Get Info and technical-metadata fills validate every ID
+  before mutating, then use one transient ID index for the batch.
 - Restoring replaces the library after validating the imported envelope.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
@@ -36,7 +39,8 @@ Overlay edits never mutate source-file tags or Spotify metadata.
 The desktop shell composes the live `Library`, its filesystem store, write
 gate, and long-running transaction exclusion as one concrete `LibraryState`.
 Ordinary changes clone the current library, save the candidate, and only then
-swap live memory. Spotify membership receives a borrowed `LibraryOwner`
+swap live memory. An unchanged candidate completes under the same mutation and
+restore gates without writing or replacing the live value. Spotify membership receives a borrowed `LibraryOwner`
 capability for that same boundary; it does not acquire unrelated application
 state. Local import and multi-component restore use narrow owner-held exclusive
 seams so their established transaction and lock ordering remains explicit.
@@ -280,7 +284,8 @@ albums, both, or neither.
 
 The three-column browser is a pure projection over `Library`. `Selection`
 contains source/category/artist/album filters; `Facets` and visible tracks are
-derived from it. Choosing a broader facet clears invalid narrower selections.
+derived from it. Facets deduplicate borrowed exact values and cache normalized
+sort keys before owning their result strings. Choosing a broader facet clears invalid narrower selections.
 When a resolved projection proves a preserved value stale, the UI falls back
 hierarchically by clearing category, artist, and album for a missing category,
 or artist and album for a missing artist or album.

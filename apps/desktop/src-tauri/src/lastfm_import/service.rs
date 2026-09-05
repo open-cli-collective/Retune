@@ -857,11 +857,17 @@ impl Service {
             let store = self.store.clone();
             let current = Arc::clone(&self.session);
             return tauri::async_runtime::spawn(async move {
-                if let Some(session) = next.clone() {
-                    tauri::async_runtime::spawn_blocking(move || store.save(&session))
+                let next = if let Some(session) = next {
+                    Some(
+                        tauri::async_runtime::spawn_blocking(move || {
+                            store.save(&session).map(|()| session)
+                        })
                         .await
-                        .map_err(|_| "Last.fm import persistence task stopped.".to_string())??;
-                }
+                        .map_err(|_| "Last.fm import persistence task stopped.".to_string())??,
+                    )
+                } else {
+                    None
+                };
                 *current.lock().await = next;
                 drop(persistence_gate);
                 Ok::<_, String>(result)

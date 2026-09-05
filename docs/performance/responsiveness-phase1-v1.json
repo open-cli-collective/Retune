@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "baseRevision": "4312e1d",
+  "candidate": {
+    "branch": "codex/responsiveness-burndown",
+    "parentRevision": "ecd4185",
+    "checkpoint": 1
+  },
+  "environment": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "build": "release"
+  },
+  "runners": {
+    "browse": "apps/desktop/src-tauri/src/library_commands.rs#audit_typeahead_browse_costs",
+    "playback": "apps/desktop/src-tauri/src/playback_resources.rs#audit_playback_resolution_costs",
+    "backfill": "apps/desktop/src-tauri/src/localfiles.rs#audit_backfill_costs"
+  },
+  "basePlaybackReproduction": {
+    "revision": "4312e1d",
+    "method": "Inject the playback runner test at the end of playback_resources.rs tests without changing production code.",
+    "apiAdapter": "The base resolve_cached returns the track vector directly; pass it to the base finish closure, whose enabled check scans the base library by URI.",
+    "fixtureAndSampling": "Use the identical responsiveness-v1 cases, output-order assertion, one warmup, seven release samples, and serial execution."
+  },
+  "measurements": [
+    {"metric":"browse.total","size":10000,"variant":"empty","unit":"ms","sampleCount":5,"base":{"median":37.68,"min":36.17,"max":39.46},"candidate":{"median":7.12,"min":6.49,"max":8.64}},
+    {"metric":"browse.total","size":10000,"variant":"track","unit":"ms","sampleCount":5,"base":{"median":37.87,"min":36.74,"max":38.47},"candidate":{"median":6.14,"min":6.01,"max":6.46}},
+    {"metric":"browse.total","size":10000,"variant":"missing-match","unit":"ms","sampleCount":5,"base":{"median":9.69,"min":9.68,"max":9.80},"candidate":{"median":5.27,"min":5.26,"max":6.15}},
+    {"metric":"browse.total","size":50000,"variant":"empty","unit":"ms","sampleCount":5,"base":{"median":753.08,"min":738.42,"max":788.36},"candidate":{"median":30.65,"min":29.48,"max":30.76}},
+    {"metric":"browse.total","size":50000,"variant":"track","unit":"ms","sampleCount":5,"base":{"median":758.61,"min":746.23,"max":791.47},"candidate":{"median":31.54,"min":31.34,"max":31.75}},
+    {"metric":"browse.total","size":50000,"variant":"missing-match","unit":"ms","sampleCount":5,"base":{"median":68.71,"min":68.55,"max":70.49},"candidate":{"median":26.78,"min":26.54,"max":27.10}},
+    {"metric":"playback.resolve-and-filter","size":1,"variant":"one-library-large-caches","unit":"ms","sampleCount":7,"base":{"median":0.000,"min":0.000,"max":0.021},"candidate":{"median":0.000,"min":0.000,"max":0.001}},
+    {"metric":"playback.resolve-and-filter","size":50000,"variant":"library-50000","unit":"ms","sampleCount":7,"base":{"median":3258.617,"min":3251.985,"max":3272.724},"candidate":{"median":9.042,"min":8.782,"max":9.306}},
+    {"metric":"playback.resolve-and-filter","size":5000,"variant":"mixed-5000","unit":"ms","sampleCount":7,"base":{"median":272.973,"min":270.613,"max":273.626},"candidate":{"median":1.424,"min":1.408,"max":1.677}},
+    {"metric":"backfill.production","size":50000,"variant":"complete-50000","unit":"ms","sampleCount":7,"base":null,"candidate":{"median":0.356,"min":0.291,"max":0.421}},
+    {"metric":"backfill.production","size":50000,"variant":"missing-50000","unit":"ms","sampleCount":7,"base":null,"candidate":{"median":2.822,"min":2.457,"max":3.253}}
+  ],
+  "correctness": [
+    "Timed fixture construction and warmup are outside samples.",
+    "Browse asserts result counts for every sample.",
+    "Playback compares resolved output URI order with every input case before timing.",
+    "Backfill verifies every missing Spotify added-at and kind value is filled before timing."
+  ],
+  "limits": [
+    "Backfill measurements are candidate-only and do not claim a paired speedup.",
+    "These CPU/service measurements are not native input-to-paint evidence.",
+    "The isolated native baseline remains open before UI responsiveness claims."
+  ]
+}

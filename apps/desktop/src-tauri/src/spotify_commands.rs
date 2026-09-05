@@ -1154,7 +1154,7 @@ pub(super) fn album_page_view(
                             local.is_some()
                         },
                         rating: local
-                            .and_then(|track| library.effective_rating(track.id).map(rating_view)),
+                            .and_then(|track| library.effective_rating(track).map(rating_view)),
                     }
                 })
                 .collect::<Vec<_>>()

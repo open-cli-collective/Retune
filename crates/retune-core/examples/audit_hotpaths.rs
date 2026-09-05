@@ -83,7 +83,11 @@ fn main() {
             library
                 .tracks()
                 .iter()
-                .map(|track| library.effective_rating(track.id))
+                .map(|track| {
+                    library
+                        .get(track.id)
+                        .and_then(|track| library.effective_rating(track))
+                })
                 .collect::<Vec<_>>()
         };
         let new_ratings = || {

@@ -151,7 +151,7 @@ impl TrackInfoView {
             alb: track.alb.clone(),
             cat: track.cat.clone(),
             orig_cat: track.orig_cat.clone(),
-            rating: library.effective_rating(track.id).map(rating_view),
+            rating: library.effective_rating(track).map(rating_view),
             inherited_rating: library
                 .album_rating(&AlbumKey::of(track))
                 .map(Rating::stars),
@@ -403,16 +403,20 @@ fn apply_track_infos(
     if ids.is_empty() {
         return Err("at least one track id is required".into());
     }
-    for &id in ids {
-        if library.get(TrackId(id)).is_none() {
-            return Err(format!("unknown track id {id}"));
-        }
-    }
     let rating_change = rating_change(edit)?;
-    for &id in ids {
-        apply_track_info(library, id, edit, rating_change)?;
-    }
-    Ok(())
+    let ids = ids.iter().copied().map(TrackId).collect::<Vec<_>>();
+    library
+        .edit_all(
+            &ids,
+            &TrackEdit {
+                name: edit.name.clone(),
+                art: edit.art.clone(),
+                alb: edit.alb.clone(),
+                cat: edit.cat.clone(),
+            },
+            rating_change,
+        )
+        .map_err(|error| error.to_string())
 }
 
 fn run_local_import(
@@ -547,7 +551,7 @@ fn browse_view(
     let counts = counts(library, &selected_tracks);
     let tracks = selected_tracks
         .into_iter()
-        .map(|track| TrackView::from_track(track, library.effective_rating(track.id)))
+        .map(|track| TrackView::from_track(track, library.effective_rating(track)))
         .collect();
 
     BrowseView {

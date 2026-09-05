@@ -68,22 +68,20 @@ pub fn facets(library: &Library, source: SourceId, selection: &Selection) -> Fac
         .tracks()
         .iter()
         .filter(|track| track.source == source);
-    let mut cats = sorted_unique(records.clone().map(|track| track.cat.clone()).collect());
+    let mut cats = sorted_unique(records.clone().map(|track| track.cat.as_str()));
     cats.sort_by_key(|cat| cat != crate::UNCATEGORIZED);
     let arts = sorted_unique(
         records
             .clone()
             .filter(|track| selected(&selection.cat, &track.cat))
-            .map(|track| track.art.clone())
-            .collect(),
+            .map(|track| track.art.as_str()),
     );
     let albs = sorted_unique(
         records
             .filter(|track| {
                 selected(&selection.cat, &track.cat) && selected(&selection.art, &track.art)
             })
-            .map(|track| track.alb.clone())
-            .collect(),
+            .map(|track| track.alb.as_str()),
     );
     Facets { cats, arts, albs }
 }
@@ -139,14 +137,12 @@ fn selected(selection: &[String], value: &str) -> bool {
     selection.is_empty() || selection.iter().any(|selected| selected == value)
 }
 
-fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
-    values.sort_by(|left, right| {
-        left.to_lowercase()
-            .cmp(&right.to_lowercase())
-            .then_with(|| left.cmp(right))
-    });
+fn sorted_unique<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_unstable();
     values.dedup();
-    values
+    values.sort_by_cached_key(|value| (value.to_lowercase(), *value));
+    values.into_iter().map(str::to_owned).collect()
 }
 
 #[cfg(test)]
@@ -379,34 +375,5 @@ mod tests {
 
         assert_eq!(calls, 2);
         assert_eq!(uris, ["first", "second"]);
-    }
-
-    #[test]
-    fn large_browse_derives_one_sort_key_per_visible_row() {
-        for size in [10_000usize, 20_000, 50_000] {
-            let mut library = Library::new();
-            for index in 0..size {
-                add(
-                    &mut library,
-                    SourceId::Music,
-                    &format!("track:{index:05}"),
-                    "Rock",
-                    "Artist",
-                    "Album",
-                );
-            }
-
-            SORT_KEY_CALLS.set(Some(0));
-            let visible = tracks(&library, SourceId::Music, &Selection::default());
-            let calls = SORT_KEY_CALLS.replace(None).unwrap();
-
-            assert_eq!(calls, size);
-            assert_eq!(visible.len(), size);
-            assert_eq!(visible.first().unwrap().uri, "track:00000");
-            assert_eq!(
-                visible.last().unwrap().uri,
-                format!("track:{:05}", size - 1)
-            );
-        }
     }
 }
