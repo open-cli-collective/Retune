@@ -88,13 +88,13 @@ use model::{
 pub(crate) use model::{
     AcceptAllSummary, AlbumCandidate, AlbumRelation, CollectionAlbumCandidate,
     CollectionAlbumMatchState, CountMode, ImportBatch, ImportDefaults, ImportMatchSelection,
-    ImportPageItem, ImportPageView, ImportPhase, ImportQueuePage, ImportStateView, JournalRecovery,
+    ImportPageView, ImportPhase, ImportQueuePage, ImportStateView, JournalRecovery,
     LastFmApplicationJournal, LastFmImportSessionV2, LastFmMappings, MatchResult, PageOptions,
-    ParsedRecentTracksPage, PersistedLastFmMappings, RetryableError, RowDecision, RowStatus,
-    SourceRow, SourceVariant,
+    ParsedRecentTracksPage, PersistedLastFmMappings, RetryableError, RowStatus, SourceRow,
+    SourceVariant,
 };
 #[cfg(test)]
-use model::{ApplyFailure, ApplyMembership, ApplyPlan};
+use model::{ApplyFailure, ApplyMembership, ApplyPlan, RowDecision};
 #[allow(unused_imports)]
 pub(crate) use model::{
     ApplyFailureCode, Confidence, ExternalScrobble, HistoryUpdate, JournalRecoveryError,

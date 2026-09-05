@@ -186,7 +186,7 @@ owning architecture documents.
 | 0 Audit/baseline | Complete | Issue #67, commit `ecd4185`, draft PR #68; native gate remains open |
 | 1 Rust hot paths | Complete | [Phase 1 results](../performance/responsiveness-phase1-v1.json) |
 | 2 Typing/keyboard | Complete | [Phase 2 results](../performance/responsiveness-phase2-v1.json); native/full-App render gate remains open |
-| 3 Importer extraction | Pending | — |
+| 3 Importer extraction | Complete | Pure review transformation and borrowed projection tests; [Library architecture](../architecture/library.md) |
 | 4 Narrow reads | Pending | — |
 | 5 Draft acknowledgement | Pending | — |
 | 6 Foreground isolation | Pending | — |

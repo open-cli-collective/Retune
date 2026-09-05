@@ -58,6 +58,13 @@ persistence; `source` and `clustering` own ingestion and review grouping;
 `matching`, `collection`, and `review` own candidate and page projection;
 `apply`, `incremental`, and `reconciliation` own durable execution; and
 `coordinator` plus `commands` own application orchestration and Tauri adaptation.
+The service holds the session lock while it clones a sync snapshot, then pure
+review functions build queue and page command DTOs from the borrowed session
+and owned snapshot. Those functions perform no filesystem or provider access.
+Pure option, count-strategy, review-action, and match-selection transformations
+return candidate records to the service for publication and persistence.
+Persisted session, mapping, apply-job, and journal records remain owned by their
+existing stores.
 `retune-core` remains
 a pure, deterministic mutation target. History is an absolute baseline: resolved source
 counts use one reusable account-bound Sum, highest-played spelling Overwrite, or
