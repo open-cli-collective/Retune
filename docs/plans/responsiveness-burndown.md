@@ -189,5 +189,5 @@ owning architecture documents.
 | 3 Importer extraction | Complete | Pure review transformation and borrowed projection tests; [Library architecture](../architecture/library.md) |
 | 4 Narrow reads | Complete | Collection coverage projection 26,958 ms → 3,227 ms on the paired 1,000-row fixture; owner-phase reads and read-only cooldown projections verified with provider/write guards; full selected-track payload cost remains open |
 | 5 Draft acknowledgement | Complete | [Phase 5 results](../performance/responsiveness-phase5-v1.json); queued session/review writers publish memory before disk and coalesce compatible snapshots |
-| 6 Foreground isolation | Pending | — |
-| 7 Re-audit/ratchet | Pending | — |
+| 6 Foreground isolation | Complete | [Phase 6 results](../performance/responsiveness-phase6-v1.json); account revalidation and lock release surround network/apply boundaries |
+| 7 Re-audit/ratchet | Deferred | [Phase 7 results](../performance/responsiveness-phase7-v1.json); source/check suites pass, but the isolated native paint journey remains blocked by the locked Mac |

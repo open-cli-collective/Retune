@@ -69,6 +69,9 @@ Review option, count-mode, and search-term edits publish the validated in-memory
 session first. A service-owned ordered writer coalesces compatible metadata
 snapshots and performs disk writes afterward, so ordinary controls do not wait
 on filesystem latency; apply and recovery continue to use the durable journal.
+Account binding is checked before provider work and again after network search;
+membership guards are released before local metadata admission and durable apply
+job handoff.
 Read-only cooldown projections hydrate the shared cooldown store once, filter
 expired entries in memory, and never rewrite the file. Mutating cooldown
 operations normalize legacy quota keys before applying their update and retain

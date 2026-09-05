@@ -501,6 +501,7 @@ where
             false,
         )
         .await?;
+        drop(membership);
         let view = apply_page(
             self.service,
             key.batch_id,
@@ -510,7 +511,6 @@ where
             options,
         )
         .await?;
-        drop(membership);
         start_worker();
         changed();
         Ok(view)
@@ -538,6 +538,7 @@ where
             false,
         )
         .await?;
+        drop(membership);
         let session_id = self
             .service
             .snapshot()
@@ -553,7 +554,6 @@ where
                 &binding.spotify_account_id,
             )
             .await?;
-        drop(membership);
         start_worker();
         changed();
         Ok(view)
