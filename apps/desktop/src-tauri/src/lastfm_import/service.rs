@@ -30,12 +30,31 @@ impl MappingsRestore {
     }
 }
 
+#[cfg(test)]
 pub(super) fn requires_spotify_ownership(session: &LastFmImportSessionV2) -> bool {
     session.spotify_account_id.is_some()
         && matches!(
             session.phase,
             ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended
         )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ImportOwnerPhase {
+    pub(super) cache_id: String,
+    pub(super) lastfm_username: String,
+    pub(super) spotify_account_id: Option<String>,
+    pub(super) phase: ImportPhase,
+}
+
+impl ImportOwnerPhase {
+    pub(super) fn requires_spotify_ownership(&self) -> bool {
+        self.spotify_account_id.is_some()
+            && matches!(
+                self.phase,
+                ImportPhase::Review | ImportPhase::Done | ImportPhase::Suspended
+            )
+    }
 }
 
 pub(crate) struct Service {
@@ -310,6 +329,23 @@ impl Service {
 
     pub(super) async fn snapshot(&self) -> Option<LastFmImportSessionV2> {
         self.session.lock().await.clone()
+    }
+
+    pub(super) async fn owner_phase(&self) -> Option<ImportOwnerPhase> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| ImportOwnerPhase {
+                cache_id: session.cache_id.clone(),
+                lastfm_username: session.lastfm_username.clone(),
+                spotify_account_id: session.spotify_account_id.clone(),
+                phase: session.phase,
+            })
+    }
+
+    pub(super) async fn has_session(&self) -> bool {
+        self.session.lock().await.is_some()
     }
 
     pub(super) async fn snapshot_with_sync(

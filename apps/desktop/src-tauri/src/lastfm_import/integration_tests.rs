@@ -119,6 +119,65 @@ async fn audit_lastfm_interaction_costs() {
     }
 }
 
+#[test]
+#[ignore = "responsiveness benchmark; run with --release --ignored --nocapture"]
+fn audit_collection_projection_cost() {
+    use std::time::Instant;
+
+    let rows = (0..1_000)
+        .map(|index| {
+            let title = (index as u64)
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .rotate_left(17);
+            collection_test_row(&format!("{title:016x}"))
+        })
+        .collect::<Vec<_>>();
+    let mut session = collection_session(&rows);
+    let batch_id = session.batches[0].page;
+    let albums = (0..8)
+        .map(|album| {
+            let start = album * 25;
+            collection_album_for_rows(
+                &format!("spotify:album:collection-{album}"),
+                &rows,
+                &(start..start + 25).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    session.collection_album_matches.insert(
+        batch_id,
+        CollectionAlbumMatchState {
+            cached_candidates: albums,
+            selected_album_uris: (0..4)
+                .map(|album| format!("spotify:album:collection-{album}"))
+                .collect(),
+            ..CollectionAlbumMatchState::default()
+        },
+    );
+    let row_refs = rows.iter().collect::<Vec<_>>();
+    let run = || collection_match_view(&session, batch_id, &row_refs);
+    let expected = run();
+    assert_eq!(expected.coverage.matched, 100);
+    assert_eq!(expected.coverage.ambiguous, 0);
+    assert_eq!(expected.coverage.unresolved, 900);
+    assert_eq!(expected.coverage.selected_albums.len(), 4);
+    assert_eq!(expected.coverage.previews.len(), 8);
+    let mut samples = (0..5)
+        .map(|_| {
+            let start = Instant::now();
+            let result = std::hint::black_box(run());
+            let elapsed = start.elapsed().as_secs_f64() * 1_000.0;
+            assert_eq!(result, expected);
+            elapsed
+        })
+        .collect::<Vec<_>>();
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "COLLECTION_PROJECTION rows=1000 cached_albums=8 selected_albums=4 median_ms={:.3} min_ms={:.3} max_ms={:.3}",
+        samples[2], samples[0], samples[4]
+    );
+}
+
 fn test_spotify_membership(path: &Path) -> Arc<SpotifyMembership> {
     Arc::new(SpotifyMembership::new(
         SpotifyLibraryState::default(),
@@ -6502,6 +6561,80 @@ fn collection_projection_reports_per_track_match_status_and_selected_coverage() 
 }
 
 #[test]
+fn collection_track_statuses_preserve_resolution_precedence_and_fallback_titles() {
+    let rows = ["Resolved", "Ambiguous", "Unique", "Fallback"]
+        .into_iter()
+        .map(collection_test_row)
+        .collect::<Vec<_>>();
+    let mut first = collection_album(
+        "spotify:album:first",
+        "Artist",
+        &[
+            ("Resolved", "spotify:track:resolved-a"),
+            ("Ambiguous", "spotify:track:ambiguous-a"),
+            ("Unique", "spotify:track:unique"),
+            ("Fallback", "spotify:track:fallback"),
+        ],
+    );
+    first.matching.name = "Fallback".into();
+    first.matching.track_names.truncate(3);
+    let second = collection_album(
+        "spotify:album:second",
+        "Artist",
+        &[
+            ("Resolved", "spotify:track:resolved-b"),
+            ("Ambiguous", "spotify:track:ambiguous-b"),
+        ],
+    );
+    let mut session = collection_session(&rows);
+    session.collection_album_matches.insert(
+        1,
+        CollectionAlbumMatchState {
+            cached_candidates: vec![first.clone(), second.clone()],
+            selected_album_uris: vec![first.matching.uri.clone(), second.matching.uri.clone()],
+            ..CollectionAlbumMatchState::default()
+        },
+    );
+    session
+        .matches
+        .get_mut(&rows[0].stable_id)
+        .unwrap()
+        .track_matches =
+        BTreeMap::from([(rows[0].stable_id.clone(), "spotify:track:resolved-a".into())]);
+
+    let row_refs = rows.iter().collect::<Vec<_>>();
+    let view = collection_match_view(&session, 1, &row_refs);
+    let preview = view
+        .coverage
+        .previews
+        .iter()
+        .find(|preview| preview.uri == first.matching.uri)
+        .unwrap();
+    assert_eq!(
+        preview
+            .track_statuses
+            .iter()
+            .map(|track| (track.uri.as_str(), track.status.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "spotify:track:resolved-a",
+                CollectionTrackMatchStatus::Matched
+            ),
+            (
+                "spotify:track:ambiguous-a",
+                CollectionTrackMatchStatus::Ambiguous,
+            ),
+            ("spotify:track:unique", CollectionTrackMatchStatus::Matched),
+            (
+                "spotify:track:fallback",
+                CollectionTrackMatchStatus::Matched
+            ),
+        ]
+    );
+}
+
+#[test]
 fn collection_projection_coverage_cases_are_authoritative() {
     struct Expected {
         aggregate: (usize, usize, usize),
@@ -10865,6 +10998,76 @@ async fn application_seam_rejects_account_mismatch_before_provider_resolution() 
     };
     assert!(result.is_err());
     assert_eq!(provider_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn prepared_import_reads_use_cached_state_without_provider_calls_or_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+    let row = collection_test_row("One");
+    let mut session = collection_session(std::slice::from_ref(&row));
+    let batch_id = session.batches[0].page;
+    let album = collection_album_for_rows("spotify:album:one", std::slice::from_ref(&row), &[0]);
+    session.collection_album_matches.insert(
+        batch_id,
+        CollectionAlbumMatchState {
+            selected_album_uris: vec![album.matching.uri.clone()],
+            cached_candidates: vec![album],
+            ..CollectionAlbumMatchState::default()
+        },
+    );
+    service.save(session).await.unwrap();
+    state.spotify_membership.set_for_test(SpotifyLibraryState {
+        account_id: "spotify".into(),
+        complete: true,
+        ..SpotifyLibraryState::default()
+    });
+    let cooldown_path = directory.path().join("cooldowns.json");
+    let expired_cooldown = br#"{"/albums":{"kind":"transient","deadline":1}}"#;
+    fs::write(&cooldown_path, expired_cooldown).unwrap();
+    let session_path = directory.path().join("lastfm-import.json");
+    fs::remove_file(&session_path).unwrap();
+    let provider_calls = std::sync::atomic::AtomicUsize::new(0);
+    let use_cases = application::UseCases::new(
+        application::Owners {
+            service: &state.lastfm_import,
+            lastfm: &state.lastfm,
+            membership: &state.spotify_membership,
+            library: &state.library,
+            settings: &state.settings,
+            cooldown_store: &state.cooldown_store,
+        },
+        || {
+            provider_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err::<Arc<crate::SpotifyProvider>, _>("provider should not be resolved".into())
+        },
+        || Ok(true),
+    );
+
+    let state_view = use_cases.state(2).await.unwrap();
+    assert_eq!(state_view.spotify_limit, None);
+    assert_eq!(
+        use_cases
+            .queue(0, LASTFM_QUEUE_PAGE_LIMIT)
+            .await
+            .unwrap()
+            .total,
+        1
+    );
+    let (page, changed, network_search) = use_cases
+        .page(ReviewBatchKey {
+            batch_id,
+            artist: "Artist".into(),
+            album: String::new(),
+        })
+        .await
+        .unwrap();
+    assert!(page.is_some());
+    assert!(!changed);
+    assert!(!network_search);
+    assert_eq!(provider_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(!session_path.exists());
+    assert_eq!(fs::read(cooldown_path).unwrap(), expired_cooldown);
 }
 
 #[tokio::test]

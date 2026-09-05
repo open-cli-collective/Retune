@@ -915,55 +915,6 @@ pub(super) fn collection_row_status(
     }
 }
 
-pub(super) fn collection_track_statuses(
-    candidate: &CollectionAlbumCandidate,
-    eligible: &[&SourceRow],
-    selected_tracks: &[AlbumCandidate],
-    session: &LastFmImportSessionV2,
-) -> Vec<CollectionTrackStatus> {
-    candidate
-        .matching
-        .track_uris
-        .iter()
-        .map(|uri| {
-            let mut matched = false;
-            let mut ambiguous = false;
-            let mut unique = false;
-            for row in eligible {
-                if let Some(target) = session
-                    .matches
-                    .get(&row.stable_id)
-                    .and_then(|result| matched_track_uri(result, &row.stable_id))
-                {
-                    matched |= target == *uri;
-                    continue;
-                }
-                let exact = selected_tracks
-                    .iter()
-                    .filter(|track| collection_candidate_matches_title(row, track))
-                    .map(|track| track.uri.as_str())
-                    .collect::<BTreeSet<_>>();
-                if exact.contains(uri.as_str()) {
-                    ambiguous |= exact.len() > 1;
-                    unique |= exact.len() == 1;
-                }
-            }
-            CollectionTrackStatus {
-                uri: uri.clone(),
-                status: if matched {
-                    CollectionTrackMatchStatus::Matched
-                } else if ambiguous {
-                    CollectionTrackMatchStatus::Ambiguous
-                } else if unique {
-                    CollectionTrackMatchStatus::Matched
-                } else {
-                    CollectionTrackMatchStatus::Unmatched
-                },
-            }
-        })
-        .collect()
-}
-
 pub(super) fn collection_album_preview_coverage(
     candidate: &CollectionAlbumCandidate,
     eligible: &[&SourceRow],
@@ -977,62 +928,100 @@ pub(super) fn collection_album_preview_coverage(
         .map(|track| track.uri.clone())
         .collect::<BTreeSet<_>>();
     let mut union = selected_tracks.to_vec();
-    let existing = union
+    let mut union_uris = union
         .iter()
         .map(|track| track.uri.clone())
         .collect::<BTreeSet<_>>();
     union.extend(
         candidate_tracks
             .into_iter()
-            .filter(|track| !existing.contains(&track.uri)),
+            .filter(|track| union_uris.insert(track.uri.clone())),
     );
-    let matched = eligible
+    let mut matched = 0;
+    let mut unique_coverage = 0;
+    let mut projected_matched = 0;
+    let mut projected_ambiguous = 0;
+    let mut track_flags = candidate
+        .matching
+        .track_uris
         .iter()
-        .filter(|row| {
-            let candidate_target = session
-                .matches
-                .get(&row.stable_id)
-                .and_then(|result| matched_track_uri(result, &row.stable_id));
-            if let Some(target) = candidate_target {
-                return candidate_uris.contains(&target);
-            }
-            let exact = union
-                .iter()
-                .filter(|track| collection_candidate_matches_title(row, track))
-                .map(|track| track.uri.as_str())
-                .collect::<BTreeSet<_>>();
-            exact.len() == 1
-                && exact
-                    .iter()
-                    .next()
-                    .is_some_and(|uri| candidate_uris.contains(*uri))
-        })
-        .count();
-    let (projected_matched, ambiguous, _) = count_collection_statuses(
-        eligible
+        .map(|uri| (uri.as_str(), (false, false, false)))
+        .collect::<BTreeMap<_, _>>();
+    for row in eligible {
+        let result = session.matches.get(&row.stable_id);
+        let resolved = result.and_then(|result| matched_track_uri(result, &row.stable_id));
+        let exact = union
             .iter()
-            .map(|row| collection_row_status(row, session.matches.get(&row.stable_id), &union)),
-    );
-    let unique_coverage = eligible
+            .filter(|track| collection_candidate_matches_title(row, track))
+            .map(|track| track.uri.as_str())
+            .collect::<BTreeSet<_>>();
+        let unique_candidate = exact.len() == 1
+            && exact
+                .first()
+                .is_some_and(|uri| candidate_uris.contains(*uri));
+        unique_coverage += usize::from(unique_candidate);
+        if resolved
+            .as_deref()
+            .is_some_and(|uri| candidate_uris.contains(uri))
+            || (resolved.is_none() && unique_candidate)
+        {
+            matched += 1;
+        }
+        let projected = if resolved.is_some() {
+            CollectionRowStatus::Matched
+        } else if exact.len() > 1 {
+            CollectionRowStatus::Ambiguous
+        } else if exact.len() == 1 {
+            CollectionRowStatus::Matched
+        } else {
+            collection_row_status(row, result, &union)
+        };
+        match projected {
+            CollectionRowStatus::Matched => projected_matched += 1,
+            CollectionRowStatus::Ambiguous => projected_ambiguous += 1,
+            CollectionRowStatus::Unresolved => {}
+        }
+        if let Some(uri) = resolved.as_deref() {
+            if let Some(flags) = track_flags.get_mut(uri) {
+                flags.0 = true;
+            }
+        } else {
+            for uri in exact.iter().filter(|uri| candidate_uris.contains(**uri)) {
+                if let Some(flags) = track_flags.get_mut(uri) {
+                    if exact.len() > 1 {
+                        flags.1 = true;
+                    } else {
+                        flags.2 = true;
+                    }
+                }
+            }
+        }
+    }
+    let statuses = candidate
+        .matching
+        .track_uris
         .iter()
-        .filter(|row| {
-            let exact = union
-                .iter()
-                .filter(|track| collection_candidate_matches_title(row, track))
-                .map(|track| track.uri.as_str())
-                .collect::<BTreeSet<_>>();
-            exact.len() == 1
-                && exact
-                    .iter()
-                    .next()
-                    .is_some_and(|uri| candidate_uris.contains(*uri))
+        .map(|uri| {
+            let (matched, ambiguous, unique) =
+                track_flags.get(uri.as_str()).copied().unwrap_or_default();
+            CollectionTrackStatus {
+                uri: uri.clone(),
+                status: if matched {
+                    CollectionTrackMatchStatus::Matched
+                } else if ambiguous {
+                    CollectionTrackMatchStatus::Ambiguous
+                } else if unique {
+                    CollectionTrackMatchStatus::Matched
+                } else {
+                    CollectionTrackMatchStatus::Unmatched
+                },
+            }
         })
-        .count();
-    let statuses = collection_track_statuses(candidate, eligible, &union, session);
+        .collect();
     (
         matched,
         projected_matched,
-        ambiguous,
+        projected_ambiguous,
         unique_coverage,
         statuses,
     )
@@ -1077,50 +1066,66 @@ pub(super) fn collection_match_view(
         collection_row_status(row, session.matches.get(&row.stable_id), &selected_tracks)
     });
     let (matched, ambiguous, unresolved) = count_collection_statuses(base_statuses);
+    let preview_coverage = state
+        .cached_candidates
+        .iter()
+        .map(|candidate| {
+            collection_album_preview_coverage(candidate, &eligible, &selected_tracks, session)
+        })
+        .collect::<Vec<_>>();
     let selected_albums = selected
         .iter()
-        .map(|album| {
-            let (matched, _, _, unique_coverage, _) =
-                collection_album_preview_coverage(album, &eligible, &selected_tracks, session);
-            CollectionAlbumCoverage {
+        .filter_map(|album| {
+            let index = state
+                .cached_candidates
+                .iter()
+                .position(|candidate| candidate.matching.uri == album.matching.uri)?;
+            let (candidate_matched, _, _, unique_coverage, _) = &preview_coverage[index];
+            Some(CollectionAlbumCoverage {
                 uri: album.matching.uri.clone(),
-                matched,
-                unique_coverage,
-            }
+                matched: *candidate_matched,
+                unique_coverage: *unique_coverage,
+            })
         })
         .collect::<Vec<_>>();
     let previews = state
         .cached_candidates
         .iter()
-        .map(|candidate| {
-            let is_selected = state
-                .selected_album_uris
-                .iter()
-                .any(|uri| uri == &candidate.matching.uri);
-            let before = eligible.iter().map(|row| {
-                collection_row_status(row, session.matches.get(&row.stable_id), &selected_tracks)
-            });
-            let (before_matched, before_ambiguous, _) = count_collection_statuses(before);
-            let (matched, after_matched, after_ambiguous, unique_coverage, track_statuses) =
-                collection_album_preview_coverage(candidate, &eligible, &selected_tracks, session);
-            CollectionAlbumPreviewCoverage {
-                uri: candidate.matching.uri.clone(),
-                selected: is_selected,
-                matched,
-                unique_coverage,
-                marginal_matches: if is_selected {
-                    0
-                } else {
-                    after_matched as i32 - before_matched as i32
-                },
-                ambiguity_changes: if is_selected {
-                    0
-                } else {
-                    after_ambiguous as i32 - before_ambiguous as i32
-                },
-                track_statuses,
-            }
-        })
+        .zip(preview_coverage)
+        .map(
+            |(
+                candidate,
+                (
+                    candidate_matched,
+                    after_matched,
+                    after_ambiguous,
+                    unique_coverage,
+                    track_statuses,
+                ),
+            )| {
+                let is_selected = state
+                    .selected_album_uris
+                    .iter()
+                    .any(|uri| uri == &candidate.matching.uri);
+                CollectionAlbumPreviewCoverage {
+                    uri: candidate.matching.uri.clone(),
+                    selected: is_selected,
+                    matched: candidate_matched,
+                    unique_coverage,
+                    marginal_matches: if is_selected {
+                        0
+                    } else {
+                        after_matched as i32 - matched as i32
+                    },
+                    ambiguity_changes: if is_selected {
+                        0
+                    } else {
+                        after_ambiguous as i32 - ambiguous as i32
+                    },
+                    track_statuses,
+                }
+            },
+        )
         .collect();
     CollectionMatchView {
         cached_albums: state.cached_candidates,

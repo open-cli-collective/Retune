@@ -110,8 +110,10 @@ pub(crate) use reconciliation::{
     resolved_play_count,
 };
 use review::*;
+#[cfg(test)]
+use service::requires_spotify_ownership;
+use service::RunnerGuard;
 pub(crate) use service::Service;
-use service::{requires_spotify_ownership, RunnerGuard};
 use source::{
     aggregate_incremental_scrobbles, discard_post_cutoff, download_page_window_with_checkpoint,
     fetch_incremental_page_with_retry, fetch_source_page, read_incremental_events, run_import,
@@ -927,13 +929,13 @@ where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(true);
     };
     match lastfm_username(lastfm).await {
-        Ok(username) if username == session.lastfm_username => {
-            if session.phase == ImportPhase::Suspended {
-                if requires_spotify_ownership(&session) {
+        Ok(username) if username == owner.lastfm_username => {
+            if owner.phase == ImportPhase::Suspended {
+                if owner.requires_spotify_ownership() {
                     let _ = current_spotify_binding_is_current(
                         service,
                         lastfm,
@@ -946,7 +948,7 @@ where
                 }
                 return Ok(false);
             }
-            if requires_spotify_ownership(&session) {
+            if owner.requires_spotify_ownership() {
                 current_spotify_binding_is_current(
                     service,
                     lastfm,
@@ -979,14 +981,14 @@ where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(false);
     };
-    if session.spotify_account_id.is_none() {
+    if owner.spotify_account_id.is_none() {
         return Ok(true);
     }
     let membership_guard = spotify_membership.lock().await;
-    let expected = session.spotify_account_id.as_deref().unwrap_or_default();
+    let expected = owner.spotify_account_id.as_deref().unwrap_or_default();
     let cached = membership_guard.snapshot();
     if cached_spotify_identity_matches(expected, &cached) == Some(false) {
         service.suspend_for_account_mismatch().await?;
@@ -1010,7 +1012,7 @@ where
             return Ok(false);
         }
     };
-    debug_assert_eq!(binding.lastfm_username, session.lastfm_username);
+    debug_assert_eq!(binding.lastfm_username, owner.lastfm_username);
     Ok(true)
 }
 
@@ -1018,11 +1020,11 @@ async fn current_import_view(
     service: &Service,
     lastfm: &crate::lastfm::Service,
 ) -> Result<ImportStateView, String> {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(service.state().await);
     };
     match lastfm
-        .with_import_owner(&session.lastfm_username, || async {
+        .with_import_owner(&owner.lastfm_username, || async {
             Ok(service.state().await)
         })
         .await?

@@ -65,6 +65,10 @@ Pure option, count-strategy, review-action, and match-selection transformations
 return candidate records to the service for publication and persistence.
 Persisted session, mapping, apply-job, and journal records remain owned by their
 existing stores.
+Read-only cooldown projections hydrate the shared cooldown store once, filter
+expired entries in memory, and never rewrite the file. Mutating cooldown
+operations normalize legacy quota keys before applying their update and retain
+the existing atomic persistence boundary.
 `retune-core` remains
 a pure, deterministic mutation target. History is an absolute baseline: resolved source
 counts use one reusable account-bound Sum, highest-played spelling Overwrite, or

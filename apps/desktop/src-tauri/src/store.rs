@@ -1026,7 +1026,18 @@ impl FsCooldownStore {
     }
 
     pub fn cooldowns(&self, now: u64) -> StoreResult<BTreeMap<String, Cooldown>> {
-        self.update_cooldowns(now, |cooldowns| cooldowns.clone())
+        self.load_cooldowns()?;
+        let mut cooldowns = self
+            .state
+            .lock()
+            .expect("cooldown state mutex poisoned")
+            .cooldowns
+            .as_ref()
+            .expect("cooldowns were loaded")
+            .clone();
+        coalesce_legacy_quota_entries(&mut cooldowns);
+        cooldowns.retain(|_, cooldown| cooldown.deadline > now);
+        Ok(cooldowns)
     }
 
     pub fn effective_cooldown(&self, now: u64) -> StoreResult<Option<Cooldown>> {
@@ -1084,6 +1095,7 @@ impl FsCooldownStore {
         let mut state = self.state.lock().expect("cooldown state mutex poisoned");
         let current = state.cooldowns.as_ref().expect("cooldowns were loaded");
         let mut next = current.clone();
+        coalesce_legacy_quota_entries(&mut next);
         next.retain(|_, cooldown| cooldown.deadline > now);
         let result = update(&mut next);
         coalesce_legacy_quota_entries(&mut next);
@@ -1115,10 +1127,7 @@ impl FsCooldownStore {
         {
             return Ok(());
         }
-        let mut cooldowns = read_json_or_default(&self.path, MAX_COOLDOWN_BYTES)?;
-        if coalesce_legacy_quota_entries(&mut cooldowns) {
-            atomic_write(&self.path, &serde_json::to_vec(&cooldowns)?, None)?;
-        }
+        let cooldowns = read_json_or_default(&self.path, MAX_COOLDOWN_BYTES)?;
         let mut state = self.state.lock().expect("cooldown state mutex poisoned");
         state.cooldowns.get_or_insert(cooldowns);
         Ok(())
@@ -2382,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    fn cooldowns_persist_and_expire_across_reloads() {
+    fn cooldown_reads_project_expiration_without_persisting() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("cooldowns.json"),
@@ -2403,10 +2412,13 @@ mod tests {
         );
         assert_eq!(
             fs::read(dir.path().join("cooldowns.json")).unwrap(),
-            br#"{"__global_quota__":{"kind":"quota","deadline":200}}"#
+            br#"{"/albums":{"kind":"quota","deadline":200},"/shows":{"kind":"transient","deadline":50}}"#
         );
         assert_eq!(reloaded.cooldowns(201).unwrap(), BTreeMap::new());
-        assert_eq!(fs::read(dir.path().join("cooldowns.json")).unwrap(), b"{}");
+        assert_eq!(
+            fs::read(dir.path().join("cooldowns.json")).unwrap(),
+            br#"{"/albums":{"kind":"quota","deadline":200},"/shows":{"kind":"transient","deadline":50}}"#
+        );
         assert!(dir.path().join("cooldowns.json").is_file());
         assert!(!dir.path().join("artist-genres.json").exists());
     }
@@ -2465,8 +2477,60 @@ mod tests {
         );
         assert_eq!(
             fs::read(dir.path().join("cooldowns.json")).unwrap(),
-            br#"{"/me/tracks":{"kind":"transient","deadline":400},"__global_quota__":{"kind":"quota","deadline":300}}"#
+            br#"{"/albums":{"kind":"quota","deadline":200},"/tracks":{"kind":"quota","deadline":300},"/me/tracks":{"kind":"transient","deadline":400}}"#
         );
+    }
+
+    #[test]
+    fn cooldown_reads_cache_without_persisting_pruning_or_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cooldowns.json");
+        let original = br#"{"/albums":{"kind":"quota","deadline":200},"/tracks":{"kind":"quota","deadline":300}}"#;
+        fs::write(&path, original).unwrap();
+        let store = FsCooldownStore::new(dir.path());
+
+        assert_eq!(
+            store.effective_cooldown(100).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 300,
+            })
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            store.effective_cooldown(100).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 300,
+            })
+        );
+        assert_eq!(store.effective_cooldown(301).unwrap(), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn legacy_quota_can_be_replaced_and_cleared_by_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("cooldowns.json"),
+            br#"{"/albums":{"kind":"quota","deadline":500}}"#,
+        )
+        .unwrap();
+        let store = FsCooldownStore::new(dir.path());
+
+        store
+            .record_cooldown("/tracks", CooldownKind::Quota, 250, 200)
+            .unwrap();
+        assert_eq!(
+            store.effective_cooldown(200).unwrap(),
+            Some(Cooldown {
+                kind: CooldownKind::Quota,
+                deadline: 250,
+            })
+        );
+        store.clear_quota(200).unwrap();
+        assert_eq!(store.effective_cooldown(200).unwrap(), None);
     }
 
     #[test]
