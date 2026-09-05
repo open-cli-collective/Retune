@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "baseRevision": "4312e1d",
+  "candidate": {
+    "branch": "codex/responsiveness-burndown",
+    "parentRevision": "1eac9d6",
+    "checkpoint": 2
+  },
+  "environment": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "cpu": "Apple M4 Pro",
+    "node": "v26.8.1",
+    "renderer": "jsdom 30.0.1",
+    "build": "Vitest opt-in diagnostic"
+  },
+  "runners": {
+    "typing": "apps/desktop/test/interactions.test.tsx#type-ahead audit",
+    "correctness": "apps/desktop/test/interactions.test.tsx#type-ahead behavior"
+  },
+  "measurements": [
+    {
+      "metric": "queue-filter.cpu",
+      "size": 1000,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 0.56,
+        "min": 0.53,
+        "max": 0.58
+      }
+    },
+    {
+      "metric": "queue-filter.cpu",
+      "size": 10000,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 5.37,
+        "min": 5.03,
+        "max": 6.58
+      }
+    },
+    {
+      "metric": "queue-filter.cpu",
+      "size": 50000,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 22.07,
+        "min": 21.91,
+        "max": 22.54
+      }
+    },
+    {
+      "metric": "import-genre.react-render",
+      "size": 25,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 0.01,
+        "min": 0.01,
+        "max": 0.01
+      }
+    },
+    {
+      "metric": "import-genre.react-render",
+      "size": 250,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 0.01,
+        "min": 0.01,
+        "max": 0.01
+      }
+    },
+    {
+      "metric": "import-genre.react-render",
+      "size": 1000,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 0.01,
+        "min": 0.01,
+        "max": 0.01
+      }
+    },
+    {
+      "metric": "get-info-autocomplete.event-to-dom",
+      "size": 20000,
+      "unit": "ms",
+      "sampleCount": 5,
+      "base": null,
+      "candidate": {
+        "median": 0.55,
+        "min": 0.53,
+        "max": 2.9
+      }
+    }
+  ],
+  "deterministicEvidence": [
+    "The controlled search field updates its displayed value before the 80 ms parent-query admission boundary.",
+    "A held Library browse permits only one active request and replaces queued queries with the latest value; stale completion cannot install rows.",
+    "Spotify query typing issues zero local browse calls after the scope transition's required unfiltered local refresh.",
+    "Compatible prior track rows and hierarchy-compatible facet candidates remain visible while a request is pending; incompatible contexts do not.",
+    "Focused row and facet multiword prefixes refine against stable candidates while the first facet request is held, then refresh candidates after timeout.",
+    "IME, modifier, nested checkbox, facet Space, and search Cmd-A paths retain native behavior.",
+    "Genre typing issues zero option IPC calls; blur, Enter, other option writes, and Apply flush the latest field draft.",
+    "Queue-filter keystrokes remain local until timeout, blur, or Enter and do not replace the mounted review row during the local draft update.",
+    "StrictMode remount resumes pending browse work and a late response after final unmount is ignored.",
+    "The genre_values command collects only distinct genre strings."
+  ],
+  "limits": [
+    "CPU and jsdom measurements are diagnostic and are not native input-to-paint evidence.",
+    "The 50000-row full App and native WebKit input-to-paint gate remains open; no TrackList virtualization or memo boundary was added without that evidence.",
+    "Queue filtering remains below 33 ms in the 50000-row CPU fixture, so no reusable normalized index was added before native measurement.",
+    "No paired base timing is claimed for the candidate-only UI diagnostics."
+  ]
+}

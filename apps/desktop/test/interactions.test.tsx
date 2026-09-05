@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef, Profiler, useState } from 'react'
+import { act, createRef, Profiler, StrictMode, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ArtistPageView, BrowseView, LastFmImportState, LastFmState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track } from '../src/types.ts'
@@ -63,6 +63,12 @@ function key(target: Element, value: string, options: KeyboardEventInit = {}) {
   const event = new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true, ...options })
   target.dispatchEvent(event)
   return event
+}
+
+async function typeInput(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+  input.setSelectionRange(value.length, value.length)
+  await act(async () => input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value.at(-1) })))
 }
 
 async function waitFor(assertion: () => void) {
@@ -344,6 +350,9 @@ describe('mounted native interaction boundaries', () => {
       expect(onPlay).toHaveBeenCalledWith(2)
       key(rows[1], ' ')
       expect(onSelect).toHaveBeenLastCalledWith(2, expect.anything())
+      const checkbox = rows[1].querySelector<HTMLInputElement>('input[type="checkbox"]')!
+      expect(key(checkbox, ' ').defaultPrevented).toBe(false)
+      expect(key(checkbox, 'r').defaultPrevented).toBe(false)
       expect(globalHandler).not.toHaveBeenCalled()
     } finally {
       document.removeEventListener('keydown', listener)
@@ -391,12 +400,15 @@ describe('mounted native interaction boundaries', () => {
 
     const filter = view.querySelector<HTMLInputElement>('input[aria-label="Filter import queue"]')!
     expect(filter.placeholder).toBe('Filter')
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(filter, 'Release Two')
-    await act(async () => filter.dispatchEvent(new Event('input', { bubbles: true })))
+    const reviewRow = view.querySelector('[data-import-nav="source"][data-import-row="1"]')
+    await typeInput(filter, 'Release Two')
+    expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(2)
+    expect(view.querySelector('[data-import-nav="source"][data-import-row="1"]')).toBe(reviewRow)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 110)) })
     await waitFor(() => expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(1))
     expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')?.textContent).toContain('Release Two')
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(filter, '')
-    await act(async () => filter.dispatchEvent(new Event('input', { bubbles: true })))
+    await typeInput(filter, '')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 110)) })
     await waitFor(() => expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(2))
     queueRows = [...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')]
 
@@ -410,8 +422,9 @@ describe('mounted native interaction boundaries', () => {
     expect(queueRows[1].getAttribute('aria-current')).toBe('true')
     expect(document.activeElement).toBe(queueRows[1])
 
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(filter, 'Release Two')
-    await act(async () => filter.dispatchEvent(new Event('input', { bubbles: true })))
+    await typeInput(filter, 'Release Two')
+    await act(async () => key(filter, 'Enter'))
+    await waitFor(() => expect(view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')).toHaveLength(1))
     const releaseOneLoads = () => invokeMock.mock.calls.filter(([command, args]) => command === 'lastfm_import_page' && args?.batchId === 1).length
     const beforeApply = releaseOneLoads()
     await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Accept & Next Batch')!.click())
@@ -661,6 +674,45 @@ describe('mounted native interaction boundaries', () => {
       selections: rows.map((item) => ({ id: item.source.stableId, uri: trackUri })),
     })
   })
+
+  it('keeps genre typing local and includes the draft in later option writes and Apply', async () => {
+    const fixtures = importerFixtures()
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return fixtures.pages.get(1)
+      if (command === 'genre_values') return []
+      if (command === 'lastfm_import_options' || command === 'lastfm_import_apply') return null
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector<HTMLInputElement>('input[aria-label="Import genre"]')).not.toBeNull())
+    const genre = view.querySelector<HTMLInputElement>('input[aria-label="Import genre"]')!
+    const optionCalls = () => invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_options')
+
+    await typeInput(genre, 'Dream Pop')
+    expect(optionCalls()).toHaveLength(0)
+    const rating = view.querySelector<HTMLSelectElement>('select[aria-label="Import rating"]')!
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(rating, '4')
+    await act(async () => rating.dispatchEvent(new Event('change', { bubbles: true })))
+    await waitFor(() => expect(optionCalls()).toHaveLength(1))
+    expect(optionCalls()[0][1]?.options).toEqual(expect.objectContaining({ genre: 'Dream Pop', rating: 4 }))
+
+    await typeInput(genre, 'Post Rock')
+    genre.focus()
+    const beforeEnter = optionCalls().length
+    await act(async () => key(genre, 'Enter', { isComposing: true }))
+    expect(optionCalls()).toHaveLength(beforeEnter)
+    await act(async () => key(genre, 'Enter'))
+    await waitFor(() => expect(optionCalls().length).toBe(beforeEnter + 1))
+    expect(optionCalls().at(-1)?.[1]?.options).toEqual(expect.objectContaining({ genre: 'Post Rock' }))
+
+    await typeInput(genre, 'Shoegaze')
+    await act(async () => [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Accept Changes')!.click())
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_apply')).toBe(true))
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_apply')?.[1]?.options).toEqual(expect.objectContaining({ genre: 'Shoegaze' }))
+  })
 })
 
 // Opt-in characterization for docs/lastfm-interaction-audit.md; no timing claims from jsdom.
@@ -766,11 +818,6 @@ describe.skipIf(!process.env.RETUNE_TYPEAHEAD_AUDIT)('type-ahead audit', () => {
       console.log(`TYPEAHEAD filter rows=${size} median-ms=${samples[2].toFixed(2)} min=${samples[0].toFixed(2)} max=${samples[4].toFixed(2)}`)
     }
   })
-  const type = async (input: HTMLInputElement, value: string) => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
-    input.setSelectionRange(value.length, value.length)
-    await act(async () => input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value.at(-1) })))
-  }
   it.each([25, 250, 1000])('profiles importer genre typing with %i visible source rows', async (size) => {
     const fixtures = importerFixtures()
     const base = fixtures.pages.get(1)!
@@ -797,7 +844,7 @@ describe.skipIf(!process.env.RETUNE_TYPEAHEAD_AUDIT)('type-ahead audit', () => {
     const samples: number[] = []
     for (let index = 1; index <= 6; index++) {
       durations.length = 0
-      await type(input, 'z'.repeat(index))
+      await typeInput(input, 'z'.repeat(index))
       if (index > 1) samples.push(durations.reduce((sum, duration) => sum + duration, 0))
     }
     expect(invokeMock.mock.calls.length).toBe(before)
@@ -818,19 +865,28 @@ describe.skipIf(!process.env.RETUNE_TYPEAHEAD_AUDIT)('type-ahead audit', () => {
     for (let index = 1; index <= 6; index++) {
       durations.length = 0
       const start = performance.now()
-      await type(input, 'z'.repeat(index))
+      await typeInput(input, 'z'.repeat(index))
       if (index > 1) { elapsed.push(performance.now() - start); renders.push(durations.reduce((a, b) => a + b, 0)) }
     }
     elapsed.sort((a, b) => a - b); renders.sort((a, b) => a - b)
     expect(invokeMock.mock.calls.filter(([command]) => command === 'metadata_values')).toHaveLength(1)
     console.log(`TYPEAHEAD GetInfo artists=20000 event-to-DOM-ms median=${elapsed[2].toFixed(2)} range=${elapsed[0].toFixed(2)}..${elapsed[4].toFixed(2)} render-median=${renders[2].toFixed(2)}`)
   })
-  it('issues one browse per search keystroke even in Spotify scope and hides old rows', async () => {
-    const browse: BrowseView = { facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks: [track(1, 'Track')], albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false, counts: { tracks: 1, totalSecs: 180, perSource: { music: 1, podcasts: 0, audiobooks: 0 } } }
-    let pending = deferred<BrowseView>()
-    let held = false
+
+})
+
+describe('type-ahead behavior', () => {
+  it('coalesces local queries behind one active browse, retains compatible rows, and skips Spotify typing', async () => {
+    const initial: BrowseView = { facets: { cats: ['Classic Metal', 'Classic Rock'], arts: ['Artist'], albs: ['Album'] }, tracks: [track(1, 'Alpha One'), track(2, 'Alpha Two')], albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false, counts: { tracks: 2, totalSecs: 360, perSource: { music: 2, podcasts: 0, audiobooks: 0 } } }
+    const held: ReturnType<typeof deferred<BrowseView>>[] = []
+    let holdBrowse = false
     invokeMock.mockImplementation(async (command) => {
-      if (command === 'browse') return held ? pending.promise : browse
+      if (command === 'browse') {
+        if (!holdBrowse) return initial
+        const request = deferred<BrowseView>()
+        held.push(request)
+        return request.promise
+      }
       if (command === 'get_settings') return defaultSettings
       if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
       if (command === 'spotify_sync_status') return spotifyStatus()
@@ -840,38 +896,97 @@ describe.skipIf(!process.env.RETUNE_TYPEAHEAD_AUDIT)('type-ahead audit', () => {
       if (command === 'subscribe_main_events') return 1
       return null
     })
-    const view = await render(<App />)
-    await waitFor(() => expect(view.querySelector('[data-track-id="1"]')).not.toBeNull())
-    const row = view.querySelector<HTMLElement>('[data-track-id="1"]')!
-    await act(async () => { row.focus(); key(row, 't') })
-    expect(row.classList.contains('selected')).toBe(false)
-    const facet = view.querySelector<HTMLElement>('[data-facet="art"]')!
-    await act(async () => facet.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })))
-    held = true
-    await act(async () => key(document.body, 'a'))
-    expect(view.querySelector('[data-facet="art"] [data-row-index="1"]')).not.toBeNull()
-    expect(view.querySelector('[data-track-id="1"]')).toBeNull()
-    const duringFacet = invokeMock.mock.calls.length
-    await act(async () => key(document.body, 'r'))
-    expect(invokeMock.mock.calls.length).toBe(duringFacet)
-    await act(async () => pending.resolve(browse))
-    pending = deferred<BrowseView>()
-    console.log('TYPEAHEAD focused track row ignores letters; old facets remain visible but next letter issues no refinement while browse is held.')
+    const view = await render(<StrictMode><App /></StrictMode>)
+    await waitFor(() => expect(view.querySelectorAll('[data-track-id]')).toHaveLength(2))
+
+    let row = view.querySelector<HTMLElement>('[data-track-id="1"]')!
+    row.focus()
+    for (const character of 'alpha tw') {
+      await act(async () => { key(document.activeElement!, character); await new Promise(requestAnimationFrame) })
+    }
+    expect(view.querySelector('[data-track-id="2"]')?.classList.contains('selected')).toBe(true)
+
+    holdBrowse = true
+    const facet = view.querySelector<HTMLButtonElement>('[data-facet="cat"] [data-row-index="0"]')!
+    facet.focus()
+    expect(key(facet, ' ').defaultPrevented).toBe(false)
+    for (const character of 'classic r') {
+      await act(async () => { key(document.activeElement!, character); await new Promise(requestAnimationFrame) })
+    }
+    expect(view.querySelector('[data-facet="cat"] [data-row-index="2"]')?.classList.contains('active')).toBe(true)
+    expect(held).toHaveLength(1)
+    await act(async () => held[0].resolve(initial))
+    await waitFor(() => expect(held).toHaveLength(2))
+    await act(async () => held[1].resolve(initial))
+    await waitFor(() => expect(view.textContent).not.toContain('Filtering library…'))
+
     const input = view.querySelector<HTMLInputElement>('input.search')!
-    held = true
-    const before = invokeMock.mock.calls.length
-    for (const value of ['r', 'ro', 'roc']) await type(input, value)
-    expect(view.querySelector('[data-track-id="1"]')).toBeNull()
-    expect(invokeMock.mock.calls.slice(before).filter(([command]) => command === 'browse')).toHaveLength(3)
-    await act(async () => pending.resolve(browse))
-    held = false
+    input.focus()
+    input.setSelectionRange(0, input.value.length)
+    expect(key(input, 'a', { metaKey: true }).defaultPrevented).toBe(false)
+    expect(view.querySelectorAll('.track-row.selected')).toHaveLength(0)
+    const browseCount = () => invokeMock.mock.calls.filter(([command]) => command === 'browse').length
+    const before = browseCount()
+    await typeInput(input, 'r')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 130)) })
+    expect(browseCount()).toBe(before + 1)
+    expect(view.querySelector('[data-track-id="1"]')).not.toBeNull()
+    expect(view.textContent).toContain('Filtering library…')
+
+    await typeInput(input, 'ro')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 130)) })
+    await typeInput(input, 'roc')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 130)) })
+    expect(browseCount()).toBe(before + 1)
+
+    const stale = { ...initial, tracks: [track(9, 'Stale')] }
+    await act(async () => held[2].resolve(stale))
+    await waitFor(() => expect(browseCount()).toBe(before + 2))
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'browse').at(-1)?.[1]?.query).toBe('roc')
+    expect(view.querySelector('[data-track-id="9"]')).toBeNull()
+    const latest = { ...initial, tracks: [track(3, 'Rock')] }
+    await act(async () => held[3].resolve(latest))
+    await waitFor(() => expect(view.querySelector('[data-track-id="3"]')).not.toBeNull())
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_010)) })
+    const rockRow = view.querySelector<HTMLElement>('[data-track-id="3"]')!
+    rockRow.focus()
+    await act(async () => { key(rockRow, 'r'); await new Promise(requestAnimationFrame) })
+    expect(rockRow.classList.contains('selected')).toBe(true)
+
+    holdBrowse = false
     await act(async () => [...view.querySelectorAll<HTMLButtonElement>('.scope-pills button')].find((button) => button.textContent === 'Spotify')!.click())
-    const spotifyBefore = invokeMock.mock.calls.length
-    for (const value of ['p', 'po', 'pop']) await type(input, value)
-    const calls = invokeMock.mock.calls.slice(spotifyBefore).filter(([command]) => command === 'browse')
-    expect(calls).toHaveLength(3)
-    expect(calls.every(([, args]) => args?.query === undefined)).toBe(true)
-    console.log('TYPEAHEAD 3 library characters => 3 browse calls, prior rows hidden; 3 Spotify characters => 3 unfiltered library browse calls.')
+    await waitFor(() => expect(view.textContent).not.toContain('Filtering library…'))
+    const spotifyBefore = browseCount()
+    for (const value of ['p', 'po', 'pop']) await typeInput(input, value)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 140)) })
+    expect(browseCount()).toBe(spotifyBefore)
+
+    await typeInput(input, 'orphaned query')
+    const podcasts = [...view.querySelectorAll<HTMLButtonElement>('.source-row')].find((button) => button.textContent?.includes('Podcasts'))!
+    await act(async () => podcasts.click())
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)) })
+    expect(input.value).toBe('')
+    expect(invokeMock.mock.calls.filter(([command, args]) => command === 'browse' && args?.query === 'orphaned query')).toHaveLength(0)
+  })
+
+  it('ignores a late browse response after StrictMode unmount', async () => {
+    const pending = deferred<BrowseView>()
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'browse') return pending.promise
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return []
+      if (command === 'subscribe_main_events') return 1
+      return null
+    })
+    await render(<StrictMode><App /></StrictMode>)
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'browse')).toBe(true))
+    await act(async () => root?.unmount())
+    await act(async () => pending.resolve({ facets: { cats: [], arts: [], albs: [] }, tracks: [], albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false, counts: { tracks: 0, totalSecs: 0, perSource: { music: 0, podcasts: 0, audiobooks: 0 } } }))
+    expect(container?.textContent).toBe('')
   })
 })
 

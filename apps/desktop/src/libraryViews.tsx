@@ -1,22 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
-import { COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
+import { browseFacetValues, COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 
-export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle }: {
-  state: { source: Source; view: BrowseView | null; settings: Pick<Settings, 'browserPanes' | 'browserVisible'>; sel: Selection }
+export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle, onPrefix }: {
+  state: { source: Source; view: BrowseView | null; viewKey?: string; browseKey: string; settings: Pick<Settings, 'browserPanes' | 'browserVisible'>; sel: Selection }
   anchors: { current: Partial<Record<keyof Selection, string>> }
   onActivate: (facet: keyof Selection) => void
   onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
   onPlay: (facet: keyof Selection, values: string[], anchor?: string) => void
   onToggle: (facet: keyof Selection) => void
+  onPrefix: (event: React.KeyboardEvent, facet: keyof Selection) => boolean
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number }>()
   const [height, setHeight] = useState(200)
   const pane = useRef<HTMLDivElement>(null)
   const resize = useRef<{ pointerId: number; startY: number; startHeight: number; maxHeight: number; zoom: number } | undefined>(undefined)
   const sourceLabels = labels[state.source].facets
-  const values = [state.view?.facets.cats ?? [], state.view?.facets.arts ?? [], state.view?.facets.albs ?? []]
+  const values = (['cat', 'art', 'alb'] as const).map((facet) => browseFacetValues(state.view, state.viewKey, state.browseKey, facet))
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
   const visible = facets.filter((facet) => state.settings.browserPanes[facet])
   if (!state.settings.browserVisible || !visible.length) return null
@@ -24,7 +25,7 @@ export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onTo
   const adjustHeight = (delta: number) => setHeight((current) => resizedPaneHeight(current, 0, delta, maxHeight(), 1))
   return <div ref={pane} className="browser-pane" style={{ height, flexBasis: height }}>
     <div className="browser-scroll"><div className="browser-columns" style={{ minWidth: `${visible.length * 200}px`, gridTemplateColumns: `repeat(${visible.length}, minmax(200px, 1fr))` }}>
-      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onPlay={(selected, anchor) => onPlay(facet, selected, anchor)} onContextMenu={(event) => {
+      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onPlay={(selected, anchor) => onPlay(facet, selected, anchor)} onPrefix={(event) => onPrefix(event, facet)} onContextMenu={(event) => {
         event.preventDefault()
         setMenu({ x: event.clientX, y: event.clientY })
       }} />)}
@@ -54,7 +55,7 @@ export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onTo
   </div>
 }
 
-function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect, onPlay, onContextMenu }: {
+function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSelect, onPlay, onPrefix, onContextMenu }: {
   facet: keyof Selection
   title: string
   values: string[]
@@ -63,6 +64,7 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   onActivate: () => void
   onSelect: (values: string[], anchor?: string) => void
   onPlay: (values: string[], anchor?: string) => void
+  onPrefix: (event: React.KeyboardEvent) => boolean
   onContextMenu: (event: React.MouseEvent) => void
 }) {
   const select = (value: string, event: React.MouseEvent) => {
@@ -79,11 +81,11 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   return <div className="facet-column" data-facet={facet} onMouseDown={onActivate} onContextMenu={onContextMenu}>
     <div className="column-header">{title}</div>
     <div className="facet-list">
-      <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)} onDoubleClick={() => onPlay([], undefined)}>All ({values.length} {title}s)</button>
+      <button data-row-index={0} className={!selected?.length ? 'active' : ''} onClick={() => onSelect([], undefined)} onDoubleClick={() => onPlay([], undefined)} onKeyDown={onPrefix}>All ({values.length} {title}s)</button>
       {values.map((value, index) => {
         const label = facetLabel(title, value)
         const meta = label !== value
-        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} onDoubleClick={() => onPlay([value], value)} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
+        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} onDoubleClick={() => onPlay([value], value)} onKeyDown={onPrefix} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
       })}
     </div>
   </div>
@@ -124,7 +126,7 @@ export function TrackCell({ track, column, facetTitle, playing, selected, onInfo
   return <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={onRate} />
 }
 
-export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort }: {
+export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort, onPrefix }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
   columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: Pick<React.MouseEvent | React.KeyboardEvent, 'shiftKey' | 'metaKey' | 'ctrlKey'>) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
@@ -132,6 +134,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   onPlaylist: (subject: PlaylistSubject) => void
   onGoToAlbum: (track: Track) => void; onGoToArtist: (track: Track) => void
   onActivate: () => void; onSetup: () => void; onClearSelection: () => void; onHiddenColumns: (columns: ColumnKey[]) => void; onSort: (column: ColumnKey, desc: boolean) => void
+  onPrefix?: (event: React.KeyboardEvent) => boolean
 }) {
   const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
@@ -222,6 +225,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
             onPlay(track.id)
             return
           }
+          if (onPrefix?.(event)) return
           if (event.key === ' ') {
             event.preventDefault()
             onSelect(track.id, event)

@@ -280,6 +280,19 @@ fn collect_metadata_values(library: &Library) -> MetadataValues {
     }
 }
 
+fn collect_genre_values(library: &Library) -> Vec<String> {
+    let mut cats = library
+        .tracks()
+        .iter()
+        .filter(|track| !track.cat.is_empty() && track.cat != UNCATEGORIZED)
+        .map(|track| track.cat.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    cats.sort_by_key(|value| value.to_lowercase());
+    cats
+}
+
 fn album_rating_view(
     library: &Library,
     selection: &Selection,
@@ -580,7 +593,12 @@ pub(super) async fn metadata_values(app: tauri::AppHandle) -> Result<MetadataVal
 
 #[tauri::command]
 pub(super) async fn genre_values(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    Ok(metadata_values(app).await?.cats)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        project_library(&state.library, collect_genre_values)
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -920,6 +938,7 @@ mod tests {
         assert_eq!(values.arts, ["Alpha", "zebra"]);
         assert_eq!(values.albs, ["beta", "Yellow"]);
         assert_eq!(values.cats, ["Jazz", "rock"]);
+        assert_eq!(collect_genre_values(&library), values.cats);
     }
 
     #[test]

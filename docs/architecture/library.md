@@ -292,11 +292,18 @@ or artist and album for a missing artist or album.
 Alternate views should consume the same library rather than introduce another
 canonical model.
 
-The UI keeps the last resolved projection visible while the same selection is
-refreshed. A source, facet, search, or scope change invalidates it until that
-new projection resolves, so playback cannot consume rows from the prior view.
-Double-clicking a facet row waits for that exact projection, then starts its
-first enabled visible track with the enabled projection as the new queue.
+The UI keeps the last resolved projection visible while the same source and
+facet selection is refreshed or its Library query changes. Source or facet
+changes hide incompatible track rows until the new projection resolves. A
+single-flight browse boundary admits one request at a time, replaces queued
+work with the latest query, and ignores late responses. Spotify-scope typing
+does not issue or invalidate a local browse; source, facet, and revision changes
+still refresh the local projection used when Spotify search is closed. Category
+prefix candidates depend on source, artist candidates on source and category,
+and album candidates on source, category, and artist, so a focused pane can
+finish a prefix while its own selection request is pending. Double-clicking a
+facet row waits for that exact projection, then starts its first enabled visible
+track with the enabled projection as the new queue.
 
 ## Track sorting
 

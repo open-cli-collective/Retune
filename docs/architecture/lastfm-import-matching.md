@@ -109,7 +109,14 @@ row-scoped matches or decisions. Review then has two shapes:
 Persisted batches preserve complete source clusters without a row-count cap.
 Queue projections report imported and remaining play totals separately so a
 cluster containing completed rows does not present its full history as new
-work. The visible batch is the unit of lazy Spotify work and review. Review exclude/undo actions
+work. Queue-filter keystrokes remain local to the queue control and coalesce
+before updating its projection, so they do not reconcile the visible review
+draft on every character. The genre field likewise owns its live draft and
+flushes it on blur or Enter and before any whole-options write or Apply; page
+refreshes still merge authoritative rows with the current batch draft.
+`genre_values` projects only distinct genres instead of constructing unused
+artist and album suggestions. The visible batch is the unit of lazy Spotify
+work and review. Review exclude/undo actions
 may address one or more source IDs, but every ID must belong to the requested
 batch and remain reviewable; empty, cross-batch, and completed-row requests are
 rejected before any decision changes. A bulk action persists the session and
