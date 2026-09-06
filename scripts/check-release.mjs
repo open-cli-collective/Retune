@@ -60,24 +60,18 @@ const requireImmutableExternalActions = (label, contents) => {
 const credentialStep = namedStep('Require Last.fm credentials')
 const releaseCandidateStep = namedStep('Require release candidate on main')
 const releaseConfigStep = namedStep('Write release configuration')
-const windowsReleaseConfigStep = namedStep('Write Windows release configuration')
 const macBuildStep = namedStep('Build macOS bundle')
 const linuxBuildStep = namedStep('Build Linux bundle')
 const windowsTargetStep = namedStep('Install Windows Rust target')
-const artifactSigningCliStep = namedStep('Install pinned Artifact Signing CLI')
-const windowsBuildStep = namedStep('Build and sign Windows bundle')
-const windowsPayloadVerifyStep = namedStep('Verify Windows signed payload')
+const windowsBuildStep = namedStep('Build Windows bundle')
 const windowsInstallVerifyStep = namedStep('Verify installed Windows payload')
 const macPackageStep = namedStep('Package macOS app')
 const windowsRenameStep = namedStep('Verify and rename Windows NSIS installer')
 const debRenameStep = namedStep('Rename Debian package')
-const appleCredentialStep = namedStep('Require Apple distribution credentials')
-const appleImportStep = namedStep('Import Developer ID certificate')
-const appleIdentityStep = namedStep('Verify imported Developer ID identity')
-const appleKeyStep = namedStep('Prepare Apple notarization key')
-const appleVerifyStep = namedStep('Verify macOS app signature')
-const appleCleanupStep = namedStep('Remove Apple notarization key')
-const windowsCredentialStep = namedStep('Require Windows Artifact Signing credentials')
+const stableSigningSetupStep = namedStep('Configure stable macOS signing')
+const stableSigningRequirementStep = namedStep('Require stable macOS signing')
+const stableSignStep = namedStep('Stable-sign macOS app')
+const macVerifyStep = namedStep('Verify macOS app signature')
 const autoDryRunStep = autoWorkflow.match(/- name: Report dry-run tag\n[\s\S]*?(?=\n      - name:)/)?.[0] ?? ''
 const autoTagStep = autoWorkflow.match(/- name: Tag\n[\s\S]*$/)?.[0] ?? ''
 
@@ -124,23 +118,18 @@ requireStepOrder('release authorization', [
   'Resolve version',
 ])
 requireStepOrder('macOS signing', [
-  'Require Apple distribution credentials',
-  'Import Developer ID certificate',
-  'Verify imported Developer ID identity',
-  'Prepare Apple notarization key',
   'Write release configuration',
   'Build macOS bundle',
+  'Configure stable macOS signing',
+  'Require stable macOS signing',
+  'Stable-sign macOS app',
   'Verify macOS app signature',
   'Package macOS app',
-  'Remove Apple notarization key',
   'Upload macOS artifact',
 ])
-requireStepOrder('Windows signing', [
-  'Require Windows Artifact Signing credentials',
-  'Install pinned Artifact Signing CLI',
-  'Write Windows release configuration',
-  'Build and sign Windows bundle',
-  'Verify Windows signed payload',
+requireStepOrder('Windows packaging', [
+  'Write release configuration',
+  'Build Windows bundle',
   'Verify and rename Windows NSIS installer',
   'Upload Windows artifact',
 ])
@@ -240,8 +229,6 @@ for (const value of [
   '/usr/bin/ditto -c -k --keepParent "$app" "$archive"',
   '/usr/bin/ditto -x -k "$archive" "$extracted"',
   'codesign --verify --deep --strict "$packaged_app"',
-  'xcrun stapler validate "$packaged_app"',
-  'spctl --assess --type execute --verbose=4 "$packaged_app"',
 ]) required(macPackageStep, value, `macOS distribution archive proof ${value}`)
 required(workflow, 'path: apps/desktop/Retune-${{ needs.prepare.outputs.version }}-aarch64.zip', 'macOS ZIP artifact upload path')
 required(workflow, '"dist/assets/Retune-${VERSION}-aarch64.zip"', 'macOS ZIP GitHub release asset')
@@ -266,75 +253,30 @@ required(ci, 'title: ${{ github.event.pull_request.title }}')
 for (const action of ['homebrew-alias', 'winget-submit']) {
   required(workflow, `open-cli-collective/.github/actions/${action}@${sharedCommit}`)
 }
-required(appleImportStep, 'apple-actions/import-codesign-certs@fe74d46e82474f87e1ba79832ad28a4013d0e33a', 'pinned Apple certificate import')
-assert.doesNotMatch(workflow, /macos-codesign-setup/, 'retired self-signed macOS setup remains')
+required(stableSigningSetupStep, `open-cli-collective/.github/actions/macos-codesign-setup@${sharedCommit}`, 'pinned stable macOS signing setup')
 for (const secret of [
   'MACOS_CERT_P12',
   'MACOS_CERT_PASSWORD',
   'MACOS_CERT_CN',
   'MACOS_CERT_LEAF_SHA',
-  'MACOS_TEAM_ID',
-  'APPLE_API_ISSUER',
-  'APPLE_API_KEY',
-  'APPLE_API_KEY_P8_BASE64',
-  'AZURE_TENANT_ID',
-  'AZURE_CLIENT_ID',
-  'AZURE_CLIENT_SECRET',
-  'AZURE_ARTIFACT_SIGNING_ENDPOINT',
-  'AZURE_ARTIFACT_SIGNING_ACCOUNT',
-  'AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE',
-  'WINDOWS_SIGNING_SUBJECT',
   'TAP_GITHUB_TOKEN',
   'WINGET_GITHUB_TOKEN',
   'LINUX_PACKAGES_DISPATCH_TOKEN',
 ]) required(workflow, secret)
-required(appleCredentialStep, 'MACOS_CERT_CN must name a Developer ID Application identity')
-required(appleIdentityStep, 'security find-identity -v -p codesigning')
-required(appleIdentityStep, 'imported Developer ID identity does not match MACOS_CERT_CN and MACOS_CERT_LEAF_SHA')
-required(appleKeyStep, 'APPLE_API_KEY_PATH=$key_path')
-assert.ok(
-  appleKeyStep.indexOf('echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"') < appleKeyStep.indexOf('writeFileSync'),
-  'Apple key path must be exported before the credential file is written so failure cleanup can locate it',
-)
-required(appleCleanupStep, "if: always() && matrix.os == 'macos-15'")
-required(appleCleanupStep, 'rm -f "$APPLE_API_KEY_PATH"')
-required(appleVerifyStep, 'codesign --verify --deep --strict "$app"')
-required(appleVerifyStep, 'for target in "$executable" "$app"; do')
-required(appleVerifyStep, 'codesign --verify --strict "$target"')
-required(appleVerifyStep, 'Authority=Developer ID Application:')
-required(appleVerifyStep, 'MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}')
-required(appleVerifyStep, 'TeamIdentifier=$MACOS_TEAM_ID')
-required(appleVerifyStep, "grep -E '^Timestamp=.+$' | grep -v '^Timestamp=none$'")
-required(appleVerifyStep, "grep -E 'flags=.*runtime'")
-required(appleVerifyStep, 'xcrun stapler validate "$app"')
-required(appleVerifyStep, 'spctl --assess --type execute --verbose=4 "$app"')
-required(macBuildStep, 'APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_CERT_CN }}')
-required(macBuildStep, 'APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}')
-required(macBuildStep, 'APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}')
-required(windowsCredentialStep, 'WINDOWS_SIGNING_SUBJECT')
-required(windowsCredentialStep, "Scheme -ne 'https'", 'Artifact Signing endpoint HTTPS validation')
-required(windowsCredentialStep, ".Host.EndsWith('.codesigning.azure.net')", 'Artifact Signing endpoint host validation')
-assert.doesNotMatch(workflow, /azure\/artifact-signing-action@/, 'out-of-lifecycle Artifact Signing action remains')
-required(artifactSigningCliStep, 'cargo install artifact-signing-cli --version 0.11.0 --locked', 'pinned Artifact Signing CLI install')
+required(stableSigningRequirementStep, 'expected_leaf=42e1afd02aae8666c09c15f171e1639550f301c2', 'pinned stable macOS certificate fingerprint')
+required(stableSignStep, 'certificate leaf = H"42e1afd02aae8666c09c15f171e1639550f301c2"', 'stable macOS designated requirement')
+required(macVerifyStep, 'codesign --verify --deep --strict "$app"')
+required(macVerifyStep, 'codesign --verify --strict "$target"')
+required(macVerifyStep, 'macOS designated requirement contains cdhash')
+required(macVerifyStep, 'macOS app has hardened-runtime flags')
+required(macVerifyStep, 'macOS app has a timestamp')
+assert.doesNotMatch(workflow, /Developer ID|xcrun stapler|spctl|APPLE_API_|MACOS_TEAM_ID|AZURE_|WINDOWS_SIGNING_SUBJECT|artifact-signing-cli|Authenticode|Get-AuthenticodeSignature|signtool/i, 'unprovisioned production signing contract remains')
 required(windowsTargetStep, 'rustup target add ${{ matrix.target }}', 'explicit Windows Rust target installation')
-required(windowsReleaseConfigStep, "cmd: 'artifact-signing-cli'", 'Tauri object-form Artifact Signing command')
-required(windowsReleaseConfigStep, "'-d', 'Retune', '--fd', 'SHA256', '--tr', 'http://timestamp.acs.microsoft.com', '--td', 'SHA256', '%1'", 'explicit Tauri signing digest, timestamp, and path contract')
-for (const option of ["'-e'", "'-a'", "'-c'"]) required(windowsReleaseConfigStep, option)
 required(windowsBuildStep, 'npx tauri build --target $env:WINDOWS_TARGET', 'target-specific Windows cross-build')
-required(windowsBuildStep, '--bundles nsis', 'Tauri must own Windows signing and bundling lifecycle')
-for (const credential of ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']) required(windowsBuildStep, credential)
-assert.doesNotMatch(windowsBuildStep, /AZURE_ARTIFACT_SIGNING_ENDPOINT|AZURE_ARTIFACT_SIGNING_ACCOUNT|AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE|WINDOWS_SIGNING_SUBJECT/, 'Windows build step must receive only Azure authentication credentials')
-required(windowsPayloadVerifyStep, 'Get-AuthenticodeSignature')
-required(windowsPayloadVerifyStep, "Status -ne 'Valid'")
-required(windowsPayloadVerifyStep, 'TimeStamperCertificate')
-required(windowsPayloadVerifyStep, 'signtool verify /pa /all /tw /v')
-required(windowsPayloadVerifyStep, 'target/$env:WINDOWS_TARGET/release/retune-desktop.exe', 'target-specific signed payload path')
+required(windowsBuildStep, '--bundles nsis', 'target-specific Windows bundling')
 required(workflow, 'target/${{ matrix.target }}/release/bundle/nsis/Retune-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-setup.exe', 'target-specific Windows upload path')
 for (const value of [
   'EXPECTED_PE_MACHINE: ${{ matrix.pe-machine }}',
-  'Get-AuthenticodeSignature',
-  'TimeStamperCertificate',
-  'signtool verify /pa /all /tw /v',
   "Start-Process -FilePath $installer -ArgumentList @('/S', \"/D=$installRoot\") -Wait -PassThru",
   '[BitConverter]::ToUInt16($bytes, $peOffset + 4)',
   'if ($uninstallers.Count -ne 1) { throw "expected one uninstaller, found $($uninstallers.Count)" }',
@@ -353,7 +295,6 @@ required(workflow, '[[ ! "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', 'strict rele
 required(workflow, 'tag_line="${version%.*}"', 'tag-derived release line')
 required(releaseConfigStep, 'VERSION: ${{ needs.prepare.outputs.version }}', 'tag version environment')
 required(releaseConfigStep, "require('node:fs').writeFileSync('src-tauri/tauri.release.conf.json'", 'Tauri version override config')
-required(windowsReleaseConfigStep, 'VERSION: ${{ needs.prepare.outputs.version }}', 'Windows tag version environment')
 required(macBuildStep, 'npx tauri build --config src-tauri/tauri.release.conf.json', 'macOS Tauri version override')
 required(linuxBuildStep, 'npx tauri build --config src-tauri/tauri.release.conf.json', 'Linux Tauri version override')
 required(windowsBuildStep, '--config src-tauri/tauri.release.conf.json', 'Windows Tauri version override')
@@ -363,10 +304,6 @@ required(macPackageStep, '[ "$actual" = "$VERSION" ]', 'macOS package version ma
 required(windowsRenameStep, 'BaseName -notmatch', 'Windows package version assertion')
 required(windowsRenameStep, 'VersionInfo.ProductVersion', 'Windows installer ProductVersion metadata assertion')
 required(windowsRenameStep, '$productVersion -ne $env:VERSION', 'Windows installer ProductVersion match')
-required(windowsRenameStep, 'Get-AuthenticodeSignature', 'Windows installer Authenticode verification')
-required(windowsRenameStep, "Status -ne 'Valid'", 'Windows installer trusted status')
-required(windowsRenameStep, 'TimeStamperCertificate', 'Windows installer timestamp verification')
-required(windowsRenameStep, 'signtool verify /pa /all /tw /v', 'Windows installer SignTool verification')
 required(debRenameStep, 'dpkg-deb -f', 'Debian package version assertion')
 required(debRenameStep, '[ "$package_version" = "$VERSION" ]', 'Debian package version match')
 required(ci, 'push:\n    branches: ["main"]', 'CI push main-only guard')
@@ -389,41 +326,34 @@ required(cask, 'version "__VERSION__"')
 required(cask, 'sha256 "__SHA256__"')
 required(cask, 'https://github.com/open-cli-collective/Retune/releases/download')
 required(cask, 'homepage "https://github.com/open-cli-collective/Retune"')
-assert.doesNotMatch(cask, /xattr|postflight/, 'notarized cask must not bypass quarantine')
-required(cask, 'Developer ID-signed')
-required(cask, 'Apple-notarized')
+assert.doesNotMatch(cask, /xattr|postflight/, 'self-signed cask must preserve quarantine for user approval')
+required(cask, 'self-signed certificate')
+required(cask, 'not Apple-notarized')
 
 for (const value of [
-  'Developer ID Application',
-  'hardened runtime',
-  'secure timestamp',
-  'Apple notarization',
-  'Microsoft Artifact Signing',
-  'RFC 3161',
-  'WINDOWS_SIGNING_SUBJECT',
+  'self-signed certificate',
+  'not timestamped, hardened, or Apple-notarized',
+  'Windows application payloads and installers are unsigned',
   'protected GitHub Actions environment named `release`',
   'only from `main` and `v*` tags',
   'require maintainer review',
 ]) required(normalized(development), value, `development release trust contract ${value}`)
 for (const value of [
-  'Developer ID-signed and notarized',
-  'hardened runtime',
-  'Apple notarization',
-  'Authenticode-signed',
-  'RFC 3161',
-  'spctl --assess',
-  'Get-AuthenticodeSignature',
+  'self-signed certificate',
+  'not Apple-notarized',
+  'application payloads are unsigned',
+  'Open Anyway',
+  'Unknown Publisher',
 ]) required(normalized(installation), value, `installation trust contract ${value}`)
 for (const value of [
-  'Developer ID Application',
-  'hardened runtime',
-  'Microsoft Artifact Signing',
-  'RFC 3161',
+  'self-signed identity',
+  'not timestamped, hardened, or Apple-notarized',
+  'outer installer are unsigned',
   'protected GitHub Actions environment named `release`',
 ]) required(normalized(tauriArchitecture), value, `Tauri distribution contract ${value}`)
 assert.doesNotMatch(development, /feature branch for packaging validation/i, 'retired feature-branch signing guidance remains')
-for (const text of [workflow, development, installation, tauriArchitecture, cask]) {
-  assert.doesNotMatch(text, /ad-hoc signing|self-signed|not Apple-notarized|intentionally unsigned/i, 'retired distribution-trust deviation remains')
+for (const [label, text] of [['development', development], ['installation', installation], ['Tauri architecture', tauriArchitecture], ['Homebrew cask', cask]]) {
+  assert.doesNotMatch(text, /Developer ID|notarized and|Authenticode|Artifact Signing|RFC 3161|stapled ticket|Gatekeeper therefore/i, `${label}: unprovisioned trust claim remains`)
 }
 
 const winget = [

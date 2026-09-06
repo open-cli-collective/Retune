@@ -146,41 +146,27 @@ enforces platform target and packaging parity.
 Local release-mode bundles are development artifacts. Only the release
 workflow produces distributable artifacts.
 
-On macOS, CI imports a `Developer ID Application` certificate and gives Tauri
-the signing identity plus App Store Connect API credentials. Tauri signs with
-the hardened runtime and secure timestamp, submits the app for Apple
-notarization, waits for acceptance, and staples the ticket. Before packaging,
-CI verifies the executable and app signatures, expected team identifier,
-Developer ID authority, runtime flag, timestamp, stapled ticket, and Gatekeeper
-assessment. The base Tauri configuration must not force an ad-hoc identity.
-CI creates the distributable ZIP with Apple's `ditto -c -k --keepParent`
-contract, extracts it with `ditto`, and repeats code-signature, stapled-ticket,
-and Gatekeeper verification against the extracted app.
+On macOS, CI builds before importing the release certificate, then signs the
+executable and app with the pinned Open CLI Collective self-signed identity.
+The designated requirement binds the application identifier to the exact
+certificate fingerprint and rejects a `cdhash` binding. The artifact is not
+timestamped, hardened, or Apple-notarized. CI creates the ZIP with Apple's
+`ditto -c -k --keepParent` contract, extracts it with `ditto`, and repeats
+code-signature verification against the extracted app.
 
 On Windows, supported x64 CI runners cross-build the explicit x64 and ARM64
-MSVC targets. Tauri owns the complete Microsoft Artifact Signing lifecycle and
-invokes a pinned Artifact Signing CLI through object-form
-`bundle.windows.signCommand`. Tauri patches its bundle marker before signing
-the shipped `retune-desktop.exe`, then
-signs the NSIS uninstaller and outer installer through the same command. This
-ordering prevents bundling from invalidating an already-signed payload. The
-command explicitly requests SHA-256 file and timestamp digests plus Microsoft's
-RFC 3161 timestamp service rather than depending on client defaults.
-Verification requires `Get-AuthenticodeSignature` status `Valid`,
-the configured signer subject, a timestamp certificate, and a successful
-SignTool policy check.
+MSVC targets. The application payload, NSIS uninstaller, and outer installer
+are unsigned. Native x64 and ARM64 runners still verify silent installation,
+the installed payload's PE machine type, and silent uninstallation.
 
-Signing actions are pinned to immutable commits. Certificate material, API
-credentials, and publication tokens exist only as secrets in the protected
+Signing actions are pinned to immutable commits. Certificate material and
+publication tokens exist only as secrets in the protected
 GitHub Actions environment named `release`. Its deployment policy allows only
 `main` and `v*` refs and requires maintainer review. Every job that consumes
-those credentials declares that environment. The Apple API key is decoded to
-an owner-only runner-temporary file and removed even when the job fails.
-Release and manual release dry-run jobs fail before packaging when required
-trust credentials are absent. The release-writing aggregate job uses the same
+those credentials declares that environment. Release and manual release dry-run
+jobs fail when the pinned macOS certificate is absent or mismatched. The release-writing aggregate job uses the same
 protected environment and waits for native Windows install verification before
-publication. Linux package dispatch may remain optional; signing and
-notarization may not.
+publication. Linux package dispatch may remain optional.
 
 The credential names and maintainer setup are documented in
 `docs/DEVELOPMENT.md`. User-visible verification and install behavior are
@@ -213,16 +199,13 @@ credentials.
 Before release, run the Release workflow by `workflow_dispatch` on the exact
 candidate commit after it is reachable from `main`. The prepare job rejects an
 off-main ref before any build job can access signing credentials. Its five
-build jobs must produce the declared asset set. The macOS job must complete
-live Apple notarization and pass `codesign`, `stapler`, and Gatekeeper
-verification. Both Windows target builds must pass live Artifact Signing,
-verify the post-patch payload and installer, and then pass a downstream silent
-install check on native x64 and ARM64 Windows runners. That check verifies the
-outer installer, installed payload, signer, timestamp, SignTool policy, and PE
-machine type. It deliberately does not launch the GUI: headless hosted runners
+build jobs must produce the declared asset set. The macOS job must import the
+pinned stable certificate, sign the app, and pass `codesign` verification before
+and after ZIP packaging. Both Windows target builds must pass a downstream
+silent install check on native x64 and ARM64 Windows runners. That check verifies
+installation, PE machine type, and uninstallation. It deliberately does not launch the GUI: headless hosted runners
 cannot provide reliable evidence for a tray/window application, OAuth, media
-controls, or audio devices. No release may claim live trust proof from a
-credential-free local run.
+controls, or audio devices.
 
 Native smoke validation remains manual: launch the packaged application on the
 oldest supported macOS, Windows x64, Windows ARM64, Ubuntu amd64, and Ubuntu
