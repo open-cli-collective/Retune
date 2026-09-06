@@ -66,7 +66,11 @@ pub(crate) fn commit_prepared(library: &mut Library, prepared: PreparedImport) -
         failure_count: prepared.failure_count,
         ..ImportSummary::default()
     };
-    summary.imported = library.add_all(prepared.tracks);
+    // Dropping/importing a file is an explicit add, so restore its saved overlay.
+    for track in &prepared.tracks {
+        summary.imported += usize::from(library.restore_track(&track.uri).is_some());
+    }
+    summary.imported += library.add_all(prepared.tracks);
     summary.duplicates += supplied - summary.imported;
     summary
 }

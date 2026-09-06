@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-retune-tracks"
+description = "Enables the remove_retune_tracks command without any pre-configured scope."
+commands.allow = ["remove_retune_tracks"]
+
+[[permission]]
+identifier = "deny-remove-retune-tracks"
+description = "Denies the remove_retune_tracks command without any pre-configured scope."
+commands.deny = ["remove_retune_tracks"]

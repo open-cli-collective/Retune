@@ -8,6 +8,7 @@ import { libraryGateway } from './libraryGateway.ts'
 import { spotifyGateway } from './spotifyGateway.ts'
 import { openExternalDestination } from './ipc.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
+import { SourcesList } from './trackDecisionDialogs.tsx'
 
 const streamingQualities = [
   ['Normal', 96],
@@ -43,6 +44,9 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
   const [draft, setDraft] = useState({ name: track.name, art: track.art, alb: track.alb, cat: track.cat === 'Uncategorized' ? '' : track.cat })
   const [suggestions, setSuggestions] = useState<MetadataValues>({ arts: [], albs: [], cats: [] })
   const [rating, setRating] = useState(track.rating)
+  const [enabled, setEnabled] = useState(track.enabled)
+  const [busy, setBusy] = useState(false)
+  const [decisionError, setDecisionError] = useState('')
   const reportError = useEffectEvent(onError)
   useEffect(() => {
     libraryGateway.metadataValues().then(setSuggestions).catch((error) => reportError(String(error)))
@@ -53,6 +57,8 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
     ? track.inheritedRating === null ? null : { stars: track.inheritedRating, explicit: false }
     : { stars, explicit: true })
   const save = async () => {
+    if (busy) return
+    setBusy(true)
     try {
       const ratingChange = { stars: rating?.explicit ? rating.stars : null }
       const edit = Object.fromEntries(Object.entries(draft).filter(([, value]) => value.trim() !== ''))
@@ -60,23 +66,45 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
       onSaved()
     } catch (error) {
       onError(String(error))
+    } finally {
+      setBusy(false)
     }
   }
+  const toggleEnabled = async (next: boolean) => {
+    setBusy(true); setDecisionError('')
+    try { await libraryGateway.setTrackEnabled(track.id, next); setEnabled(next) }
+    catch (error) { setDecisionError(String(error)) }
+    finally { setBusy(false) }
+  }
+  const undoMerge = async () => {
+    setBusy(true); setDecisionError('')
+    try { await libraryGateway.undoMerge(track.id); onSaved() }
+    catch (error) { setDecisionError(String(error)); setBusy(false) }
+  }
+  const dirty = draft.name !== track.name || draft.art !== track.art || draft.alb !== track.alb || draft.cat !== (track.cat === 'Uncategorized' ? '' : track.cat) || rating?.stars !== track.rating?.stars || rating?.explicit !== track.rating?.explicit
   const field = (key: keyof typeof draft) => ({
     value: draft[key],
+    disabled: busy,
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => setDraft({ ...draft, [key]: event.target.value }),
   })
-  return <ModalDialog className="get-info" labelledBy="get-info-title" onCancel={onCancel} onSubmit={save}>
+  return <ModalDialog className="get-info track-info-details" labelledBy="get-info-title" onCancel={busy ? undefined : onCancel} onSubmit={save}>
       <h2 id="get-info-title">Get Info</h2>
       {track.localPath ? <label>File<input className="file-path" value={track.localPath} title={track.localPath} readOnly /></label> : <label>Spotify ID<input value={track.uri} readOnly /></label>}
       <label>Name<input {...field('name')} /></label>
-      <label>Artist<AutocompleteInput suggestions={suggestions.arts} value={draft.art} onValue={(art) => setDraft({ ...draft, art })} /></label>
-      <label>Album<AutocompleteInput suggestions={suggestions.albs} value={draft.alb} onValue={(alb) => setDraft({ ...draft, alb })} /></label>
-      <label>Genre<AutocompleteInput suggestions={genres} value={draft.cat} onValue={(cat) => setDraft({ ...draft, cat })} placeholder={track.cat === 'Uncategorized' ? 'Uncategorized' : undefined} /></label>
+      <label>Artist<AutocompleteInput disabled={busy} suggestions={suggestions.arts} value={draft.art} onValue={(art) => setDraft({ ...draft, art })} /></label>
+      <label>Album<AutocompleteInput disabled={busy} suggestions={suggestions.albs} value={draft.alb} onValue={(alb) => setDraft({ ...draft, alb })} /></label>
+      <label>Genre<AutocompleteInput disabled={busy} suggestions={genres} value={draft.cat} onValue={(cat) => setDraft({ ...draft, cat })} placeholder={track.cat === 'Uncategorized' ? 'Uncategorized' : undefined} /></label>
       <div className="genre-hint">normalize freely, e.g. “Operatic Rock” → “Rock”</div>
-      <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={rate} /><button type="button" disabled={!rating?.explicit} onClick={() => setRating(clearedTrackRating(track.inheritedRating))}>Clear rating</button></div>
+      <div className="info-rating"><span>Track Rating</span><RatingStars rating={rating?.stars ?? null} explicit={rating?.explicit} onRate={busy ? undefined : rate} /><button type="button" disabled={busy || !rating?.explicit} onClick={() => setRating(clearedTrackRating(track.inheritedRating))}>Clear rating</button></div>
       {track.origCat && draft.cat !== track.origCat && <div className="override-banner">Spotify reports this as “{track.origCat}”. Your overlay wins in Retune.</div>}
-      <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">Save Overlay</button></div>
+      <section className="info-lineage"><h3>Library sources</h3><SourcesList sources={track.sources} />
+        <div className="info-history">Play history · {track.playCount.toLocaleString()} plays (including imported history)<br />First added: {track.addedAt === null ? 'Unknown' : new Date(track.addedAt * 1000).toLocaleDateString()}<br />Last played: {track.lastPlayedAt === null ? 'Unknown' : new Date(track.lastPlayedAt * 1000).toLocaleString()}</div>
+        <label className="info-enabled"><input type="checkbox" checked={enabled} disabled={busy} onChange={(event) => void toggleEnabled(event.target.checked)} />Include in sequential playback</label>
+        {track.mergedSources.length > 0 && <details><summary>Merged recordings ({track.mergedSources.length})</summary>{track.mergedSources.map((original) => <div className="decision-track" key={original.uri}><strong>{original.name}</strong><span>{original.art} · {original.alb} · {original.playCount.toLocaleString()} plays before merge</span><small>{original.uri}</small><SourcesList sources={original.sources} /></div>)}</details>}
+        {track.latestMergeAt !== null && <><p className="info-history">Last merged {new Date(track.latestMergeAt * 1000).toLocaleDateString()}. Undo restores originals and keeps later saved edits and plays.</p><button type="button" disabled={busy || dirty} onClick={() => void undoMerge()}>Undo last merge</button>{dirty && <p className="info-history">Save or revert your field edits before undoing the merge.</p>}</>}
+        {decisionError && <p className="decision-error" role="alert">{decisionError}</p>}
+      </section>
+      <div className="modal-actions"><button type="button" disabled={busy} onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={busy}>{busy ? 'Saving…' : 'Save Overlay'}</button></div>
   </ModalDialog>
 }
 

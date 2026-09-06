@@ -16,6 +16,7 @@ import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
 import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
+import { RemovedTracksDialog, RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
@@ -177,6 +178,7 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const [artworkOpen, setArtworkOpen] = useState(false)
+  const [trackDecision, setTrackDecision] = useState<{ kind: 'merge'; ids: number[] } | { kind: 'remove'; tracks: Pick<Track, 'id' | 'uri' | 'name'>[]; spotify: boolean } | { kind: 'removed' }>()
   const [playingMenu, setPlayingMenu] = useState<{ x: number; y: number; uri: string; name: string; trackId?: number }>()
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
@@ -664,6 +666,8 @@ function App() {
         onGoToAlbum={playingMenu.uri.startsWith('spotify:track:') ? () => navigateSpotify(playingMenu, 'album') : undefined}
         onGoToArtist={playingMenu.uri.startsWith('spotify:track:') ? () => navigateSpotify(playingMenu, 'artist') : undefined}
         onInfo={playingMenu.trackId === undefined ? undefined : () => openSingleInfo(playingMenu.trackId!)}
+        onRemoveRetune={playingMenu.trackId === undefined ? undefined : () => setTrackDecision({ kind: 'remove', tracks: [{ id: playingMenu.trackId!, uri: playingMenu.uri, name: playingMenu.name }], spotify: false })}
+        onRemoveSpotify={playingMenu.trackId === undefined || !playingMenu.uri.startsWith('spotify:track:') ? undefined : () => setTrackDecision({ kind: 'remove', tracks: [{ id: playingMenu.trackId!, uri: playingMenu.uri, name: playingMenu.name }], spotify: true })}
       />}
       <div className="body-grid">
         <Sidebar
@@ -748,6 +752,7 @@ function App() {
                 />
               )}
               {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
+              <div className="library-tools"><button type="button" onClick={() => setTrackDecision({ kind: 'removed' })}>Removed tracks…</button></div>
               <TrackList
                 tracks={displayedTracks}
                 label={labels[state.source]}
@@ -787,6 +792,9 @@ function App() {
                 onEnabled={(id, enabled) => mutate(() => libraryGateway.setTrackEnabled(id, enabled))}
                 onRate={(id, stars) => rate(`track:${id}`, () => libraryGateway.clickTrackStar(id, stars))}
                 onInfo={openInfo}
+                onMerge={(tracks) => setTrackDecision({ kind: 'merge', ids: tracks.map((track) => track.id) })}
+                onRemoveRetune={(tracks) => setTrackDecision({ kind: 'remove', tracks, spotify: false })}
+                onRemoveSpotify={(track) => setTrackDecision({ kind: 'remove', tracks: [track], spotify: true })}
                 onPlaylist={setPlaylistSubject}
                 onGoToAlbum={(track) => navigateSpotify(track, 'album')}
                 onGoToArtist={(track) => navigateSpotify(track, 'artist')}
@@ -807,6 +815,12 @@ function App() {
         dispatch({ type: 'refresh' })
       }} onError={(error) => dispatch({ type: 'error', error })} />}
       {state.info?.kind === 'multiple' && <MultipleItemInformation tracks={state.info.tracks} onCancel={closeInfo} onSaved={closeInfo} onError={(error) => dispatch({ type: 'error', error })} />}
+      {trackDecision?.kind === 'merge' && <TrackMergeDialog ids={trackDecision.ids} onClose={() => setTrackDecision(undefined)} onChanged={(id) => {
+        dispatch({ type: 'refresh' })
+        dispatch({ type: 'selection', ids: new Set(id === undefined ? [] : [id]) })
+      }} />}
+      {trackDecision?.kind === 'remove' && <RemoveTrackDialog tracks={trackDecision.tracks} spotify={trackDecision.spotify} onClose={() => setTrackDecision(undefined)} onChanged={() => { dispatch({ type: 'refresh' }); dispatch({ type: 'selection', ids: new Set() }) }} />}
+      {trackDecision?.kind === 'removed' && <RemovedTracksDialog onClose={() => setTrackDecision(undefined)} onChanged={() => dispatch({ type: 'refresh' })} />}
       {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} connectionHydrated={state.connectionHydrated} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
         .then(spotifyGateway.connect)
         .catch(fail)} onSync={(clientId) => saveSetupClientId(clientId)

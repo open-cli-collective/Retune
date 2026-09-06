@@ -294,10 +294,9 @@ pub(super) fn project_library_matches(
         )
         .collect::<HashSet<_>>();
     let local = library
-        .tracks()
-        .iter()
-        .filter(|track| wanted.contains(track.uri.as_str()))
-        .map(|track| (track.uri.as_str(), track))
+        .tracks_by_uri()
+        .into_iter()
+        .filter(|(uri, _)| wanted.contains(uri))
         .collect::<HashMap<_, _>>();
     let exact = spotify.is_exact()
         && page.state.spotify_account_id.as_deref() == Some(spotify.account_id.as_str());
@@ -1692,9 +1691,9 @@ pub(super) fn collection_membership_from(
     let mut track_uris = library
         .lock()
         .expect("library mutex poisoned")
-        .tracks()
-        .iter()
-        .map(|track| track.uri.clone())
+        .tracks_by_uri()
+        .keys()
+        .map(|uri| (*uri).to_owned())
         .collect::<BTreeSet<_>>();
     let spotify_library = spotify_membership.snapshot();
     let mut album_uris = BTreeSet::new();

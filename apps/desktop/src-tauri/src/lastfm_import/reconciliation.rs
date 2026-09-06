@@ -172,11 +172,12 @@ pub(crate) fn apply_metadata(
     genre: Option<&str>,
     rating: Option<u8>,
 ) -> Result<(), String> {
-    let ids = library
-        .tracks()
+    let by_uri = library.tracks_by_uri();
+    let ids = tracks
         .iter()
-        .filter(|track| tracks.iter().any(|uri| uri == &track.uri))
-        .map(|track| track.id)
+        .filter_map(|uri| by_uri.get(uri.as_str()).map(|track| track.id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     if let Some(genre) = genre.map(str::trim).filter(|genre| !genre.is_empty()) {
         for id in &ids {
@@ -224,6 +225,60 @@ mod tests {
             timestamp,
             submitted: None,
         }
+    }
+
+    #[test]
+    fn incremental_history_follows_merged_aliases_even_while_the_entry_is_hidden() {
+        use retune_core::model::{MergePlayCount, TrackMergeOptions, TrackMergeTarget};
+        let mut library = Library::new();
+        let first = library.add(NewTrack {
+            uri: "spotify:track:one".into(),
+            ..NewTrack::default()
+        });
+        let second = library.add(NewTrack {
+            uri: "spotify:track:two".into(),
+            ..NewTrack::default()
+        });
+        library.merge_history_absolute("spotify:track:one", Some(114), None, None);
+        library
+            .merge_tracks(
+                &[first, second],
+                TrackMergeTarget::Existing(first),
+                TrackMergeOptions {
+                    edit: TrackEdit::default(),
+                    rating: None,
+                    play_count: MergePlayCount::Highest,
+                    merged_at: 1,
+                },
+            )
+            .unwrap();
+        library.remove_tracks(&[first]).unwrap();
+        let mappings = LastFmMappings {
+            track_mappings: BTreeMap::from([(
+                source_id("Artist", "Album", "Song"),
+                "spotify:track:two".into(),
+            )]),
+            ..Default::default()
+        };
+        let available = library
+            .known_tracks()
+            .map(|track| track.uri.clone())
+            .collect();
+        let result = reconcile_incremental(
+            &[event("Artist", "Album", "Song", 10)],
+            &[],
+            &mappings,
+            &available,
+            0,
+            20,
+        );
+        assert!(result.unresolved.is_empty());
+        apply_incremental_updates(&mut library, &result.increments, &result.latest);
+        assert!(library.tracks().is_empty());
+        assert_eq!(library.removed_tracks()[0].play_count, 115);
+        library.restore_track("spotify:track:two").unwrap();
+        library.undo_track_merge(first).unwrap();
+        assert_eq!(library.get(first).unwrap().play_count, 115);
     }
 
     #[test]

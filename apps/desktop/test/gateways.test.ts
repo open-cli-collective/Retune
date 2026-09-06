@@ -280,6 +280,12 @@ test('library gateway preserves command names and argument shapes', async () => 
   await library.metadataValues()
   await library.genreValues()
   await library.getTrack(41)
+  await library.mergePreview([41, 42])
+  await library.mergeTracks([41, 42], 'spotify:track:one', { name: 'Song', art: 'Artist', alb: 'Album', cat: 'Rock', rating: 4, playCount: { mode: 'custom', value: 25 } }, 'revision')
+  await library.undoMerge(41)
+  await library.removeTracks([41, 42])
+  await library.removedTracks()
+  await library.restoreTrack('spotify:track:one')
   await library.editTrack(41, { name: 'Song', ratingChange: { stars: null } })
   await library.editTracks([41, 42], { art: 'Artist', cat: 'Rock', ratingChange: { stars: 5 } })
   await library.clickTrackStar(41, 4)
@@ -292,6 +298,12 @@ test('library gateway preserves command names and argument shapes', async () => 
     ['metadata_values', undefined],
     ['genre_values', undefined],
     ['get_track', { id: 41 }],
+    ['get_track_merge', { ids: [41, 42], targetUri: null }],
+    ['merge_library_tracks', { ids: [41, 42], targetUri: 'spotify:track:one', edit: { name: 'Song', art: 'Artist', alb: 'Album', cat: 'Rock', rating: 4, playCount: { mode: 'custom', value: 25 } }, expectedRevision: 'revision' }],
+    ['undo_track_merge', { id: 41 }],
+    ['remove_retune_tracks', { ids: [41, 42] }],
+    ['removed_retune_tracks', undefined],
+    ['restore_retune_track', { uri: 'spotify:track:one' }],
     ['edit_track', { id: 41, edit: { name: 'Song', ratingChange: { stars: null } } }],
     ['set_track_infos', { ids: [41, 42], edit: { art: 'Artist', cat: 'Rock', ratingChange: { stars: 5 } } }],
     ['click_track_star', { id: 41, stars: 4 }],

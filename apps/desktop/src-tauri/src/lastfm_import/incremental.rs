@@ -55,8 +55,7 @@ pub(super) async fn apply_completed_incremental_range(
     let available = library
         .lock()
         .expect("library mutex poisoned")
-        .tracks()
-        .iter()
+        .known_tracks()
         .map(|track| track.uri.clone())
         .collect::<BTreeSet<_>>();
     let spotify_account_id = sync_before.spotify_account_id.as_deref();

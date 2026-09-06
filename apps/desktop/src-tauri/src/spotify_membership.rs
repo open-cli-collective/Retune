@@ -26,16 +26,67 @@ pub(super) fn album_track_uris(album: &Album) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn preserve_track_before_removal(library: &mut Library, uri: &str) {
+    // Keep history durable before the remote write. If later local persistence
+    // fails, a complete sync must not prune this still-visible entry.
+    let existing = library.get_by_uri(uri).map(|track| NewTrack {
+        uri: track.uri.clone(),
+        source: track.source,
+        ..NewTrack::default()
+    });
+    if let Some(track) = existing {
+        library.add_retune_track(track);
+    }
+}
+
+/// Reconcile an explicit unsave after Spotify membership has been persisted.
+/// A retry is safe even when the previous call finished the remote write only.
+pub(crate) fn apply_track_removal(
+    library: &mut Library,
+    membership: &SpotifyLibraryState,
+    uri: &str,
+) -> Result<Option<u64>, String> {
+    let Some(track) = library.get_by_uri(uri) else {
+        return Ok(None);
+    };
+    let id = track.id;
+    let canonical = track.uri.clone();
+    let referenced = membership
+        .saved_tracks
+        .keys()
+        .chain(
+            membership
+                .saved_albums
+                .values()
+                .flat_map(|album| &album.track_uris),
+        )
+        .any(|uri| library.canonical_uri(uri) == canonical);
+    if referenced {
+        library
+            .set_track_enabled(id, false)
+            .map_err(|error| error.to_string())?;
+    } else {
+        library.remove_tracks(&[id])?;
+    }
+    Ok(Some(id.0))
+}
+
 pub(crate) fn spotify_track_match<'a>(
     library: &'a Library,
     incoming: &NewTrack,
 ) -> Option<&'a TrackRecord> {
+    if let Some(track) = library.get_by_uri(&incoming.uri) {
+        return Some(track);
+    }
     let incoming_identity = spotify_new_track_identity(incoming);
-    library.tracks().iter().find(|existing| {
-        existing.uri == incoming.uri
-            || spotify_track_identity(existing)
-                .is_some_and(|identity| Some(&identity) == incoming_identity.as_ref())
-    })
+    library
+        .known_tracks()
+        .find(|existing| {
+            existing.uri == incoming.uri
+                || spotify_track_identity(existing)
+                    .is_some_and(|identity| Some(&identity) == incoming_identity.as_ref())
+        })
+        .map(|track| library.get_by_uri(&track.uri).unwrap_or(track))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -523,7 +574,10 @@ pub(crate) async fn save_tracks_locked<T: Transport, S: TokenStore>(
     let initially_present = library_owner.read(|library| {
         requested_uris
             .iter()
-            .filter(|uri| library.tracks().iter().any(|track| &track.uri == *uri))
+            .filter(|uri| {
+                library.get_by_uri(uri).is_some()
+                    || library.known_tracks().any(|track| &track.uri == *uri)
+            })
             .cloned()
             .collect::<HashSet<_>>()
     })?;
@@ -587,9 +641,8 @@ pub(crate) async fn save_tracks_locked<T: Transport, S: TokenStore>(
                 requested_uris
                     .iter()
                     .map(|uri| {
-                        if let Some(track) =
-                            library.tracks().iter().find(|track| &track.uri == uri)
-                        {
+                        library.restore_track(uri);
+                        if let Some(track) = library.get_by_uri(uri) {
                             return Ok(track.id.0);
                         }
                         let track = tracks.remove(uri).ok_or_else(|| {

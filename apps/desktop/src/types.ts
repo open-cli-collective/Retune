@@ -229,7 +229,42 @@ export type TrackInfo = {
   rating: RatingView | null
   inheritedRating: number | null
   genres: string[]
+  enabled: boolean
+  playCount: number
+  addedAt: number | null
+  lastPlayedAt: number | null
+  sources: LibrarySources
+  mergedSources: DecisionTrack[]
+  latestMergeAt: number | null
 }
+
+export type LibrarySources = {
+  savedTrack: boolean | null
+  savedAlbums: string[]
+  wholeAlbum: boolean
+  membershipKnown: boolean
+  retained: boolean
+  localFile: boolean
+}
+
+export type DecisionTrack = {
+  id: number | null
+  uri: string
+  name: string
+  art: string
+  alb: string
+  cat: string
+  rating: number | null
+  playCount: number
+  addedAt: number | null
+  lastPlayedAt: number | null
+  durationSecs: number
+  enabled: boolean
+  sources: LibrarySources
+}
+export type MergePlayCount = { mode: 'highest' | 'sum' } | { mode: 'custom'; value: number }
+export type TrackMergePreview = { tracks: DecisionTrack[]; target: DecisionTrack | null; revision: string }
+export type TrackMergeEdit = Pick<DecisionTrack, 'name' | 'art' | 'alb' | 'cat' | 'rating'> & { playCount: MergePlayCount }
 
 export type MetadataValues = { arts: string[]; albs: string[]; cats: string[] }
 

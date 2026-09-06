@@ -3,7 +3,7 @@
 import { act, createRef, Profiler, StrictMode, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AlbumPageView, ArtistPageView, BrowseView, LastFmImportState, LastFmState, PlayerState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track } from '../src/types.ts'
+import type { AlbumPageView, ArtistPageView, BrowseView, DecisionTrack, LastFmImportState, LastFmState, LibrarySources, PlayerState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track, TrackInfo, TrackMergePreview } from '../src/types.ts'
 import type { MainEvent } from '../src/ipc.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
@@ -29,6 +29,7 @@ import { TrackList } from '../src/libraryViews.tsx'
 import { SpotifySearch } from '../src/spotifyViews.tsx'
 import { labels, routeGlobalShortcut } from '../src/ui.ts'
 import { ContextMenu } from '../src/viewShared.tsx'
+import { RemovedTracksDialog, RemoveTrackDialog, TrackMergeDialog } from '../src/trackDecisionDialogs.tsx'
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -40,6 +41,9 @@ const deferred = <T,>() => {
   const promise = new Promise<T>((done) => { resolve = done })
   return { promise, resolve }
 }
+
+const sources = (overrides: Partial<LibrarySources> = {}): LibrarySources => ({ savedTrack: false, savedAlbums: [], wholeAlbum: false, membershipKnown: true, retained: false, localFile: false, ...overrides })
+const info = (track: Track, overrides: Partial<TrackInfo> = {}): TrackInfo => ({ ...track, source: 'music', localPath: null, origCat: null, inheritedRating: null, genres: [], sources: sources(), mergedSources: [], latestMergeAt: null, ...overrides })
 
 beforeEach(() => {
   nativeEventHandlers.clear()
@@ -377,7 +381,8 @@ describe('mounted native interaction boundaries', () => {
         channel.onmessage({ type: 'playerState', payload: playerState(Number(args?.startIndex)) })
         return 'started'
       }
-      if (command === 'get_track') return { ...tracks[Number(args?.id) - 1], source: 'music', localPath: null, origCat: null, inheritedRating: null, genres: [] }
+      if (command === 'get_track') return info(tracks[Number(args?.id) - 1])
+      if (command === 'get_track_merge') { const ids = args?.ids as number[]; const selected = mergeFixture().tracks.filter((track) => ids.includes(track.id!)); return { tracks: selected, target: selected[0], revision: 'selected' } }
       if (command === 'resolve_spotify_track_destination') return new Promise(() => {})
       return null
     })
@@ -400,12 +405,18 @@ describe('mounted native interaction boundaries', () => {
     expect(view.querySelectorAll('.track-row.selected')).toHaveLength(2)
     await contextMenu('[data-track-id="2"]')
     const listActions = menuItems().map((item) => item.textContent)
+    await act(async () => menuItems()[4].click())
+    expect(invokeMock).toHaveBeenLastCalledWith('get_track_merge', { ids: [2, 3], targetUri: null })
+    expect(view.querySelector('#track-merge-title')?.textContent).toBe('Merge 2 tracks')
+    await act(async () => key(view.querySelector('[role="dialog"]')!, 'Escape'))
+    await contextMenu('[data-track-id="2"]')
     await act(async () => menuItems()[0].click())
     expect(invokeMock).toHaveBeenCalledWith('playlists_list', { uris: [tracks[1].uri, tracks[2].uri] })
     await act(async () => key(view.querySelector('[role="dialog"]')!, 'Escape'))
     await contextMenu('.lcd-artwork')
-    expect(menuItems().map((item) => item.textContent)).toEqual(listActions)
-    expect(listActions).toEqual(['Add to Playlist…', 'View album in Spotify', 'View artist albums in Spotify', 'Get Info'])
+    expect(menuItems().map((item) => item.textContent).slice(0, 4)).toEqual(listActions.slice(0, 4))
+    expect(listActions).toEqual(['Add to Playlist…', 'View album in Spotify', 'View artist albums in Spotify', 'Get Info', 'Merge tracks…', 'Remove from Retune…'])
+    expect(menuItems().map((item) => item.textContent).slice(4)).toEqual(['Remove from Retune…', 'Remove from Spotify…'])
     await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(1) }))
     await act(async () => menuItems()[3].click())
     expect(invokeMock).toHaveBeenCalledWith('get_track', { id: 1 })
@@ -425,7 +436,7 @@ describe('mounted native interaction boundaries', () => {
     }
     await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(3) }))
     await contextMenu('.lcd')
-    expect(menuItems().map((item) => item.disabled)).toEqual([false, true, true, false])
+    expect(menuItems().map((item) => item.disabled)).toEqual([false, true, true, false, false])
     await act(async () => key(menuItems()[0], 'Escape'))
     await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { external: true, uri: 'spotify:track:external', name: 'External' }) }))
     await contextMenu('.lcd')
@@ -1395,7 +1406,7 @@ describe.skipIf(!process.env.RETUNE_TYPEAHEAD_AUDIT)('type-ahead audit', () => {
       ? { arts: Array.from({ length: 20000 }, (_, index) => `Artist ${index}`), albs: [], cats: [] } : null)
     const durations: number[] = []
     const view = await render(<Profiler id="info" onRender={(_, __, duration) => durations.push(duration)}><GetInfo
-      track={{ id: 1, uri: 'fixture:track:1', localPath: null, source: 'music', name: 'Track', art: '', alb: '', cat: '', origCat: null, rating: null, inheritedRating: null, genres: [] }}
+      track={info({ ...track(1, 'Track'), art: '', alb: '', cat: '' })}
       onCancel={() => {}} onSaved={() => {}} onError={() => {}}
     /></Profiler>)
     const input = [...view.querySelectorAll('label')].find((label) => label.textContent === 'Artist')!.querySelector('input')!
@@ -1526,6 +1537,164 @@ describe('type-ahead behavior', () => {
     await act(async () => root?.unmount())
     await act(async () => pending.resolve({ facets: { cats: [], arts: [], albs: [] }, tracks: [], albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false, counts: { tracks: 0, totalSecs: 0, perSource: { music: 0, podcasts: 0, audiobooks: 0 } } }))
     expect(container?.textContent).toBe('')
+  })
+})
+
+function mergeFixture(): TrackMergePreview {
+  const tracks: DecisionTrack[] = [114, 0, 18].map((playCount, index) => ({
+    ...track(index + 1, ['Chasing Fire', 'Chasing Fire (Single)', 'Chasing Fire (Remix)'][index]),
+    art: 'Lauv', alb: index === 0 ? 'I met you when I was 18' : 'Chasing Fire', cat: index === 1 ? 'Pop' : 'Rock',
+    rating: index === 1 ? 2 : 4, playCount, sources: sources({ savedTrack: true, savedAlbums: index === 0 ? ['I met you when I was 18'] : [], wholeAlbum: index === 0 }),
+    addedAt: 1_600_000_000 + index, lastPlayedAt: 1_700_000_000 + index,
+  }))
+  return { tracks, target: tracks[0], revision: 'current' }
+}
+
+async function clickText(view: Element, text: string) {
+  const button = [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === text)
+  expect(button, `button ${text}`).toBeDefined()
+  await act(async () => button!.click())
+}
+
+async function selectValue(select: HTMLSelectElement, value: string) {
+  await act(async () => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })) })
+}
+
+describe('library track decisions', () => {
+  it('requires explicit conflict choices, validates custom totals, and retries and undoes a three-track merge', async () => {
+    const fixture = mergeFixture()
+    let attempts = 0
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'get_track_merge') return fixture
+      if (command === 'merge_library_tracks') { if (++attempts === 1) throw new Error('Disk unavailable'); return 1 }
+      return null
+    })
+    const changed = vi.fn()
+    const closed = vi.fn()
+    const view = await render(<StrictMode><TrackMergeDialog ids={[1, 2, 3]} onClose={closed} onChanged={changed} /></StrictMode>)
+    await waitFor(() => expect(view.querySelectorAll('.merge-recording')).toHaveLength(3))
+    expect(view.querySelector<HTMLInputElement>('.merge-recording input')?.checked).toBe(true)
+    if (process.env.RETUNE_DECISIONS_PREVIEW) {
+      const { writeFileSync, readFileSync } = await import('node:fs')
+      writeFileSync(`${process.env.RETUNE_DECISIONS_PREVIEW}-recording.html`, '<!doctype html><html data-theme="light"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css', 'src/trackDecisions.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + view.innerHTML + '</body></html>')
+    }
+    await clickText(view, 'Continue')
+    const proceed = () => [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Continue')!
+    expect(proceed().disabled).toBe(true)
+    await typeInput(view.querySelector<HTMLInputElement>('input[list="merge-genres"]')!, 'Rock')
+    expect(proceed().disabled).toBe(true)
+    await selectValue(view.querySelector('select')!, '4')
+    expect(proceed().disabled).toBe(false)
+    expect(view.querySelector('.merge-total')?.textContent).toContain('114 plays')
+    await act(async () => view.querySelectorAll<HTMLInputElement>('input[name="play-count"]')[1].click())
+    expect(view.querySelector('.merge-total')?.textContent).toContain('132 plays')
+    await act(async () => view.querySelectorAll<HTMLInputElement>('input[name="play-count"]')[2].click())
+    const number = view.querySelector<HTMLInputElement>('input[type="number"]')!
+    for (const value of ['-1', '1.5', '4294967296', '25']) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(number, value)
+      await act(async () => number.dispatchEvent(new InputEvent('input', { bubbles: true })))
+      expect(proceed().disabled).toBe(value !== '25')
+    }
+    await clickText(view, 'Continue')
+    expect(view.querySelector('.merge-result')?.textContent).toContain('25 plays')
+    if (process.env.RETUNE_DECISIONS_PREVIEW) {
+      const { writeFileSync, readFileSync } = await import('node:fs')
+      writeFileSync(`${process.env.RETUNE_DECISIONS_PREVIEW}-review.html`, '<!doctype html><html data-theme="light"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css', 'src/trackDecisions.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + view.innerHTML + '</body></html>')
+    }
+    await clickText(view, 'Merge tracks')
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Disk unavailable')
+    expect(changed).not.toHaveBeenCalled()
+    await clickText(view, 'Merge tracks')
+    expect(invokeMock).toHaveBeenLastCalledWith('merge_library_tracks', { ids: [1, 2, 3], targetUri: fixture.target!.uri, edit: { name: fixture.target!.name, art: 'Lauv', alb: fixture.target!.alb, cat: 'Rock', rating: 4, playCount: { mode: 'custom', value: 25 } }, expectedRevision: 'current' })
+    expect(changed).toHaveBeenCalledWith(1)
+    await clickText(view, 'Undo merge')
+    expect(invokeMock).toHaveBeenLastCalledWith('undo_track_merge', { id: 1 })
+    expect(closed).toHaveBeenCalledOnce()
+    expect(invokeMock.mock.calls.some(([command]) => /^(add|remove)_spotify/.test(command))).toBe(false)
+  })
+
+  it('includes an existing different recording in the preview and ignores obsolete search responses', async () => {
+    const fixture = mergeFixture()
+    fixture.tracks.forEach((track) => { track.cat = 'Rock'; track.rating = 4 })
+    const external = { ...fixture.tracks[0], id: 99, uri: 'spotify:track:acoustic', name: 'Chasing Fire (Acoustic)', playCount: 9 }
+    const stale = deferred<unknown>()
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'get_track_merge') return args?.targetUri ? { ...fixture, target: external, revision: 'external' } : fixture
+      if (command === 'spotify_search') return args?.query === 'old' ? stale.promise : { tracks: { items: [{ ...external, artist: 'Lauv' }], total: 1, nextOffset: null } }
+      return null
+    })
+    const view = await render(<TrackMergeDialog ids={[1, 2, 3]} onClose={vi.fn()} onChanged={vi.fn()} />)
+    const query = view.querySelector<HTMLInputElement>('input[aria-label="Search recordings"]')!
+    await typeInput(query, 'old'); await clickText(view, 'Search')
+    await typeInput(query, 'new'); await clickText(view, 'Search')
+    await act(async () => stale.resolve({ tracks: { items: [], nextOffset: null } }))
+    expect(view.querySelector('.merge-search-results')?.textContent).toContain('Acoustic')
+    await act(async () => view.querySelector<HTMLButtonElement>('.merge-search-results button')!.click())
+    expect(invokeMock).toHaveBeenLastCalledWith('get_track_merge', { ids: [1, 2, 3], targetUri: external.uri })
+    await clickText(view, 'Continue')
+    await act(async () => view.querySelectorAll<HTMLInputElement>('input[name="play-count"]')[1].click())
+    expect(view.querySelector('.merge-total')?.textContent).toContain('141 plays')
+    await clickText(view, 'Continue')
+    expect(view.textContent).toContain('Its existing history is included above.')
+  })
+
+  it.each([
+    ['track', sources({ savedTrack: true }), true, 'move its Retune entry'],
+    ['both', sources({ savedTrack: true, savedAlbums: ['Album'] }), true, 'excluded from sequential playback'],
+    ['album', sources({ savedAlbums: ['Album'] }), false, 'not individually saved'],
+    ['unknown', sources({ savedTrack: null, membershipKnown: false }), false, 'Sync Spotify'],
+  ] as const)('handles %s membership before offering a Spotify removal', async (_, membership, enabled, explanation) => {
+    invokeMock.mockImplementation(async (command) => command === 'get_track' ? info(track(1, 'Song'), { sources: membership }) : null)
+    const changed = vi.fn()
+    const view = await render(<RemoveTrackDialog tracks={[track(1, 'Song')]} spotify onClose={vi.fn()} onChanged={changed} />)
+    expect(view.textContent).toContain(explanation)
+    const remove = [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Remove from Spotify')!
+    expect(remove.disabled).toBe(!enabled)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'remove_spotify_track')).toBe(false)
+    await act(async () => remove.click())
+    if (enabled) { expect(invokeMock).toHaveBeenLastCalledWith('remove_spotify_track', { uri: 'spotify:track:1' }); expect(changed).toHaveBeenCalledOnce() }
+    else { expect(changed).not.toHaveBeenCalled(); await clickText(view, 'Exclude from playback'); expect(invokeMock).toHaveBeenLastCalledWith('set_track_enabled', { id: 1, enabled: false }) }
+  })
+
+  it('removes locally with retry and restores through the dedicated list without Spotify writes', async () => {
+    let attempts = 0
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'remove_retune_tracks' && ++attempts === 1) throw new Error('Write failed')
+      if (command === 'removed_retune_tracks') return [mergeFixture().tracks[0]]
+      return null
+    })
+    const changed = vi.fn()
+    const view = await render(<RemoveTrackDialog tracks={[track(1, 'Song'), track(2, 'Other')]} spotify={false} onClose={vi.fn()} onChanged={changed} />)
+    await clickText(view, 'Remove from Retune')
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Write failed')
+    await clickText(view, 'Remove from Retune')
+    expect(invokeMock).toHaveBeenLastCalledWith('remove_retune_tracks', { ids: [1, 2] })
+    await act(async () => root!.render(<RemovedTracksDialog onClose={vi.fn()} onChanged={changed} />))
+    expect(view.textContent).toContain('114 plays')
+    await clickText(view, 'Add to Retune')
+    expect(invokeMock).toHaveBeenLastCalledWith('restore_retune_track', { uri: 'spotify:track:1' })
+    expect(view.textContent).toContain('No removed tracks')
+    expect(invokeMock.mock.calls.some(([command]) => command.includes('spotify'))).toBe(false)
+  })
+
+  it('shows sources and merge lineage in Get Info while protecting unsaved fields from undo', async () => {
+    invokeMock.mockImplementation(async (command) => command === 'metadata_values' ? { arts: [], albs: [], cats: [] } : null)
+    const value = info({ ...track(1, 'Chosen'), playCount: 114 }, { sources: sources({ savedAlbums: ['Album'] }), mergedSources: mergeFixture().tracks, latestMergeAt: 1_700_000_000 })
+    const view = await render(<GetInfo track={value} onCancel={vi.fn()} onSaved={vi.fn()} onError={vi.fn()} />)
+    expect(view.textContent).toContain('Saved Spotify album · Album')
+    expect(view.textContent).toContain('Play history · 114 plays')
+    expect(view.textContent).toContain('Merged recordings (3)')
+    const name = [...view.querySelectorAll('label')].find((label) => label.textContent === 'Name')!.querySelector('input')!
+    await typeInput(name, 'Edited')
+    const undo = [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Undo last merge')!
+    expect(undo.disabled).toBe(true)
+    await act(async () => view.querySelector<HTMLInputElement>('.info-enabled input')!.click())
+    expect(name.value).toBe('Edited')
+    expect(invokeMock).toHaveBeenLastCalledWith('set_track_enabled', { id: 1, enabled: false })
+    await typeInput(name, 'Chosen')
+    expect(undo.disabled).toBe(false)
+    await act(async () => undo.click())
+    expect(invokeMock).toHaveBeenLastCalledWith('undo_track_merge', { id: 1 })
   })
 })
 

@@ -163,12 +163,27 @@ An undecodable saved-track, saved-album, or album-track item makes the sync
 partial even when Spotify returns the rest of its page, because a decoded
 subset cannot prove exact absence. Explicit album actions likewise stop before
 writing when album content is incomplete.
-Complete reconciliation prunes only unreferenced Spotify music, so a track is
-retained while any individual membership or saved album references it. Missing
-or incomplete exact state keeps the legacy local-presence fallback for UI
-membership flags. Explicit upstream removals also retain local records when
-exact membership state is unknown or incomplete; a later complete sync is what
-authorizes destructive reconciliation.
+Complete reconciliation prunes only unreferenced Spotify music. Individually
+saved tracks, album references, and Retune's explicitly retained merge/restore
+targets keep their entries. Local removal decisions suppress re-materialization
+even while Spotify continues to supply the source recording. Persistent merge
+aliases participate in identity matching and are never saved upstream.
+Missing or incomplete exact state keeps the legacy local-presence fallback for
+search UI membership flags. Get Info instead distinguishes known positives from
+unknown membership and lists saved albums separately.
+
+Explicit individual-track removal requires exact membership. It unsaves only
+the requested track URI through the existing shared `DELETE /me/library`
+operation. The local record is durably retained before the remote write so a
+later sync cannot discard its history if local finalization fails. After
+membership is durable, the local record moves to Removed
+tracks if no saved source still references it; otherwise it stays visible and
+is disabled for sequential playback. Merged aliases count as references.
+An album-only track has no individual unsave action in the Library dialog;
+the user may disable playback there without removing an album. Retrying an
+already-unsaved track reconciles local state without another remote write.
+Album removal retains its existing unknown-membership behavior. See Spotify's
+[Remove Items from Library contract](https://developer.spotify.com/documentation/web-api/reference/remove-library-items).
 
 One async membership gate serializes complete sync snapshots with explicit
 album/track saves and removals, preventing a stale snapshot or concurrent

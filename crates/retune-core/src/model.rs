@@ -3,6 +3,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+#[path = "track_decisions.rs"]
+mod decisions;
+use decisions::TrackDecisions;
+pub use decisions::{MergePlayCount, TrackMergeOptions, TrackMergeTarget};
+
 /// Sentinel genre for tracks whose provider metadata carries no genre.
 pub const UNCATEGORIZED: &str = "Uncategorized";
 
@@ -122,6 +127,8 @@ pub struct Library {
     #[serde(serialize_with = "album_rating_serde::serialize")]
     album_ratings: BTreeMap<AlbumKey, Rating>,
     next_id: u64,
+    #[serde(skip_serializing_if = "TrackDecisions::is_empty")]
+    decisions: TrackDecisions,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +136,8 @@ struct LibraryWire {
     tracks: Vec<TrackRecord>,
     album_ratings: Vec<(AlbumKey, Rating)>,
     next_id: u64,
+    #[serde(default)]
+    decisions: TrackDecisions,
 }
 
 impl<'de> Deserialize<'de> for Library {
@@ -140,10 +149,12 @@ impl<'de> Deserialize<'de> for Library {
             tracks,
             album_ratings,
             next_id: _stored_next_id,
+            mut decisions,
         } = LibraryWire::deserialize(deserializer)?;
+        decisions.rebuild_aliases().map_err(D::Error::custom)?;
         let mut ids = std::collections::HashSet::new();
         let mut uris = std::collections::HashSet::new();
-        for track in &tracks {
+        for track in tracks.iter().chain(&decisions.removed) {
             if !ids.insert(track.id) {
                 return Err(D::Error::custom(format!(
                     "duplicate track id {}",
@@ -160,7 +171,59 @@ impl<'de> Deserialize<'de> for Library {
                 )));
             }
         }
-        let next_id = match tracks.iter().map(|track| track.id.0).max() {
+        let mut identity_by_id = tracks
+            .iter()
+            .chain(&decisions.removed)
+            .map(|track| (track.id, track.uri.as_str()))
+            .collect::<HashMap<_, _>>();
+        let mut identity_by_uri = tracks
+            .iter()
+            .chain(&decisions.removed)
+            .map(|track| (track.uri.as_str(), track.id))
+            .collect::<HashMap<_, _>>();
+        for track in decisions
+            .merges
+            .iter()
+            .flat_map(|merge| merge.before.iter().chain(std::iter::once(&merge.after)))
+        {
+            if track.uri.is_empty()
+                || identity_by_id
+                    .insert(track.id, &track.uri)
+                    .is_some_and(|uri| uri != track.uri)
+                || identity_by_uri
+                    .insert(&track.uri, track.id)
+                    .is_some_and(|id| id != track.id)
+            {
+                return Err(D::Error::custom("Conflicting archived track identities."));
+            }
+        }
+        for (source, target) in &decisions.aliases {
+            if uris.contains(source.as_str()) || !uris.contains(target.as_str()) {
+                return Err(D::Error::custom(
+                    "A track merge must resolve to one live or removed target.",
+                ));
+            }
+        }
+        // Replay undo against identities only: every journal must consume its
+        // current target and restore originals that are not already present.
+        for merge in decisions.merges.iter().rev() {
+            if !ids.remove(&merge.after.id)
+                || merge
+                    .before
+                    .iter()
+                    .any(|track| track.source != merge.after.source || !ids.insert(track.id))
+            {
+                return Err(D::Error::custom("Conflicting track merge history."));
+            }
+        }
+        if decisions
+            .retained
+            .iter()
+            .any(|uri| !identity_by_uri.contains_key(uri.as_str()))
+        {
+            return Err(D::Error::custom("Unknown retained track identity."));
+        }
+        let next_id = match identity_by_id.keys().map(|id| id.0).max() {
             None => 0,
             Some(max) => max
                 .checked_add(1)
@@ -176,6 +239,7 @@ impl<'de> Deserialize<'de> for Library {
             tracks,
             album_ratings: ratings,
             next_id,
+            decisions,
         })
     }
 }
@@ -208,10 +272,14 @@ impl Library {
     }
 
     pub fn get(&self, id: TrackId) -> Option<&TrackRecord> {
-        self.tracks.iter().find(|track| track.id == id)
+        self.tracks.iter().find(|track| track.id == id).or_else(|| {
+            let original = self.known_tracks().find(|track| track.id == id)?;
+            self.get_by_uri(&original.uri)
+        })
     }
 
     fn track_mut(&mut self, id: TrackId) -> Result<&mut TrackRecord, UnknownTrack> {
+        let id = self.get(id).map(|track| track.id).unwrap_or(id);
         self.tracks
             .iter_mut()
             .find(|track| track.id == id)
@@ -226,6 +294,10 @@ impl Library {
             return track.id;
         }
 
+        if let Some(&id) = self.inactive_uri_ids().get(&incoming.uri) {
+            return id;
+        }
+
         self.push(incoming)
     }
 
@@ -236,6 +308,7 @@ impl Library {
             .iter()
             .map(|track| track.uri.clone())
             .collect::<HashSet<_>>();
+        uris.extend(self.inactive_uri_ids().into_keys());
         let before = self.tracks.len();
         for track in incoming {
             if uris.insert(track.uri.clone()) {
@@ -280,11 +353,15 @@ impl Library {
         {
             return Self::update(&mut self.tracks[index], incoming);
         }
+        if let Some(&id) = self.inactive_uri_ids().get(&incoming.uri) {
+            return id;
+        }
         self.push(incoming)
     }
 
     /// Upserts a batch in order using one transient URI index.
     pub fn upsert_all(&mut self, incoming: impl IntoIterator<Item = NewTrack>) {
+        let inactive = self.inactive_uri_ids();
         let mut indexes = self
             .tracks
             .iter()
@@ -292,6 +369,9 @@ impl Library {
             .map(|(index, track)| (track.uri.clone(), index))
             .collect::<HashMap<_, _>>();
         for track in incoming {
+            if inactive.contains_key(&track.uri) {
+                continue;
+            }
             if let Some(&index) = indexes.get(&track.uri) {
                 Self::update(&mut self.tracks[index], track);
             } else {
@@ -415,7 +495,13 @@ impl Library {
         earliest: Option<u64>,
         latest: Option<u64>,
     ) -> bool {
-        let Some(track) = self.tracks.iter_mut().find(|track| track.uri == uri) else {
+        let uri = self.canonical_uri(uri).to_owned();
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .chain(&mut self.decisions.removed)
+            .find(|track| track.uri == uri)
+        else {
             return false;
         };
         track.play_count = track
@@ -432,7 +518,13 @@ impl Library {
         earliest: Option<u64>,
         latest: Option<u64>,
     ) -> bool {
-        let Some(track) = self.tracks.iter_mut().find(|track| track.uri == uri) else {
+        let uri = self.canonical_uri(uri).to_owned();
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .chain(&mut self.decisions.removed)
+            .find(|track| track.uri == uri)
+        else {
             return false;
         };
         if let Some(play_count) = play_count {
@@ -549,25 +641,15 @@ impl Library {
     /// and keep their overlay edits; album ratings merge the same way
     /// (existing keys win).
     pub fn merge(&mut self, other: Library) {
-        let mut uris = self
-            .tracks
-            .iter()
-            .map(|track| track.uri.clone())
-            .collect::<HashSet<_>>();
-        for mut track in other.tracks {
-            if !uris.insert(track.uri.clone()) {
-                continue;
-            }
-            track.id = self.fresh_id();
-            self.tracks.push(track);
-        }
-        for (key, rating) in other.album_ratings {
-            self.album_ratings.entry(key).or_insert(rating);
-        }
+        self.merge_imported(other);
     }
 
     pub fn remove_uris(&mut self, uris: &[String]) -> usize {
-        let uris = uris.iter().map(String::as_str).collect::<HashSet<_>>();
+        let uris = uris
+            .iter()
+            .map(String::as_str)
+            .filter(|uri| !self.is_retained(uri))
+            .collect::<HashSet<_>>();
         let albums = self
             .tracks
             .iter()
@@ -580,6 +662,8 @@ impl Library {
         let retained_albums = self
             .tracks
             .iter()
+            .chain(&self.decisions.removed)
+            .chain(self.decisions.merges.iter().flat_map(|merge| &merge.before))
             .map(AlbumKey::of)
             .collect::<BTreeSet<_>>();
         self.album_ratings

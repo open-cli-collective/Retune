@@ -6,6 +6,7 @@ mod lastfm;
 mod lastfm_import;
 mod library_commands;
 mod library_state;
+mod library_track_commands;
 mod localfiles;
 mod main_events;
 mod media_keys;
@@ -669,9 +670,7 @@ fn authorized_local_artwork_path(library: &Library, uri: &str) -> Result<Option<
         return Ok(None);
     }
     let canonical_uri = library
-        .tracks()
-        .iter()
-        .find(|track| track.uri == uri)
+        .get_by_uri(uri)
         .map(|track| track.uri.as_str())
         .ok_or_else(|| "Local artwork resource is not in the library.".to_string())?;
     localfiles::path_from_file_uri(canonical_uri).map(Some)
@@ -1008,6 +1007,12 @@ pub fn run() {
             library_commands::set_track_enabled,
             library_commands::set_album_rating,
             library_commands::get_track,
+            library_track_commands::get_track_merge,
+            library_track_commands::merge_library_tracks,
+            library_track_commands::undo_track_merge,
+            library_track_commands::remove_retune_tracks,
+            library_track_commands::removed_retune_tracks,
+            library_track_commands::restore_retune_track,
             library_commands::edit_track,
             library_commands::set_track_infos,
             main_events::subscribe_main_events,

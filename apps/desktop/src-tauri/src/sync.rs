@@ -50,8 +50,17 @@ impl SpotifyTrackIndex {
             identities: HashMap::new(),
             by_index: Vec::with_capacity(library.tracks().len()),
         };
-        for track in library.tracks() {
-            index.insert(track.uri.clone(), spotify_track_identity(track));
+        let mut seen = HashSet::new();
+        for track in library
+            .known_tracks()
+            .filter(|track| seen.insert(track.uri.as_str()))
+        {
+            let position = index.by_index.len();
+            index.insert(
+                library.canonical_uri(&track.uri).to_owned(),
+                spotify_track_identity(track),
+            );
+            index.uris.entry(track.uri.clone()).or_insert(position);
         }
         index
     }
@@ -72,7 +81,7 @@ impl SpotifyTrackIndex {
 
     fn insert(&mut self, uri: String, identity: Option<SpotifyTrackIdentity>) {
         let index = self.by_index.len();
-        self.uris.insert(uri.clone(), index);
+        self.uris.entry(uri.clone()).or_insert(index);
         if let Some(identity) = &identity {
             self.identities
                 .entry(identity.clone())
@@ -258,6 +267,7 @@ pub fn prune_unreferenced_spotify_music_with_aliases(
             track.source == retune_core::model::SourceId::Music
                 && track.uri.starts_with("spotify:track:")
                 && !referenced.contains(&track.uri)
+                && !library.is_retained(&track.uri)
         })
         .map(|track| track.uri.clone())
         .collect::<Vec<_>>();
@@ -291,10 +301,11 @@ pub fn prune_unreferenced_spotify_tracks_with_aliases(
     let mut seen = HashSet::new();
     let uris = candidates
         .iter()
-        .map(|uri| aliases.get(uri).unwrap_or(uri))
-        .filter(|uri| seen.insert(uri.as_str()))
+        .map(|uri| library.canonical_uri(aliases.get(uri).unwrap_or(uri)))
+        .filter(|uri| seen.insert(*uri))
         .filter(|uri| !referenced.contains(*uri))
-        .cloned()
+        .filter(|uri| !library.is_retained(uri))
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     library.remove_uris(&uris)
 }

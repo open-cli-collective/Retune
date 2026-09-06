@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-retune-track"
+description = "Enables the restore_retune_track command without any pre-configured scope."
+commands.allow = ["restore_retune_track"]
+
+[[permission]]
+identifier = "deny-restore-retune-track"
+description = "Denies the restore_retune_track command without any pre-configured scope."
+commands.deny = ["restore_retune_track"]
