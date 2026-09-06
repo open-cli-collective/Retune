@@ -27,10 +27,10 @@ in each artifact name:
 | Debian/Ubuntu | arm64 | `retune_<version>_arm64.deb` |
 
 Download `checksums.txt` from that same latest release and verify the matching
-asset before installing. macOS artifacts are Developer ID-signed and notarized;
-Windows installers and their installed application payloads are
-Authenticode-signed. Checksums remain an independent transport-integrity check.
-These files support only the targets listed above.
+asset before installing. The macOS artifact uses the Open CLI Collective's
+self-signed certificate and is not Apple-notarized. Windows installers and
+their application payloads are unsigned. The checksums are the release's
+transport-integrity check. These files support only the targets listed above.
 
 After verifying the download, install the matching package:
 
@@ -38,7 +38,6 @@ After verifying the download, install the matching package:
 # macOS (replace VERSION with the latest release version)
 VERSION=latest-version
 /usr/bin/ditto -x -k "Retune-${VERSION}-aarch64.zip" .
-spctl --assess --type execute --verbose=4 Retune.app
 sudo mv Retune.app /Applications/
 
 # Debian/Ubuntu amd64 (use the arm64 filename on ARM64)
@@ -47,6 +46,10 @@ sudo apt install "./retune_${VERSION}_amd64.deb"
 
 On Windows, run the downloaded `.exe` installer from File Explorer or
 PowerShell, for example `./Retune-<version>-windows-x64-setup.exe`.
+On first macOS launch, try to open Retune once, then choose **Open Anyway** in
+System Settings → Privacy & Security (Security & Privacy → General on older
+macOS). Only approve the app after verifying its release checksum; Apple
+documents this flow in [Open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/mh40616/mac).
 
 ## macOS with Homebrew
 
@@ -64,10 +67,10 @@ brew upgrade --cask retune
 brew uninstall --cask retune
 ```
 
-The app is signed with the Open CLI Collective's Apple Developer ID identity,
-uses hardened runtime and a secure timestamp, and has an Apple notarization
-ticket stapled before publication. Gatekeeper therefore validates the normal
-download without a quarantine bypass.
+The app uses the Open CLI Collective's long-lived self-signed certificate but
+is not Apple-notarized. Homebrew leaves quarantine metadata intact; approve the
+first launch through Privacy & Security after Homebrew verifies the cask
+checksum.
 
 ## Windows with Winget
 
@@ -84,12 +87,11 @@ winget upgrade --exact --id OpenCLICollective.Retune
 winget uninstall --exact --id OpenCLICollective.Retune
 ```
 
-The installer and installed Retune executable are Authenticode-signed through
-Microsoft Artifact Signing with SHA-256 RFC 3161 timestamps. Windows should
-show the verified publisher rather than **Unknown Publisher**. Winget also
+The installer and installed Retune executable are unsigned, so Windows may show
+**Unknown Publisher** or Microsoft Defender SmartScreen warnings. Winget
 verifies the published installer hash. New Winget submissions can take time to
 appear while Microsoft publishes the manifest; if Winget reports that no
-package was found, use the signed direct download or retry later.
+package was found, use the checksum-verified direct download or retry later.
 
 ## Debian or Ubuntu with APT
 
@@ -155,14 +157,12 @@ documentation](https://developer.spotify.com/documentation/web-api/concepts/quot
   Premium, add the signing-in Spotify account to the app allowlist, and keep the
   total at five users or fewer. Quota exhaustion must clear at Spotify; repeated
   reconnects do not bypass it.
-- **macOS trust failure:** verify the checksum, then run
-  `spctl --assess --type execute --verbose=4 Retune.app`. A current published
-  artifact must pass Developer ID and notarization assessment without removing
-  quarantine metadata.
-- **Windows trust failure:** run
-  `Get-AuthenticodeSignature .\Retune-<version>-windows-<arch>-setup.exe` and
-  require `Status` to be `Valid`; do not install an unsigned or mismatched
-  artifact.
+- **macOS first-launch warning:** verify the checksum, try to open the app once,
+  then choose **Open Anyway** in Privacy & Security. The self-signed app does
+  not pass Apple's notarization assessment.
+- **Windows publisher warning:** the installer is unsigned. Verify it against
+  `checksums.txt` before accepting an **Unknown Publisher** or SmartScreen
+  prompt.
 - **Credential-store unavailable:** unlock macOS Keychain, Windows Credential
   Manager, or Linux Secret Service and relaunch. Local-only use remains
   available without stored Spotify credentials.
