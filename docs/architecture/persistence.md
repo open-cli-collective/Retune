@@ -15,7 +15,7 @@ before their contents are read.
 
 | File | Contents |
 | --- | --- |
-| `library.json` | Versioned core library and overlay |
+| `library.json` | Version 2 core library, overlay, removed records, and merge history |
 | `settings.json` | UI, sync, and playback preferences |
 | `playlists.json` | Playlist metadata/content cache |
 | `cooldowns.json` | Typed Spotify endpoint cooldowns |
@@ -127,6 +127,16 @@ restore as failed.
 `backup.rs` owns the portable envelope, native file dialogs, and multi-owner
 runtime coordination. `restore.rs` remains the low-level journal and recovery
 mechanism used by both startup and runtime replacement.
+
+Version 2 library envelopes preserve local track decisions in an optional
+`decisions` object: removed full records, merge before/after records, and retained
+URI identities. The flattened alias index is rebuilt and validated on load,
+not serialized. Version 1 imports default to no decisions; newer envelopes are
+rejected by older apps rather than silently losing merge history. Portable
+backup and restore include these decisions as library data. Additive merge
+preserves existing identity groups and imports only disjoint incoming groups,
+remapping every active and historical local ID consistently. Removing a track
+does not discard album ratings needed by its archived record or merge journal.
 
 If a runtime replacement fails after the Applying journal is durable, Retune
 immediately rolls the journal forward while the library, settings, playlist,

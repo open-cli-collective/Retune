@@ -1821,11 +1821,14 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
     let id = track_id(&uri).ok_or_else(|| "Expected a Spotify track URI".to_string())?;
     let state = app.state::<AppState>();
     let mut membership = state.spotify_membership.lock().await;
-    let provider = provider_from(&state)?;
     let current = membership.snapshot();
-    let needs_alias = current.is_exact() && {
+    if !current.is_exact() {
+        return Err("Sync Spotify before removing a saved track so Retune can preserve tracks supplied by saved albums.".into());
+    }
+    let provider = provider_from(&state)?;
+    let needs_alias = {
         let library = state.library.lock().expect("library mutex poisoned");
-        !library.tracks().iter().any(|track| track.uri == uri)
+        !library.known_tracks().any(|track| track.uri == uri)
             && library.tracks().iter().any(|track| {
                 track.source == SourceId::Music && track.uri.starts_with("spotify:track:")
             })
@@ -1842,45 +1845,55 @@ pub(super) async fn remove_spotify_track(app: tauri::AppHandle, uri: String) -> 
     } else {
         std::collections::HashMap::new()
     };
-    let next = if current.is_exact() {
-        let mut next = current;
-        next.saved_tracks.remove(&uri);
-        Some(next)
-    } else {
-        None
-    };
-    spotify_membership::remove_from_library(
-        provider.as_ref(),
-        &state.cooldown_store,
-        std::slice::from_ref(&uri),
-        unix_now(),
-    )
-    .await
-    .map_err(SpotifyActionFailure::into_message)?;
-    if let Some(next) = next {
+    let local_uri = aliases.get(&uri).unwrap_or(&uri).clone();
+    let gate = membership.take_gate();
+    let ((), gate) = state
+        .library
+        .owner()
+        .mutate_async_owned(
+            move |library| {
+                spotify_membership::preserve_track_before_removal(library, &local_uri);
+                Ok(())
+            },
+            gate,
+        )
+        .await?;
+    membership.restore_gate(gate);
+    let mut next = current;
+    if next.saved_tracks.remove(&uri).is_some() {
+        spotify_membership::remove_from_library(
+            provider.as_ref(),
+            &state.cooldown_store,
+            std::slice::from_ref(&uri),
+            unix_now(),
+        )
+        .await
+        .map_err(SpotifyActionFailure::into_message)?;
         membership
             .replace(next.clone())
             .await
             .map_err(SpotifyActionFailure::from)
             .map_err(SpotifyActionFailure::into_message)?;
-        let gate = membership.take_gate();
-        let ((), gate) = state
-            .library
-            .owner()
-            .mutate_async_owned(
-                move |library| {
-                    sync::prune_unreferenced_spotify_tracks_with_aliases(
-                        library,
-                        &next,
-                        std::slice::from_ref(&uri),
-                        &aliases,
-                    );
-                    Ok(())
-                },
-                gate,
-            )
-            .await?;
-        membership.restore_gate(gate);
+    }
+    let gate = membership.take_gate();
+    let (excluded, gate) = state
+        .library
+        .owner()
+        .mutate_async_owned(
+            move |library| {
+                spotify_membership::apply_track_removal(
+                    library,
+                    &next,
+                    aliases.get(&uri).unwrap_or(&uri),
+                )
+            },
+            gate,
+        )
+        .await?;
+    membership.restore_gate(gate);
+    drop(membership);
+    if let Some(id) = excluded {
+        state.playback.exclude_track(id).await;
     }
     emit_main(&app, "library-changed", ()).map_err(|error| error.to_string())
 }

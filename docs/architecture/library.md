@@ -36,6 +36,45 @@ same text merges their Retune album group.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
 
+## Track removal and merge decisions
+
+`Library` owns persistent local removal and merge decisions. Removing tracks
+archives complete records and hides them from browse and ordinary queues.
+Provider refresh cannot recreate those identities. Removed tracks can be
+restored with their original IDs, metadata, ratings, and history from the
+Library's Removed tracks dialog. An explicit individual Spotify save or local
+file import also restores a removed identity. Removal never deletes or edits an
+audio file.
+
+Manual merges accept two or more active entries of one media type and an
+explicit target: an existing entry or a newly selected Spotify track. The
+dialog recommends a recording supplied by a saved full album, then the highest
+play count. Users review title/artist/album, resolve conflicting genres and
+ratings, and choose Highest (default), Sum, or Custom play count. Merge retains
+the earliest addition and latest play. It changes no Spotify membership or
+playlist.
+
+The core keeps before/after records for each merge and resolves source URIs and
+old local IDs to the target. Sync matches original identities without
+re-materializing them or applying their provider metadata to the chosen
+recording. Future local plays and Last.fm updates follow these aliases,
+including into archived records, without restoring hidden entries. Explicitly
+restored and merged targets stay retained against provider pruning.
+
+Undo reverses the latest merge of an active target. Original entries return;
+later field edits and added plays remain on the chosen recording. A new target
+disappears only if it has not changed since the merge. Nested merges undo in
+order. Get Info separates source membership from play history and exposes
+original merged recordings, a playback checkbox, and undo. It does not infer
+Last.fm provenance for historical plays without stored evidence.
+
+`library_track_commands.rs` adapts these operations to the existing atomic
+library owner. Preview revisions cover selected records, the target, and their
+album ratings. Commit rejects changed revisions instead of overwriting
+intervening plays or edits. Spotify lookups happen outside the library lock;
+local mutation and persistence run on blocking work. Removed and merged-away
+IDs are excluded from the existing queue after the durable mutation.
+
 The desktop shell composes the live `Library`, its filesystem store, write
 gate, and long-running transaction exclusion as one concrete `LibraryState`.
 Ordinary changes clone the current library, save the candidate, and only then
@@ -336,8 +375,13 @@ album/disc/track order is preserved.
 
 ## Serialization
 
-Core exports use a versioned JSON envelope and optionally gzip at the application
-boundary. Import rejects duplicate IDs and URIs and recomputes the next local ID.
+Core exports use version 2 JSON envelopes and optionally gzip at the application
+boundary. Version 1 remains readable. Import rejects duplicate IDs and URIs,
+conflicting merge journals, and cyclic or dangling aliases, and recomputes the
+next local ID across active and archived records. Additive backup import keeps
+existing identities and decisions; conflicting incoming merge groups are
+skipped as a whole. Disjoint groups retain their journals with consistently
+reassigned local IDs.
 Application backup adds settings and playlist cache data around the core
 envelope; see [Persistence](persistence.md).
 

@@ -52,6 +52,13 @@ duplicate queue entries, and carries an enabled flag beside each prepared row so
 filtering does not rescan the library. Provider misses are hydrated afterward
 through the shared Spotify client.
 
+Manual library merges resolve queued source URIs to the chosen recording when
+preparing a new queue. Durable removal and merge actions exclude removed IDs
+from an already-running queue using the existing exclusion path; they do not
+interrupt the current recording. Its eventual play count follows the persisted
+URI alias, even if the target has since moved to Removed tracks. Ordinary view
+refreshes continue to leave the queue untouched.
+
 The reducer emits only neutral, listening-generation-scoped facts: natural
 start, cumulative forward listening, discontinuity/seek, and completion. The
 shell translates those facts into provider actions. Last.fm owns its

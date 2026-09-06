@@ -25,7 +25,7 @@ pub(crate) fn resolve_cached(
     validate_request(resources, start_index)?;
     let requested = resources
         .iter()
-        .map(|resource| resource.uri.as_str())
+        .map(|resource| library.canonical_uri(&resource.uri))
         .collect::<HashSet<_>>();
     let mut library_by_uri = HashMap::with_capacity(requested.len());
     for track in library.tracks() {
@@ -40,7 +40,10 @@ pub(crate) fn resolve_cached(
     let mut tracks = Vec::with_capacity(resources.len());
     let mut enabled = Vec::with_capacity(resources.len());
     for resource in resources {
-        if let Some(track) = library_by_uri.get(resource.uri.as_str()).copied() {
+        if let Some(track) = library_by_uri
+            .get(library.canonical_uri(&resource.uri))
+            .copied()
+        {
             tracks.push(Some(from_library(track)));
             enabled.push(track.enabled);
         } else if resource.uri.starts_with("file://") {

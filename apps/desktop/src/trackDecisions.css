@@ -1,0 +1,53 @@
+.track-merge, .removed-tracks { width: 680px; display: flex; flex-direction: column; }
+.track-merge, .track-removal, .removed-tracks, .track-info-details { max-width: calc(100% - 32px); max-height: calc(100% - 36px); overflow: auto; }
+.merge-steps { display: flex; gap: 12px; margin: 0; padding: 0 0 12px; list-style: none; border-bottom: 1px solid var(--border); color: var(--dim); }
+.merge-steps [aria-current] { color: var(--text); font-weight: 600; }
+.decision-body { min-height: 0; overflow: auto; padding: 0 2px; }
+.decision-body p, .track-removal p, .removed-tracks p { line-height: 1.5; }
+.merge-recordings { display: grid; gap: 8px; }
+.merge-recording { display: flex; gap: 12px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--control); }
+.merge-recording.chosen { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
+.get-info .merge-recording input, .get-info .merge-count input[type=radio], .get-info .info-enabled input { width: 15px; height: 15px; padding: 0; flex-shrink: 0; accent-color: var(--accent); }
+.decision-track { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.decision-track small, .decision-track > span, .merge-result > small, .merge-review-sources small { color: var(--dim); }
+.library-sources { margin: 6px 0; padding-left: 17px; font-size: 11px; line-height: 1.6; }
+.track-merge details { margin: 14px 0; }
+.track-merge summary { cursor: pointer; }
+.merge-search { display: flex; gap: 8px; margin: 10px 0; }
+.merge-search input { flex: 1; }
+.merge-search-results { display: grid; gap: 4px; max-height: 190px; overflow: auto; }
+.merge-search-results button { display: grid; gap: 4px; padding: 8px; text-align: left; border: 1px solid var(--border); background: var(--control); border-radius: 4px; }
+.merge-fields { margin-top: 14px; }
+.merge-fields > label { display: grid; grid-template-columns: 60px minmax(0, 1fr); align-items: center; gap: 8px; margin: 8px 0; }
+.merge-fields select { height: 26px; color: var(--text); border: 1px solid var(--border); border-radius: 3px; background: var(--list); }
+.merge-conflict { padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--control); font-size: 11px; }
+.merge-count { margin: 14px 0 0; border: 1px solid var(--border); border-radius: 4px; }
+.merge-count > label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.merge-count p { margin: 5px 0 10px; }
+.merge-count .merge-total { margin: 12px 0 4px; }
+.merge-review-sources { display: grid; margin: 14px 0; }
+.merge-review-sources > div { display: flex; justify-content: space-between; gap: 16px; padding: 8px; border-bottom: 1px solid var(--border); }
+.merge-review-sources small { display: block; margin-top: 3px; }
+.merge-result { display: grid; gap: 6px; padding: 15px; border: 1px solid var(--accent); border-radius: 5px; background: var(--control); }
+.merge-result > b { font-size: 20px; margin: 4px 0; }
+.decision-error { padding: 8px; color: var(--danger); overflow-wrap: anywhere; }
+.decision-error button { display: block; margin-top: 8px; }
+.removed-track { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.removed-track button { flex-shrink: 0; }
+.removed-tracks > input { width: 100%; }
+.info-lineage { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 10px; }
+.info-lineage h3 { font-size: 12px; margin: 5px 0; }
+.info-history { font-size: 11px; line-height: 1.6; color: var(--dim); }
+.get-info .info-enabled { display: flex; grid-template-columns: none; gap: 8px; margin: 10px 0; }
+.info-lineage details { margin-top: 10px; }
+.info-lineage .decision-track { margin: 10px 0; }
+.library-tools { display: flex; justify-content: flex-end; padding: 3px 10px; border-bottom: 1px solid var(--border); background: var(--control); }
+.library-tools button { border: 0; background: transparent; color: var(--dim); font-size: 11px; }
+.context-menu button.danger { color: var(--danger); }
+.context-menu button.danger:hover { color: #fff; background: var(--danger); }
+@media (max-width: 540px) {
+  .merge-steps { gap: 8px; font-size: 10px; }
+  .track-merge .modal-actions { gap: 5px; }
+  .track-merge .modal-actions button { min-width: 0; }
+  .track-removal .modal-actions { flex-wrap: wrap; }
+}

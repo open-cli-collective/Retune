@@ -1,5 +1,5 @@
 import { tauriInvoker, type Invoker } from './ipc.ts'
-import type { BrowseView, MetadataValues, Selection, Source, TrackInfo } from './types.ts'
+import type { BrowseView, DecisionTrack, MetadataValues, Selection, Source, TrackInfo, TrackMergeEdit, TrackMergePreview } from './types.ts'
 
 type TrackEdit = Partial<Pick<TrackInfo, 'name' | 'art' | 'alb' | 'cat'>> & {
   ratingChange?: { stars: number | null }
@@ -24,6 +24,12 @@ export function createLibraryGateway(invoke: Invoker) {
     metadataValues: () => invoke<MetadataValues>('metadata_values'),
     genreValues: () => invoke<string[]>('genre_values'),
     getTrack: (id: number) => invoke<TrackInfo>('get_track', { id }),
+    mergePreview: (ids: number[], targetUri?: string) => invoke<TrackMergePreview>('get_track_merge', { ids, targetUri: targetUri ?? null }),
+    mergeTracks: (ids: number[], targetUri: string, edit: TrackMergeEdit, expectedRevision: string) => invoke<number>('merge_library_tracks', { ids, targetUri, edit, expectedRevision }),
+    undoMerge: (id: number) => invoke<void>('undo_track_merge', { id }),
+    removeTracks: (ids: number[]) => invoke<void>('remove_retune_tracks', { ids }),
+    removedTracks: () => invoke<DecisionTrack[]>('removed_retune_tracks'),
+    restoreTrack: (uri: string) => invoke<number>('restore_retune_track', { uri }),
     editTrack: (id: number, edit: TrackEdit) => invoke<void>('edit_track', { id, edit }),
     editTracks: (ids: number[], edit: TrackEdit) => invoke<void>('set_track_infos', { ids, edit }),
     clickTrackStar: (id: number, stars: number) => invoke<void>('click_track_star', { id, stars }),

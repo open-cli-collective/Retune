@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::model::Library;
 
 /// Current schema version written by [`export_json`].
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
@@ -21,7 +21,7 @@ pub enum ImportError {
     Invalid(String),
 }
 
-/// Serializes as `{"version": 1, "library": { … }}`.
+/// Serializes the current version envelope with all local track decisions.
 pub fn export_json(library: &Library) -> Vec<u8> {
     #[derive(Serialize)]
     struct Envelope<'a> {
@@ -36,7 +36,7 @@ pub fn export_json(library: &Library) -> Vec<u8> {
     .expect("Library is always serializable")
 }
 
-/// Accepts the output of [`export_json`]: plain JSON, schema v1 only.
+/// Accepts current exports and legacy v1 libraries without track decisions.
 /// A handwritten-envelope fixture test pins that v1 files load forever.
 pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
     let mut envelope: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -52,7 +52,7 @@ pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
             u32::try_from(version).unwrap_or(u32::MAX),
         ));
     }
-    if version != u64::from(SCHEMA_VERSION) {
+    if version == 0 {
         return Err(ImportError::MissingEnvelope);
     }
     let library = object

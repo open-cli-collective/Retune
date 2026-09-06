@@ -126,19 +126,23 @@ export function TrackCell({ track, column, facetTitle, playing, selected, onInfo
   return <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={onRate} />
 }
 
-export function TrackContextMenu({ x, y, onClose, onPlaylist, onGoToAlbum, onGoToArtist, onInfo }: {
+export function TrackContextMenu({ x, y, onClose, onPlaylist, onGoToAlbum, onGoToArtist, onInfo, onMerge, onRemoveRetune, onRemoveSpotify }: {
   x: number; y: number; onClose: () => void; onPlaylist: () => void
   onGoToAlbum?: () => void; onGoToArtist?: () => void; onInfo?: () => void
+  onMerge?: () => void; onRemoveRetune?: () => void; onRemoveSpotify?: () => void
 }) {
   return <ContextMenu x={x} y={y} onClose={onClose}>
     <button onClick={() => { onClose(); onPlaylist() }}>Add to Playlist…</button>
     <button disabled={!onGoToAlbum} onClick={() => { onClose(); onGoToAlbum?.() }}>View album in Spotify</button>
     <button disabled={!onGoToArtist} onClick={() => { onClose(); onGoToArtist?.() }}>View artist albums in Spotify</button>
     <button disabled={!onInfo} onClick={() => { onClose(); onInfo?.() }}>Get Info</button>
+    {onMerge && <button onClick={() => { onClose(); onMerge() }}>Merge tracks…</button>}
+    {onRemoveRetune && <button onClick={() => { onClose(); onRemoveRetune() }}>Remove from Retune…</button>}
+    {onRemoveSpotify && <button className="danger" onClick={() => { onClose(); onRemoveSpotify() }}>Remove from Spotify…</button>}
   </ContextMenu>
 }
 
-export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort, onPrefix }: {
+export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort, onPrefix, onMerge, onRemoveRetune, onRemoveSpotify }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
   columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: Pick<React.MouseEvent | React.KeyboardEvent, 'shiftKey' | 'metaKey' | 'ctrlKey'>) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
@@ -147,6 +151,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   onGoToAlbum: (track: Track) => void; onGoToArtist: (track: Track) => void
   onActivate: () => void; onSetup: () => void; onClearSelection: () => void; onHiddenColumns: (columns: ColumnKey[]) => void; onSort: (column: ColumnKey, desc: boolean) => void
   onPrefix?: (event: React.KeyboardEvent) => boolean
+  onMerge?: (tracks: Track[]) => void; onRemoveRetune?: (tracks: Track[]) => void; onRemoveSpotify?: (track: Track) => void
 }) {
   const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
@@ -287,6 +292,9 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
         onGoToAlbum={menuTrack && !menuTrack.isLocal ? () => onGoToAlbum(menuTrack) : undefined}
         onGoToArtist={menuTrack && !menuTrack.isLocal ? () => onGoToArtist(menuTrack) : undefined}
         onInfo={menuTrack ? () => onInfo(menuTrack.id) : undefined}
+        onMerge={onMerge && selectedIds.size > 1 ? () => onMerge(tracks.filter((track) => selectedIds.has(track.id))) : undefined}
+        onRemoveRetune={onRemoveRetune && menuTrack ? () => onRemoveRetune(selectedIds.has(menuTrack.id) ? tracks.filter((track) => selectedIds.has(track.id)) : [menuTrack]) : undefined}
+        onRemoveSpotify={onRemoveSpotify && menuTrack?.uri.startsWith('spotify:track:') && selectedIds.size <= 1 ? () => onRemoveSpotify(menuTrack) : undefined}
       />)}
   </div>
 }

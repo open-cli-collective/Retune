@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-merge-library-tracks"
+description = "Enables the merge_library_tracks command without any pre-configured scope."
+commands.allow = ["merge_library_tracks"]
+
+[[permission]]
+identifier = "deny-merge-library-tracks"
+description = "Denies the merge_library_tracks command without any pre-configured scope."
+commands.deny = ["merge_library_tracks"]

@@ -231,7 +231,7 @@ pub(super) fn import_with_settings_and_mappings(
 ) -> Result<ImportedBackup, String> {
     let json = decode_backup(bytes)?;
     let envelope: BackupV1 = serde_json::from_slice(&json).map_err(|error| error.to_string())?;
-    if envelope.version != SCHEMA_VERSION {
+    if envelope.version == 0 || envelope.version > SCHEMA_VERSION {
         return Err(format!(
             "The backup version {} is unsupported.",
             envelope.version

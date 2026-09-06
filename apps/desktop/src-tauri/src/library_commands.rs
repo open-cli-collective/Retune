@@ -135,11 +135,39 @@ pub(super) struct TrackInfoView {
     rating: Option<RatingView>,
     inherited_rating: Option<u8>,
     genres: Vec<String>,
+    enabled: bool,
+    play_count: u32,
+    added_at: Option<u64>,
+    last_played_at: Option<u64>,
+    sources: crate::library_track_commands::LibrarySources,
+    merged_sources: Vec<crate::library_track_commands::DecisionTrack>,
+    latest_merge_at: Option<u64>,
 }
 
 impl TrackInfoView {
-    fn from_track(library: &Library, track: &TrackRecord) -> Self {
+    fn from_track(
+        library: &Library,
+        track: &TrackRecord,
+        membership: &crate::store::SpotifyLibraryState,
+    ) -> Self {
         Self {
+            enabled: track.enabled,
+            play_count: track.play_count,
+            added_at: track.added_at,
+            last_played_at: track.last_played_at,
+            sources: crate::library_track_commands::library_sources(
+                library, membership, &track.uri,
+            ),
+            merged_sources: library
+                .merge_sources(track.id)
+                .into_iter()
+                .map(|original| {
+                    crate::library_track_commands::DecisionTrack::from_track(
+                        library, membership, original,
+                    )
+                })
+                .collect(),
+            latest_merge_at: library.latest_merge_at(track.id),
             id: track.id.0,
             uri: track.uri.clone(),
             local_path: localfiles::path_from_file_uri(&track.uri)
@@ -184,7 +212,7 @@ struct RatingChangeDto {
     stars: Option<u8>,
 }
 
-fn validate_metadata(label: &str, value: &str) -> Result<(), String> {
+pub(super) fn validate_metadata(label: &str, value: &str) -> Result<(), String> {
     if value.len() > MAX_LIBRARY_METADATA_BYTES {
         return Err(format!("{label} is too long."));
     }
@@ -205,7 +233,7 @@ fn validate_track_edit(edit: &TrackEditDto) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_track_ids(ids: &[u64]) -> Result<(), String> {
+pub(super) fn validate_track_ids(ids: &[u64]) -> Result<(), String> {
     if ids.len() > MAX_LIBRARY_BATCH_IDS {
         return Err("Too many track IDs were supplied.".into());
     }
@@ -669,11 +697,12 @@ pub(super) async fn set_album_rating(
 pub(super) async fn get_track(app: tauri::AppHandle, id: u64) -> Result<TrackInfoView, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let membership = state.spotify_membership.snapshot();
         let library = state.library.lock().expect("library mutex poisoned");
         let track = library
             .get(TrackId(id))
             .ok_or_else(|| format!("unknown track id {id}"))?;
-        Ok(TrackInfoView::from_track(&library, track))
+        Ok(TrackInfoView::from_track(&library, track, &membership))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -891,11 +920,13 @@ mod tests {
         ));
 
         assert_eq!(
-            TrackInfoView::from_track(&library, library.get(local).unwrap()).local_path,
+            TrackInfoView::from_track(&library, library.get(local).unwrap(), &Default::default())
+                .local_path,
             Some(local_path.to_string_lossy().into_owned())
         );
         assert_eq!(
-            TrackInfoView::from_track(&library, library.get(spotify).unwrap()).local_path,
+            TrackInfoView::from_track(&library, library.get(spotify).unwrap(), &Default::default())
+                .local_path,
             None
         );
     }
