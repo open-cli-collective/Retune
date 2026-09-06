@@ -233,57 +233,12 @@ impl LastFmImportSessionV2 {
             options.selected_track_ids.clear();
             return options;
         };
-        let batch_ids = batch.source_ids.iter().collect::<BTreeSet<_>>();
-        let batch_options = self.page_options.get(&batch_options_key(batch_id)).cloned();
-        let legacy_options = self
-            .page_options
-            .get(&format!("{artist}\u{1f}{album}"))
-            .cloned();
-        let customized = batch_options.is_some() || legacy_options.is_some();
-        let mut options = batch_options
-            .clone()
-            .or(legacy_options.clone())
-            .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
-        if customized {
-            options
-                .selected_track_ids
-                .retain(|id| batch_ids.contains(id));
-        } else {
-            options.selected_track_ids = batch
-                .source_ids
-                .iter()
-                .filter(|id| {
-                    let id = (*id).as_str();
-                    self.rows
-                        .iter()
-                        .any(|row| row.stable_id == id && is_actionable(self, &row.stable_id))
-                })
-                .cloned()
-                .collect();
-            let rows = batch
-                .source_ids
-                .iter()
-                .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
-                .collect::<Vec<_>>();
-            options.whole_album =
-                options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
-        }
         let rows = batch
             .source_ids
             .iter()
             .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
             .collect::<Vec<_>>();
-        let collection_shaped = batch_is_collection_shaped(self, &batch, &rows);
-        let has_collection_match = self.collection_album_matches.contains_key(&batch_id);
-        if (collection_shaped && !has_collection_match)
-            || (!album.is_empty() && has_collection_match)
-        {
-            options.whole_album = false;
-        } else if album.is_empty() && options.whole_album {
-            options.whole_album =
-                options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
-        }
-        options
+        self.options_for_page_batch(&batch, artist, album, &rows)
     }
 
     fn options_for_page_batch(
@@ -321,6 +276,13 @@ impl LastFmImportSessionV2 {
                 options.import_content && exact_album_match_for_rows(self, batch.page, rows);
         }
         let collection_shaped = batch_is_collection_shaped(self, batch, rows);
+        options.whole_album &= collection_shaped
+            || rows.iter().any(|row| {
+                self.matches
+                    .get(&row.stable_id)
+                    .and_then(|result| result.selected_uri.as_deref())
+                    .is_some_and(|uri| uri.starts_with("spotify:album:"))
+            });
         let has_collection_match = self.collection_album_matches.contains_key(&batch.page);
         if (collection_shaped && !has_collection_match)
             || (!album.is_empty() && has_collection_match)
@@ -655,7 +617,6 @@ fn select_match_in_session(
         projection.representative_artist,
         projection.representative_album,
     );
-    let collection_shaped = batch_is_collection_shaped_for_id(session, batch_id);
     let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
     let explicit_album = session.matches.get(source_id).is_some_and(|result| {
         spotify_share_uri(&result.search_term, "album")
@@ -734,25 +695,23 @@ fn select_match_in_session(
             }
         }
     } else {
-        if row_album.is_empty() || collection_shaped {
-            let result = session
-                .matches
-                .entry(source_id.to_owned())
-                .or_insert_with(|| MatchResult {
-                    source_id: source_id.to_owned(),
-                    search_term: track_search_term(&row_artist, &row_track),
-                    confidence: None,
-                    selected_uri: None,
-                    candidates: Vec::new(),
-                    track_matches: BTreeMap::new(),
-                });
-            if !result
-                .candidates
-                .iter()
-                .any(|existing| existing.uri == candidate.uri)
-            {
-                result.candidates.insert(0, candidate.clone());
-            }
+        let result = session
+            .matches
+            .entry(source_id.to_owned())
+            .or_insert_with(|| MatchResult {
+                source_id: source_id.to_owned(),
+                search_term: track_search_term(&row_artist, &row_track),
+                confidence: None,
+                selected_uri: None,
+                candidates: Vec::new(),
+                track_matches: BTreeMap::new(),
+            });
+        if !result
+            .candidates
+            .iter()
+            .any(|existing| existing.uri == candidate.uri)
+        {
+            result.candidates.push(candidate.clone());
         }
         let album_uri = session
             .matches

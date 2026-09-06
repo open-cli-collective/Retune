@@ -19,6 +19,90 @@ use std::{
 
 // Opt-in synthetic evidence for docs/lastfm-interaction-audit.md.
 #[tokio::test]
+#[ignore = "local acceptance benchmark; set RETUNE_APPLY_FIXTURE to a copied session JSON"]
+async fn audit_apply_acceptance_cost() {
+    use std::time::Instant;
+    let path = std::env::var("RETUNE_APPLY_FIXTURE").expect("copied session JSON path");
+    let session: LastFmImportSessionV2 = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let sync = LastFmSyncState::default();
+    let queue = queue_page_view(Some(&session), &sync, 0, 1000).unwrap();
+    let page = queue
+        .items
+        .iter()
+        .filter(|item| item.remaining)
+        .find_map(|item| {
+            let batch = session
+                .batches
+                .iter()
+                .find(|batch| batch.page == item.page)?;
+            if !batch.source_ids.iter().all(|id| {
+                session
+                    .matches
+                    .get(id)
+                    .and_then(|result| matched_track_uri(result, id))
+                    .is_some()
+            }) {
+                return None;
+            }
+            println!(
+                "APPLY_FIXTURE matched_batch={} selected_rows={}",
+                item.page,
+                batch.source_ids.len()
+            );
+            let page = page_view(Some(&session), &sync, item.page, &item.artist, &item.album)?;
+            build_apply_plan(
+                &session,
+                session.spotify_account_id.as_deref()?,
+                item.page,
+                &item.artist,
+                &item.album,
+                &page
+                    .options
+                    .selected_track_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                true,
+                page.options.clone(),
+            )
+            .ok()?;
+            Some(page)
+        })
+        .expect("an actionable matched batch");
+    for sample in 0..3 {
+        let directory = tempfile::tempdir().unwrap();
+        let service = Service::new(directory.path());
+        *service.session.lock().await = Some(session.clone());
+        let start = Instant::now();
+        super::apply::apply_page(
+            &service,
+            page.batch_id,
+            (&page.artist, &page.album),
+            &page
+                .options
+                .selected_track_ids
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            true,
+            page.options.clone(),
+        )
+        .await
+        .unwrap();
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            service.incremental_store.load().unwrap().apply_queue.len(),
+            1
+        );
+        println!(
+            "APPLY_ACCEPTANCE sample={sample} rows={} batches={} elapsed_ms={elapsed:.3}",
+            session.rows.len(),
+            session.batches.len()
+        );
+    }
+}
+
+#[tokio::test]
 #[ignore = "audit benchmark; run with --release --ignored --nocapture"]
 async fn audit_lastfm_interaction_costs() {
     use std::time::Instant;
@@ -269,13 +353,13 @@ fn collection_album(uri: &str, artist: &str, tracks: &[(&str, &str)]) -> Collect
             track_names: tracks.iter().map(|(name, _)| (*name).into()).collect(),
             track_artists: tracks.iter().map(|_| artist.into()).collect(),
             track_albums: tracks.iter().map(|_| uri.into()).collect(),
+            track_durations: vec![180; tracks.len()],
             relation: None,
         },
         total_tracks: tracks.len() as u32,
         track_numbers: (1..=tracks.len())
             .map(|number| Some(number as u32))
             .collect(),
-        track_durations: vec![180; tracks.len()],
         ..CollectionAlbumCandidate::default()
     }
 }
@@ -310,7 +394,7 @@ fn collection_album_for_rows(
     }
     candidate.total_tracks = candidate.matching.track_uris.len() as u32;
     candidate.track_numbers = (1..=candidate.total_tracks).map(Some).collect();
-    candidate.track_durations = vec![180; candidate.total_tracks as usize];
+    candidate.matching.track_durations = vec![180; candidate.total_tracks as usize];
     candidate
 }
 
@@ -409,6 +493,7 @@ fn selected_release_session() -> (LastFmImportSessionV2, Vec<SourceRow>, String)
         track_names: rows.iter().map(|row| row.track.clone()).collect(),
         track_artists: rows.iter().map(|row| row.artist.clone()).collect(),
         track_albums: vec!["Seed Release".into(); rows.len()],
+        track_durations: Vec::new(),
         relation: Some(AlbumRelation::BestMatch),
         ..AlbumCandidate::default()
     };
@@ -4945,6 +5030,104 @@ async fn named_collection_batches_seed_once_from_the_representative_release() {
 }
 
 #[tokio::test]
+async fn track_picker_preserves_spotify_order_and_duration_through_cache_and_rerank() {
+    let directory = tempfile::tempdir().unwrap();
+    let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+    state.spotify_membership.set_for_test(SpotifyLibraryState {
+        account_id: "spotify".into(),
+        complete: true,
+        ..SpotifyLibraryState::default()
+    });
+    let row = collection_row("Cascada", "Miracle");
+    service
+        .save(collection_session(std::slice::from_ref(&row)))
+        .await
+        .unwrap();
+    let tracks = [
+        ("z", "Miracle - Original Mix", 368000),
+        ("y", "Miracle", 218000),
+        ("a", "Miracle", 219000),
+    ];
+    let client = Arc::new(fake_client(
+        [retune_spotify::client::Response::json(
+            200,
+            serde_json::json!({
+                "tracks": { "items": tracks.iter().map(|(id, name, duration)| serde_json::json!({
+                    "id": id, "uri": format!("spotify:track:{id}"), "name": name, "duration_ms": duration,
+                    "artists": [{"id": "cascada", "name": "Cascada"}],
+                    "album": {"id": "album", "uri": "spotify:album:album", "name": "Album"}
+                })).collect::<Vec<_>>(), "next": null, "total": 3 }
+            }),
+        )],
+        "",
+    ));
+    for expected_source in [
+        retune_spotify::client::SearchSource::Network,
+        retune_spotify::client::SearchSource::Cache,
+    ] {
+        let ((page, _), source) = change_import_track_with_source(
+            &service,
+            &lastfm,
+            &state.spotify_membership,
+            &state.library,
+            &|| Ok(Arc::clone(&client)),
+            &|| Ok(true),
+            1,
+            &row.stable_id,
+            "cascada miracle",
+        )
+        .await
+        .unwrap();
+        assert_eq!(source, expected_source);
+        let page = page.unwrap();
+        let candidates = &page.rows[0].match_result.as_ref().unwrap().candidates;
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.uri.as_str())
+                .collect::<Vec<_>>(),
+            vec!["spotify:track:z", "spotify:track:y", "spotify:track:a"]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.track_durations[0])
+                .collect::<Vec<_>>(),
+            vec![368, 218, 219]
+        );
+        assert_eq!(candidates[0].relation, Some(AlbumRelation::SameSongs));
+        assert_eq!(candidates[1].relation, Some(AlbumRelation::BestMatch));
+        service
+            .rerank_collection_batch(
+                1,
+                &CollectionMembership::default(),
+                &LastFmMappings::default(),
+            )
+            .await
+            .unwrap();
+        let refreshed = service.page(1, "Cascada", "").await.unwrap();
+        assert_eq!(
+            &refreshed.rows[0].match_result.as_ref().unwrap().candidates,
+            candidates
+        );
+    }
+    assert_eq!(client.transport().requests().len(), 1);
+    assert_eq!(
+        Service::new(directory.path()).snapshot().await,
+        service.snapshot().await
+    );
+    let mut legacy = serde_json::to_value(
+        &service.snapshot().await.unwrap().matches[&row.stable_id].candidates[0],
+    )
+    .unwrap();
+    legacy.as_object_mut().unwrap().remove("trackDurations");
+    assert!(serde_json::from_value::<AlbumCandidate>(legacy)
+        .unwrap()
+        .track_durations
+        .is_empty());
+}
+
+#[tokio::test]
 async fn collection_album_search_and_preview_use_bounded_requests_and_cached_edits_are_local() {
     let client = retune_spotify::client::fake_client(
         [
@@ -5000,6 +5183,16 @@ async fn collection_album_search_and_preview_use_bounded_requests_and_cached_edi
     let album = client.album("album").await.unwrap();
     let candidate = collection_album_candidate(&album, &CollectionMembership::default());
     assert_eq!(candidate.matching.track_uris, vec!["spotify:track:one"]);
+    assert_eq!(
+        serde_json::to_value(&candidate).unwrap()["trackDurations"],
+        serde_json::json!([180])
+    );
+    assert_eq!(
+        album_track_candidate(&candidate.matching, "spotify:track:one", false)
+            .unwrap()
+            .track_durations,
+        vec![180]
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
@@ -5647,6 +5840,211 @@ fn manual_track_candidate_can_map_multiple_rows_in_one_batch() {
     assert_eq!(
         session.matches[&rows[1].stable_id].track_matches[&rows[1].stable_id],
         "spotify:track:one"
+    );
+}
+
+#[tokio::test]
+async fn chosen_track_shares_exact_variants_and_keeps_near_matches_as_local_suggestions() {
+    let rows = [
+        "Perfection – Shogun Remix",
+        "Perfection (Shogun Remix)",
+        "Perfection",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, title)| SourceRow {
+        stable_id: format!("source-{index}"),
+        play_count: if index == 0 {
+            5
+        } else if index == 1 {
+            107
+        } else {
+            1
+        },
+        ..collection_test_row(title)
+    })
+    .collect::<Vec<_>>();
+    let target = "spotify:track:shogun";
+    let mut session = collection_session(&rows);
+    session
+        .matches
+        .get_mut(&rows[0].stable_id)
+        .unwrap()
+        .candidates = vec![collection_candidate(
+        target,
+        &rows[0].track,
+        "Artist",
+        false,
+    )];
+    session.matches.remove(&rows[1].stable_id);
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::new(directory.path());
+    service.save(session).await.unwrap();
+    service
+        .select_match("user", "spotify", 1, &rows[0].stable_id, target)
+        .await
+        .unwrap();
+    let selected = service.snapshot().await.unwrap();
+    let automatic = &selected.matches[&rows[1].stable_id];
+    assert_eq!(automatic.track_matches[&rows[1].stable_id], target);
+    assert_eq!(automatic.confidence, Some(Confidence::Exact));
+    assert_eq!(automatic.selected_uri, None);
+    assert!(selected.matches[&rows[2].stable_id].candidates.is_empty());
+    assert!(selected.matches[&rows[2].stable_id]
+        .track_matches
+        .is_empty());
+    assert_eq!(
+        Service::new(directory.path()).snapshot().await,
+        Some(selected)
+    );
+
+    service
+        .rerank_collection_batch(
+            1,
+            &CollectionMembership::default(),
+            &LastFmMappings::default(),
+        )
+        .await
+        .unwrap();
+    let page = service.page(1, "Artist", "").await.unwrap();
+    assert_eq!(page.fuzzy_groups[target].len(), 2);
+    assert_eq!(page.resolved_counts[target], 112);
+    let near = page
+        .rows
+        .iter()
+        .find(|item| item.source.stable_id == rows[2].stable_id)
+        .unwrap()
+        .match_result
+        .as_ref()
+        .unwrap();
+    assert!(near.track_matches.is_empty());
+    assert_eq!(near.candidates[0].uri, target);
+    assert_eq!(near.candidates[0].relation, Some(AlbumRelation::SameSongs));
+    // Projection-only suggestions stay out of automatic matching on future reranks.
+    assert!(
+        service.snapshot().await.unwrap().matches[&rows[2].stable_id]
+            .candidates
+            .is_empty()
+    );
+    service
+        .select_match("user", "spotify", 1, &rows[2].stable_id, target)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.snapshot().await.unwrap().matches[&rows[2].stable_id]
+            .selected_uri
+            .as_deref(),
+        Some(target)
+    );
+}
+
+#[test]
+fn cached_release_track_choice_is_shared_without_changing_the_selected_album() {
+    let (mut session, mut rows, album) = selected_release_session();
+    rows[1].track = "ONE".into();
+    session.rows = rows.clone();
+    for result in session.matches.values_mut() {
+        result.track_matches.clear();
+    }
+    let (session, _) = review::select_matches_in_session(
+        session,
+        1,
+        &[(rows[0].stable_id.clone(), "spotify:track:one".into())],
+    )
+    .unwrap();
+    for row in &rows[..2] {
+        let result = &session.matches[&row.stable_id];
+        assert_eq!(result.selected_uri.as_deref(), Some(album.as_str()));
+        assert_eq!(result.track_matches[&row.stable_id], "spotify:track:one");
+        assert!(result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.uri == "spotify:track:one"));
+    }
+}
+
+#[test]
+fn shared_track_choices_preserve_ties_existing_mappings_exclusions_and_batch_scope() {
+    let rows = (0..8)
+        .map(|index| SourceRow {
+            stable_id: format!("source-{index}"),
+            ..collection_test_row("Song")
+        })
+        .collect::<Vec<_>>();
+    let mut session = collection_session(&rows);
+    let mut other_batch = session.batches[0].clone();
+    other_batch.page = 2;
+    other_batch.source_ids = vec![rows[7].stable_id.clone()];
+    session.batches[0].source_ids = rows[..7].iter().map(|row| row.stable_id.clone()).collect();
+    session.batches.push(other_batch);
+    for (index, uri) in [
+        (0, "spotify:track:first"),
+        (1, "spotify:track:second"),
+        (3, "spotify:track:manual"),
+    ] {
+        session
+            .matches
+            .get_mut(&rows[index].stable_id)
+            .unwrap()
+            .candidates = vec![collection_candidate(uri, "Song", "Artist", false)];
+    }
+    session
+        .matches
+        .get_mut(&rows[2].stable_id)
+        .unwrap()
+        .candidates = vec![collection_candidate(
+        "spotify:track:first",
+        "Song",
+        "Artist",
+        false,
+    )];
+    select_match_in_session(&mut session, 1, &rows[3].stable_id, "spotify:track:manual").unwrap();
+    session
+        .matches
+        .get_mut(&rows[4].stable_id)
+        .unwrap()
+        .track_matches
+        .insert(rows[4].stable_id.clone(), "spotify:track:accepted".into());
+    session.decisions.insert(
+        rows[4].stable_id.clone(),
+        RowDecision {
+            status: RowStatus::Done,
+            excluded: false,
+        },
+    );
+    session.decisions.insert(
+        rows[5].stable_id.clone(),
+        RowDecision {
+            excluded: true,
+            ..RowDecision::default()
+        },
+    );
+    session.rows[6].artist = "Other Artist".into();
+    let protected = rows[3..]
+        .iter()
+        .map(|row| session.matches[&row.stable_id].clone())
+        .collect::<Vec<_>>();
+    let (session, _) = review::select_matches_in_session(
+        session,
+        1,
+        &[
+            (rows[0].stable_id.clone(), "spotify:track:first".into()),
+            (rows[1].stable_id.clone(), "spotify:track:second".into()),
+        ],
+    )
+    .unwrap();
+    assert!(session.matches[&rows[2].stable_id].track_matches.is_empty());
+    assert_eq!(session.matches[&rows[2].stable_id].candidates.len(), 3);
+    assert!(session.matches[&rows[2].stable_id]
+        .candidates
+        .iter()
+        .all(|candidate| candidate.relation == Some(AlbumRelation::BestMatch)));
+    assert_eq!(
+        rows[3..]
+            .iter()
+            .map(|row| session.matches[&row.stable_id].clone())
+            .collect::<Vec<_>>(),
+        protected
     );
 }
 
@@ -6892,7 +7290,7 @@ fn collection_preview_marginal_matches_count_ambiguity_conversion() {
     }
     candidate.total_tracks = candidate.matching.track_uris.len() as u32;
     candidate.track_numbers = (1..=candidate.total_tracks).map(Some).collect();
-    candidate.track_durations = vec![180; candidate.total_tracks as usize];
+    candidate.matching.track_durations = vec![180; candidate.total_tracks as usize];
     session.collection_album_matches.insert(
         1,
         CollectionAlbumMatchState {
@@ -7605,6 +8003,55 @@ fn selected_count_mode_is_session_scoped_across_pages_and_persisted() {
 }
 
 #[test]
+fn historical_target_counts_preserve_release_fallback_and_collection_boundaries() {
+    let (mut session, rows, _) = selected_release_session();
+    let previous = rows[1].stable_id.clone();
+    session
+        .matches
+        .get_mut(&previous)
+        .unwrap()
+        .track_matches
+        .clear();
+    session.decisions.insert(
+        previous.clone(),
+        RowDecision {
+            status: RowStatus::Done,
+            excluded: false,
+        },
+    );
+    session
+        .page_options
+        .get_mut(&batch_options_key(1))
+        .unwrap()
+        .selected_track_ids
+        .insert(previous);
+    let targets = BTreeMap::from([
+        ("spotify:track:manual".to_owned(), vec![&rows[0]]),
+        ("spotify:track:two".to_owned(), Vec::new()),
+    ]);
+    let expected = BTreeMap::from([
+        ("spotify:track:manual".to_owned(), 1),
+        ("spotify:track:two".to_owned(), 1),
+    ]);
+    assert_eq!(historical_counts_for_targets(&session, &targets), expected);
+    // Legacy batches derive their shape from source rows.
+    session.batches[0].collection_shaped = None;
+    assert_eq!(historical_counts_for_targets(&session, &targets), expected);
+    // Explicit conversion overrides the original release shape: collection
+    // history must not manufacture a track mapping from an album candidate.
+    session
+        .collection_album_matches
+        .insert(1, CollectionAlbumMatchState::default());
+    assert_eq!(
+        historical_counts_for_targets(&session, &targets),
+        BTreeMap::from([
+            ("spotify:track:manual".to_owned(), 1),
+            ("spotify:track:two".to_owned(), 0),
+        ])
+    );
+}
+
+#[test]
 fn spotify_share_links_and_selected_album_tracks_remain_reviewable() {
     for value in [
         "spotify:album:Album123",
@@ -7654,6 +8101,7 @@ fn spotify_share_links_and_selected_album_tracks_remain_reviewable() {
                 track_names: vec!["Different movement".into()],
                 track_artists: vec!["Orchestra".into()],
                 track_albums: vec!["Exact recording".into()],
+                track_durations: Vec::new(),
                 relation: None,
             }],
             track_matches: BTreeMap::new(),
@@ -7693,6 +8141,7 @@ fn album_title_coverage_selects_freedom_and_tron_style_matches() {
         track_names: names,
         track_artists: Vec::new(),
         track_albums: Vec::new(),
+        track_durations: Vec::new(),
         relation: None,
     };
 
@@ -7852,6 +8301,7 @@ fn album_title_and_track_coverage_outweigh_compilation_artist_credit() {
         track_names: tracks,
         track_artists: Vec::new(),
         track_albums: Vec::new(),
+        track_durations: Vec::new(),
         relation: None,
     }];
 
@@ -7892,6 +8342,7 @@ fn cached_supported_album_is_selected_without_another_spotify_search() {
         track_names: vec!["The Offering".into(), "The Call".into()],
         track_artists: Vec::new(),
         track_albums: Vec::new(),
+        track_durations: Vec::new(),
         relation: Some(AlbumRelation::SameSongs),
     };
     let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1);
@@ -7969,6 +8420,7 @@ fn collection_candidate(uri: &str, name: &str, artist: &str, in_library: bool) -
         track_names: vec![name.into()],
         track_artists: vec![artist.into()],
         track_albums: vec!["Release".into()],
+        track_durations: Vec::new(),
         relation: None,
     }
 }
@@ -8201,7 +8653,7 @@ fn collection_candidate_relations_accept_source_variant_titles() {
 }
 
 #[test]
-fn collection_candidates_break_relation_ties_by_title_token_overlap() {
+fn collection_candidates_preserve_provider_order_while_labeling_matches() {
     let row = collection_row("Artist", "Last Rose of Summer Walking in the Air");
     let mut candidates = vec![
         collection_candidate("spotify:track:short", "Walking in the Air", "Artist", false),
@@ -8213,7 +8665,31 @@ fn collection_candidates_break_relation_ties_by_title_token_overlap() {
         ),
     ];
     rank_collection_candidates(&row, &mut candidates, &CollectionMembership::default());
-    assert_eq!(candidates[0].uri, "spotify:track:full");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.uri.as_str())
+            .collect::<Vec<_>>(),
+        vec!["spotify:track:short", "spotify:track:full"]
+    );
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate.relation == Some(AlbumRelation::SameSongs)));
+    let full = candidates.pop().unwrap();
+    let mut crowded = (0..10)
+        .map(|index| {
+            collection_candidate(
+                &format!("spotify:track:{index}"),
+                "Unrelated",
+                "Artist",
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    crowded.push(full);
+    rank_collection_candidates(&row, &mut crowded, &CollectionMembership::default());
+    assert_eq!(crowded.len(), 10);
+    assert_eq!(crowded.last().unwrap().uri, "spotify:track:full");
 }
 
 #[test]
@@ -9412,6 +9888,7 @@ async fn queue_reports_exact_entity_counts_for_current_page_choices() {
                         track_names: vec![row.track.clone()],
                         track_artists: vec!["Artist".into()],
                         track_albums: vec!["Album".into()],
+                        track_durations: Vec::new(),
                         relation: Some(AlbumRelation::BestMatch),
                     }],
                     track_matches,
@@ -9532,6 +10009,7 @@ fn exact_album_match_defaults_to_whole_album_until_user_overrides_it() {
         track_names: vec!["One".into(), "Two".into()],
         track_artists: vec!["Artist".into(), "Artist".into()],
         track_albums: vec!["Album".into(), "Album".into()],
+        track_durations: Vec::new(),
         relation: Some(AlbumRelation::BestMatch),
     };
     for (row, target) in session
@@ -9588,6 +10066,27 @@ fn exact_album_match_defaults_to_whole_album_until_user_overrides_it() {
         },
     );
     assert!(!session.options_for_batch(1, "Artist", "Album").whole_album);
+
+    session
+        .page_options
+        .get_mut(&batch_options_key(1))
+        .unwrap()
+        .whole_album = true;
+    for selected in [Some("spotify:track:one"), None] {
+        for result in session.matches.values_mut() {
+            result.selected_uri = selected.map(str::to_owned);
+        }
+        assert!(!session.options_for_batch(1, "Artist", "Album").whole_album);
+        let page = page_view(
+            Some(&session),
+            &LastFmSyncState::default(),
+            1,
+            "Artist",
+            "Album",
+        )
+        .unwrap();
+        assert!(!page.options.whole_album);
+    }
 }
 
 #[tokio::test]
@@ -9632,6 +10131,7 @@ async fn collection_whole_album_guard_covers_persist_and_apply_boundaries() {
                     track_names: vec![row.track.clone()],
                     track_artists: vec!["Artist".into()],
                     track_albums: vec![String::new()],
+                    track_durations: Vec::new(),
                     relation: Some(AlbumRelation::BestMatch),
                     ..AlbumCandidate::default()
                 }],
@@ -9690,6 +10190,7 @@ async fn collection_whole_album_guard_covers_persist_and_apply_boundaries() {
                     track_names: vec!["One".into(), "Two".into()],
                     track_artists: vec!["Artist".into(), "Artist".into()],
                     track_albums: vec!["Singles".into(), "Singles".into()],
+                    track_durations: Vec::new(),
                     relation: Some(AlbumRelation::BestMatch),
                     ..AlbumCandidate::default()
                 }],
@@ -9756,6 +10257,7 @@ async fn selecting_an_album_candidate_remaps_every_related_source_track() {
                 track_names: vec![row.track.clone()],
                 track_artists: vec!["Artist".into()],
                 track_albums: vec!["Old release".into()],
+                track_durations: Vec::new(),
                 relation: Some(AlbumRelation::BestMatch),
             },
             AlbumCandidate {
@@ -9767,6 +10269,7 @@ async fn selecting_an_album_candidate_remaps_every_related_source_track() {
                 track_names: vec![row.track.clone()],
                 track_artists: vec!["Artist".into()],
                 track_albums: vec!["Alternate release".into()],
+                track_durations: Vec::new(),
                 relation: Some(AlbumRelation::BestMatch),
             },
         ];
@@ -9780,6 +10283,7 @@ async fn selecting_an_album_candidate_remaps_every_related_source_track() {
                 track_names: vec![row.track.clone()],
                 track_artists: vec!["Artist".into()],
                 track_albums: vec!["The Classics".into()],
+                track_durations: Vec::new(),
                 relation: None,
             });
         }
@@ -9876,6 +10380,7 @@ fn picker_candidate_refresh_preserves_selection_until_explicit_choice() {
         track_names: vec!["One".into()],
         track_artists: vec!["Artist".into()],
         track_albums: vec!["Old release".into()],
+        track_durations: Vec::new(),
         relation: Some(AlbumRelation::BestMatch),
     };
     let previous = MatchResult {
@@ -9898,6 +10403,7 @@ fn picker_candidate_refresh_preserves_selection_until_explicit_choice() {
             track_names: vec!["One".into()],
             track_artists: vec!["Artist".into()],
             track_albums: vec!["Release".into()],
+            track_durations: Vec::new(),
             relation: Some(AlbumRelation::BestMatch),
         }],
         "One",
@@ -9961,6 +10467,7 @@ fn picker_candidate_refresh_preserves_selection_until_explicit_choice() {
             track_names: vec!["One".into()],
             track_artists: vec!["Artist".into()],
             track_albums: vec!["New release".into()],
+            track_durations: Vec::new(),
             relation: Some(AlbumRelation::BestMatch),
         }],
         "One",
@@ -11003,7 +11510,19 @@ async fn application_seam_rejects_account_mismatch_before_provider_resolution() 
 #[tokio::test]
 async fn prepared_import_reads_use_cached_state_without_provider_calls_or_writes() {
     let directory = tempfile::tempdir().unwrap();
-    let (_, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+    let mut library = Library::new();
+    let track_id = library.add(retune_core::model::NewTrack {
+        uri: "spotify:track:one-0".into(),
+        cat: "Christmas".into(),
+        art: "Artist".into(),
+        alb: "one".into(),
+        ..Default::default()
+    });
+    library
+        .set_track_rating(track_id, retune_core::Rating::new(4))
+        .unwrap();
+    library.merge_history_absolute("spotify:track:one-0", Some(42), None, None);
+    let (_, service, state) = test_app_state(directory.path(), library, &[]);
     let row = collection_test_row("One");
     let mut session = collection_session(std::slice::from_ref(&row));
     let batch_id = session.batches[0].page;
@@ -11014,6 +11533,17 @@ async fn prepared_import_reads_use_cached_state_without_provider_calls_or_writes
             selected_album_uris: vec![album.matching.uri.clone()],
             cached_candidates: vec![album],
             ..CollectionAlbumMatchState::default()
+        },
+    );
+    session.matches.insert(
+        row.stable_id.clone(),
+        MatchResult {
+            source_id: row.stable_id.clone(),
+            search_term: String::new(),
+            confidence: Some(Confidence::Exact),
+            selected_uri: Some("spotify:track:one-0".into()),
+            candidates: vec![exact_collection_track(&row, "spotify:track:one-0")],
+            track_matches: BTreeMap::from([(row.stable_id.clone(), "spotify:track:one-0".into())]),
         },
     );
     service.save(session).await.unwrap();
@@ -11062,7 +11592,15 @@ async fn prepared_import_reads_use_cached_state_without_provider_calls_or_writes
         })
         .await
         .unwrap();
-    assert!(page.is_some());
+    let page = page.unwrap();
+    assert_eq!(page.suggested_genre.as_deref(), Some("Christmas"));
+    assert_eq!(
+        page.library_matches["spotify:track:one-0"].play_count,
+        Some(42)
+    );
+    assert_eq!(page.library_matches["spotify:track:one-0"].rating, Some(4));
+    assert!(page.library_matches["spotify:track:one-0"].in_library);
+    assert!(!page.library_matches["spotify:album:one"].in_library);
     assert!(!changed);
     assert!(!network_search);
     assert_eq!(provider_calls.load(std::sync::atomic::Ordering::Relaxed), 0);

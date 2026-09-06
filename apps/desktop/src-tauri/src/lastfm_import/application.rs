@@ -63,6 +63,15 @@ where
         .await
     }
 
+    fn with_library_metadata(&self, mut page: Option<ImportPageView>) -> Option<ImportPageView> {
+        if let Some(page) = &mut page {
+            let membership = self.membership.snapshot();
+            let library = self.library.lock().expect("library mutex poisoned");
+            super::review::project_library_matches(page, &library, &membership);
+        }
+        page
+    }
+
     pub(super) async fn state(&self, now: u64) -> Result<ImportStateView, String> {
         if self.service.has_session().await {
             let _ = self.readable().await?;
@@ -121,6 +130,7 @@ where
             key,
         )
         .await
+        .map(|(page, changed, searched)| (self.with_library_metadata(page), changed, searched))
     }
 
     pub(super) async fn combine_batches(
@@ -144,7 +154,7 @@ where
             .service
             .combine_batches(&owner.lastfm_username, spotify_account_id, batch_ids)
             .await?;
-        Ok(self.service.page(batch_id, &artist, &album).await)
+        Ok(self.with_library_metadata(self.service.page(batch_id, &artist, &album).await))
     }
 
     pub(super) async fn review(
@@ -232,7 +242,7 @@ where
             &selections,
         )
         .await
-        .map(|(page, _)| page)
+        .map(|(page, _)| self.with_library_metadata(page))
     }
 
     pub(super) async fn search_collection_albums(
@@ -280,7 +290,7 @@ where
             add,
         )
         .await
-        .map(|(page, _)| page)
+        .map(|(page, _)| self.with_library_metadata(page))
     }
 
     pub(super) async fn remove_collection_album(
@@ -301,7 +311,7 @@ where
             uri,
         )
         .await
-        .map(|(page, _)| page)
+        .map(|(page, _)| self.with_library_metadata(page))
     }
 
     pub(super) async fn set_collection_album_import(
@@ -323,7 +333,7 @@ where
             enabled,
         )
         .await
-        .map(|(page, _)| page)
+        .map(|(page, _)| self.with_library_metadata(page))
     }
 
     pub(super) async fn change_track(
@@ -346,7 +356,7 @@ where
         .await?;
         super::clear_search_quota(self.cooldown_store, source)?;
         Ok((
-            page,
+            self.with_library_metadata(page),
             source == retune_spotify::client::SearchSource::Network,
         ))
     }
@@ -389,7 +399,7 @@ where
             key,
         )
         .await
-        .map(|(page, _)| page)
+        .map(|(page, _)| self.with_library_metadata(page))
     }
 
     pub(super) async fn start_import<Spawn, Changed>(

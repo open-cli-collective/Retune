@@ -5,10 +5,10 @@ import './App.css'
 import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
-import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
+import { AlbumRatingStrip, BrowserPane, TrackCell, TrackContextMenu, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, LastFmImportState, PlaybackOrigin, PlaybackTrack, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, SettingsPatch, Source, SpotifySyncStatus, Theme, Track } from './types.ts'
-import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
+import { ArtworkLightbox, CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
@@ -177,6 +177,7 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const [artworkOpen, setArtworkOpen] = useState(false)
+  const [playingMenu, setPlayingMenu] = useState<{ x: number; y: number; uri: string; name: string; trackId?: number }>()
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
@@ -267,6 +268,14 @@ function App() {
     setBrowserPanes(browserPanes)
     if (!browserPanes[facet]) setActivePane('track')
   }, [setBrowserPanes, state.settings.browserPanes])
+  const openSingleInfo = (id: number) => {
+    cancelTrackInfoLoad(infoGeneration)
+    dispatch({ type: 'info' })
+    void loadCurrentGeneration(infoGeneration,
+      () => libraryGateway.getTrack(id),
+      (track) => dispatch({ type: 'info', info: { kind: 'single', track } }),
+      fail)
+  }
   const openInfo = (id?: number) => {
     cancelTrackInfoLoad(infoGeneration)
     if (selectedTracks.length > 1) {
@@ -275,11 +284,7 @@ function App() {
     }
     const target = id ?? selectedTracks[0]?.id
     if (target === undefined) return
-    dispatch({ type: 'info' })
-    void loadCurrentGeneration(infoGeneration,
-      () => libraryGateway.getTrack(target),
-      (track) => dispatch({ type: 'info', info: { kind: 'single', track } }),
-      fail)
+    openSingleInfo(target)
   }
   const closeInfo = () => {
     cancelTrackInfoLoad(infoGeneration)
@@ -430,7 +435,7 @@ function App() {
   const rate = (key: string, mutation: () => Promise<unknown>) => {
     void loadCurrentGeneration(entityRequestGeneration(ratingGenerations.current, key), mutation, () => dispatch({ type: 'refresh' }), fail)
   }
-  const navigateSpotify = (track: Track, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
+  const navigateSpotify = (track: Pick<Track, 'uri'>, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
     .then((entry) => dispatch({ type: 'spotifyNavigate', entry }))
     .catch(fail)
   const setZoom = useCallback((zoom: number) => {
@@ -643,7 +648,23 @@ function App() {
         onSeek={player.seek}
         onOrigin={showPlayingOrigin}
         onArtwork={() => setArtworkOpen(true)}
+        onContextMenu={(event) => {
+          const uri = state.playing?.external ? state.playing.uri : playingTrack?.uri
+          if (!uri) return
+          event.preventDefault()
+          const id = state.playing?.external ? undefined : playingTrack?.id
+          setPlayingMenu({ x: event.clientX, y: event.clientY, uri,
+            name: state.playing?.external ? state.playing.name ?? 'Unknown Track' : playingTrack!.name,
+            trackId: id !== undefined && id < SYNTHETIC_BASE ? id : undefined,
+          })
+        }}
       />
+      {playingMenu && <TrackContextMenu x={playingMenu.x} y={playingMenu.y} onClose={() => setPlayingMenu(undefined)}
+        onPlaylist={() => setPlaylistSubject({ kind: 'tracks', label: `Track · ${playingMenu.name}`, uris: [playingMenu.uri] })}
+        onGoToAlbum={playingMenu.uri.startsWith('spotify:track:') ? () => navigateSpotify(playingMenu, 'album') : undefined}
+        onGoToArtist={playingMenu.uri.startsWith('spotify:track:') ? () => navigateSpotify(playingMenu, 'artist') : undefined}
+        onInfo={playingMenu.trackId === undefined ? undefined : () => openSingleInfo(playingMenu.trackId!)}
+      />}
       <div className="body-grid">
         <Sidebar
           state={{ ...state, view }}
@@ -855,25 +876,22 @@ function ArtworkPanel({ uri, name, onClose }: { uri: string; name: string; onClo
         {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span aria-hidden="true">♪</span>}
       </button>
     </div>
-    {expanded && <ArtworkLightbox uri={uri} name={name} onClose={() => setExpanded(false)} />}
+    {expanded && <TrackArtworkLightbox uri={uri} name={name} onClose={() => setExpanded(false)} />}
   </>
 }
 
-function ArtworkLightbox({ uri, name, onClose }: { uri: string; name: string; onClose: () => void }) {
+function TrackArtworkLightbox({ uri, name, onClose }: { uri: string; name: string; onClose: () => void }) {
   const artwork = useArtwork(uri, 640)
-  return <ModalDialog className="artwork-lightbox" labelledBy="artwork-lightbox-title" onCancel={onClose} closeOnBackdrop>
-    <h2 id="artwork-lightbox-title" className="visually-hidden">Artwork for {name}</h2>
-    <button type="button" className="artwork-lightbox-close" aria-label="Close artwork" onClick={onClose}>×</button>
-    {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span className="artwork-placeholder" aria-hidden="true">♪</span>}
-  </ModalDialog>
+  return <ArtworkLightbox artwork={artwork} name={name} onClose={onClose} />
 }
 
-export function TransportBar({ playing, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork }: {
+export function TransportBar({ playing, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork, onContextMenu }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; queryReset?: number; scope: State['scope']
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onOrigin: () => void; onArtwork: () => void
+  onContextMenu?: React.MouseEventHandler<HTMLDivElement>
 }) {
   const [queryDraft, setQueryDraft] = useState(query)
   const queryTimer = useRef(0)
@@ -895,7 +913,7 @@ export function TransportBar({ playing, track, query, queryReset, scope, volume,
   } : track
   const duration = shown?.durationSecs ?? 0
   const uri = playing?.external ? playing.uri : track?.uri
-  const artwork = useArtwork(uri, 64)
+  const artwork = useArtwork(uri, 128)
   return <header className="transport">
     <div className="transport-controls">
       <div className="transport-buttons">
@@ -911,6 +929,7 @@ export function TransportBar({ playing, track, query, queryReset, scope, volume,
       tabIndex={playing?.origin ? 0 : undefined}
       aria-label={playing?.origin ? 'Show playing source' : undefined}
       title={playing?.origin ? 'Show playing source' : undefined}
+      onContextMenu={onContextMenu}
       onClick={(event) => {
         if (!playing?.origin || (event.target as Element).closest('input')) return
         onOrigin()

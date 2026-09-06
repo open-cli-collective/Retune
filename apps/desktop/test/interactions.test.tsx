@@ -3,7 +3,8 @@
 import { act, createRef, Profiler, StrictMode, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ArtistPageView, BrowseView, LastFmImportState, LastFmState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track } from '../src/types.ts'
+import type { AlbumPageView, ArtistPageView, BrowseView, LastFmImportState, LastFmState, PlayerState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track } from '../src/types.ts'
+import type { MainEvent } from '../src/ipc.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
 const nativeEventHandlers = vi.hoisted(() => new Map<string, (payload: unknown) => void>())
@@ -317,6 +318,187 @@ describe('mounted native interaction boundaries', () => {
     expect(onSeek).toHaveBeenCalledWith(42)
   })
 
+  it('opens album artwork in the shared lightbox without refetching and restores focus when dismissed', async () => {
+    const page: AlbumPageView = {
+      uri: 'spotify:album:one', name: 'One', artist: 'Artist', artistId: 'artist', albumType: 'Album', year: '2026',
+      imageUrl: 'https://example.test/art-640.jpg', totalDurationSecs: 180, savedAlbum: false, contentComplete: false,
+      addedAt: null, albumRating: null,
+      tracks: [{ uri: 'spotify:track:one', name: 'One', trackNo: 1, durationSecs: 180, enabled: true, trackId: null, savedIndividually: false, rating: null }],
+    }
+    invokeMock.mockImplementation(async (command) => command === 'spotify_album_page' ? page : null)
+    const view = await render(<SpotifySearch query="" searching={false} results={null} navigation={{ kind: 'album', uri: page.uri }} playingUri={null}
+      onAdd={vi.fn(async () => {})} onRemove={vi.fn(async () => {})} onAddTrack={vi.fn(async () => {})} onRemoveTrack={vi.fn(async () => {})}
+      onPlay={vi.fn()} onPlaylist={vi.fn()} onClose={vi.fn()} onError={vi.fn()} />)
+    await waitFor(() => expect(view.querySelector('button[aria-label="Enlarge artwork for One"]')).not.toBeNull())
+    const artwork = view.querySelector<HTMLButtonElement>('button[aria-label="Enlarge artwork for One"]')!
+    expect(artwork.querySelector('img')?.src).toBe(page.imageUrl)
+    artwork.focus()
+    const before = invokeMock.mock.calls.length
+    for (const dismissal of ['escape', 'button', 'backdrop']) {
+      await act(async () => artwork.click())
+      const dialog = view.querySelector<HTMLElement>('.artwork-lightbox[role="dialog"]')!
+      expect(dialog.querySelector('img')?.src).toBe(page.imageUrl)
+      expect(dialog.querySelector('img')?.alt).toBe('One album artwork')
+      expect(document.activeElement).toBe(dialog.querySelector('button[aria-label="Close artwork"]'))
+      await act(async () => {
+        if (dismissal === 'escape') key(dialog, 'Escape')
+        else if (dismissal === 'button') dialog.querySelector<HTMLButtonElement>('button[aria-label="Close artwork"]')!.click()
+        else dialog.parentElement!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      })
+      expect(view.querySelector('[role="dialog"]')).toBeNull()
+      expect(document.activeElement).toBe(artwork)
+    }
+    expect(invokeMock.mock.calls).toHaveLength(before)
+  })
+
+  it('shares track-list actions with now playing and keeps the clicked track despite selection or playback changes', async () => {
+    const tracks = [track(1, 'Playing'), track(2, 'Selected'), track(3, 'Also Selected'), { ...track(4, 'Local'), uri: 'file:///local.mp3', isLocal: true }]
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: tracks.length, totalSecs: 720, perSource: { music: tracks.length, podcasts: 0, audiobooks: 0 } },
+    }
+    let channel: { onmessage: (event: MainEvent) => void }
+    const playerState = (index: number, overrides: Partial<PlayerState> = {}): PlayerState => ({
+      trackId: tracks[index].id, uri: tracks[index].uri, elapsed: 10, isPlaying: true, external: false,
+      name: null, art: null, alb: null, durationSecs: null, shuffle: false, ...overrides,
+    })
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'browse') return browse
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return []
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'subscribe_main_events') { channel = args?.channel as typeof channel; return 1 }
+      if (command === 'play_tracks') {
+        channel.onmessage({ type: 'playerState', payload: playerState(Number(args?.startIndex)) })
+        return 'started'
+      }
+      if (command === 'get_track') return { ...tracks[Number(args?.id) - 1], source: 'music', localPath: null, origCat: null, inheritedRating: null, genres: [] }
+      if (command === 'resolve_spotify_track_destination') return new Promise(() => {})
+      return null
+    })
+    const view = await render(<App />)
+    await waitFor(() => expect(view.querySelector('[data-track-id="1"]')).not.toBeNull())
+    const contextMenu = async (selector: string) => act(async () => {
+      view.querySelector<HTMLElement>(selector)!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 250, clientY: 35 }))
+    })
+    const menuItems = () => [...view.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    await contextMenu('.lcd')
+    expect(menuItems()).toHaveLength(0)
+    await act(async () => view.querySelector('[data-track-id="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    await waitFor(() => expect(view.querySelector('.lcd .marquee')?.textContent).toBe('Playing'))
+    await act(async () => {
+      view.querySelector('[data-track-id="2"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      view.querySelector('[data-track-id="3"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }))
+    })
+    expect(view.querySelectorAll('.track-row.selected')).toHaveLength(2)
+    await contextMenu('[data-track-id="2"]')
+    const listActions = menuItems().map((item) => item.textContent)
+    await act(async () => menuItems()[0].click())
+    expect(invokeMock).toHaveBeenCalledWith('playlists_list', { uris: [tracks[1].uri, tracks[2].uri] })
+    await act(async () => key(view.querySelector('[role="dialog"]')!, 'Escape'))
+    await contextMenu('.lcd-artwork')
+    expect(menuItems().map((item) => item.textContent)).toEqual(listActions)
+    expect(listActions).toEqual(['Add to Playlist…', 'View album in Spotify', 'View artist albums in Spotify', 'Get Info'])
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(1) }))
+    await act(async () => menuItems()[3].click())
+    expect(invokeMock).toHaveBeenCalledWith('get_track', { id: 1 })
+    await waitFor(() => expect([...view.querySelectorAll<HTMLLabelElement>('.get-info label')].find((label) => label.textContent === 'Name')?.querySelector('input')?.value).toBe('Playing'))
+    expect(view.querySelector('#multiple-item-information-title')).toBeNull()
+    await act(async () => key(view.querySelector('[role="dialog"]')!, 'Escape'))
+
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0) }))
+    await contextMenu('.lcd-copy')
+    await act(async () => menuItems()[0].click())
+    expect(invokeMock).toHaveBeenCalledWith('playlists_list', { uris: [tracks[0].uri] })
+    await act(async () => key(view.querySelector('[role="dialog"]')!, 'Escape'))
+    for (const [index, destination] of [[1, 'album'], [2, 'artist']] as const) {
+      await contextMenu('.lcd')
+      await act(async () => menuItems()[index].click())
+      expect(invokeMock).toHaveBeenCalledWith('resolve_spotify_track_destination', { uri: tracks[0].uri, destination })
+    }
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(3) }))
+    await contextMenu('.lcd')
+    expect(menuItems().map((item) => item.disabled)).toEqual([false, true, true, false])
+    await act(async () => key(menuItems()[0], 'Escape'))
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { external: true, uri: 'spotify:track:external', name: 'External' }) }))
+    await contextMenu('.lcd')
+    expect(menuItems()[3].disabled).toBe(true)
+    await act(async () => menuItems()[0].click())
+    expect(invokeMock).toHaveBeenCalledWith('playlists_list', { uris: ['spotify:track:external'] })
+  })
+
+  it('clears whole-album mode when a release loses its album selection, including stale saved options', async () => {
+    const fixtures = importerFixtures()
+    let page = { ...fixtures.pages.get(1)!, options: { ...fixtures.pages.get(1)!.options, wholeAlbum: true } }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    const wholeAlbum = () => view.querySelector<HTMLInputElement>('input[aria-label="Import whole album"]')!
+    await waitFor(() => expect(wholeAlbum()?.checked).toBe(true))
+    page = { ...page, rows: page.rows.map((row) => ({ ...row, matchResult: { ...row.matchResult, selectedUri: 'spotify:track:one', trackMatches: {}, candidates: row.matchResult.candidates.map((candidate) => ({ ...candidate, uri: 'spotify:track:one', trackUris: ['spotify:track:one'] })) } })) }
+    await emitNativeEvent('lastfm-import-changed', fixtures.state)
+    await waitFor(() => expect(wholeAlbum().checked).toBe(false))
+    expect(wholeAlbum().disabled).toBe(true)
+    expect(view.querySelector('.import-exclusion-note')).toBeNull()
+    const before = invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_options').length
+    await act(async () => key(view.querySelector('[data-import-nav="source"][data-import-row="0"]')!, ' '))
+    expect(wholeAlbum().checked).toBe(false)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_options')).toHaveLength(before)
+    await act(async () => [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Accept Changes')!.click())
+    expect(invokeMock.mock.calls.find(([command]) => command === 'lastfm_import_apply')?.[1]).toMatchObject({ options: { wholeAlbum: false } })
+  })
+
+  it('keeps review interactive while whole-album options save and orders pending writes before acceptance', async () => {
+    const fixtures = importerFixtures()
+    const page = { ...fixtures.pages.get(1)!, options: { ...fixtures.pages.get(1)!.options, wholeAlbum: true } }
+    const saves = [deferred<void>(), deferred<void>(), deferred<void>()]
+    let saveIndex = 0
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: fixtures.queue, total: 2, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'lastfm_import_options') return saves[saveIndex++].promise
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector<HTMLInputElement>('input[aria-label="Import whole album"]')?.checked).toBe(true))
+    const checkbox = view.querySelector<HTMLInputElement>('input[aria-label="Import whole album"]')!
+    const pageReads = () => invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_page').length
+    const before = pageReads()
+    for (const expected of [false, true, false]) {
+      await act(async () => checkbox.click())
+      expect(checkbox.checked).toBe(expected)
+      expect(checkbox.disabled).toBe(false)
+      expect([...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')].every((button) => !button.disabled)).toBe(true)
+      expect(view.querySelector('.import-workspace')?.getAttribute('aria-busy')).toBe('false')
+    }
+    expect(saveIndex).toBe(1)
+    await act(async () => [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Accept Changes')!.click())
+    expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_apply')).toBe(false)
+    await act(async () => saves[0].resolve())
+    await act(async () => saves[1].resolve())
+    expect(pageReads()).toBeGreaterThan(before)
+    expect(checkbox.checked).toBe(false)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'lastfm_import_options').map(([, args]) => (args!.options as { wholeAlbum: boolean }).wholeAlbum)).toEqual([false, true, false])
+    await act(async () => saves[2].resolve())
+    expect(invokeMock.mock.calls.find(([command]) => command === 'lastfm_import_apply')?.[1]).toMatchObject({ options: { wholeAlbum: false } })
+  })
+
   it('moves and activates library rows from the keyboard and recovers roving focus after refresh', async () => {
     const tracks = [track(1, 'One'), track(2, 'Two')]
     const onSelect = vi.fn()
@@ -383,7 +565,7 @@ describe('mounted native interaction boundaries', () => {
     const { state, queue, pages } = importerFixtures()
     invokeMock.mockImplementation(async (command, args) => {
       if (command === 'lastfm_import_state') return state
-      if (command === 'lastfm_import_queue') return { cursor: 0, items: queue, total: queue.length, nextCursor: null }
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: queue.map((item) => item.page === 2 ? { ...item, status: 'skipped' } : item), total: queue.length, nextCursor: null }
       if (command === 'lastfm_import_page') return pages.get(Number(args?.batchId))
       if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
       if (command === 'get_appearance') return { theme: 'light' }
@@ -396,6 +578,10 @@ describe('mounted native interaction boundaries', () => {
     let queueRows = [...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')]
     expect(queueRows[0].getAttribute('aria-label')).toContain('Batch 1 of 2')
     expect(queueRows[0].getAttribute('aria-current')).toBe('true')
+    expect(queueRows[1].getAttribute('aria-label')).toContain('skipped')
+    expect(queueRows[1].querySelector('.import-queue-copy small')?.textContent).toBe('Artist · 1 tracks · skipped')
+    expect(view.querySelectorAll('.import-queue-select input[type="checkbox"]')).toHaveLength(2)
+    expect(view.querySelector('.import-status-dot')).toBeNull()
     expect(invokeMock.mock.calls.some(([command, args]) => command === 'lastfm_import_page' && args?.batchId === 2)).toBe(true)
 
     const filter = view.querySelector<HTMLInputElement>('input[aria-label="Filter import queue"]')!
@@ -432,6 +618,54 @@ describe('mounted native interaction boundaries', () => {
     expect(releaseOneLoads()).toBe(beforeApply)
   })
 
+  it('shows preparation progress until the initial queue and batch finish loading', async () => {
+    const fixtures = importerFixtures()
+    const state = deferred<unknown>()
+    const page = deferred<unknown>()
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return state.promise
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page.promise
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    expect(view.textContent).toContain('Loading Last.fm tracks and preparing batches…')
+    expect(view.querySelector('.import-intent-checks')).toBeNull()
+    await act(async () => state.resolve(fixtures.state))
+    expect(view.querySelector('.import-spinner')).not.toBeNull()
+    expect(view.textContent).not.toContain('Import your complete Last.fm history')
+    await act(async () => page.resolve(fixtures.pages.get(1)))
+    await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toBe('Release One'))
+    expect(view.querySelector('.import-spinner')).toBeNull()
+    expect(invokeMock.mock.calls.some(([command]) => command === 'start_lastfm_import')).toBe(false)
+  })
+
+  it.each(['downloading', 'aggregating', 'disconnected', 'error'])('keeps setup controls out of the %s state', async (phase) => {
+    const fixtures = importerFixtures()
+    let fail = phase === 'error'
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') {
+        if (fail) throw new Error('Could not read import state')
+        return { ...fixtures.state, phase: phase === 'disconnected' ? null : phase === 'error' ? 'done' : phase, username: phase === 'disconnected' ? null : fixtures.state.username }
+      }
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [], total: 0, nextCursor: null }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    const title = phase === 'downloading' ? 'Importing Last.fm tracks…' : phase === 'aggregating' ? 'Preparing Last.fm review batches…' : phase === 'disconnected' ? 'Last.fm isn’t connected' : 'Couldn’t load Last.fm batches'
+    await waitFor(() => expect(view.textContent).toContain(title))
+    expect(view.querySelector('.import-intent-checks')).toBeNull()
+    expect(view.textContent).not.toContain('Start import')
+    if (phase === 'error') {
+      fail = false
+      await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Try again')!.click())
+      await waitFor(() => expect(view.querySelector('.import-empty')?.textContent).toContain('Import complete'))
+    }
+  })
+
   it('retries queue pagination once when an apply changes the queue mid-load', async () => {
     const { state, queue, pages } = importerFixtures()
     const largeQueue = Array.from({ length: 1001 }, (_, index) => ({ ...queue[0], page: index + 1, album: `Release ${index + 1}` }))
@@ -465,7 +699,7 @@ describe('mounted native interaction boundaries', () => {
       rows: [...fixtures.pages.get(1)!.rows, ...fixtures.pages.get(2)!.rows],
       collection: { cachedAlbums: [], selectedAlbumUris: [], fullAlbumUris: [], wholeAlbumReady: false, coverage: { matched: 0, ambiguous: 0, unresolved: 2, selectedAlbums: [], previews: [] } },
     }
-    invokeMock.mockImplementation(async (command) => {
+    invokeMock.mockImplementation(async (command, args) => {
       if (command === 'lastfm_import_state') return fixtures.state
       if (command === 'lastfm_import_queue') return { cursor: 0, items: currentQueue, total: currentQueue.length, nextCursor: null }
       if (command === 'lastfm_import_page') return fixtures.pages.get(Number(args?.batchId))
@@ -576,6 +810,37 @@ describe('mounted native interaction boundaries', () => {
     await waitFor(() => expect(view.textContent).toContain('Durably Refreshed Release'))
     expect(view.querySelector('[role="alert"]')?.textContent).toContain('Retune received an invalid Last.fm import result.')
     expect(view.querySelector('.import-limit-reset')).toBeNull()
+  })
+
+  it('shows track-picker duration and assessments in provider order', async () => {
+    const fixtures = importerFixtures()
+    const base = fixtures.collectionPage.rows[0]
+    const candidates = [
+      { name: 'Miracle - Original Mix', uri: 'spotify:track:z', relation: 'same-songs', trackDurations: [368] },
+      { name: 'Miracle', uri: 'spotify:track:y', relation: 'best-match', trackDurations: [218] },
+      { name: 'Miracle (Other release)', uri: 'spotify:track:a', relation: null, trackDurations: [] },
+    ].map((candidate) => ({ ...base.matchResult.candidates[0], artist: 'Cascada', trackAlbums: ['Album'], ...candidate }))
+    const page = { ...fixtures.collectionPage, rows: [{ ...base, source: { ...base.source, artist: 'Cascada', track: 'Miracle' }, matchResult: { ...base.matchResult, selectedUri: null, trackMatches: {}, candidates } }] }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.textContent).toContain('Change Track…'))
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Change Track…')!.click())
+    const results = [...view.querySelectorAll('.import-picker-track')]
+    expect(results.map((row) => row.querySelector('strong')?.textContent)).toEqual(candidates.map((candidate) => candidate.name))
+    expect(results.map((row) => row.querySelector('time')?.textContent)).toEqual(['6:08', '3:38', '—'])
+    expect(results.map((row) => row.querySelector('em')?.textContent)).toEqual(['Likely', 'EXACT TRACK MATCH', 'Low'])
+    expect(results[2].querySelector('time')?.getAttribute('aria-label')).toBe('Duration unavailable')
+    if (process.env.RETUNE_PICKER_PREVIEW) {
+      const { writeFileSync, readFileSync } = await import('node:fs')
+      writeFileSync(process.env.RETUNE_PICKER_PREVIEW, '<!doctype html><html data-theme="light"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css', 'src/lastfmImporter.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + document.body.innerHTML + '</body></html>')
+    }
   })
 
   it('executes release conversion, collection result actions, and track-picker native controls', async () => {
@@ -712,6 +977,280 @@ describe('mounted native interaction boundaries', () => {
     await act(async () => [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Accept Changes')!.click())
     await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_apply')).toBe(true))
     expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_apply')?.[1]?.options).toEqual(expect.objectContaining({ genre: 'Shoegaze' }))
+  })
+
+  it.each([true, false])('shows live library metadata and preserves genre edits (collection=%s)', async (collection) => {
+    const fixtures = importerFixtures()
+    const base = fixtures.collectionPage
+    const album = base.collection.cachedAlbums[0]
+    const target = album.trackUris[0]
+    let page = { ...base, collection: collection ? base.collection : null,
+      rows: base.rows.map((item) => ({ ...item, matchResult: { ...item.matchResult, selectedUri: collection ? null : album.uri, candidates: [album] } })),
+      suggestedGenre: 'Christmas',
+      libraryMatches: {
+        [target]: { inLibrary: true, albumInLibrary: true, genres: ['Christmas'], playCount: 42, rating: 4 },
+        [album.uri]: { inLibrary: true, albumInLibrary: false, genres: ['Christmas'], playCount: 137, rating: 5 },
+      },
+    }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state' || command === 'lastfm_import_apply') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'genre_values') return ['Christmas', 'Rock']
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    const genre = () => view.querySelector<HTMLInputElement>('input[aria-label="Import genre"]')!
+    const accept = () => [...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Accept Changes')!
+    await waitFor(() => expect(genre()?.value).toBe('Christmas'))
+    const metadata = view.querySelector('.import-match-cell [aria-label="Track library metadata"]')!
+    expect(metadata.textContent).toContain('Track in library')
+    expect(metadata.textContent).toContain('Album in library')
+    expect(metadata.textContent).toContain('Genre: Christmas')
+    expect(metadata.textContent).toContain('42 plays in library')
+    expect(metadata.querySelector('[aria-label="4 out of 5 stars"]')).not.toBeNull()
+    const albumMetadata = view.querySelector('[aria-label="Album library metadata"]')!
+    expect(albumMetadata.textContent).toContain('137 total track plays in library')
+    expect(albumMetadata.querySelector('[aria-label="5 out of 5 stars"]')).not.toBeNull()
+    expect(view.querySelector('.import-source-cell')?.textContent).not.toContain('42 plays in library')
+    if (process.env.RETUNE_LIBRARY_PREVIEW && collection) {
+      const { writeFileSync, readFileSync } = await import('node:fs')
+      writeFileSync(process.env.RETUNE_LIBRARY_PREVIEW, '<!doctype html><html data-theme="light"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css', 'src/lastfmImporter.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + view.innerHTML + '</body></html>')
+    }
+    await act(async () => accept().click())
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_apply')).toBe(true))
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_apply')?.[1]?.options).toEqual(expect.objectContaining({ genre: 'Christmas', rating: null }))
+    page = { ...page, suggestedGenre: 'Rock', libraryMatches: { ...page.libraryMatches, [target]: { ...page.libraryMatches[target], albumInLibrary: false, rating: null, playCount: 43, genres: ['Rock'] } } }
+    await emitNativeEvent('lastfm-import-changed', null)
+    await waitFor(() => expect(genre().value).toBe('Rock'))
+    expect(view.querySelector('.import-match-cell [aria-label="Track library metadata"]')?.textContent).not.toContain('Album in library')
+    expect(view.querySelector('.import-match-cell [aria-label="4 out of 5 stars"]')).toBeNull()
+    await typeInput(genre(), 'Holiday')
+    page = { ...page, suggestedGenre: 'Jazz' }
+    await emitNativeEvent('lastfm-import-changed', null)
+    expect(genre().value).toBe('Holiday')
+    await act(async () => accept().click())
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_apply')?.[1]?.options).toEqual(expect.objectContaining({ genre: 'Holiday' }))
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(genre(), '')
+    await act(async () => genre().dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' })))
+    page = { ...page, suggestedGenre: 'Country' }
+    await emitNativeEvent('lastfm-import-changed', null)
+    expect(genre().value).toBe('')
+    await act(async () => accept().click())
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_apply')?.[1]?.options).toEqual(expect.objectContaining({ genre: null }))
+  })
+
+  it('collapses count merges into one entry and applies row actions to every contributor', async () => {
+    const fixtures = importerFixtures()
+    const base = fixtures.collectionPage.rows[0]
+    const target = base.matchResult.candidates[0].trackUris[0]
+    const rows = [111, 3, 7].map((playCount, index) => {
+      const source = { ...base.source, stableId: `merge-${index}`, track: ['Live To Love', 'Live to Love', 'Live To Love (Original)'][index], playCount }
+      return { ...base, source: { ...source, variants: [{ artist: source.artist, album: source.album, track: source.track, playCount, earliest: 10, latest: 30 }] }, matchResult: { ...base.matchResult, trackMatches: { [source.stableId]: target } } }
+    })
+    const other = { ...base, source: { ...base.source, stableId: 'other', track: 'Another song' }, matchResult: { ...base.matchResult, trackMatches: { other: target } } }
+    let page = { ...fixtures.collectionPage, rows: [...rows, other], options: { ...fixtures.collectionPage.options, selectedTrackIds: [...rows, other].map(({ source }) => source.stableId) }, fuzzyGroups: { [target]: rows.map(({ source }) => source) }, resolvedCounts: { [target]: 121 } }
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'lastfm_import_select_matches') return page
+      if (command === 'lastfm_import_options') {
+        const options = args?.options as typeof page.options
+        page = { ...page, options, fuzzyGroups: options.selectedTrackIds.length === 4 ? { [target]: rows.map(({ source }) => source) } : {} }
+        return null
+      }
+      if (command === 'lastfm_import_review') return fixtures.state
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    const button = (text: string) => [...view.querySelectorAll<HTMLButtonElement>('button')].find((entry) => entry.textContent === text)!
+    await waitFor(() => expect(view.querySelector('.import-fuzzy-panel')).not.toBeNull())
+    expect(view.querySelectorAll('.import-track-row')).toHaveLength(2)
+    expect(view.querySelectorAll('.import-track-check input')).toHaveLength(2)
+    expect(view.querySelector('.import-fuzzy-panel .import-track-copy')?.textContent).toContain('121 plays')
+    const details = view.querySelector<HTMLElement>('.import-fuzzy-merge')!
+    expect(details.hidden).toBe(false)
+    expect(details.querySelector('output')?.textContent).toContain('121 plays')
+    expect([...details.querySelectorAll('li > span:first-child')].map((entry) => entry.textContent)).toEqual(rows.map((row) => row.source.track))
+    await act(async () => button('Hide flow').click())
+    expect(details.hidden).toBe(true)
+    expect(button('Show flow').getAttribute('aria-expanded')).toBe('false')
+    expect(view.querySelectorAll('.import-track-row')).toHaveLength(2)
+    await act(async () => button('Show flow').click())
+    if (process.env.RETUNE_MERGE_PREVIEW) {
+      const { writeFileSync, readFileSync } = await import('node:fs')
+      writeFileSync(process.env.RETUNE_MERGE_PREVIEW, '<!doctype html><html data-theme="light"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css', 'src/lastfmImporter.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + view.innerHTML + '</body></html>')
+    }
+    const beforeUnmerge = invokeMock.mock.calls.length
+    await act(async () => view.querySelector<HTMLButtonElement>('[aria-label="Unmerge Live to Love"]')!.click())
+    expect(view.querySelectorAll('.import-track-row')).toHaveLength(3)
+    expect(view.querySelector('.import-fuzzy-heading')?.textContent).toContain('2 Last.fm names')
+    await act(async () => button('Merge matching rows').click())
+    await act(async () => button('Unmerge all').click())
+    expect(view.querySelectorAll('.import-track-row')).toHaveLength(4)
+    expect(view.querySelector('.import-fuzzy-panel')).toBeNull()
+    expect(invokeMock.mock.calls).toHaveLength(beforeUnmerge)
+    await act(async () => button('Merge matching rows').click())
+    const sourceCell = () => view.querySelector<HTMLElement>('.import-fuzzy-panel .import-source-cell')!
+    sourceCell().focus()
+    await act(async () => key(sourceCell(), 'ArrowDown'))
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Last.fm source Another song')
+    await act(async () => sourceCell().click())
+    expect(button('Map selected (3)…').disabled).toBe(false)
+    await act(async () => key(sourceCell(), 'e'))
+    expect(view.querySelector('[role="dialog"]')?.textContent).toContain('3')
+    await act(async () => button('Use This Track').click())
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_select_matches')).toBe(true))
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_select_matches')?.[1]).toEqual({ batchId: 1, selections: rows.map((row) => ({ id: row.source.stableId, uri: target })) })
+    await act(async () => key(sourceCell(), ' '))
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_options')).toBe(true))
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_options')?.[1]?.options).toEqual(expect.objectContaining({ selectedTrackIds: ['other'] }))
+    expect(view.querySelectorAll('.import-track-row')).toHaveLength(4)
+    for (const row of rows) {
+      await act(async () => view.querySelector<HTMLInputElement>(`input[aria-label="Include ${row.source.track}"]`)!.click())
+    }
+    await waitFor(() => expect(view.querySelectorAll('.import-track-row')).toHaveLength(2))
+    await act(async () => key(sourceCell(), 'x'))
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_review')).toBe(true))
+    expect(invokeMock.mock.calls.findLast(([command]) => command === 'lastfm_import_review')?.[1]?.ids).toEqual(rows.map((row) => row.source.stableId))
+  })
+
+  it('keeps completed, excluded, and unchecked sources outside an editable merged row', async () => {
+    const fixtures = importerFixtures()
+    const base = fixtures.collectionPage.rows[0]
+    const target = base.matchResult.candidates[0].trackUris[0]
+    const rows = ['pending-a', 'pending-b', 'done', 'excluded', 'unchecked'].map((id) => ({
+      ...base,
+      source: { ...base.source, stableId: id, track: id, variants: [{ artist: 'Artist', album: 'Album', track: id, playCount: 3, earliest: 10, latest: 30 }] },
+      decision: { status: id === 'done' ? 'done' as const : 'pending' as const, excluded: id === 'excluded' },
+      matchResult: { ...base.matchResult, trackMatches: { [id]: target } },
+    }))
+    const page = { ...fixtures.collectionPage, rows, options: { ...fixtures.collectionPage.options, selectedTrackIds: ['pending-a', 'pending-b'] }, fuzzyGroups: { [target]: rows.slice(0, 3).map(({ source }) => source) }, resolvedCounts: { [target]: 9 } }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'get_appearance') return { theme: 'light' }
+      if (command === 'genre_values') return []
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelectorAll('.import-track-row')).toHaveLength(4))
+    expect(view.querySelectorAll('.import-fuzzy-panel')).toHaveLength(1)
+    expect(view.querySelector('.import-fuzzy-heading')?.textContent).toContain('2 Last.fm names')
+    expect(view.querySelector('[data-review-status="done"]')).not.toBeNull()
+    expect(view.querySelector<HTMLInputElement>('input[aria-label="Include done"]')?.disabled).toBe(true)
+    expect(view.querySelector<HTMLInputElement>('input[aria-label="Include excluded"]')?.disabled).toBe(true)
+    expect(view.querySelector<HTMLInputElement>('input[aria-label="Include unchecked"]')?.checked).toBe(false)
+  })
+
+  it.each([true, false])('offers a chosen track as a suggestion without selecting the other row (collection=%s)', async (collection) => {
+    const fixtures = importerFixtures()
+    const base = fixtures.collectionPage.rows[0]
+    const target = 'spotify:track:chosen'
+    const candidate = { ...base.matchResult.candidates[0], uri: target, name: 'Song', artist: 'Artist', inLibrary: false, trackUris: [target], trackNames: ['Song'], trackArtists: ['Artist'], trackAlbums: ['Album'], relation: 'same-songs' }
+    const rows = ['chosen', 'near'].map((id) => ({
+      ...base,
+      source: { ...base.source, stableId: id, artist: 'Artist', track: id === 'near' ? 'Song Live' : 'Song', variants: [] },
+      matchResult: { ...base.matchResult, sourceId: id, selectedUri: id === 'chosen' ? target : null, confidence: id === 'chosen' ? 'exact' : null, trackMatches: id === 'chosen' ? { [id]: target } : {}, candidates: [{ ...candidate, relation: id === 'chosen' ? 'best-match' : 'same-songs' }] },
+    }))
+    let page = { ...fixtures.collectionPage, rows, options: { ...fixtures.collectionPage.options, selectedTrackIds: ['chosen', 'near'] }, collection: collection ? { ...fixtures.collectionPage.collection, cachedAlbums: [], selectedAlbumUris: [] } : null }
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
+      if (command === 'lastfm_import_page') return page
+      if (command === 'lastfm_import_select_match') {
+        expect(args).toEqual({ batchId: 1, id: 'near', uri: target })
+        page = { ...page, rows: page.rows.map((item) => item.source.stableId === 'near' ? { ...item, matchResult: { ...item.matchResult, selectedUri: target, trackMatches: { near: target } } } : item) }
+        return page
+      }
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.textContent).toContain('SUGGESTED'))
+    expect(view.querySelectorAll('.import-match-cell.needs-action')).toHaveLength(1)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'lastfm_import_select_match')).toBe(false)
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Use This Track')!.click())
+    await waitFor(() => expect(view.textContent).not.toContain('SUGGESTED'))
+    expect(view.querySelectorAll('.import-match-cell.needs-action')).toHaveLength(0)
+  })
+
+  it.each([false, true])('accepts from the middle and continues in the visible queue (filtered=%s)', async (filtered) => {
+    const fixtures = importerFixtures()
+    const batches = ['Release A', 'Release B', 'Unrelated', 'Release C'].map((album, index) => ({
+      ...fixtures.queue[0], page: index + 1, album, remainingPlayCount: 4 - index,
+    }))
+    let currentQueue = batches
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: currentQueue, total: currentQueue.length, nextCursor: null }
+      if (command === 'lastfm_import_page') {
+        const batch = batches.find((item) => item.page === args?.batchId)!
+        return { ...fixtures.pages.get(1)!, batchId: batch.page, album: batch.album }
+      }
+      if (command === 'lastfm_import_apply') {
+        currentQueue = currentQueue.filter((item) => item.page !== args?.batchId)
+        return fixtures.state
+      }
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toBe('Release A'))
+    if (filtered) {
+      const filter = view.querySelector<HTMLInputElement>('input[aria-label="Filter import queue"]')!
+      await typeInput(filter, 'Release')
+      await act(async () => key(filter, 'Enter'))
+    }
+    const openBatch = (title: string) => [...view.querySelectorAll<HTMLButtonElement>('[data-import-nav="queue"]')].find((button) => button.textContent?.includes(title))!
+    await act(async () => openBatch('Release B').click())
+    await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toBe('Release B'))
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Accept & Next Batch')!.click())
+    const expected = filtered ? 'Release C' : 'Unrelated'
+    await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toBe(expected))
+    expect(openBatch(expected).getAttribute('aria-current')).toBe('true')
+    expect(document.activeElement).toBe(openBatch(expected))
+    expect(view.querySelector('.import-queue-list')?.textContent).not.toContain('Release B')
+  })
+
+  it.each([false, true])('keeps acceptance safe and unlocks navigation before the next page loads (failure=%s)', async (fail) => {
+    const fixtures = importerFixtures()
+    const acknowledgement = deferred<unknown>()
+    const nextPage = deferred<unknown>()
+    let applying = false
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: fixtures.queue, total: 2, nextCursor: null }
+      if (command === 'lastfm_import_page') return applying && args?.batchId === 2 ? nextPage.promise : fixtures.pages.get(Number(args?.batchId))
+      if (command === 'lastfm_import_apply') { applying = true; await acknowledgement.promise; if (fail) throw new Error('Disk is full'); return fixtures.state }
+      if (command === 'genre_values') return []
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toBe('Release One'))
+    await act(async () => [...view.querySelectorAll('button')].find((button) => button.textContent === 'Accept & Next Batch')!.click())
+    expect(view.textContent).toContain('Saving accepted batch…')
+    expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')!.disabled).toBe(true)
+    if (fail) {
+      await act(async () => acknowledgement.resolve(null))
+      expect(view.querySelector('#import-review-title')?.textContent).toBe('Release One')
+      expect(view.textContent).toContain('Disk is full')
+    } else {
+      await act(async () => acknowledgement.resolve(fixtures.state))
+      expect(view.querySelector('#import-review-title')).toBeNull()
+      expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')!.disabled).toBe(false)
+      await act(async () => nextPage.resolve(fixtures.pages.get(2)))
+      await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toBe('Release Two'))
+    }
+    expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')!.disabled).toBe(false)
   })
 })
 

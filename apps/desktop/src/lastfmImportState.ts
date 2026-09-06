@@ -247,7 +247,8 @@ export function collectionAmbiguousChoices(
 }
 
 export function collectionSuggestion<T extends ImportCollectionSuggestionCandidate>(source: Pick<ImportSourceRow, 'stableId' | 'artist' | 'variants'>, match: (Omit<ImportCollectionSuggestionMatch, 'candidates'> & { candidates: T[] }) | null, selectedTrackUris: Iterable<string> = []): T | null {
-  if (!match || match.selectedUri || match.trackMatches[source.stableId]) return null
+  if (!match || match.selectedUri?.startsWith('spotify:track:') || match.trackMatches[source.stableId]) return null
+  if (match.candidates.some((candidate) => candidate.uri.startsWith('spotify:track:') && candidate.relation === 'best-match')) return null
   const artists = [source.artist, ...source.variants.map((variant) => variant.artist)].map(normalizeImportMatch)
   const selected = new Set(selectedTrackUris)
   const candidates = new Map(match.candidates
@@ -521,7 +522,9 @@ export function sortImportQueue(items: ImportQueueItem[], sort: ImportSort): Imp
 }
 
 export function nextRemainingImportQueue(items: ImportQueueItem[], current: ImportQueueItem | null, sort: ImportSort): ImportQueueItem | null {
-  const ordered = sortImportQueue(items, sort)
+  // A completed or excluded batch may already be hidden; retain its position for advancement.
+  const anchored = current && !items.some((item) => item.page === current.page) ? [...items, current] : items
+  const ordered = sortImportQueue(anchored, sort)
   const currentIndex = current ? ordered.findIndex((item) => item.page === current.page) : -1
   return ordered.slice(currentIndex + 1).find((item) => item.remaining) ?? ordered.slice(0, Math.max(0, currentIndex)).find((item) => item.remaining) ?? null
 }

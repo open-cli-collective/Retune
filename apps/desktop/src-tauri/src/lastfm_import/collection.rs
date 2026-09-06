@@ -54,6 +54,10 @@ pub(super) async fn album_candidates_with_source<
             track_names: tracks.iter().map(|track| track.name.clone()).collect(),
             track_artists: tracks.iter().map(|track| track.art.clone()).collect(),
             track_albums: tracks.iter().map(|track| track.alb.clone()).collect(),
+            track_durations: tracks
+                .iter()
+                .map(|track| track.duration.as_secs())
+                .collect(),
             relation: None,
         });
     }
@@ -960,6 +964,7 @@ where
                 track_names: vec![track.name],
                 track_artists: vec![artist],
                 track_albums: vec![album],
+                track_durations: vec![track.duration_ms.unwrap_or_default() / 1_000],
                 relation: None,
             }],
             retune_spotify::client::SearchSource::Cache,
@@ -981,6 +986,7 @@ where
                     track_names: vec![track.name.clone()],
                     track_artists: vec![track.artist],
                     track_albums: vec![track.alb],
+                    track_durations: vec![track.duration_secs],
                     relation: None,
                 })
                 .collect(),

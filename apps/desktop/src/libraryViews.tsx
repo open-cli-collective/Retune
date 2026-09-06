@@ -126,6 +126,18 @@ export function TrackCell({ track, column, facetTitle, playing, selected, onInfo
   return <RatingStars rating={track.rating?.stars ?? null} explicit={track.rating?.explicit} onRate={onRate} />
 }
 
+export function TrackContextMenu({ x, y, onClose, onPlaylist, onGoToAlbum, onGoToArtist, onInfo }: {
+  x: number; y: number; onClose: () => void; onPlaylist: () => void
+  onGoToAlbum?: () => void; onGoToArtist?: () => void; onInfo?: () => void
+}) {
+  return <ContextMenu x={x} y={y} onClose={onClose}>
+    <button onClick={() => { onClose(); onPlaylist() }}>Add to Playlist…</button>
+    <button disabled={!onGoToAlbum} onClick={() => { onClose(); onGoToAlbum?.() }}>View album in Spotify</button>
+    <button disabled={!onGoToArtist} onClick={() => { onClose(); onGoToArtist?.() }}>View artist albums in Spotify</button>
+    <button disabled={!onInfo} onClick={() => { onClose(); onInfo?.() }}>Get Info</button>
+  </ContextMenu>
+}
+
 export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort, onPrefix }: {
   tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
   columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: Pick<React.MouseEvent | React.KeyboardEvent, 'shiftKey' | 'metaKey' | 'ctrlKey'>) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
@@ -265,17 +277,16 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
         disabled: column === 'name',
         onChange: (checked) => onHiddenColumns(checked ? hiddenColumns.filter((hidden) => hidden !== column) : [...hiddenColumns, column]),
       }))} />
-      : <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
-        <button onClick={() => {
+      : <TrackContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}
+        onPlaylist={() => {
           const target = tracks.find((track) => track.id === menu.trackId)
           if (!target) return
           const selected = selectedIds.has(target.id) ? tracks.filter((track) => selectedIds.has(track.id)) : [target]
-          setMenu(undefined)
           onPlaylist({ kind: 'tracks', label: selected.length === 1 ? `Track · ${selected[0].name}` : `${selected.length} tracks`, uris: selected.map((track) => track.uri) })
-        }}>Add to Playlist…</button>
-        <button disabled={!menuTrack || menuTrack.isLocal} onClick={() => { setMenu(undefined); if (menuTrack) onGoToAlbum(menuTrack) }}>View album in Spotify</button>
-        <button disabled={!menuTrack || menuTrack.isLocal} onClick={() => { setMenu(undefined); if (menuTrack) onGoToArtist(menuTrack) }}>View artist albums in Spotify</button>
-        <button onClick={() => { const id = menu.trackId; setMenu(undefined); if (id !== undefined) onInfo(id) }}>Get Info</button>
-      </ContextMenu>)}
+        }}
+        onGoToAlbum={menuTrack && !menuTrack.isLocal ? () => onGoToAlbum(menuTrack) : undefined}
+        onGoToArtist={menuTrack && !menuTrack.isLocal ? () => onGoToArtist(menuTrack) : undefined}
+        onInfo={menuTrack ? () => onInfo(menuTrack.id) : undefined}
+      />)}
   </div>
 }

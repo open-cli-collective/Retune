@@ -687,6 +687,7 @@ pub(super) fn exact_album_match_for_rows(
                         .cloned()
                         .unwrap_or_else(|| album.matching.artist.clone())],
                     track_albums: vec![album.matching.name.clone()],
+                    track_durations: Vec::new(),
                     relation: None,
                 })
                 .collect::<Vec<_>>();
@@ -943,6 +944,12 @@ pub(super) fn historical_counts_for_targets(
         .flat_map(|rows| rows.iter().map(|row| row.stable_id.as_str()))
         .collect::<BTreeSet<_>>();
     let source_batches = source_batch_map(session);
+    let rows_by_id = source_row_map(session);
+    let collection_batches = review_batches_for_read(session)
+        .iter()
+        .filter(|batch| batch_is_collection_shaped(session, batch, &batch_rows(batch, &rows_by_id)))
+        .map(|batch| batch.page)
+        .collect::<BTreeSet<_>>();
     let mut relevant = BTreeMap::<String, Vec<&SourceRow>>::new();
     for row in &session.rows {
         let decision = default_decision(session, &row.stable_id);
@@ -970,7 +977,7 @@ pub(super) fn historical_counts_for_targets(
                 row,
                 source_batches
                     .get(&row.stable_id)
-                    .is_some_and(|batch_id| batch_is_collection_shaped_for_id(session, *batch_id)),
+                    .is_some_and(|batch_id| collection_batches.contains(batch_id)),
             )
         }) else {
             continue;

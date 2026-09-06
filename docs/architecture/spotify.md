@@ -203,6 +203,11 @@ Search album and track rows expose their respective exact membership as
 not saved-album membership. Local track IDs remain available for rating and
 playback even when an individual Spotify membership is absent.
 
+Album pages select artwork at least 640 pixels wide, falling back to the largest
+available image, for both the header and the shared artwork lightbox. The page
+reuses Spotify's supplied image URLs and dimensions; opening the lightbox makes
+no extra Web API request. Search rows retain their smaller thumbnails.
+
 Artist genres use an in-memory and persistent cache. Uncached artist lookups are
 paced and capped per sync. New entries remain dirty in the long-lived store and
 flush once after each sync on blocking work; partial or failed syncs keep accepted

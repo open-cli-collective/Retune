@@ -5,17 +5,18 @@ use super::matching::{
     collection_album_candidate_from_release, collection_best_title_matches,
     collection_candidate_matches_title, collection_track_candidates, ratify_collection_result,
     ratify_collection_result_with_selected_albums_and_injected, release_track_match_index,
-    remove_injected_collection_candidates, selected_match_confidence, track_search_term,
-    update_selected_release_match, without_known_source_suffix, CollectionMembership,
+    remove_injected_collection_candidates, selected_match_confidence, shared_track_candidates,
+    track_search_term, update_selected_release_match, without_known_source_suffix,
+    CollectionMembership,
 };
 use super::model::{
     AlbumCandidate, ApplyJobStatus, CollectionAlbumCandidate, CollectionAlbumCoverage,
     CollectionAlbumMatchState, CollectionAlbumPreviewCoverage, CollectionCoverage,
     CollectionMatchView, CollectionTrackMatchStatus, CollectionTrackStatus, ImportBatch,
     ImportPageItem, ImportPageView, ImportPhase, ImportQueueItem, ImportQueuePage,
-    LastFmImportSessionV2, LastFmMappings, LastFmSyncState, MatchResult, PageOptions,
-    PersistedLastFmMappings, QueueStatus, ReviewAction, ReviewApplyJob, RowDecision, RowStatus,
-    SourceRow,
+    LastFmImportSessionV2, LastFmMappings, LastFmSyncState, LibraryMatchInfo, MatchResult,
+    PageOptions, PersistedLastFmMappings, QueueStatus, ReviewAction, ReviewApplyJob, RowDecision,
+    RowStatus, SourceRow,
 };
 use super::{
     batch_is_collection_shaped, batch_options_key, batch_projection, batch_rows, best_candidate,
@@ -131,6 +132,7 @@ pub(super) fn page_view(
     let page_count = visible().count();
     let options = session.options_for_page_batch(batch, artist, album, &rows);
     let required_ids = required_import_match_ids(session, &options, &rows);
+    let chosen_tracks = selected_batch_track_candidates(session, batch);
     let items = rows
         .iter()
         .filter(|row| required_ids.contains(&row.stable_id))
@@ -141,7 +143,31 @@ pub(super) fn page_view(
         .map(|row| ImportPageItem {
             source: (*row).clone(),
             decision: default_decision(session, &row.stable_id),
-            match_result: session.matches.get(&row.stable_id).cloned(),
+            match_result: {
+                let mut result = session.matches.get(&row.stable_id).cloned();
+                if is_actionable(session, &row.stable_id)
+                    && result
+                        .as_ref()
+                        .is_none_or(|result| matched_track_uri(result, &row.stable_id).is_none())
+                {
+                    let suggestions = shared_track_candidates(row, &chosen_tracks);
+                    if !suggestions.is_empty() {
+                        let result = result.get_or_insert_with(|| empty_track_match(row));
+                        for candidate in suggestions {
+                            if let Some(existing) = result
+                                .candidates
+                                .iter_mut()
+                                .find(|existing| existing.uri == candidate.uri)
+                            {
+                                existing.relation = candidate.relation;
+                            } else {
+                                result.candidates.push(candidate);
+                            }
+                        }
+                    }
+                }
+                result
+            },
         })
         .collect();
     let mut fuzzy_groups = BTreeMap::<String, Vec<SourceRow>>::new();
@@ -215,7 +241,156 @@ pub(super) fn page_view(
         resolved_counts,
         locked_count_modes,
         collection,
+        library_matches: BTreeMap::new(),
+        suggested_genre: None,
     })
+}
+
+// Library metadata is a live view, never cached in a matching candidate or imported
+// into the review draft until the user accepts/saves its options.
+pub(super) fn project_library_matches(
+    page: &mut ImportPageView,
+    library: &retune_core::Library,
+    spotify: &crate::store::SpotifyLibraryState,
+) {
+    use retune_core::{AlbumKey, Rating, TrackRecord, UNCATEGORIZED};
+
+    let albums = if let Some(collection) = &page.collection {
+        collection
+            .cached_albums
+            .iter()
+            .filter(|album| collection.selected_album_uris.contains(&album.matching.uri))
+            .map(|album| (&album.matching.uri, &album.matching))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        page.rows
+            .iter()
+            .filter_map(|item| {
+                let result = item.match_result.as_ref()?;
+                let uri = result
+                    .selected_uri
+                    .as_ref()
+                    .filter(|uri| uri.starts_with("spotify:album:"))?;
+                result
+                    .candidates
+                    .iter()
+                    .find(|candidate| &candidate.uri == uri)
+                    .map(|candidate| (uri, candidate))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let target_uris = page
+        .rows
+        .iter()
+        .filter_map(|item| matched_track_uri(item.match_result.as_ref()?, &item.source.stable_id))
+        .collect::<BTreeSet<_>>();
+    let wanted = target_uris
+        .iter()
+        .map(String::as_str)
+        .chain(
+            albums
+                .values()
+                .flat_map(|album| album.track_uris.iter().map(String::as_str)),
+        )
+        .collect::<HashSet<_>>();
+    let local = library
+        .tracks()
+        .iter()
+        .filter(|track| wanted.contains(track.uri.as_str()))
+        .map(|track| (track.uri.as_str(), track))
+        .collect::<HashMap<_, _>>();
+    let exact = spotify.is_exact()
+        && page.state.spotify_account_id.as_deref() == Some(spotify.account_id.as_str());
+    let mut album_tracks = if exact {
+        spotify
+            .saved_albums
+            .values()
+            .flat_map(|album| album.track_uris.iter().cloned())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    let genres = |tracks: &[&TrackRecord]| {
+        tracks
+            .iter()
+            .map(|track| track.cat.trim())
+            .filter(|genre| !genre.is_empty() && *genre != UNCATEGORIZED)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    let mut matches = BTreeMap::new();
+    for (uri, album) in &albums {
+        let uris = album.track_uris.iter().collect::<BTreeSet<_>>();
+        let tracks = uris
+            .iter()
+            .filter_map(|uri| local.get(uri.as_str()).copied())
+            .collect::<Vec<_>>();
+        let in_library = if exact {
+            spotify.saved_albums.contains_key(*uri)
+        } else {
+            !uris.is_empty() && tracks.len() == uris.len()
+        };
+        if in_library {
+            album_tracks.extend(album.track_uris.iter().cloned());
+        }
+        let keys = tracks
+            .iter()
+            .map(|track| AlbumKey::of(track))
+            .collect::<BTreeSet<_>>();
+        let rating = if keys.len() == 1 {
+            keys.first()
+                .and_then(|key| library.album_rating(key))
+                .map(Rating::stars)
+        } else {
+            None
+        };
+        matches.insert(
+            (*uri).clone(),
+            LibraryMatchInfo {
+                in_library,
+                album_in_library: false,
+                genres: genres(&tracks),
+                play_count: (!tracks.is_empty())
+                    .then(|| tracks.iter().map(|track| u64::from(track.play_count)).sum()),
+                rating,
+            },
+        );
+    }
+    let album_genres = albums
+        .keys()
+        .map(|uri| matches.get(*uri).map(|info| info.genres.as_slice()))
+        .collect::<Vec<_>>();
+    page.suggested_genre = album_genres.first().and_then(|first| {
+        let genre = first.filter(|genres| genres.len() == 1)?;
+        album_genres
+            .iter()
+            .all(|other| *other == Some(genre))
+            .then(|| genre[0].clone())
+    });
+    for uri in target_uris {
+        let track = local.get(uri.as_str()).copied();
+        let album_in_library = album_tracks.contains(&uri);
+        matches.insert(
+            uri.clone(),
+            LibraryMatchInfo {
+                in_library: track.is_some()
+                    || album_in_library
+                    || (exact && spotify.saved_tracks.contains_key(&uri)),
+                album_in_library,
+                genres: genres(&track.into_iter().collect::<Vec<_>>()),
+                play_count: track.map(|track| u64::from(track.play_count)),
+                rating: track
+                    .and_then(|track| library.effective_rating(track))
+                    .map(|rating| match rating {
+                        retune_core::model::EffectiveRating::Explicit(rating)
+                        | retune_core::model::EffectiveRating::Inherited(rating) => rating.stars(),
+                    }),
+            },
+        );
+    }
+    page.library_matches = matches;
 }
 
 pub(super) fn update_options_in_session(
@@ -256,6 +431,101 @@ pub(super) fn update_options_in_session(
     Ok(session)
 }
 
+fn empty_track_match(row: &SourceRow) -> MatchResult {
+    MatchResult {
+        source_id: row.stable_id.clone(),
+        search_term: track_search_term(&row.artist, &row.track),
+        confidence: None,
+        selected_uri: None,
+        candidates: Vec::new(),
+        track_matches: BTreeMap::new(),
+    }
+}
+
+fn selected_batch_track_candidates(
+    session: &LastFmImportSessionV2,
+    batch: &ImportBatch,
+) -> Vec<AlbumCandidate> {
+    batch
+        .source_ids
+        .iter()
+        .filter_map(|id| {
+            let result = session.matches.get(id)?;
+            let selected = result.selected_uri.as_deref()?;
+            let uri = if selected.starts_with("spotify:track:") {
+                selected
+            } else {
+                result.track_matches.get(id)?.as_str()
+            };
+            // A standalone candidate identifies a track choice, including a release override.
+            let candidate = result
+                .candidates
+                .iter()
+                .find(|candidate| candidate.uri == uri && uri.starts_with("spotify:track:"))?;
+            Some((uri.to_owned(), candidate.clone()))
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
+}
+
+fn share_selected_batch_tracks(session: &mut LastFmImportSessionV2, batch_id: u32) {
+    let batches = review_batches_for_read(session);
+    let Some(batch) = batches.iter().find(|batch| batch.page == batch_id) else {
+        return;
+    };
+    let chosen = selected_batch_track_candidates(session, batch);
+    if chosen.is_empty() {
+        return;
+    }
+    let ids = batch.source_ids.iter().cloned().collect::<HashSet<_>>();
+    let rows = session
+        .rows
+        .iter()
+        .filter(|row| ids.contains(&row.stable_id) && is_actionable(session, &row.stable_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for row in rows {
+        let previous = session.matches.get(&row.stable_id);
+        if previous.is_some_and(|result| matched_track_uri(result, &row.stable_id).is_some()) {
+            continue;
+        }
+        let shared = shared_track_candidates(&row, &chosen)
+            .into_iter()
+            .filter(|candidate| candidate.relation == Some(super::AlbumRelation::BestMatch))
+            .collect::<Vec<_>>();
+        if shared.is_empty() {
+            continue;
+        }
+        let result = session
+            .matches
+            .entry(row.stable_id.clone())
+            .or_insert_with(|| empty_track_match(&row));
+        for candidate in shared {
+            if let Some(existing) = result
+                .candidates
+                .iter_mut()
+                .find(|existing| existing.uri == candidate.uri)
+            {
+                existing.relation = candidate.relation;
+            } else {
+                result.candidates.push(candidate);
+            }
+        }
+        let exact = shared_track_candidates(&row, &result.candidates)
+            .into_iter()
+            .filter(|candidate| candidate.relation == Some(super::AlbumRelation::BestMatch))
+            .map(|candidate| candidate.uri)
+            .collect::<BTreeSet<_>>();
+        if exact.len() == 1 {
+            result
+                .track_matches
+                .insert(row.stable_id.clone(), exact.into_iter().next().unwrap());
+            result.confidence = Some(super::Confidence::Exact);
+        }
+    }
+}
+
 pub(super) fn select_matches_in_session(
     mut session: LastFmImportSessionV2,
     batch_id: u32,
@@ -275,6 +545,7 @@ pub(super) fn select_matches_in_session(
         }
         batch_identity = Some(identity);
     }
+    share_selected_batch_tracks(&mut session, batch_id);
     Ok((session, batch_identity.expect("selections are non-empty")))
 }
 
@@ -1410,6 +1681,7 @@ pub(super) fn rerank_collection_session(
     if let Some(state) = session.collection_album_matches.get_mut(&batch_id) {
         state.injected_candidate_uris = next_injected;
     }
+    share_selected_batch_tracks(session, batch_id);
     Ok(())
 }
 
@@ -1777,6 +2049,200 @@ mod tests {
             earliest: 1,
             latest: 1,
         }
+    }
+
+    #[test]
+    fn library_match_metadata_uses_live_overlays_and_distinguishes_album_membership() {
+        use retune_core::{
+            model::{NewTrack, TrackEdit},
+            AlbumKey, Library, Rating,
+        };
+        let album = AlbumCandidate {
+            uri: "spotify:album:album".into(),
+            name: "Album".into(),
+            artist: "Artist".into(),
+            in_library: true, // An old candidate flag must not masquerade as current membership.
+            track_uris: vec!["spotify:track:one".into(), "spotify:track:two".into()],
+            ..AlbumCandidate::default()
+        };
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.rows = vec![row("one", "Artist", "Album"), row("two", "Artist", "Album")];
+        for row in &session.rows {
+            session.matches.insert(
+                row.stable_id.clone(),
+                MatchResult {
+                    source_id: row.stable_id.clone(),
+                    search_term: String::new(),
+                    confidence: None,
+                    selected_uri: Some(album.uri.clone()),
+                    candidates: vec![album.clone()],
+                    track_matches: BTreeMap::from([(
+                        row.stable_id.clone(),
+                        format!("spotify:track:{}", row.stable_id),
+                    )]),
+                },
+            );
+        }
+        let mut page = page_view(
+            Some(&session),
+            &LastFmSyncState::default(),
+            1,
+            "Artist",
+            "Album",
+        )
+        .unwrap();
+        let mut library = Library::new();
+        for uri in &album.track_uris {
+            library.add(NewTrack {
+                uri: uri.clone(),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                cat: "Christmas".into(),
+                ..NewTrack::default()
+            });
+        }
+        let first = library.tracks()[0].id;
+        let second = library.tracks()[1].id;
+        library.set_album_rating(AlbumKey::of(&library.tracks()[0]), Rating::new(4));
+        library.set_track_rating(second, Rating::new(5)).unwrap();
+        library.merge_history_absolute(&album.track_uris[0], Some(50), None, None);
+        library.merge_history_absolute(&album.track_uris[1], Some(7), None, None);
+        let mut spotify = crate::store::SpotifyLibraryState {
+            account_id: "spotify".into(),
+            complete: true,
+            ..Default::default()
+        };
+        project_library_matches(&mut page, &library, &spotify);
+        assert_eq!(page.suggested_genre.as_deref(), Some("Christmas"));
+        assert_eq!(page.library_matches[&album.uri].play_count, Some(57));
+        assert_eq!(page.library_matches[&album.uri].rating, Some(4));
+        assert!(!page.library_matches[&album.uri].in_library);
+        assert!(page.library_matches[&album.track_uris[0]].in_library);
+        assert!(!page.library_matches[&album.track_uris[0]].album_in_library);
+        assert_eq!(page.library_matches[&album.track_uris[0]].rating, Some(4));
+        assert_eq!(page.library_matches[&album.track_uris[1]].rating, Some(5));
+        spotify.saved_albums.insert(
+            album.uri.clone(),
+            crate::store::SavedAlbumRecord {
+                uri: album.uri.clone(),
+                name: album.name.clone(),
+                artists: vec![album.artist.clone()],
+                release_date: None,
+                album_type: None,
+                added_at: None,
+                track_uris: album.track_uris.clone(),
+            },
+        );
+        project_library_matches(&mut page, &library, &spotify);
+        assert!(page.library_matches[&album.uri].in_library);
+        assert!(page.library_matches[&album.track_uris[0]].album_in_library);
+        library
+            .edit(
+                second,
+                TrackEdit {
+                    cat: Some("Rock".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        project_library_matches(&mut page, &library, &spotify);
+        assert_eq!(page.suggested_genre, None);
+        assert_eq!(
+            page.library_matches[&album.uri].genres,
+            vec!["Christmas", "Rock"]
+        );
+        library
+            .edit(
+                first,
+                TrackEdit {
+                    cat: Some(retune_core::UNCATEGORIZED.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        library
+            .edit(
+                second,
+                TrackEdit {
+                    cat: Some(String::new()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        project_library_matches(&mut page, &library, &spotify);
+        assert_eq!(page.suggested_genre, None);
+        assert!(page.library_matches[&album.uri].genres.is_empty());
+        let first_album = CollectionAlbumCandidate {
+            matching: album.clone(),
+            ..Default::default()
+        };
+        let second_album = CollectionAlbumCandidate {
+            matching: AlbumCandidate {
+                uri: "spotify:album:other".into(),
+                track_uris: vec!["spotify:track:other".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        library
+            .edit(
+                first,
+                TrackEdit {
+                    cat: Some("Christmas".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let third = library.add(NewTrack {
+            uri: "spotify:track:other".into(),
+            cat: "Rock".into(),
+            ..Default::default()
+        });
+        page.collection = Some(CollectionMatchView {
+            selected_album_uris: vec![
+                first_album.matching.uri.clone(),
+                second_album.matching.uri.clone(),
+            ],
+            cached_albums: vec![first_album, second_album],
+            full_album_uris: BTreeSet::new(),
+            coverage: CollectionCoverage {
+                matched: 0,
+                ambiguous: 0,
+                unresolved: 0,
+                selected_albums: Vec::new(),
+                previews: Vec::new(),
+            },
+            whole_album_ready: false,
+        });
+        project_library_matches(&mut page, &library, &spotify);
+        assert_eq!(page.suggested_genre, None);
+        library
+            .edit(
+                third,
+                TrackEdit {
+                    cat: Some("Christmas".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        project_library_matches(&mut page, &library, &spotify);
+        assert_eq!(page.suggested_genre.as_deref(), Some("Christmas"));
+        page.collection = None;
+        // Unknown membership uses complete local album content, as the album browser does.
+        project_library_matches(
+            &mut page,
+            &library,
+            &crate::store::SpotifyLibraryState::default(),
+        );
+        assert!(page.library_matches[&album.uri].in_library);
+        project_library_matches(
+            &mut page,
+            &Library::new(),
+            &crate::store::SpotifyLibraryState::default(),
+        );
+        assert!(!page.library_matches[&album.uri].in_library);
+        assert_eq!(page.library_matches[&album.track_uris[0]].play_count, None);
+        assert_eq!(page.library_matches[&album.track_uris[0]].rating, None);
     }
 
     #[test]

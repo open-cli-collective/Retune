@@ -313,6 +313,11 @@ pub(super) fn album_track_candidate(
         track_names: vec![name],
         track_artists: vec![artist],
         track_albums: vec![album_name],
+        track_durations: vec![album
+            .track_durations
+            .get(index)
+            .copied()
+            .unwrap_or_default()],
         relation: None,
     })
 }
@@ -580,6 +585,32 @@ pub(super) fn collection_best_title_matches<'a>(
         .collect()
 }
 
+pub(super) fn shared_track_candidates(
+    row: &SourceRow,
+    chosen: &[AlbumCandidate],
+) -> Vec<AlbumCandidate> {
+    let same_artist = chosen
+        .iter()
+        .filter(|candidate| {
+            candidate.uri.starts_with("spotify:track:")
+                && collection_candidate_matches_artist(row, candidate)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    collection_best_title_matches(row, &same_artist)
+        .into_iter()
+        .map(|candidate| {
+            let mut candidate = candidate.clone();
+            candidate.relation = Some(if collection_candidate_is_exact(row, &candidate) {
+                AlbumRelation::BestMatch
+            } else {
+                AlbumRelation::SameSongs
+            });
+            candidate
+        })
+        .collect()
+}
+
 fn collection_title_confidence(row: &SourceRow, candidate: &AlbumCandidate) -> Confidence {
     if collection_candidate_is_exact(row, candidate) {
         Confidence::Exact
@@ -644,6 +675,7 @@ fn mapping_candidate(
         track_names: vec![row.track.clone()],
         track_artists: vec![row.artist.clone()],
         track_albums: vec![String::new()],
+        track_durations: Vec::new(),
         relation: Some(AlbumRelation::BestMatch),
     }
 }
@@ -663,7 +695,11 @@ pub(super) fn rank_collection_candidates(
             None
         };
     }
-    candidates.sort_by_cached_key(|candidate| {
+    let mut ranked = std::mem::take(candidates)
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>();
+    ranked.sort_by_cached_key(|(_, candidate)| {
         (
             collection_candidate_rank(row, candidate),
             !collection_candidate_matches_artist(row, candidate),
@@ -672,7 +708,9 @@ pub(super) fn rank_collection_candidates(
             candidate.uri.clone(),
         )
     });
-    candidates.truncate(10);
+    ranked.truncate(10);
+    ranked.sort_by_key(|(position, _)| *position);
+    *candidates = ranked.into_iter().map(|(_, candidate)| candidate).collect();
 }
 
 pub(super) fn ratify_collection_result(
@@ -1050,6 +1088,7 @@ pub(super) fn collection_album_summary(
             track_names: Vec::new(),
             track_artists: Vec::new(),
             track_albums: Vec::new(),
+            track_durations: Vec::new(),
             relation: None,
         },
         image_url: album.image_url,
@@ -1057,7 +1096,6 @@ pub(super) fn collection_album_summary(
         album_type: album.album_type,
         total_tracks: album.track_count,
         track_numbers: Vec::new(),
-        track_durations: Vec::new(),
     }
 }
 
@@ -1093,6 +1131,10 @@ pub(super) fn collection_album_candidate(
             })
             .collect(),
         track_albums: vec![album.name.clone(); tracks.len()],
+        track_durations: tracks
+            .iter()
+            .map(|track| track.duration_ms.unwrap_or_default() / 1_000)
+            .collect(),
         relation: None,
     };
     CollectionAlbumCandidate {
@@ -1102,10 +1144,6 @@ pub(super) fn collection_album_candidate(
         album_type: album.album_type.clone(),
         total_tracks: album.total_tracks.max(tracks.len() as u32),
         track_numbers: tracks.iter().map(|track| track.track_number).collect(),
-        track_durations: tracks
-            .iter()
-            .map(|track| track.duration_ms.unwrap_or_default() / 1_000)
-            .collect(),
     }
 }
 
@@ -1221,7 +1259,7 @@ pub(super) fn preserve_match_selection(
             .iter()
             .any(|existing| existing.uri == candidate.uri)
         {
-            result.candidates.insert(0, candidate);
+            result.candidates.push(candidate);
         }
     }
     for candidate in result
