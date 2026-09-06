@@ -109,7 +109,14 @@ row-scoped matches or decisions. Review then has two shapes:
 Persisted batches preserve complete source clusters without a row-count cap.
 Queue projections report imported and remaining play totals separately so a
 cluster containing completed rows does not present its full history as new
-work. The visible batch is the unit of lazy Spotify work and review. Review exclude/undo actions
+work. Queue-filter keystrokes remain local to the queue control and coalesce
+before updating its projection, so they do not reconcile the visible review
+draft on every character. The genre field likewise owns its live draft and
+flushes it on blur or Enter and before any whole-options write or Apply; page
+refreshes still merge authoritative rows with the current batch draft.
+`genre_values` projects only distinct genres instead of constructing unused
+artist and album suggestions. The visible batch is the unit of lazy Spotify
+work and review. Review exclude/undo actions
 may address one or more source IDs, but every ID must belong to the requested
 batch and remain reviewable; empty, cross-batch, and completed-row requests are
 rejected before any decision changes. A bulk action persists the session and
@@ -134,7 +141,18 @@ grouping does not represent one source entity.
 Release matching issues one bounded Spotify album search using generated
 `album:` and `artist:` fields, then obtains complete candidate track lists for
 local comparison. Generated album and track searches elide parenthetical
-annotations. Search results are capped at ten candidates.
+annotations. Search results are capped at ten candidates. Track search results retain the
+Spotify API's returned order, including cached responses. Retune annotates
+match strength and uses it to retain the strongest candidates when a local
+album union exceeds the cap, without rearranging the retained list. A search
+position is not evidence for automatic selection. Previously selected candidates
+absent from a new search are retained after its results.
+
+Matching candidates persist optional-by-default `trackDurations` in seconds,
+aligned with `trackUris`; unknown durations render as a dash in the track picker.
+Search and cached album data supply those values without extra metadata requests.
+Older import candidates remain readable with an empty duration vector. Collection
+album JSON retains its existing flattened `trackDurations` property.
 
 Collection-shaped batches with no representative album do not search Spotify
 automatically. A named collection cluster lazily searches its representative
@@ -248,6 +266,14 @@ Rows not supported by its track set remain visible for individual review. Cached
 unselected candidates are reclassified on load, so improvements to deterministic
 matching apply without another Spotify request.
 
+Release whole-album options are effective only while an album URI is selected;
+stored settings cannot enable them for standalone track matches or an unselected
+release. The checkbox and its keyboard shortcut follow the same eligibility.
+Option edits update the UI immediately and save in order without locking review
+or queue navigation. Acceptance drains earlier option writes before submitting
+the current options. Background refreshes reconcile queue totals and count merges
+without disabling review controls or replacing newer local option choices.
+
 Manual album and track searches also accept canonical Spotify URIs,
 `spotify://` links, and `https://open.spotify.com` share links. A pasted link
 resolves that exact entity through the materialized catalog/shared client rather
@@ -259,7 +285,15 @@ Choosing a cached track makes no Spotify request; Rust verifies that its URI
 belongs to a currently selected album before persisting the mapping.
 One explicitly chosen track candidate may be applied to multiple source rows in
 the same review batch; each row keeps its own source identity and contributes to
-the normal target-wide count merge.
+the normal target-wide count merge. Choosing a track also shares its cached
+candidate with unresolved, actionable rows in that batch. One distinct exact
+normalized title-and-artist target is selected automatically; ties stay
+unresolved. Existing mappings, manual choices, completed rows, and exclusions
+are preserved. Compatible weaker candidates are projected as suggestions and
+require an explicit choice; those suggestions are not persisted into the
+automatic candidate pool. Reopening or reranking a batch preserves this behavior
+without Spotify requests. The same target-wide count merge includes the newly
+resolved variants.
 
 ## Collection matching
 
@@ -319,7 +353,37 @@ the same target.
 In the `ImportPageView` projection, `fuzzyGroups` remains scoped to the
 current batch for source disclosure, while `resolvedCounts` is the
 authoritative target-wide result including eligible completed rows, resolved
-with the selected count mode.
+with the selected count mode. Count projection determines collection shape once
+per batch per request, reusing that result across completed source rows; it does
+not rebuild the full review queue for every historical row. The review UI collapses contributing rows into one entry per target and review
+state, with an expanded count flow. Its inclusion, exclusion, selection, and
+track-picker actions address all represented source IDs. Unmerge reveals original
+rows for individual editing without changing mappings or count policy; this
+display choice lasts for the current batch. Raw names already aggregated into
+one source identity remain disclosure-only.
+
+## Existing library metadata in review
+
+Every application-level review page response adds live `libraryMatches` for the
+selected tracks and albums from local library records and the account-scoped
+membership snapshot. This projection performs no Spotify requests or writes and
+is not persisted in matching candidates. Track and album membership are separate:
+local tracks remain recognizable even when they are not individually saved;
+known saved-album membership is authoritative, with complete local album contents
+as the fallback when membership is unknown, consistent with the album browser.
+
+The Spotify side of review displays existing library genres, play counts, and
+ratings independently of Last.fm history and proposed import options. Track
+ratings include album inheritance. Album plays are the total for its known local
+tracks; an album rating is shown only when those tracks identify one local album.
+Missing metadata stays absent rather than presenting an invented zero or rating.
+
+A matched album's known genre prefills the import Genre. Multiple selected albums
+must each have one known genre and agree before Retune suggests it; mixed genres
+and the `Uncategorized` sentinel do not prefill. Saved non-empty import genres win,
+and typing or clearing the field protects that draft from subsequent page
+refreshes. A suggested genre is only applied through the normal explicit import
+or options action. Ratings are displayed without preselecting an import rating.
 
 ## Acceptance and reusable mappings
 

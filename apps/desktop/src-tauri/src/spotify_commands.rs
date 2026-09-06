@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     album_id, auth, emit_connection_state_async, emit_main, emit_main_event, empty_player_state,
-    image_url,
+    image_url, image_url_at_least,
     library_commands::{rating_view, RatingView},
     main_events, notify_error, playlist_commands,
     provider::{
@@ -1154,7 +1154,7 @@ pub(super) fn album_page_view(
                             local.is_some()
                         },
                         rating: local
-                            .and_then(|track| library.effective_rating(track.id).map(rating_view)),
+                            .and_then(|track| library.effective_rating(track).map(rating_view)),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -1198,7 +1198,7 @@ pub(super) fn album_page_view(
             .as_deref()
             .and_then(|date| date.get(..4))
             .map(str::to_owned),
-        image_url: image_url(&album.images),
+        image_url: image_url_at_least(&album.images, 640),
         total_duration_secs,
         saved_album,
         content_complete,
@@ -1969,6 +1969,37 @@ mod tests {
                 total: 2,
             }),
         }
+    }
+
+    #[test]
+    fn album_page_uses_large_artwork_for_the_header_and_lightbox() {
+        let mut album = spotify_album();
+        album.images = [64, 640, 300]
+            .map(|width| Image {
+                url: format!("art-{width}"),
+                width: Some(width),
+            })
+            .to_vec();
+        let library = Library::new();
+        let membership = SpotifyLibraryState::default();
+        assert_eq!(
+            album_page_view(&library, &membership, album.clone())
+                .image_url
+                .as_deref(),
+            Some("art-640")
+        );
+        album.images.retain(|image| image.width != Some(640));
+        assert_eq!(
+            album_page_view(&library, &membership, album.clone())
+                .image_url
+                .as_deref(),
+            Some("art-300")
+        );
+        album.images.clear();
+        assert_eq!(
+            album_page_view(&library, &membership, album).image_url,
+            None
+        );
     }
 
     #[test]

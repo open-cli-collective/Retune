@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "baseRevision": "31a39e7",
+  "scenario": "Accept and Next Batch: durable backend admission",
+  "fixture": {
+    "rows": 37947,
+    "batches": 20849,
+    "completedSourceRows": 5670,
+    "source": "Private copy of the local session; omitted from Git"
+  },
+  "measurement": {
+    "tool": "Rust Instant in audit_apply_acceptance_cost, release build on local macOS arm64",
+    "scope": "apply_page through durable queue write and state acknowledgement; no Spotify requests or worker execution",
+    "baselineMs": [
+      2058.806,
+      2029.164,
+      2029.328
+    ],
+    "afterMs": [
+      152.585,
+      137.359,
+      137.325
+    ],
+    "baselineMedianMs": 2029.328,
+    "afterMedianMs": 137.359
+  },
+  "cause": "historical_counts_for_targets rebuilt all batch projections for each included historical row",
+  "change": "Determine collection-shaped batch IDs once per count projection and reuse them across rows",
+  "checks": {
+    "rustImporter": "230 passed, 3 ignored",
+    "frontend": "95 unit/gateway and 22 mounted interaction checks passed, 8 audit checks skipped",
+    "clippy": "strict workspace passed",
+    "visual": "Rendered component fixture inspected in light and dark at 1380x940"
+  },
+  "decision": "UNVERIFIED",
+  "limits": [
+    "Backend timing is verified by the runnable local benchmark; full native WebKit input-to-paint is not measured.",
+    "A narrow 680px preview exposed the existing album-pane/track-list height constraint; the merge panel was inspected at the reference window size."
+  ]
+}

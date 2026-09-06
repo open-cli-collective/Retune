@@ -88,13 +88,13 @@ use model::{
 pub(crate) use model::{
     AcceptAllSummary, AlbumCandidate, AlbumRelation, CollectionAlbumCandidate,
     CollectionAlbumMatchState, CountMode, ImportBatch, ImportDefaults, ImportMatchSelection,
-    ImportPageItem, ImportPageView, ImportPhase, ImportQueuePage, ImportStateView, JournalRecovery,
+    ImportPageView, ImportPhase, ImportQueuePage, ImportStateView, JournalRecovery,
     LastFmApplicationJournal, LastFmImportSessionV2, LastFmMappings, MatchResult, PageOptions,
-    ParsedRecentTracksPage, PersistedLastFmMappings, RetryableError, RowDecision, RowStatus,
-    SourceRow, SourceVariant,
+    ParsedRecentTracksPage, PersistedLastFmMappings, RetryableError, RowStatus, SourceRow,
+    SourceVariant,
 };
 #[cfg(test)]
-use model::{ApplyFailure, ApplyMembership, ApplyPlan};
+use model::{ApplyFailure, ApplyMembership, ApplyPlan, RowDecision};
 #[allow(unused_imports)]
 pub(crate) use model::{
     ApplyFailureCode, Confidence, ExternalScrobble, HistoryUpdate, JournalRecoveryError,
@@ -110,8 +110,10 @@ pub(crate) use reconciliation::{
     resolved_play_count,
 };
 use review::*;
+#[cfg(test)]
+use service::requires_spotify_ownership;
+use service::RunnerGuard;
 pub(crate) use service::Service;
-use service::{requires_spotify_ownership, RunnerGuard};
 use source::{
     aggregate_incremental_scrobbles, discard_post_cutoff, download_page_window_with_checkpoint,
     fetch_incremental_page_with_retry, fetch_source_page, read_incremental_events, run_import,
@@ -231,57 +233,12 @@ impl LastFmImportSessionV2 {
             options.selected_track_ids.clear();
             return options;
         };
-        let batch_ids = batch.source_ids.iter().collect::<BTreeSet<_>>();
-        let batch_options = self.page_options.get(&batch_options_key(batch_id)).cloned();
-        let legacy_options = self
-            .page_options
-            .get(&format!("{artist}\u{1f}{album}"))
-            .cloned();
-        let customized = batch_options.is_some() || legacy_options.is_some();
-        let mut options = batch_options
-            .clone()
-            .or(legacy_options.clone())
-            .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
-        if customized {
-            options
-                .selected_track_ids
-                .retain(|id| batch_ids.contains(id));
-        } else {
-            options.selected_track_ids = batch
-                .source_ids
-                .iter()
-                .filter(|id| {
-                    let id = (*id).as_str();
-                    self.rows
-                        .iter()
-                        .any(|row| row.stable_id == id && is_actionable(self, &row.stable_id))
-                })
-                .cloned()
-                .collect();
-            let rows = batch
-                .source_ids
-                .iter()
-                .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
-                .collect::<Vec<_>>();
-            options.whole_album =
-                options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
-        }
         let rows = batch
             .source_ids
             .iter()
             .filter_map(|id| self.rows.iter().find(|row| row.stable_id == *id))
             .collect::<Vec<_>>();
-        let collection_shaped = batch_is_collection_shaped(self, &batch, &rows);
-        let has_collection_match = self.collection_album_matches.contains_key(&batch_id);
-        if (collection_shaped && !has_collection_match)
-            || (!album.is_empty() && has_collection_match)
-        {
-            options.whole_album = false;
-        } else if album.is_empty() && options.whole_album {
-            options.whole_album =
-                options.import_content && exact_album_match_for_rows(self, batch_id, &rows);
-        }
-        options
+        self.options_for_page_batch(&batch, artist, album, &rows)
     }
 
     fn options_for_page_batch(
@@ -319,6 +276,13 @@ impl LastFmImportSessionV2 {
                 options.import_content && exact_album_match_for_rows(self, batch.page, rows);
         }
         let collection_shaped = batch_is_collection_shaped(self, batch, rows);
+        options.whole_album &= collection_shaped
+            || rows.iter().any(|row| {
+                self.matches
+                    .get(&row.stable_id)
+                    .and_then(|result| result.selected_uri.as_deref())
+                    .is_some_and(|uri| uri.starts_with("spotify:album:"))
+            });
         let has_collection_match = self.collection_album_matches.contains_key(&batch.page);
         if (collection_shaped && !has_collection_match)
             || (!album.is_empty() && has_collection_match)
@@ -653,7 +617,6 @@ fn select_match_in_session(
         projection.representative_artist,
         projection.representative_album,
     );
-    let collection_shaped = batch_is_collection_shaped_for_id(session, batch_id);
     let batch_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
     let explicit_album = session.matches.get(source_id).is_some_and(|result| {
         spotify_share_uri(&result.search_term, "album")
@@ -732,25 +695,23 @@ fn select_match_in_session(
             }
         }
     } else {
-        if row_album.is_empty() || collection_shaped {
-            let result = session
-                .matches
-                .entry(source_id.to_owned())
-                .or_insert_with(|| MatchResult {
-                    source_id: source_id.to_owned(),
-                    search_term: track_search_term(&row_artist, &row_track),
-                    confidence: None,
-                    selected_uri: None,
-                    candidates: Vec::new(),
-                    track_matches: BTreeMap::new(),
-                });
-            if !result
-                .candidates
-                .iter()
-                .any(|existing| existing.uri == candidate.uri)
-            {
-                result.candidates.insert(0, candidate.clone());
-            }
+        let result = session
+            .matches
+            .entry(source_id.to_owned())
+            .or_insert_with(|| MatchResult {
+                source_id: source_id.to_owned(),
+                search_term: track_search_term(&row_artist, &row_track),
+                confidence: None,
+                selected_uri: None,
+                candidates: Vec::new(),
+                track_matches: BTreeMap::new(),
+            });
+        if !result
+            .candidates
+            .iter()
+            .any(|existing| existing.uri == candidate.uri)
+        {
+            result.candidates.push(candidate.clone());
         }
         let album_uri = session
             .matches
@@ -927,13 +888,13 @@ where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(true);
     };
     match lastfm_username(lastfm).await {
-        Ok(username) if username == session.lastfm_username => {
-            if session.phase == ImportPhase::Suspended {
-                if requires_spotify_ownership(&session) {
+        Ok(username) if username == owner.lastfm_username => {
+            if owner.phase == ImportPhase::Suspended {
+                if owner.requires_spotify_ownership() {
                     let _ = current_spotify_binding_is_current(
                         service,
                         lastfm,
@@ -946,7 +907,7 @@ where
                 }
                 return Ok(false);
             }
-            if requires_spotify_ownership(&session) {
+            if owner.requires_spotify_ownership() {
                 current_spotify_binding_is_current(
                     service,
                     lastfm,
@@ -979,14 +940,14 @@ where
     T: retune_spotify::client::Transport,
     S: retune_spotify::tokens::TokenStore,
 {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(false);
     };
-    if session.spotify_account_id.is_none() {
+    if owner.spotify_account_id.is_none() {
         return Ok(true);
     }
     let membership_guard = spotify_membership.lock().await;
-    let expected = session.spotify_account_id.as_deref().unwrap_or_default();
+    let expected = owner.spotify_account_id.as_deref().unwrap_or_default();
     let cached = membership_guard.snapshot();
     if cached_spotify_identity_matches(expected, &cached) == Some(false) {
         service.suspend_for_account_mismatch().await?;
@@ -1010,7 +971,7 @@ where
             return Ok(false);
         }
     };
-    debug_assert_eq!(binding.lastfm_username, session.lastfm_username);
+    debug_assert_eq!(binding.lastfm_username, owner.lastfm_username);
     Ok(true)
 }
 
@@ -1018,11 +979,11 @@ async fn current_import_view(
     service: &Service,
     lastfm: &crate::lastfm::Service,
 ) -> Result<ImportStateView, String> {
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Ok(service.state().await);
     };
     match lastfm
-        .with_import_owner(&session.lastfm_username, || async {
+        .with_import_owner(&owner.lastfm_username, || async {
             Ok(service.state().await)
         })
         .await?

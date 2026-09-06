@@ -42,6 +42,14 @@ export function ModalDialog({ className, labelledBy, dialogRef, onCancel, onSubm
   }}>{children}</form></div>
 }
 
+export function ArtworkLightbox({ artwork, name, onClose }: { artwork: string | null; name: string; onClose: () => void }) {
+  return <ModalDialog className="artwork-lightbox" labelledBy="artwork-lightbox-title" onCancel={onClose} closeOnBackdrop>
+    <h2 id="artwork-lightbox-title" className="visually-hidden">Artwork for {name}</h2>
+    <button type="button" className="artwork-lightbox-close" aria-label="Close artwork" onClick={onClose}>×</button>
+    {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span className="artwork-placeholder" aria-hidden="true">♪</span>}
+  </ModalDialog>
+}
+
 export function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
   const menu = useRef<HTMLDivElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)

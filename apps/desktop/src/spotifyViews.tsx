@@ -2,7 +2,7 @@ import { useCallback, useEffect, useEffectEvent, useRef, useState, type ReactNod
 import type { AlbumPageView, ArtistAlbumsPage, ArtistPageView, PlaybackTrack, PlaylistSubject, SearchAlbum, SearchArtist, SearchTrack, SpotifyNavEntry, SpotifyResults } from './types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey, type SpotifyMembershipOverrides, type SpotifySearchState } from './spotifySearch.ts'
 import { beginPendingEntity, DRAG_TYPE, entityRequestGeneration, formatTime, loadCurrentGeneration, mergeByUri, pendingEntities, SYNTHETIC_BASE } from './ui.ts'
-import { ContextMenu, RatingStars } from './viewShared.tsx'
+import { ArtworkLightbox, ContextMenu, RatingStars } from './viewShared.tsx'
 import { libraryGateway } from './libraryGateway.ts'
 import { spotifyGateway } from './spotifyGateway.ts'
 
@@ -112,7 +112,7 @@ export type SpotifyAlbumPresentationData = {
 }
 
 /** Album artwork, metadata, and track rows without playback or membership controls. */
-export function SpotifyAlbumPresentation({ album, compact = false, titleAs = 'h2', artistContent, headerMeta, headerActions, renderTrack, trackFooter }: {
+export function SpotifyAlbumPresentation({ album, compact = false, titleAs = 'h2', artistContent, headerMeta, headerActions, renderTrack, trackFooter, onArtwork }: {
   album: SpotifyAlbumPresentationData
   compact?: boolean
   titleAs?: 'h1' | 'h2'
@@ -121,12 +121,15 @@ export function SpotifyAlbumPresentation({ album, compact = false, titleAs = 'h2
   headerActions?: ReactNode
   renderTrack?: (track: SpotifyAlbumPresentationData['tracks'][number], index: number) => ReactNode
   trackFooter?: ReactNode
+  onArtwork?: () => void
 }) {
   const totalDurationSecs = album.tracks.reduce((total, track) => total + (track.durationSecs ?? 0), 0)
   const title = titleAs === 'h1' ? <h1>{album.name}</h1> : <h2>{album.name}</h2>
   return <section className={`spotify-album-presentation${compact ? ' compact' : ''}`} aria-label={`${album.name} album preview`}>
     <header className="spotify-page-header album-header">
-      <div className="spotify-page-art album-art"><SpotifyArtwork imageUrl={album.imageUrl ?? null} /></div>
+      {onArtwork
+        ? <button type="button" className="spotify-page-art album-art" aria-label={`Enlarge artwork for ${album.name}`} onClick={onArtwork}><SpotifyArtwork imageUrl={album.imageUrl ?? null} /></button>
+        : <div className="spotify-page-art album-art"><SpotifyArtwork imageUrl={album.imageUrl ?? null} /></div>}
       <div className="spotify-page-copy">
         <div className="spotify-eyebrow">ALBUM{album.albumType && album.albumType.toLowerCase() !== 'album' && ` · ${album.albumType.toUpperCase()}`}</div>
         {title}
@@ -159,6 +162,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
   onError: (error: string) => void
 }) {
   const [loaded, setLoaded] = useState<{ uri: string; page?: AlbumPageView }>({ uri: entry.uri })
+  const [artworkExpanded, setArtworkExpanded] = useState(false)
   const [revision, setRevision] = useState(0)
   const [busy, setBusy] = useState(false)
   const [trackBusy, setTrackBusy] = useState<Set<string>>(new Set())
@@ -226,6 +230,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
     <SpotifyAlbumPresentation
       album={presentation}
       titleAs="h1"
+      onArtwork={page.imageUrl ? () => setArtworkExpanded(true) : undefined}
       artistContent={<button className="spotify-link artist-link" onClick={() => onArtist(page.artistId)}>{page.artist}</button>}
       headerMeta={<div className="spotify-page-meta"><RatingStars rating={page.albumRating} explicit onRate={page.contentComplete && !adding && !busy ? rateAlbum : undefined} /><span>{page.year && `${page.year} · `}{page.tracks.length} {page.tracks.length === 1 ? 'track' : 'tracks'} · {Math.floor(page.totalDurationSecs / 60)} min</span>{page.addedAt !== null && <time>Date Added: {new Date(page.addedAt * 1000).toLocaleDateString()}</time>}</div>}
       headerActions={<div className="spotify-page-actions">
@@ -254,6 +259,7 @@ function SpotifyAlbumPage({ entry, backLabel, adding, membership, playingUri, on
       }}
       trackFooter={<p className="spotify-page-hint">Double-click a track to preview. Adding the album pulls every track into your local overlay.</p>}
     />
+    {artworkExpanded && <ArtworkLightbox artwork={page.imageUrl} name={page.name} onClose={() => setArtworkExpanded(false)} />}
   </div>
 }
 

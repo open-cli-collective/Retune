@@ -138,6 +138,8 @@ pub(crate) struct AlbumCandidate {
     pub track_artists: Vec<String>,
     #[serde(default)]
     pub track_albums: Vec<String>,
+    #[serde(default)]
+    pub track_durations: Vec<u64>,
     pub relation: Option<AlbumRelation>,
 }
 
@@ -156,8 +158,6 @@ pub(crate) struct CollectionAlbumCandidate {
     pub total_tracks: u32,
     #[serde(default)]
     pub track_numbers: Vec<Option<u32>>,
-    #[serde(default)]
-    pub track_durations: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -509,6 +509,16 @@ pub(crate) struct ImportPageItem {
     pub match_result: Option<MatchResult>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryMatchInfo {
+    pub in_library: bool,
+    pub album_in_library: bool,
+    pub genres: Vec<String>,
+    pub play_count: Option<u64>,
+    pub rating: Option<u8>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportPageView {
@@ -528,6 +538,8 @@ pub(crate) struct ImportPageView {
     pub resolved_counts: BTreeMap<String, u64>,
     pub locked_count_modes: BTreeSet<String>,
     pub collection: Option<CollectionMatchView>,
+    pub library_matches: BTreeMap<String, LibraryMatchInfo>,
+    pub suggested_genre: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

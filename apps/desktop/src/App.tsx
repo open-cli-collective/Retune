@@ -2,13 +2,13 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
 import './App.css'
-import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
-import { AlbumRatingStrip, BrowserPane, TrackCell, TrackList } from './libraryViews.tsx'
+import { AlbumRatingStrip, BrowserPane, TrackCell, TrackContextMenu, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, LastFmImportState, PlaybackOrigin, PlaybackTrack, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, SettingsPatch, Source, SpotifySyncStatus, Theme, Track } from './types.ts'
-import { CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
+import { ArtworkLightbox, CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
@@ -177,11 +177,16 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const [artworkOpen, setArtworkOpen] = useState(false)
+  const [playingMenu, setPlayingMenu] = useState<{ x: number; y: number; uri: string; name: string; trackId?: number }>()
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
   const preferenceZoom = useRef(defaultSettings.zoom)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
-  const typeahead = useRef({ buffer: '', timer: 0 })
+  const typeahead = useRef<{ buffer: string; timer: number; context: string; candidates: { value: string; id?: number }[] }>({ buffer: '', timer: 0, context: '', candidates: [] })
+  const browseDesiredToken = useRef('')
+  const browseInFlight = useRef(false)
+  const browsePendingRequest = useRef<{ token: string; key: string; source: Source; sel: Selection; query?: string } | undefined>(undefined)
+  const browseMounted = useRef(true)
   const infoGeneration = useRef(0)
   const ratingGenerations = useRef(new Map<string, { current: number }>())
   const browseKey = browseRequestKey(state.source, state.sel, state.query, state.scope)
@@ -263,6 +268,14 @@ function App() {
     setBrowserPanes(browserPanes)
     if (!browserPanes[facet]) setActivePane('track')
   }, [setBrowserPanes, state.settings.browserPanes])
+  const openSingleInfo = (id: number) => {
+    cancelTrackInfoLoad(infoGeneration)
+    dispatch({ type: 'info' })
+    void loadCurrentGeneration(infoGeneration,
+      () => libraryGateway.getTrack(id),
+      (track) => dispatch({ type: 'info', info: { kind: 'single', track } }),
+      fail)
+  }
   const openInfo = (id?: number) => {
     cancelTrackInfoLoad(infoGeneration)
     if (selectedTracks.length > 1) {
@@ -271,32 +284,49 @@ function App() {
     }
     const target = id ?? selectedTracks[0]?.id
     if (target === undefined) return
-    dispatch({ type: 'info' })
-    void loadCurrentGeneration(infoGeneration,
-      () => libraryGateway.getTrack(target),
-      (track) => dispatch({ type: 'info', info: { kind: 'single', track } }),
-      fail)
+    openSingleInfo(target)
   }
   const closeInfo = () => {
     cancelTrackInfoLoad(infoGeneration)
     dispatch({ type: 'info' })
   }
 
-  useEffect(() => {
-    let active = true
-    const requestKey = browseRequestKey(state.source, state.sel, state.query, state.scope)
-    libraryGateway.browse(state.source, state.sel, state.scope === 'library' && state.query.trim() ? state.query : undefined).then((next) => {
-      if (!active) return
-      const fallback = staleSelectionFacet(state.sel, next.facets)
-      if (fallback) {
-        selectFacet(fallback, [])
-        return
-      }
-      dispatch({ type: 'view', view: next, key: requestKey })
+  const drainBrowse = useEffectEvent(() => {
+    if (browseInFlight.current || !browsePendingRequest.current || !browseMounted.current) return
+    const request = browsePendingRequest.current
+    browsePendingRequest.current = undefined
+    browseInFlight.current = true
+    libraryGateway.browse(request.source, request.sel, request.query).then((next) => {
+      if (!browseMounted.current || browseDesiredToken.current !== request.token) return
+      const fallback = staleSelectionFacet(request.sel, next.facets)
+      if (fallback) selectFacet(fallback, [])
+      else dispatch({ type: 'view', view: next, key: request.key })
+    }).catch((error) => {
+      if (!browseMounted.current || browseDesiredToken.current !== request.token) return
+      dispatch({ type: 'browsePending', pending: false })
+      fail(error)
+    }).finally(() => {
+      browseInFlight.current = false
+      drainBrowse()
     })
-      .catch((error) => active && fail(error))
-    return () => { active = false }
-  }, [state.source, state.sel, state.query, state.scope, state.revision, fail, selectFacet])
+  })
+  useEffect(() => {
+    const key = browseRequestKey(state.source, state.sel, state.query, state.scope)
+    const token = JSON.stringify([key, state.revision])
+    if (browseDesiredToken.current === token) return
+    browseDesiredToken.current = token
+    dispatch({ type: 'browsePending', pending: true })
+    const query = state.scope === 'library' ? state.query.trim() || undefined : undefined
+    browsePendingRequest.current = { token, key, source: state.source, sel: state.sel, query }
+    drainBrowse()
+  }, [state.source, state.sel, state.query, state.scope, state.revision])
+  useEffect(() => {
+    browseMounted.current = true
+    drainBrowse()
+    return () => {
+      browseMounted.current = false
+    }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -405,7 +435,7 @@ function App() {
   const rate = (key: string, mutation: () => Promise<unknown>) => {
     void loadCurrentGeneration(entityRequestGeneration(ratingGenerations.current, key), mutation, () => dispatch({ type: 'refresh' }), fail)
   }
-  const navigateSpotify = (track: Track, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
+  const navigateSpotify = (track: Pick<Track, 'uri'>, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
     .then((entry) => dispatch({ type: 'spotifyNavigate', entry }))
     .catch(fail)
   const setZoom = useCallback((zoom: number) => {
@@ -437,6 +467,59 @@ function App() {
   }
   const playingTrack = playbackTracks.find((track) => track.id === state.playing?.trackId)
   const selectedAlbum = state.sel.alb?.length === 1 ? state.sel.alb[0] : undefined
+  const handlePrefix = (event: Pick<KeyboardEvent, 'key' | 'altKey' | 'ctrlKey' | 'metaKey' | 'isComposing' | 'preventDefault' | 'stopPropagation'>, pane: ActivePane): boolean => {
+    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.key.length !== 1) return false
+    const context = browseTypeaheadContextKey(pane, state.source, state.sel, browseKey)
+    if (typeahead.current.context !== context) {
+      window.clearTimeout(typeahead.current.timer)
+      typeahead.current.buffer = ''
+      typeahead.current.context = context
+      typeahead.current.candidates = []
+    }
+    if (event.key === ' ' && !typeahead.current.buffer) return false
+    if (!typeahead.current.buffer) {
+      const facet = pane === 'track' ? undefined : pane
+      const values = facet ? browseFacetValues(state.view, state.viewKey, browseKey, facet) : []
+      typeahead.current = {
+        ...typeahead.current,
+        buffer: '',
+        context,
+        candidates: pane === 'track'
+          ? displayedTracks.map((track) => ({ value: track.name, id: track.id }))
+          : values.map((value) => ({ value })),
+      }
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    typeahead.current.buffer += event.key
+    window.clearTimeout(typeahead.current.timer)
+    typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, 1000)
+    const prefix = typeahead.current.buffer.toLocaleLowerCase()
+    const candidate = typeahead.current.candidates.find(({ value }) => {
+      const label = pane === 'track' ? value : facetLabel(labels[state.source].facets[pane === 'cat' ? 0 : pane === 'art' ? 1 : 2], value)
+      return label.toLocaleLowerCase().startsWith(prefix)
+    })
+    if (!candidate) return true
+    if (pane === 'track') {
+      if (candidate.id === undefined) return true
+      dispatch({ type: 'selectTrack', id: candidate.id })
+      window.requestAnimationFrame(() => {
+        const row = document.querySelector<HTMLElement>(`[data-track-id="${candidate.id}"]`)
+        row?.focus()
+        row?.scrollIntoView({ block: 'nearest' })
+      })
+    } else {
+      selectFacet(pane, [candidate.value], candidate.value)
+      const values = typeahead.current.candidates
+      const index = values.indexOf(candidate)
+      window.requestAnimationFrame(() => {
+        const row = document.querySelector<HTMLElement>(`[data-facet="${pane}"] [data-row-index="${index + 1}"]`)
+        row?.focus()
+        row?.scrollIntoView({ block: 'nearest' })
+      })
+    }
+    return true
+  }
 
   useTauriEvent<string>('view-action', (payload) => {
     if (payload === 'zoom_in') setZoom(state.settings.zoom + 0.1)
@@ -470,7 +553,7 @@ function App() {
     if (command && ['=', '+', '-', '0'].includes(event.key)) {
       event.preventDefault()
       setZoom(event.key === '0' ? 1 : state.settings.zoom + (event.key === '-' ? -0.1 : 0.1))
-    } else if (command && event.key.toLowerCase() === 'a' && activePane === 'track' && tracklistVisible) {
+    } else if (command && event.key.toLowerCase() === 'a' && activePane === 'track' && tracklistVisible && !(event.target instanceof Element && event.target.closest('input, textarea, [contenteditable]'))) {
       event.preventDefault()
       const anchor = displayedTracks.some((track) => track.id === state.selectionAnchor)
         ? state.selectionAnchor
@@ -486,28 +569,12 @@ function App() {
     } else if (command && event.key === ',') {
       event.preventDefault()
       openPreferences()
-    } else if (!command && event.key === ' ' && !typeahead.current.buffer) {
+    } else if (!command && event.key === ' ' && (!typeahead.current.buffer || typeahead.current.context !== browseTypeaheadContextKey(activePane, state.source, state.sel, browseKey))) {
       event.preventDefault()
+      typeahead.current.buffer = ''
       player.toggle()
     } else if (!command && event.key.length === 1) {
-      event.preventDefault()
-      typeahead.current.buffer += event.key
-      window.clearTimeout(typeahead.current.timer)
-      typeahead.current.timer = window.setTimeout(() => { typeahead.current.buffer = '' }, 1000)
-      const prefix = typeahead.current.buffer.toLocaleLowerCase()
-      if (activePane === 'track') {
-        const track = displayedTracks.find((track) => track.name.toLocaleLowerCase().startsWith(prefix))
-        if (!track) return
-        dispatch({ type: 'selectTrack', id: track.id })
-        window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${track.id}"]`)?.scrollIntoView({ block: 'nearest' }))
-      } else {
-        const facetValues = view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
-        const facetTitle = labels[state.source].facets[activePane === 'cat' ? 0 : activePane === 'art' ? 1 : 2]
-        const index = facetValues.findIndex((value) => facetLabel(facetTitle, value).toLocaleLowerCase().startsWith(prefix))
-        if (index < 0) return
-        selectFacet(activePane, [facetValues[index]], facetValues[index])
-        window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index + 1}"]`)?.scrollIntoView({ block: 'nearest' }))
-      }
+      handlePrefix(event, activePane)
     } else if (!command && event.key === 'ArrowLeft') {
       event.preventDefault()
       player.step(-1)
@@ -537,7 +604,10 @@ function App() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => onKeyDown.current(event)
     window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    return () => {
+      window.removeEventListener('keydown', handler)
+      window.clearTimeout(typeahead.current.timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -559,13 +629,13 @@ function App() {
     dispatch({ type: 'scope', scope: 'library' })
     dispatch(playbackOriginAction(origin))
   }
-
   return (
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: appliedZoom(state.settings.zoom, ZOOM_BASE) }}>
       <TransportBar
         playing={state.playing}
         track={playingTrack}
         query={state.query}
+        queryReset={state.queryReset}
         scope={state.scope}
         volume={state.settings.volume}
         searchRef={search}
@@ -578,7 +648,23 @@ function App() {
         onSeek={player.seek}
         onOrigin={showPlayingOrigin}
         onArtwork={() => setArtworkOpen(true)}
+        onContextMenu={(event) => {
+          const uri = state.playing?.external ? state.playing.uri : playingTrack?.uri
+          if (!uri) return
+          event.preventDefault()
+          const id = state.playing?.external ? undefined : playingTrack?.id
+          setPlayingMenu({ x: event.clientX, y: event.clientY, uri,
+            name: state.playing?.external ? state.playing.name ?? 'Unknown Track' : playingTrack!.name,
+            trackId: id !== undefined && id < SYNTHETIC_BASE ? id : undefined,
+          })
+        }}
       />
+      {playingMenu && <TrackContextMenu x={playingMenu.x} y={playingMenu.y} onClose={() => setPlayingMenu(undefined)}
+        onPlaylist={() => setPlaylistSubject({ kind: 'tracks', label: `Track · ${playingMenu.name}`, uris: [playingMenu.uri] })}
+        onGoToAlbum={playingMenu.uri.startsWith('spotify:track:') ? () => navigateSpotify(playingMenu, 'album') : undefined}
+        onGoToArtist={playingMenu.uri.startsWith('spotify:track:') ? () => navigateSpotify(playingMenu, 'artist') : undefined}
+        onInfo={playingMenu.trackId === undefined ? undefined : () => openSingleInfo(playingMenu.trackId!)}
+      />}
       <div className="body-grid">
         <Sidebar
           state={{ ...state, view }}
@@ -597,7 +683,7 @@ function App() {
             onClose={() => setArtworkOpen(false)}
           /> : undefined}
         />
-        <section className="content">
+        <section className="content" aria-busy={state.browsePending}>
           {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => spotifyGateway.connect().catch(fail)}>Reconnect</button></div>}
           {spotifySearchActive ? (
             !state.connectionHydrated ? <div className="spotify-stub"><span>Checking Spotify connection…</span></div> : state.connection.connected ? <SpotifySearch
@@ -653,7 +739,7 @@ function App() {
           />
           : (
             <>
-              <BrowserPane state={state} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onPlay={playFacet} onToggle={toggleBrowserPane} />
+              <BrowserPane state={{ ...state, browseKey }} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onPlay={playFacet} onToggle={toggleBrowserPane} onPrefix={(event, facet) => handlePrefix(event.nativeEvent, facet)} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
                 <AlbumRatingStrip
                   album={selectedAlbum}
@@ -708,11 +794,12 @@ function App() {
                 onColumnWidths={(columnWidths) => updateSettings({ columnWidths })}
                 onHiddenColumns={(hiddenColumns) => updateSettings({ hiddenColumns })}
                 onSort={(sortColumn, sortDesc) => updateSettings({ sortColumn, sortDesc })}
+                onPrefix={(event) => handlePrefix(event.nativeEvent, 'track')}
               />
             </>
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} lastfmRemaining={Math.max(state.lastfmImport.remaining, state.lastfmImport.pendingReview)} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
+          <StatusBar view={view} unit={labels[state.source].item} browsePending={state.browsePending} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} lastfmRemaining={Math.max(state.lastfmImport.remaining, state.lastfmImport.pendingReview)} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={closeInfo} onSaved={() => {
@@ -789,26 +876,34 @@ function ArtworkPanel({ uri, name, onClose }: { uri: string; name: string; onClo
         {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span aria-hidden="true">♪</span>}
       </button>
     </div>
-    {expanded && <ArtworkLightbox uri={uri} name={name} onClose={() => setExpanded(false)} />}
+    {expanded && <TrackArtworkLightbox uri={uri} name={name} onClose={() => setExpanded(false)} />}
   </>
 }
 
-function ArtworkLightbox({ uri, name, onClose }: { uri: string; name: string; onClose: () => void }) {
+function TrackArtworkLightbox({ uri, name, onClose }: { uri: string; name: string; onClose: () => void }) {
   const artwork = useArtwork(uri, 640)
-  return <ModalDialog className="artwork-lightbox" labelledBy="artwork-lightbox-title" onCancel={onClose} closeOnBackdrop>
-    <h2 id="artwork-lightbox-title" className="visually-hidden">Artwork for {name}</h2>
-    <button type="button" className="artwork-lightbox-close" aria-label="Close artwork" onClick={onClose}>×</button>
-    {artwork ? <img src={artwork} alt={`${name} album artwork`} /> : <span className="artwork-placeholder" aria-hidden="true">♪</span>}
-  </ModalDialog>
+  return <ArtworkLightbox artwork={artwork} name={name} onClose={onClose} />
 }
 
-export function TransportBar({ playing, track, query, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork }: {
-  playing: State['playing']; track?: PlaybackTrack; query: string; scope: State['scope']
+export function TransportBar({ playing, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork, onContextMenu }: {
+  playing: State['playing']; track?: PlaybackTrack; query: string; queryReset?: number; scope: State['scope']
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
   onPlay: () => void; onPrev: () => void; onNext: () => void; onVolume: (volume: number) => void; onOrigin: () => void; onArtwork: () => void
+  onContextMenu?: React.MouseEventHandler<HTMLDivElement>
 }) {
+  const [queryDraft, setQueryDraft] = useState(query)
+  const queryTimer = useRef(0)
+  useEffect(() => {
+    window.clearTimeout(queryTimer.current)
+    setQueryDraft(query)
+  }, [query, queryReset])
+  useEffect(() => () => window.clearTimeout(queryTimer.current), [])
+  const commitQuery = (next: string) => {
+    window.clearTimeout(queryTimer.current)
+    if (next !== query) onQuery(next)
+  }
   const elapsed = playing?.elapsed ?? 0
   const shown = playing?.external ? {
     name: `${playing.name ?? 'Unknown Track'} (Spotify)`,
@@ -818,7 +913,7 @@ export function TransportBar({ playing, track, query, scope, volume, searchRef, 
   } : track
   const duration = shown?.durationSecs ?? 0
   const uri = playing?.external ? playing.uri : track?.uri
-  const artwork = useArtwork(uri, 64)
+  const artwork = useArtwork(uri, 128)
   return <header className="transport">
     <div className="transport-controls">
       <div className="transport-buttons">
@@ -834,6 +929,7 @@ export function TransportBar({ playing, track, query, scope, volume, searchRef, 
       tabIndex={playing?.origin ? 0 : undefined}
       aria-label={playing?.origin ? 'Show playing source' : undefined}
       title={playing?.origin ? 'Show playing source' : undefined}
+      onContextMenu={onContextMenu}
       onClick={(event) => {
         if (!playing?.origin || (event.target as Element).closest('input')) return
         onOrigin()
@@ -861,11 +957,16 @@ export function TransportBar({ playing, track, query, scope, volume, searchRef, 
       </div>
     </div>
     <div className="search-area">
-      <input ref={searchRef} className="search" type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
+      <input ref={searchRef} className="search" type="search" value={queryDraft} onChange={(event) => {
+        const next = event.target.value
+        setQueryDraft(next)
+        window.clearTimeout(queryTimer.current)
+        queryTimer.current = window.setTimeout(() => onQuery(next), 80)
+      }} onBlur={() => commitQuery(queryDraft)} placeholder={`⌕ Search ${scope === 'library' ? 'Library' : 'Spotify'}`} />
       <div className="search-scope">
         <div className="scope-pills" aria-label="Search scope">
-          <button className={scope === 'library' ? 'active' : ''} onClick={() => onScope('library')}>Library</button>
-          <button className={scope === 'spotify' ? 'active' : ''} onClick={() => onScope('spotify')}>Spotify</button>
+          <button className={scope === 'library' ? 'active' : ''} onClick={() => { commitQuery(queryDraft); onScope('library') }}>Library</button>
+          <button className={scope === 'spotify' ? 'active' : ''} onClick={() => { commitQuery(queryDraft); onScope('spotify') }}>Spotify</button>
         </div>
       </div>
     </div>
@@ -1439,7 +1540,7 @@ function statusCountdown(deadline: number, now: number) {
   return `${seconds}s`
 }
 
-export function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, spotifySyncStatus, lastfmImport, lastfmRemaining, onSpotifySync, onLastfmImport, empty }: { view: BrowseView | null; unit: string; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; spotifySyncStatus: SpotifySyncStatus; lastfmImport: LastFmImportState; lastfmRemaining: number; onSpotifySync: () => void; onLastfmImport: () => void; empty: boolean }) {
+export function StatusBar({ view, unit, browsePending, syncPhase, syncProgress, importStatus, spotifySyncStatus, lastfmImport, lastfmRemaining, onSpotifySync, onLastfmImport, empty }: { view: BrowseView | null; unit: string; browsePending?: boolean; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; spotifySyncStatus: SpotifySyncStatus; lastfmImport: LastFmImportState; lastfmRemaining: number; onSpotifySync: () => void; onLastfmImport: () => void; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
@@ -1467,7 +1568,7 @@ export function StatusBar({ view, unit, syncPhase, syncProgress, importStatus, s
       : lastfmImport.syncProblem ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Last.fm sync needs attention</button>
         : lastfmRemaining > 0 ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Finish importing from Last.fm — {lastfmRemaining} left</button>
           : null
-  return <footer className="status-bar">{spotifySegment}{lastfmSegment && <><span className="status-separator" aria-hidden="true">·</span>{lastfmSegment}</>}</footer>
+  return <footer className="status-bar">{browsePending && <><span role="status">Filtering library…</span><span className="status-separator" aria-hidden="true">·</span></>}{spotifySegment}{lastfmSegment && <><span className="status-separator" aria-hidden="true">·</span>{lastfmSegment}</>}</footer>
 }
 
 export default App

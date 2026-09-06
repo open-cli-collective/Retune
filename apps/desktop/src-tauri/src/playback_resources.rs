@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use retune_core::model::{Library, TrackRecord};
 use retune_spotify::{catalog::SpotifyCatalog, client::Track as SpotifyTrack};
 use serde::Deserialize;
@@ -19,20 +21,79 @@ pub(crate) fn resolve_cached(
     library: &Library,
     playlists: &PlaylistCache,
     catalog: &SpotifyCatalog,
-) -> Result<Vec<Option<SnapshotTrack>>, String> {
+) -> Result<(Vec<Option<SnapshotTrack>>, Vec<bool>), String> {
     validate_request(resources, start_index)?;
-    resources
+    let requested = resources
         .iter()
-        .map(|resource| resolve_one(resource, library, playlists, catalog))
-        .collect()
+        .map(|resource| resource.uri.as_str())
+        .collect::<HashSet<_>>();
+    let mut library_by_uri = HashMap::with_capacity(requested.len());
+    for track in library.tracks() {
+        if requested.contains(track.uri.as_str()) {
+            library_by_uri.entry(track.uri.as_str()).or_insert(track);
+            if library_by_uri.len() == requested.len() {
+                break;
+            }
+        }
+    }
+    let mut unresolved = HashSet::new();
+    let mut tracks = Vec::with_capacity(resources.len());
+    let mut enabled = Vec::with_capacity(resources.len());
+    for resource in resources {
+        if let Some(track) = library_by_uri.get(resource.uri.as_str()).copied() {
+            tracks.push(Some(from_library(track)));
+            enabled.push(track.enabled);
+        } else if resource.uri.starts_with("file://") {
+            return Err("Local playback resource is not in the library.".into());
+        } else {
+            unresolved.insert(resource.uri.as_str());
+            tracks.push(None);
+            enabled.push(true);
+        }
+    }
+    let mut playlist_by_uri = HashMap::new();
+    if !unresolved.is_empty() {
+        for track in playlists
+            .playlists
+            .iter()
+            .flat_map(|playlist| &playlist.spotify_tracks)
+            .filter(|track| unresolved.contains(track.uri.as_str()))
+        {
+            playlist_by_uri.entry(track.uri.as_str()).or_insert(track);
+            if playlist_by_uri.len() == unresolved.len() {
+                break;
+            }
+        }
+    }
+    for (resource, resolved) in resources.iter().zip(&mut tracks) {
+        if resolved.is_some() {
+            continue;
+        }
+        *resolved = playlist_by_uri
+            .get(resource.uri.as_str())
+            .map(|track| SnapshotTrack {
+                id: resource.id,
+                uri: track.uri.clone(),
+                name: track.name.clone(),
+                art: track.art.clone(),
+                alb: track.alb.clone(),
+                duration_secs: track.duration / 1_000,
+            })
+            .or_else(|| {
+                catalog
+                    .complete_track(&resource.uri)
+                    .map(|track| from_spotify(resource, &track))
+            });
+    }
+    Ok((tracks, enabled))
 }
 
 pub(crate) fn finish(
     tracks: Vec<SnapshotTrack>,
     start_index: usize,
-    enabled: impl Fn(&SnapshotTrack) -> bool,
+    enabled: &[bool],
 ) -> Result<(Vec<SnapshotTrack>, usize), String> {
-    if tracks.get(start_index).is_none() {
+    if tracks.get(start_index).is_none() || enabled.len() != tracks.len() {
         return Err("Playback start index is out of range.".into());
     }
     let mut resolved_index = 0;
@@ -40,10 +101,10 @@ pub(crate) fn finish(
         .into_iter()
         .enumerate()
         .filter_map(|(index, track)| {
-            if index < start_index && enabled(&track) {
+            if index < start_index && enabled[index] {
                 resolved_index += 1;
             }
-            (index == start_index || enabled(&track)).then_some(track)
+            (index == start_index || enabled[index]).then_some(track)
         })
         .collect();
     Ok((tracks, resolved_index))
@@ -104,42 +165,6 @@ fn validate_uri(uri: &str) -> Result<(), String> {
     }
 }
 
-fn resolve_one(
-    resource: &PlaybackResource,
-    library: &Library,
-    playlists: &PlaylistCache,
-    catalog: &SpotifyCatalog,
-) -> Result<Option<SnapshotTrack>, String> {
-    if let Some(track) = library
-        .tracks()
-        .iter()
-        .find(|track| track.uri == resource.uri)
-    {
-        return Ok(Some(from_library(track)));
-    }
-    if resource.uri.starts_with("file://") {
-        return Err("Local playback resource is not in the library.".into());
-    }
-    if let Some(track) = playlists
-        .playlists
-        .iter()
-        .flat_map(|playlist| &playlist.spotify_tracks)
-        .find(|track| track.uri == resource.uri)
-    {
-        return Ok(Some(SnapshotTrack {
-            id: resource.id,
-            uri: track.uri.clone(),
-            name: track.name.clone(),
-            art: track.art.clone(),
-            alb: track.alb.clone(),
-            duration_secs: track.duration / 1_000,
-        }));
-    }
-    Ok(catalog
-        .complete_track(&resource.uri)
-        .map(|track| from_spotify(resource, &track)))
-}
-
 fn from_library(track: &TrackRecord) -> SnapshotTrack {
     SnapshotTrack {
         id: track.id.0,
@@ -158,6 +183,7 @@ mod tests {
     use retune_core::model::{NewTrack, SourceId};
 
     use super::*;
+    use crate::playlists::{CachedPlaylist, CachedTrack, TRACK_METADATA_VERSION};
 
     fn add(library: &mut Library, uri: &str, name: &str) -> u64 {
         library
@@ -192,6 +218,7 @@ mod tests {
             &SpotifyCatalog::default(),
         )
         .unwrap()
+        .0
         .pop()
         .flatten()
         .unwrap();
@@ -226,6 +253,7 @@ mod tests {
                 &SpotifyCatalog::default(),
             )
             .unwrap()
+            .0
             .len(),
             2
         );
@@ -255,6 +283,7 @@ mod tests {
                 &SpotifyCatalog::default(),
             )
             .unwrap()
+            .0
             .len(),
             1_001
         );
@@ -277,6 +306,45 @@ mod tests {
     }
 
     #[test]
+    fn cached_resolution_uses_the_first_playlist_match() {
+        let playlist = |id: &str, name: &str| CachedPlaylist {
+            id: id.into(),
+            name: id.into(),
+            snapshot_id: id.into(),
+            owned: true,
+            owner: None,
+            track_count: 1,
+            tracks: vec!["spotify:track:same".into()],
+            track_metadata_version: TRACK_METADATA_VERSION,
+            spotify_tracks: vec![CachedTrack {
+                uri: "spotify:track:same".into(),
+                name: name.into(),
+                art: String::new(),
+                alb: String::new(),
+                duration: 1_000,
+                disc_no: None,
+                track_no: None,
+                release_date: None,
+            }],
+        };
+        let playlists = PlaylistCache {
+            playlists: vec![playlist("first", "First"), playlist("second", "Second")],
+        };
+
+        let resolved = resolve_cached(
+            &[resource(1, "spotify:track:same")],
+            0,
+            &Library::new(),
+            &playlists,
+            &SpotifyCatalog::default(),
+        )
+        .unwrap()
+        .0;
+
+        assert_eq!(resolved[0].as_ref().unwrap().name, "First");
+    }
+
+    #[test]
     fn finish_keeps_selected_disabled_track_and_filters_other_disabled_tracks() {
         let tracks = [1, 2, 3]
             .map(|id| SnapshotTrack {
@@ -288,11 +356,107 @@ mod tests {
                 duration_secs: 1,
             })
             .to_vec();
-        let (tracks, index) = finish(tracks, 1, |track| track.id == 3).unwrap();
+        let (tracks, index) = finish(tracks, 1, &[false, false, true]).unwrap();
         assert_eq!(
             tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
             [2, 3]
         );
         assert_eq!(index, 0);
+    }
+
+    #[test]
+    #[ignore = "responsiveness benchmark; run with --release --ignored --nocapture"]
+    fn audit_playback_resolution_costs() {
+        use std::{hint::black_box, time::Instant};
+
+        let mut library = Library::new();
+        library.add_all((0..50_000).map(|index| NewTrack {
+            uri: format!("spotify:track:library{index}"),
+            name: format!("Library {index}"),
+            ..NewTrack::default()
+        }));
+        let playlist_tracks = (0..50_000)
+            .map(|index| CachedTrack {
+                uri: format!("spotify:track:playlist{index}"),
+                name: format!("Playlist {index}"),
+                art: String::new(),
+                alb: String::new(),
+                duration: 1_000,
+                disc_no: None,
+                track_no: None,
+                release_date: None,
+            })
+            .collect::<Vec<_>>();
+        let playlists = PlaylistCache {
+            playlists: vec![CachedPlaylist {
+                id: "large".into(),
+                name: "Large".into(),
+                snapshot_id: "large".into(),
+                owned: true,
+                owner: None,
+                track_count: playlist_tracks.len(),
+                tracks: playlist_tracks
+                    .iter()
+                    .map(|track| track.uri.clone())
+                    .collect(),
+                track_metadata_version: TRACK_METADATA_VERSION,
+                spotify_tracks: playlist_tracks,
+            }],
+        };
+        let catalog = SpotifyCatalog::default();
+        let cases = [
+            (
+                "one-library-large-caches",
+                vec![resource(0, "spotify:track:library0")],
+            ),
+            (
+                "library-50000",
+                (0..50_000)
+                    .map(|index| resource(index, &format!("spotify:track:library{index}")))
+                    .collect(),
+            ),
+            (
+                "mixed-5000",
+                (0..2_500)
+                    .flat_map(|index| {
+                        [
+                            resource(index, &format!("spotify:track:library{index}")),
+                            resource(index, &format!("spotify:track:playlist{index}")),
+                        ]
+                    })
+                    .collect(),
+            ),
+        ];
+        for (name, resources) in cases {
+            let run = || {
+                let (tracks, enabled) =
+                    resolve_cached(&resources, 0, &library, &playlists, &catalog).unwrap();
+                let tracks = tracks.into_iter().collect::<Option<Vec<_>>>().unwrap();
+                finish(tracks, 0, &enabled).unwrap().0
+            };
+            let expected = resources
+                .iter()
+                .map(|resource| resource.uri.as_str())
+                .collect::<Vec<_>>();
+            let actual = run();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|track| track.uri.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let mut samples = Vec::with_capacity(7);
+            for _ in 0..7 {
+                let start = Instant::now();
+                black_box(run());
+                samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "PLAYBACK fixture=responsiveness-v1 case={name} samples=7 median_ms={:.3} min={:.3} max={:.3}",
+                samples[3], samples[0], samples[6]
+            );
+        }
     }
 }

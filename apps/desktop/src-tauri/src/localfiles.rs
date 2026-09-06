@@ -124,6 +124,12 @@ pub(crate) fn backfill_metadata(library: &mut Library) -> bool {
     let updates = library
         .tracks()
         .iter()
+        .filter(|track| {
+            track.added_at.is_none()
+                || (track.uri.starts_with("spotify:") && track.kind.is_none())
+                || (track.uri.starts_with("file:")
+                    && (track.kind.is_none() || track.bitrate_kbps.is_none()))
+        })
         .map(|track| {
             let (kind, bitrate_kbps) = if track.uri.starts_with("spotify:") {
                 (track.kind.is_none().then(|| "Spotify".into()), None)
@@ -149,14 +155,13 @@ pub(crate) fn backfill_metadata(library: &mut Library) -> bool {
             (track.id, kind, bitrate_kbps)
         })
         .collect::<Vec<_>>();
-    updates
-        .into_iter()
-        .fold(false, |changed, (id, kind, bitrate_kbps)| {
-            let filled = library
-                .fill_missing_metadata(id, Some(now), kind, bitrate_kbps)
-                .expect("metadata target came from this library");
-            filled || changed
-        })
+    library
+        .fill_missing_metadata_all(
+            updates
+                .into_iter()
+                .map(|(id, kind, bitrate_kbps)| (id, Some(now), kind, bitrate_kbps)),
+        )
+        .expect("metadata targets came from this library")
 }
 
 pub(crate) fn file_uri(canonical_path: &Path) -> String {
@@ -369,6 +374,48 @@ mod tests {
         assert!(added.is_some());
         assert!(library.tracks().iter().all(|track| track.added_at == added));
         assert!(!backfill_metadata(&mut library));
+    }
+
+    #[test]
+    #[ignore = "responsiveness benchmark; run with --release --ignored --nocapture"]
+    fn audit_backfill_costs() {
+        use std::{hint::black_box, time::Instant};
+
+        let library = |complete: bool| {
+            let mut library = Library::new();
+            library.add_all((0..50_000).map(|index| NewTrack {
+                uri: format!("spotify:track:{index}"),
+                name: format!("Track {index}"),
+                added_at: complete.then_some(1),
+                kind: complete.then(|| "Spotify".into()),
+                ..NewTrack::default()
+            }));
+            library
+        };
+        let mut correctness = library(false);
+        assert!(backfill_metadata(&mut correctness));
+        assert!(correctness
+            .tracks()
+            .iter()
+            .all(|track| track.added_at.is_some() && track.kind.as_deref() == Some("Spotify")));
+        for (name, mut fixtures) in [
+            ("complete-50000", vec![library(true); 8]),
+            ("missing-50000", vec![library(false); 8]),
+        ] {
+            black_box(backfill_metadata(fixtures.last_mut().unwrap()));
+            fixtures.pop();
+            let mut samples = Vec::with_capacity(7);
+            for mut fixture in fixtures {
+                let start = Instant::now();
+                black_box(backfill_metadata(&mut fixture));
+                samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "BACKFILL fixture=responsiveness-v1 case={name} samples=7 median_ms={:.3} min={:.3} max={:.3}",
+                samples[3], samples[0], samples[6]
+            );
+        }
     }
 
     #[test]

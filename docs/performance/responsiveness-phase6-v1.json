@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "baseRevision": "380c55e",
+  "candidate": { "branch": "codex/responsiveness-burndown", "checkpoint": 6 },
+  "measurements": [],
+  "correctness": {
+    "importerTestsPassed": 229,
+    "accountIsolation": "binding is validated before network work and revalidated after network search",
+    "apply": "durable apply jobs are queued before the worker performs external effects",
+    "foregroundIsolation": "membership guards are released before queued metadata, apply journaling, and retry persistence",
+    "lateWork": "existing request generations and apply runner guards remain in place"
+  },
+  "limits": [
+    "This checkpoint records structural isolation and regression checks, not native input-to-paint timing.",
+    "Network throughput and foreground-versus-prefetch scheduling remain outside this local importer change."
+  ]
+}

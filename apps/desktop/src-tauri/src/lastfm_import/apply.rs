@@ -862,6 +862,7 @@ fn cached_collection_tracks_for_apply(
                     name: name.clone(),
                     duration: std::time::Duration::from_secs(
                         album
+                            .matching
                             .track_durations
                             .get(index)
                             .copied()

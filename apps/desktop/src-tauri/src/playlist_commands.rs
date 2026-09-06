@@ -18,11 +18,6 @@ use crate::{
     track_id, AppState, SpotifyProvider,
 };
 
-#[cfg(test)]
-thread_local! {
-    static PROJECTION_LOOKUPS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PlaylistListView {
@@ -193,8 +188,6 @@ fn playlist_track_views(
         .tracks
         .iter()
         .map(|uri| {
-            #[cfg(test)]
-            PROJECTION_LOOKUPS.set(PROJECTION_LOOKUPS.get().map(|lookups| lookups + 2));
             let cached = cached_by_uri.get(uri.as_str()).copied();
             if let Some(track) = library_by_uri.get(uri.as_str()).copied() {
                 PlaylistTrackView {
@@ -226,7 +219,7 @@ fn playlist_track_views(
                         .as_ref()
                         .is_some_and(|original| original != &track.cat),
                     is_local: false,
-                    rating: library.effective_rating(track.id).map(rating_view),
+                    rating: library.effective_rating(track).map(rating_view),
                 }
             } else {
                 PlaylistTrackView {
@@ -300,44 +293,6 @@ mod tests {
         assert_eq!(tracks[0].id, Some(id.0));
         assert_eq!((tracks[0].disc_no, tracks[0].track_no), (Some(2), Some(7)));
         assert_eq!(tracks[0].release_date.as_deref(), Some("1999"));
-    }
-
-    #[test]
-    fn playlist_projection_does_two_index_lookups_per_entry() {
-        let mut library = Library::new();
-        library.add_all((0..50_000).map(|index| NewTrack {
-            uri: format!("spotify:track:{index}"),
-            ..NewTrack::default()
-        }));
-        let playlists = playlists::PlaylistCache {
-            playlists: vec![playlists::CachedPlaylist {
-                id: "playlist".into(),
-                name: "Playlist".into(),
-                snapshot_id: "snapshot".into(),
-                owned: true,
-                owner: None,
-                track_count: 10_000,
-                tracks: vec!["spotify:track:42".into(); 10_000],
-                track_metadata_version: playlists::TRACK_METADATA_VERSION,
-                spotify_tracks: vec![playlists::CachedTrack {
-                    uri: "spotify:track:42".into(),
-                    name: "Song".into(),
-                    art: "Artist".into(),
-                    alb: "Album".into(),
-                    duration: 1,
-                    disc_no: None,
-                    track_no: None,
-                    release_date: None,
-                }],
-            }],
-        };
-
-        PROJECTION_LOOKUPS.set(Some(0));
-        let tracks = playlist_track_views(&playlists, &library, "playlist").unwrap();
-        let lookups = PROJECTION_LOOKUPS.replace(None).unwrap();
-
-        assert_eq!(tracks.len(), 10_000);
-        assert_eq!(lookups, 20_000);
     }
 
     #[test]

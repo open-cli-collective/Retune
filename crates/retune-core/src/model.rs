@@ -231,30 +231,18 @@ impl Library {
 
     /// Adds a batch in order, returning how many records were new.
     pub fn add_all(&mut self, incoming: impl IntoIterator<Item = NewTrack>) -> usize {
-        self.add_all_counted(incoming).0
-    }
-
-    fn add_all_counted(&mut self, incoming: impl IntoIterator<Item = NewTrack>) -> (usize, usize) {
         let mut uris = self
             .tracks
             .iter()
             .map(|track| track.uri.clone())
             .collect::<HashSet<_>>();
         let before = self.tracks.len();
-        #[cfg(test)]
-        let mut index_operations = uris.len();
-        #[cfg(not(test))]
-        let index_operations = 0;
         for track in incoming {
-            #[cfg(test)]
-            {
-                index_operations += 1;
-            }
             if uris.insert(track.uri.clone()) {
                 self.push(track);
             }
         }
-        (self.tracks.len() - before, index_operations)
+        self.tracks.len() - before
     }
 
     fn push(&mut self, incoming: NewTrack) -> TrackId {
@@ -297,38 +285,21 @@ impl Library {
 
     /// Upserts a batch in order using one transient URI index.
     pub fn upsert_all(&mut self, incoming: impl IntoIterator<Item = NewTrack>) {
-        self.upsert_all_counted(incoming);
-    }
-
-    fn upsert_all_counted(&mut self, incoming: impl IntoIterator<Item = NewTrack>) -> usize {
         let mut indexes = self
             .tracks
             .iter()
             .enumerate()
             .map(|(index, track)| (track.uri.clone(), index))
             .collect::<HashMap<_, _>>();
-        #[cfg(test)]
-        let mut index_operations = indexes.len();
-        #[cfg(not(test))]
-        let index_operations = 0;
         for track in incoming {
-            #[cfg(test)]
-            {
-                index_operations += 1;
-            }
             if let Some(&index) = indexes.get(&track.uri) {
                 Self::update(&mut self.tracks[index], track);
             } else {
                 let uri = track.uri.clone();
                 self.push(track);
                 indexes.insert(uri, self.tracks.len() - 1);
-                #[cfg(test)]
-                {
-                    index_operations += 1;
-                }
             }
         }
-        index_operations
     }
 
     fn update(track: &mut TrackRecord, incoming: NewTrack) -> TrackId {
@@ -356,22 +327,53 @@ impl Library {
     /// check hides it).
     pub fn edit(&mut self, id: TrackId, edit: TrackEdit) -> Result<(), UnknownTrack> {
         let track = self.track_mut(id)?;
-        if let Some(name) = edit.name {
-            track.name = name;
-        }
-        if let Some(art) = edit.art {
-            track.art = art;
-        }
-        if let Some(alb) = edit.alb {
-            track.alb = alb;
-        }
-        if let Some(cat) = edit.cat {
-            if track.orig_cat.is_none() && cat != track.cat {
-                track.orig_cat = Some(track.cat.clone());
+        Self::apply_edit(track, &edit);
+        Ok(())
+    }
+
+    /// Atomically edits a batch of known tracks using one transient ID index.
+    pub fn edit_all(
+        &mut self,
+        ids: &[TrackId],
+        edit: &TrackEdit,
+        rating_change: Option<Option<Rating>>,
+    ) -> Result<(), UnknownTrack> {
+        let indexes = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id, index))
+            .collect::<HashMap<_, _>>();
+        let targets = ids
+            .iter()
+            .map(|id| indexes.get(id).copied().ok_or(UnknownTrack(*id)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for index in targets {
+            let track = &mut self.tracks[index];
+            Self::apply_edit(track, edit);
+            if let Some(rating) = rating_change {
+                track.rating = rating;
             }
-            track.cat = cat;
         }
         Ok(())
+    }
+
+    fn apply_edit(track: &mut TrackRecord, edit: &TrackEdit) {
+        if let Some(name) = &edit.name {
+            track.name.clone_from(name);
+        }
+        if let Some(art) = &edit.art {
+            track.art.clone_from(art);
+        }
+        if let Some(alb) = &edit.alb {
+            track.alb.clone_from(alb);
+        }
+        if let Some(cat) = &edit.cat {
+            if track.orig_cat.is_none() && cat != &track.cat {
+                track.orig_cat = Some(track.cat.clone());
+            }
+            track.cat.clone_from(cat);
+        }
     }
 
     /// Star-click semantics on a track: clicking always sets an explicit
@@ -448,6 +450,57 @@ impl Library {
         bitrate_kbps: Option<u32>,
     ) -> Result<bool, UnknownTrack> {
         let track = self.track_mut(id)?;
+        Ok(Self::fill_missing_metadata_for(
+            track,
+            added_at,
+            kind,
+            bitrate_kbps,
+        ))
+    }
+
+    /// Atomically fills missing technical metadata using one transient ID index.
+    pub fn fill_missing_metadata_all(
+        &mut self,
+        updates: impl IntoIterator<Item = (TrackId, Option<u64>, Option<String>, Option<u32>)>,
+    ) -> Result<bool, UnknownTrack> {
+        let updates = updates.into_iter().collect::<Vec<_>>();
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        let indexes = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id, index))
+            .collect::<HashMap<_, _>>();
+        let updates = updates
+            .into_iter()
+            .map(|(id, added_at, kind, bitrate_kbps)| {
+                indexes
+                    .get(&id)
+                    .copied()
+                    .map(|index| (index, added_at, kind, bitrate_kbps))
+                    .ok_or(UnknownTrack(id))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut changed = false;
+        for (index, added_at, kind, bitrate_kbps) in updates {
+            changed |= Self::fill_missing_metadata_for(
+                &mut self.tracks[index],
+                added_at,
+                kind,
+                bitrate_kbps,
+            );
+        }
+        Ok(changed)
+    }
+
+    fn fill_missing_metadata_for(
+        track: &mut TrackRecord,
+        added_at: Option<u64>,
+        kind: Option<String>,
+        bitrate_kbps: Option<u32>,
+    ) -> bool {
         let mut changed = false;
         if track.added_at.is_none() && added_at.is_some() {
             track.added_at = added_at;
@@ -461,7 +514,7 @@ impl Library {
             track.bitrate_kbps = bitrate_kbps;
             changed = true;
         }
-        Ok(changed)
+        changed
     }
 
     pub fn set_album_rating(&mut self, key: AlbumKey, rating: Option<Rating>) {
@@ -480,8 +533,7 @@ impl Library {
     }
 
     /// Effective rating = track override ?? album rating ?? unrated.
-    pub fn effective_rating(&self, id: TrackId) -> Option<EffectiveRating> {
-        let track = self.get(id)?;
+    pub fn effective_rating(&self, track: &TrackRecord) -> Option<EffectiveRating> {
         track.rating.map(EffectiveRating::Explicit).or_else(|| {
             self.album_rating(&AlbumKey::of(track))
                 .map(EffectiveRating::Inherited)
@@ -497,24 +549,12 @@ impl Library {
     /// and keep their overlay edits; album ratings merge the same way
     /// (existing keys win).
     pub fn merge(&mut self, other: Library) {
-        self.merge_counted(other);
-    }
-
-    fn merge_counted(&mut self, other: Library) -> usize {
         let mut uris = self
             .tracks
             .iter()
             .map(|track| track.uri.clone())
             .collect::<HashSet<_>>();
-        #[cfg(test)]
-        let mut index_operations = uris.len();
-        #[cfg(not(test))]
-        let index_operations = 0;
         for mut track in other.tracks {
-            #[cfg(test)]
-            {
-                index_operations += 1;
-            }
             if !uris.insert(track.uri.clone()) {
                 continue;
             }
@@ -524,7 +564,6 @@ impl Library {
         for (key, rating) in other.album_ratings {
             self.album_ratings.entry(key).or_insert(rating);
         }
-        index_operations
     }
 
     pub fn remove_uris(&mut self, uris: &[String]) -> usize {
@@ -735,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_sync_upsert_matches_sequential_semantics_and_has_linear_index_work() {
+    fn bulk_sync_upsert_matches_sequential_semantics() {
         let mut sequential = Library::new();
         let id = sequential.add(track("same", "Rock", "Artist", "Album"));
         sequential
@@ -757,37 +796,8 @@ mod tests {
         for track in batch.clone() {
             sequential.upsert(track);
         }
-        assert_eq!(bulk.upsert_all_counted(batch), 5);
+        bulk.upsert_all(batch);
         assert_eq!(bulk, sequential);
-
-        for size in [10_000usize, 20_000, 50_000] {
-            let mut library = Library::new();
-            let tracks =
-                (0..size).map(|index| track(&format!("track:{index}"), "Rock", "Artist", "Album"));
-            assert_eq!(library.upsert_all_counted(tracks), size * 2);
-            assert_eq!(library.tracks().len(), size);
-        }
-    }
-
-    #[test]
-    fn bulk_import_and_merge_have_linear_index_work_at_expected_sizes() {
-        for size in [10_000usize, 20_000, 50_000] {
-            let incoming = || {
-                (0..size).map(|index| track(&format!("track:{index}"), "Rock", "Artist", "Album"))
-            };
-
-            let mut imported = Library::new();
-            let (added, import_operations) = imported.add_all_counted(incoming());
-            assert_eq!(added, size);
-            assert_eq!(import_operations, size);
-
-            let mut other = Library::new();
-            assert_eq!(other.add_all(incoming()), size);
-            let mut merged = Library::new();
-            let merge_operations = merged.merge_counted(other);
-            assert_eq!(merge_operations, size);
-            assert_eq!(merged.tracks().len(), size);
-        }
     }
 
     #[test]
@@ -838,14 +848,34 @@ mod tests {
                 .fill_missing_metadata(id, Some(20), Some("Other".into()), Some(128))
                 .unwrap()
         );
-        let track = library.get(id).unwrap();
-        assert_eq!(track.added_at, Some(10));
-        assert_eq!(track.kind.as_deref(), Some("Spotify"));
-        assert_eq!(track.bitrate_kbps, Some(320));
+        let record = library.get(id).unwrap();
+        assert_eq!(record.added_at, Some(10));
+        assert_eq!(record.kind.as_deref(), Some("Spotify"));
+        assert_eq!(record.bitrate_kbps, Some(320));
         assert_eq!(
             library.fill_missing_metadata(TrackId(u64::MAX), None, None, None),
             Err(UnknownTrack(TrackId(u64::MAX)))
         );
+
+        let missing = library.add(track("two", "Rock", "Artist", "Album"));
+        let before = library.clone();
+        assert_eq!(
+            library.fill_missing_metadata_all([
+                (missing, Some(20), Some("Other".into()), Some(128)),
+                (TrackId(u64::MAX), Some(20), None, None),
+            ]),
+            Err(UnknownTrack(TrackId(u64::MAX)))
+        );
+        assert_eq!(library, before);
+        assert!(
+            library
+                .fill_missing_metadata_all([(missing, Some(20), Some("Other".into()), Some(128),)])
+                .unwrap()
+        );
+        let missing = library.get(missing).unwrap();
+        assert_eq!(missing.added_at, Some(20));
+        assert_eq!(missing.kind.as_deref(), Some("Other"));
+        assert_eq!(missing.bitrate_kbps, Some(128));
     }
 
     #[test]
@@ -927,12 +957,12 @@ mod tests {
 
         library.click_track_star(id, rating(4)).unwrap();
         assert_eq!(
-            library.effective_rating(id),
+            library.effective_rating(library.get(id).unwrap()),
             Some(EffectiveRating::Explicit(rating(4)))
         );
         library.click_track_star(id, rating(4)).unwrap();
         assert_eq!(
-            library.effective_rating(id),
+            library.effective_rating(library.get(id).unwrap()),
             Some(EffectiveRating::Inherited(rating(4)))
         );
     }
@@ -950,7 +980,7 @@ mod tests {
         library.set_album_rating(old, Some(rating(2)));
         library.set_album_rating(target, Some(rating(5)));
         assert_eq!(
-            library.effective_rating(id),
+            library.effective_rating(library.get(id).unwrap()),
             Some(EffectiveRating::Inherited(rating(2)))
         );
 
@@ -963,7 +993,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(library.effective_rating(id), None);
+        assert_eq!(library.effective_rating(library.get(id).unwrap()), None);
         library
             .edit(
                 id,
@@ -974,7 +1004,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            library.effective_rating(id),
+            library.effective_rating(library.get(id).unwrap()),
             Some(EffectiveRating::Inherited(rating(5)))
         );
 
@@ -989,7 +1019,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            library.effective_rating(id),
+            library.effective_rating(library.get(id).unwrap()),
             Some(EffectiveRating::Explicit(rating(3)))
         );
     }

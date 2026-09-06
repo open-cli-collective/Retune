@@ -6,7 +6,7 @@ import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, PlayOutcome, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
 import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, excludeImportRows, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, requiredImportMatchIds, resolveImportCount, restPendingImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportCount, selectedImportTrackConfidence, setWholeAlbumImport, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, toggleImportRow, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
-import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
@@ -198,6 +198,20 @@ test('Last.fm acknowledged apply projects the next queue choice before authorita
   assert.deepEqual(activeImportQueue(projection.queue).map((item) => item.page), [2])
 })
 
+test('Last.fm next batch retains a removed current batch as its sorted position', () => {
+  const queue = ['Alpha', 'Bravo', 'Charlie', 'Delta'].map((artist, index) => ({
+    ...importQueue()[0], page: index + 1, artist, remainingPlayCount: 4 - index, sourceCount: 4 - index, latest: 4 - index,
+  }))
+  for (const sort of ['plays', 'artist', 'batch', 'lastPlayed'] as const) {
+    const remaining = queue.filter((item) => item.page !== 2)
+    assert.equal(nextRemainingImportQueue(remaining, queue[1], sort)?.page, 3)
+    assert.equal(nextRemainingImportQueue(remaining.filter((item) => item.page !== 3), queue[1], sort)?.page, 4)
+    assert.equal(nextRemainingImportQueue(queue.slice(0, 3), queue[3], sort)?.page, 1)
+    assert.equal(nextRemainingImportQueue([], queue[1], sort), null)
+    assert.equal(nextRemainingImportQueue(remaining, null, sort)?.page, 1)
+  }
+})
+
 test('Last.fm acknowledged exclusions project queue counts without reloading the queue', () => {
   const partial = projectImportQueueExclusion(importQueue(), 1, 1, false)
   assert.equal(partial[0].remainingPlayCount, 1)
@@ -243,6 +257,7 @@ test('Last.fm collection suggestions require one eligible same-artist candidate'
   assert.equal(suggest([exactOne, exactTwo]), null)
   const ownedNear = { uri: 'spotify:track:near', artist: 'Artist', inLibrary: true, relation: 'same-songs' as const }
   assert.deepEqual(suggest([ownedNear]), ownedNear)
+  assert.equal(suggest([exactOne, exactTwo, ownedNear]), null)
   assert.deepEqual(suggest([{ ...ownedNear, inLibrary: false }], [ownedNear.uri]), { ...ownedNear, inLibrary: false })
   assert.equal(suggest([{ ...ownedNear, inLibrary: false }]), null)
   assert.equal(suggest([{ ...ownedNear, artist: 'Other Artist' }]), null)
@@ -711,7 +726,7 @@ test('Spotify search pending pages are not reused after returning to the same qu
   )
 })
 
-test('pending navigation cannot use prior tracks, while a data refresh keeps them visible', () => {
+test('pending browse retains only compatible rows and facet candidates', () => {
   const broadQueue: PlaybackTrack[] = [
     { id: 1, uri: 'fixture:track:1', name: 'Welcome', art: 'Artist', alb: 'Broad Album', durationSecs: 180, enabled: true },
     { id: 2, uri: 'fixture:track:2', name: 'Americana', art: 'Artist', alb: 'Broad Album', durationSecs: 200, enabled: true },
@@ -724,6 +739,13 @@ test('pending navigation cannot use prior tracks, while a data refresh keeps the
   assert.deepEqual(playbackQueue(browseViewForRequest(broadQueue, resolvedKey, resolvedKey) ?? [], 1).map((track) => track.id), [1, 2])
   assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, pendingKey) ?? [], [])
   assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, refreshKey), broadQueue)
+  const queryKey = browseRequestKey('music', baseSelection, 'America', 'library')
+  assert.deepEqual(browseViewForRequest(broadQueue, resolvedKey, queryKey), broadQueue)
+
+  const view = { facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] } } as BrowseView
+  assert.deepEqual(browseFacetValues(view, resolvedKey, browseRequestKey('music', { cat: ['Rock'] }, '', 'library'), 'cat'), ['Rock'])
+  assert.deepEqual(browseFacetValues(view, resolvedKey, browseRequestKey('music', { cat: ['Rock'] }, '', 'library'), 'art'), [])
+  assert.deepEqual(browseFacetValues(view, resolvedKey, browseRequestKey('podcasts', {}, '', 'library'), 'cat'), [])
 
   // Category, artist, and album selections are browser-pane selection changes.
   const changedKeys = [
@@ -731,10 +753,10 @@ test('pending navigation cannot use prior tracks, while a data refresh keeps the
     browseRequestKey('music', { cat: ['Rock'] }, '', 'library'),
     browseRequestKey('music', { art: ['Artist'] }, '', 'library'),
     pendingKey,
-    browseRequestKey('music', baseSelection, 'America', 'library'),
-    browseRequestKey('music', baseSelection, '', 'spotify'),
+    queryKey,
   ]
   assert.equal(new Set([resolvedKey, ...changedKeys]).size, changedKeys.length + 1)
+  assert.equal(browseRequestKey('music', baseSelection, 'ignored by local browse', 'spotify'), resolvedKey)
 })
 
 test('facet selection preserves broader columns and clears narrower columns', () => {

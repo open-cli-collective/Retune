@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "fixtureVersion": "responsiveness-v1",
+  "candidate": { "branch": "codex/responsiveness-burndown", "checkpoint": 7 },
+  "checks": {
+    "importerTests": "229 passed, 2 ignored",
+    "workspaceLibraryTests": "847 passed, 6 ignored",
+    "strictClippy": "passed",
+    "format": "passed",
+    "documentation": "passed",
+    "diff": "clean"
+  },
+  "classification": {
+    "fixed": [
+      "shared Rust hot paths",
+      "typing and keyboard admission",
+      "importer transformation ownership",
+      "narrow read work",
+      "draft acknowledgement and ordered metadata persistence",
+      "foreground lock isolation"
+    ],
+    "deferred": [
+      "native WebKit input-to-paint and full-app 50k-row journey while the Mac is locked"
+    ]
+  },
+  "limits": [
+    "The deferred native journey is required before claiming end-to-end paint targets.",
+    "Queued metadata acknowledgement intentionally accepts crash loss before the writer flushes; Apply remains journaled."
+  ]
+}

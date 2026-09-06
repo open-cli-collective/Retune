@@ -41,13 +41,6 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         Arc::clone(&self.catalog)
     }
 
-    pub fn clear_catalog(&self) {
-        self.catalog
-            .lock()
-            .expect("Spotify catalog mutex poisoned")
-            .clear();
-    }
-
     pub fn transport(&self) -> &T {
         &self.transport
     }

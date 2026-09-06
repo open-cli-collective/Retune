@@ -39,8 +39,10 @@ pub fn export_json(library: &Library) -> Vec<u8> {
 /// Accepts the output of [`export_json`]: plain JSON, schema v1 only.
 /// A handwritten-envelope fixture test pins that v1 files load forever.
 pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
-    let envelope: serde_json::Value = serde_json::from_slice(bytes)?;
-    let object = envelope.as_object().ok_or(ImportError::MissingEnvelope)?;
+    let mut envelope: serde_json::Value = serde_json::from_slice(bytes)?;
+    let object = envelope
+        .as_object_mut()
+        .ok_or(ImportError::MissingEnvelope)?;
     let version = object
         .get("version")
         .and_then(serde_json::Value::as_u64)
@@ -54,8 +56,7 @@ pub fn import(bytes: &[u8]) -> Result<Library, ImportError> {
         return Err(ImportError::MissingEnvelope);
     }
     let library = object
-        .get("library")
-        .cloned()
+        .remove("library")
         .ok_or(ImportError::MissingEnvelope)?;
     Ok(serde_json::from_value(library)?)
 }

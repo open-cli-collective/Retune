@@ -24,10 +24,49 @@ export const normalizeZoom = (zoom: number, min: number, max: number) =>
 export const appliedZoom = (zoom: number, base: number) => zoom * base
 
 export const browseRequestKey = (source: Source, selection: Selection, query: string, scope: 'library' | 'spotify') =>
-  JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], query, scope])
+  JSON.stringify([source, selection.cat ?? [], selection.art ?? [], selection.alb ?? [], scope === 'library' ? query.trim() : ''])
 
-export const browseViewForRequest = <T>(view: T | null, resolvedKey: string | undefined, requestKey: string) =>
-  resolvedKey === requestKey ? view : null
+const browseKeyParts = (key: string | undefined): [Source, string[], string[], string[], string] | undefined => {
+  if (!key) return undefined
+  try {
+    const parsed = JSON.parse(key)
+    return Array.isArray(parsed) && parsed.length === 5 ? parsed as [Source, string[], string[], string[], string] : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const sameValues = (left: string[], right: string[]) => left.length === right.length && left.every((value, index) => value === right[index])
+
+export const browseViewForRequest = <T>(view: T | null, resolvedKey: string | undefined, requestKey: string) => {
+  if (resolvedKey === requestKey) return view
+  const resolved = browseKeyParts(resolvedKey)
+  const requested = browseKeyParts(requestKey)
+  return resolved && requested
+    && resolved[0] === requested[0]
+    && sameValues(resolved[1], requested[1])
+    && sameValues(resolved[2], requested[2])
+    && sameValues(resolved[3], requested[3]) ? view : null
+}
+
+export function browseFacetValues(view: BrowseView | null, resolvedKey: string | undefined, requestKey: string, facet: keyof Selection): string[] {
+  if (!view) return []
+  const resolved = browseKeyParts(resolvedKey)
+  const requested = browseKeyParts(requestKey)
+  if (!resolved || !requested || resolved[0] !== requested[0]) return []
+  if (facet === 'cat') return view.facets.cats
+  if (!sameValues(resolved[1], requested[1])) return []
+  if (facet === 'art') return view.facets.arts
+  return sameValues(resolved[2], requested[2]) ? view.facets.albs : []
+}
+
+export const browseTypeaheadContextKey = (pane: 'track' | keyof Selection, source: Source, selection: Selection, requestKey: string) => pane === 'cat'
+  ? JSON.stringify([pane, source])
+  : pane === 'art'
+    ? JSON.stringify([pane, source, selection.cat ?? []])
+    : pane === 'alb'
+      ? JSON.stringify([pane, source, selection.cat ?? [], selection.art ?? []])
+      : JSON.stringify([pane, requestKey])
 
 export const selectionAfterFacet = (selection: Selection, facet: keyof Selection, values: string[]): Selection =>
   facet === 'cat' ? { cat: values }

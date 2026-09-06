@@ -54,6 +54,10 @@ pub(super) async fn album_candidates_with_source<
             track_names: tracks.iter().map(|track| track.name.clone()).collect(),
             track_artists: tracks.iter().map(|track| track.art.clone()).collect(),
             track_albums: tracks.iter().map(|track| track.alb.clone()).collect(),
+            track_durations: tracks
+                .iter()
+                .map(|track| track.duration.as_secs())
+                .collect(),
             relation: None,
         });
     }
@@ -205,6 +209,7 @@ where
     )
     .await?
     .0;
+    drop(membership_guard);
     service
         .review_action(
             &binding.lastfm_username,
@@ -225,7 +230,6 @@ where
             )
             .await?;
     }
-    drop(membership_guard);
     current_import_view(service, lastfm).await
 }
 
@@ -256,8 +260,9 @@ where
     )
     .await?
     .0;
+    drop(membership_guard);
     service
-        .update_options(
+        .update_options_queued(
             &binding.lastfm_username,
             &binding.spotify_account_id,
             key.batch_id,
@@ -266,7 +271,6 @@ where
             options,
         )
         .await?;
-    drop(membership_guard);
     current_import_view(service, lastfm).await
 }
 
@@ -297,15 +301,15 @@ where
     )
     .await?
     .0;
+    drop(membership_guard);
     service
-        .set_count_mode(
+        .set_count_mode_queued(
             &binding.lastfm_username,
             &binding.spotify_account_id,
             target_uri,
             mode,
         )
         .await?;
-    drop(membership_guard);
     current_import_view(service, lastfm).await
 }
 
@@ -334,10 +338,10 @@ where
     )
     .await?
     .0;
-    service
-        .set_search_terms(&binding.lastfm_username, &binding.spotify_account_id, show)
-        .await?;
     drop(membership_guard);
+    service
+        .set_search_terms_queued(&binding.lastfm_username, &binding.spotify_account_id, show)
+        .await?;
     current_import_view(service, lastfm).await
 }
 
@@ -960,6 +964,7 @@ where
                 track_names: vec![track.name],
                 track_artists: vec![artist],
                 track_albums: vec![album],
+                track_durations: vec![track.duration_ms.unwrap_or_default() / 1_000],
                 relation: None,
             }],
             retune_spotify::client::SearchSource::Cache,
@@ -981,6 +986,7 @@ where
                     track_names: vec![track.name.clone()],
                     track_artists: vec![track.artist],
                     track_albums: vec![track.alb],
+                    track_durations: vec![track.duration_secs],
                     relation: None,
                 })
                 .collect(),
