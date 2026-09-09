@@ -18,7 +18,7 @@ export const listen = async (name: string, handler: (event: { payload: unknown }
   const handlers = listeners.get(name) ?? new Set(); handlers.add(handler); listeners.set(name, handlers)
   return () => { handlers.delete(handler) }
 }
-export const getCurrentWindow = () => ({ label: 'main', setTitle: async () => {}, onDragDropEvent: async () => () => {} })
+export const getCurrentWindow = () => ({ label: new URLSearchParams(location.search).get('window') ?? 'main', setTitle: async () => {}, onDragDropEvent: async () => () => {} })
 export function emit(event: MainEvent) { channel?.onmessage(event) }
 export function invalidate(name: string, payload: unknown = null) { listeners.get(name)?.forEach(handler => handler({ payload })) }
 export const player = (elapsed: number, overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -30,10 +30,14 @@ export async function invoke(command: string, args: Record<string, any> = {}) {
   if (command === 'subscribe_main_events') { channel = args.channel; return 1 }
   if (command === 'unsubscribe_main_events') { channel = undefined; return }
   if (command === 'get_settings') return defaultSettings
+  if (command === 'get_appearance') return { theme: 'light' }
+  if (command === 'genre_values') return []
   if (command === 'connection_state') return initialState.connection
   if (command === 'spotify_sync_status') return initialState.spotifySyncStatus
   if (command === 'lastfm_state') return initialState.lastfm
   if (command === 'lastfm_import_state') return initialState.lastfmImport
+  if (command === 'lastfm_import_queue') return { cursor: 0, items: [], total: 0, nextCursor: null }
+  if (command === 'lastfm_import_playback') return { uri: null, isPlaying: false }
   if (command === 'track_artwork') return null
   if (command === 'browse') {
     const query = String(args.query ?? '').toLowerCase()
