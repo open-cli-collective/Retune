@@ -10,6 +10,9 @@ export const tracks: Track[] = Array.from({ length: 4000 }, (_, index) => ({
 }))
 // Duplicate URIs deliberately represent separate playlist entries.
 export const playlistTracks = [...tracks, ...tracks.slice(0, 100)]
+export const queueWire = { calls: 0, bytes: 0, inFlight: 0 }
+const importerFixture = new URLSearchParams(location.search).has('queueFixture')
+const importQueue = Array.from({ length: 8000 }, (_, index) => ({ page: index + 1, artist: `Artist ${index % 200}`, album: `Batch ${index + 1}`, customBatch: false, collectionShaped: false, albumLabelCount: 1, playCount: 20, importedPlayCount: 0, remainingPlayCount: 20, latest: 1700000000 + index, sourceCount: 1, remaining: true, albumEntities: 0, trackEntities: 1, status: null, error: null, errorCode: null, retryAt: null }))
 export const calls: { command: string; args: unknown }[] = []
 export class Channel { constructor(public onmessage: (event: MainEvent) => void) {} }
 let channel: Channel | undefined
@@ -35,8 +38,16 @@ export async function invoke(command: string, args: Record<string, any> = {}) {
   if (command === 'connection_state') return initialState.connection
   if (command === 'spotify_sync_status') return initialState.spotifySyncStatus
   if (command === 'lastfm_state') return initialState.lastfm
-  if (command === 'lastfm_import_state') return initialState.lastfmImport
-  if (command === 'lastfm_import_queue') return { cursor: 0, items: [], total: 0, nextCursor: null }
+  if (command === 'lastfm_import_state') return importerFixture ? { ...initialState.lastfmImport, phase: 'review', remaining: importQueue.length, syncProblem: null } : initialState.lastfmImport
+  if (command === 'lastfm_import_queue') {
+    if (!importerFixture) return { cursor: 0, items: [], total: 0, nextCursor: null }
+    queueWire.inFlight++
+    await new Promise(resolve => setTimeout(resolve, 15))
+    const cursor = Number(args.cursor ?? 0), end = Math.min(cursor + Number(args.limit ?? 1000), importQueue.length)
+    const wire = JSON.stringify({ cursor, items: importQueue.slice(cursor, end), total: importQueue.length, nextCursor: end < importQueue.length ? end : null })
+    queueWire.calls++; queueWire.bytes += new TextEncoder().encode(wire).length; queueWire.inFlight--
+    return JSON.parse(wire)
+  }
   if (command === 'lastfm_import_playback') return { uri: null, isPlaying: false }
   if (command === 'track_artwork') return null
   if (command === 'browse') {
