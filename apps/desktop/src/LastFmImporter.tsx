@@ -1127,7 +1127,7 @@ export default function LastFmImporter() {
     const currentSelectedPage = selectedPageRef.current
     const currentSort = sortRef.current
     try {
-      const { value: [nextState, nextQueue], applied } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue()]), ([currentState, currentQueue]) => {
+      const { value: [nextState, nextQueue], applied } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue(() => isCurrentImportRefresh(requestGeneration, refreshGeneration))]), ([currentState, currentQueue]) => {
         setState(currentState)
         setShowQueries(currentState.searchTerms)
         setQueue(currentQueue)
@@ -1174,7 +1174,7 @@ export default function LastFmImporter() {
   const refreshQueueOnly = useCallback(async (strict = false): Promise<ImportQueueItem[]> => {
     const requestGeneration = beginImportRefresh(refreshGeneration)
     try {
-      const { value: [, nextQueue] } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue()]), ([nextState, currentQueue]) => {
+      const { value: [, nextQueue] } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue(() => isCurrentImportRefresh(requestGeneration, refreshGeneration))]), ([nextState, currentQueue]) => {
         setState(nextState)
         setShowQueries(nextState.searchTerms)
         setQueue(currentQueue)
