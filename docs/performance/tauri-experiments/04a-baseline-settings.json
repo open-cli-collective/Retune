@@ -1,0 +1,10 @@
+{
+  "commit": "70c4a94",
+  "tool": "cargo test --release -p retune-desktop startup_settings_performance -- --ignored --nocapture",
+  "conditions": "macOS arm64; temporary directories on local filesystem; first missing-file load then 100 warm existing-file loads per sample; real atomic writes/fsync; no native window",
+  "samples": [
+    {"existingTotalMs":485.06629200000003,"iterations":100,"missingMs":10.042875,"sample":1,"scenario":"startup-settings"},
+    {"existingTotalMs":467.360333,"iterations":100,"missingMs":4.71525,"sample":2,"scenario":"startup-settings"},
+    {"existingTotalMs":481.19408400000003,"iterations":100,"missingMs":4.605584,"sample":3,"scenario":"startup-settings"}
+  ]
+}

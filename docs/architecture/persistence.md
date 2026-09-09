@@ -57,6 +57,10 @@ reported to their caller or recovery coordinator instead of being silently
 discarded. Quarantine renames the evidence to a unique sibling and never writes
 a replacement over it during the failing load.
 
+Startup validates and normalizes existing settings in memory without rewriting
+the file. Only a missing settings file creates and atomically saves defaults;
+ordinary settings mutations persist normalized values through the same owner.
+
 `cooldowns.json` and `artist-genres.json` have separate concrete filesystem
 owners. Full Spotify sync receives both; content actions and importer policy
 receive only cooldown persistence. Their filenames and JSON formats are
