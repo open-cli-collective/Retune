@@ -1,0 +1,45 @@
+{
+  "source": "0c09cf8",
+  "conditions": "Chromium development fixture, actual importer, 8000 generated batches, six invalidations 1ms apart; each mocked page has 15ms delay and real JSON encode/decode. No native IPC or account.",
+  "samples": [
+    {
+      "durationMs": 180.70000004768372,
+      "queueCalls": 48,
+      "queueBytes": 15850986,
+      "renderMs": 3.8999998569488525,
+      "commits": 2,
+      "queueRows": 13,
+      "selectionLabel": " Select all 8,000 resultsCombine selected (0)",
+      "viewport": [
+        1280,
+        720
+      ]
+    },
+    {
+      "durationMs": 166,
+      "queueCalls": 48,
+      "queueBytes": 15850986,
+      "renderMs": 3.799999952316284,
+      "commits": 2,
+      "queueRows": 13,
+      "selectionLabel": " Select all 8,000 resultsCombine selected (0)",
+      "viewport": [
+        1280,
+        720
+      ]
+    },
+    {
+      "durationMs": 172.70000004768372,
+      "queueCalls": 48,
+      "queueBytes": 15850986,
+      "renderMs": 5.400000095367432,
+      "commits": 2,
+      "queueRows": 13,
+      "selectionLabel": " Select all 8,000 resultsCombine selected (0)",
+      "viewport": [
+        1280,
+        720
+      ]
+    }
+  ]
+}

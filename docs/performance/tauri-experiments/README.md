@@ -11,7 +11,7 @@ Keep these changes separate from main until each result has been assessed.
 | 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Store benchmark complete; native launch timing pending |
 | 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Bundle/startup fixture complete; no demonstrated latency gain |
 | 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | File-load benchmark complete; native first paint pending |
-| 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Pending |
+| 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Burst fixture complete; native IPC pending |
 
 Measure at least three comparable samples before and after each discrete change.
 Preserve raw data and exact source revisions. Browser fixtures and React timings
@@ -224,3 +224,41 @@ recovery. The native main-thread menu/media callback still needs packaged UI
 validation. This is the broadest experiment (it moves composition behind the file
 load), and the small fixture cost does not yet justify merging it. Native benefit
 remains **UNVERIFIED**. Raw data: `04c-{baseline,after}-files.json`.
+
+## 5. Superseded importer refreshes
+
+Baseline `0c09cf8`, candidate `fea5335`. Both full and queue-only refresh callers
+now pass their existing shared generation to the queue loader. After each page
+arrives, an obsolete loader stops before requesting another page; the existing
+publication guard still prevents its result from changing the UI. The newest
+request retains every row for global sorting, filtering, selection, and combine.
+There is no new native API, cache invalidation policy, or persisted format.
+
+The real importer fixture has 8,000 generated batches, 1,000 per response. A burst
+sends six invalidations one millisecond apart; each mock page adds a fixed 15 ms
+wait and performs real JSON encoding/decoding. In all three baseline samples this
+causes 48 page calls and 15,850,986 bytes. All three candidate samples use 13 calls
+and 4,283,276 bytes, a 73.0% reduction. The still-pending page from each obsolete
+request finishes; the other seven pages are avoided. Mounted queue buttons stay
+at 13, and global selection still sees 8,000 batches.
+
+Refresh-to-two-frames latency is unchanged within noise: 172.7 ms median baseline
+(166.0–180.7), 173.1 ms candidate (169.9–174.2). Total React render duration is
+small and slightly higher in this sample (3.9 vs 5.9 ms median), so this is a
+reduction in wasted requests/bytes, **not** a demonstrated interaction speed gain.
+Three candidate samples were collected after background build/test work finished;
+one preliminary overlapping sample was excluded before collecting those three.
+Raw data: `05-{baseline,after}-refresh.json`.
+
+Two focused checks prove obsolete loads stop after their pending page, never
+publish, and leave the newest 2,100-row queue complete; pagination retry and
+malformed-response rejection remain intact. Existing global filter/combine,
+selection, and stale-response interaction tests pass. The browser filter reaches
+batch 8,000 beyond the first response page.
+
+The ordinary isolated refresh still loads the complete queue. Revisioned or
+incremental snapshots could reduce that cost, but this experiment does not
+establish their value. Burst efficiency is demonstrated only in the fixture;
+native IPC, memory, account-bound interaction, and steady-refresh benefit remain
+**UNVERIFIED**. Start the existing performance Vite server and open
+`/performance/importer.html?window=lastfm-importer&queueFixture=1` to reproduce.

@@ -1,0 +1,45 @@
+{
+  "source": "fea5335",
+  "conditions": "Same fixture and Chromium session as baseline; three samples with no build/test commands running",
+  "samples": [
+    {
+      "durationMs": 169.89999985694885,
+      "queueCalls": 13,
+      "queueBytes": 4283276,
+      "renderMs": 5.799999952316284,
+      "commits": 2,
+      "queueRows": 13,
+      "selectionLabel": " Select all 8,000 resultsCombine selected (0)",
+      "viewport": [
+        1280,
+        720
+      ]
+    },
+    {
+      "durationMs": 173.09999990463257,
+      "queueCalls": 13,
+      "queueBytes": 4283276,
+      "renderMs": 5.900000095367432,
+      "commits": 2,
+      "queueRows": 13,
+      "selectionLabel": " Select all 8,000 resultsCombine selected (0)",
+      "viewport": [
+        1280,
+        720
+      ]
+    },
+    {
+      "durationMs": 174.20000004768372,
+      "queueCalls": 13,
+      "queueBytes": 4283276,
+      "renderMs": 7,
+      "commits": 1,
+      "queueRows": 13,
+      "selectionLabel": " Select all 8,000 resultsCombine selected (0)",
+      "viewport": [
+        1280,
+        720
+      ]
+    }
+  ]
+}

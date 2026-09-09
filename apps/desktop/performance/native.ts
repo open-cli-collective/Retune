@@ -32,8 +32,8 @@ export async function invoke(command: string, args: Record<string, any> = {}) {
   calls.push({ command, args })
   if (command === 'subscribe_main_events') { channel = args.channel; return 1 }
   if (command === 'unsubscribe_main_events') { channel = undefined; return }
-  if (command === 'get_settings') return defaultSettings
-  if (command === 'get_appearance') return { theme: 'light' }
+  if (command === 'get_settings') return { ...defaultSettings, theme: new URLSearchParams(location.search).get('theme') ?? defaultSettings.theme }
+  if (command === 'get_appearance') return { theme: new URLSearchParams(location.search).get('theme') ?? 'light' }
   if (command === 'genre_values') return []
   if (command === 'connection_state') return initialState.connection
   if (command === 'spotify_sync_status') return initialState.spotifySyncStatus
