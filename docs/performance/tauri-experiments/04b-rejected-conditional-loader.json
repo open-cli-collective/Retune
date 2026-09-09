@@ -1,0 +1,150 @@
+{
+  "commit": "280e840",
+  "reason": "Bundled preload helper selected App dependencies even in importer branch; importer CSS was not requested. Functional/style regression; not a valid final candidate.",
+  "samples": [
+    {
+      "window": "lastfm-importer",
+      "readyMs": 17.200000047683716,
+      "paintedMs": 41.5,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-DyC0tVoY.js",
+          "durationMs": 3.4000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 2.9000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.7999999523162842,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "App-DS2gWa9V.js",
+          "durationMs": 1.0999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-9mit3wQl.js",
+          "durationMs": 1.4000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-BpAVFAra.js",
+          "durationMs": 1.2999999523162842,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 16.700000047683716,
+      "paintedMs": 36.80000019073486,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 3.5,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-DyC0tVoY.js",
+          "durationMs": 3.200000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-9mit3wQl.js",
+          "durationMs": 1.0999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "App-DS2gWa9V.js",
+          "durationMs": 1.5999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.2000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-BpAVFAra.js",
+          "durationMs": 1.8999998569488525,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 15.599999904632568,
+      "paintedMs": 33.59999990463257,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 3,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-DyC0tVoY.js",
+          "durationMs": 3.4000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.2000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "App-DS2gWa9V.js",
+          "durationMs": 0.9000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-9mit3wQl.js",
+          "durationMs": 1.4000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-BpAVFAra.js",
+          "durationMs": 1.9000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    }
+  ]
+}
