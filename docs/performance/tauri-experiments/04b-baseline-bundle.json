@@ -1,0 +1,29 @@
+{
+  "commit": "67f09f6",
+  "tool": "npm run build -- --manifest; Python stdlib gzip/SHA256",
+  "manifest": {
+    "index.html": {
+      "file": "assets/index-BvQbcGg-.js",
+      "name": "index",
+      "src": "index.html",
+      "isEntry": true,
+      "css": [
+        "assets/index-CCfdujPN.css"
+      ]
+    }
+  },
+  "files": [
+    {
+      "path": "assets/index-BvQbcGg-.js",
+      "bytes": 446859,
+      "gzipBytes": 130008,
+      "sha256": "32fc5b6a39e307cf597aa47b6a1f22912bc4206d955d231fb8ae0651f8b3c049"
+    },
+    {
+      "path": "assets/index-CCfdujPN.css",
+      "bytes": 77842,
+      "gzipBytes": 13842,
+      "sha256": "92a17d229063bfbf7cc90ff97ab4d0e5bf91ab797a0b50bdbb533d987d2e8683"
+    }
+  ]
+}

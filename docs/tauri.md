@@ -132,6 +132,11 @@ form destinations; permits scripts from self; permits artwork from self,
 `https://i.scdn.co`, and data URLs; and limits connections to Tauri IPC. Adding
 a remote origin requires an explicit architecture review.
 
+The frontend entry loads only the component for its native window label. Main
+and importer view modules are separate chunks; shared theme/dialog CSS remains
+eager. A loading status is replaced by the chosen view, and a chunk-load error
+offers a full-window retry without changing the webview's authority.
+
 Vite binds `127.0.0.1` on strict port `5173` and chooses the frontend target
 appropriate to the native webview floor. Tauri's development URL must remain
 identical. Platform overlays define the supported bundle contract:
