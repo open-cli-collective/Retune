@@ -1,5 +1,11 @@
 import type { PlayerState, Playing } from './types.ts'
 
+export const documentVisible = () => document.visibilityState !== 'hidden'
+export function subscribeDocumentVisibility(listener: () => void) {
+  document.addEventListener('visibilitychange', listener)
+  return () => document.removeEventListener('visibilitychange', listener)
+}
+
 // Native position is presentation data; semantic playback changes still use the reducer.
 export function createPlaybackProgress() {
   let elapsed = 0
@@ -8,12 +14,13 @@ export function createPlaybackProgress() {
     getSnapshot: () => elapsed,
     subscribe: (listener: () => void) => {
       listeners.add(listener)
-      return () => { listeners.delete(listener) }
+      const stop = subscribeDocumentVisibility(() => { if (documentVisible()) listener() })
+      return () => { listeners.delete(listener); stop() }
     },
     update: (next: number) => {
       if (next === elapsed) return
       elapsed = next
-      listeners.forEach(listener => listener())
+      if (documentVisible()) listeners.forEach(listener => listener())
     },
   }
 }

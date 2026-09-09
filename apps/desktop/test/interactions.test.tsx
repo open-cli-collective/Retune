@@ -633,6 +633,20 @@ describe('mounted native interaction boundaries', () => {
     await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 11 }) }))
     expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('11')
     expect(readTracks).not.toHaveBeenCalled()
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    try {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+      await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 42 }) }))
+      expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('11')
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+      expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('42')
+      expect(readTracks).not.toHaveBeenCalled()
+    } finally {
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
     await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 12, isPlaying: false }) }))
     expect(view.querySelector('[aria-label="Play"]')).not.toBeNull()
     expect(readTracks).toHaveBeenCalled()

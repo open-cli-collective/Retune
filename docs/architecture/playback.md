@@ -14,6 +14,10 @@ The main window sends native elapsed-only changes to a per-player presentation
 store subscribed by the transport. Queue, origin, metadata, playback flags, and
 track changes still pass through the app reducer; the controller remains
 authoritative. Simulated playback keeps its reducer timer and elapsed value.
+When the document is hidden, the presentation store retains native positions
+without notifying the transport and the title marquee pauses. On visibility
+restoration, subscribers read the latest position. Native events, queue changes,
+audio, and listening bookkeeping continue normally.
 
 The desktop playback module is an application controller around three execution
 paths: built-in Spotify playback, Spotify Connect, and local-file playback.

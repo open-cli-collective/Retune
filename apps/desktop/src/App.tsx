@@ -12,7 +12,7 @@ import { ArtworkLightbox, CheckboxMenu, ContextMenu, ModalDialog } from './viewS
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
-import { createPlaybackProgress, onlyPlaybackProgressChanged } from './playbackProgress.ts'
+import { createPlaybackProgress, documentVisible, onlyPlaybackProgressChanged, subscribeDocumentVisibility } from './playbackProgress.ts'
 import { useTrackWindow } from './useTrackWindow.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
 import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
@@ -874,6 +874,7 @@ function App() {
 }
 
 function Marquee({ text, strong }: { text: string; strong?: boolean }) {
+  const visible = useSyncExternalStore(subscribeDocumentVisibility, documentVisible)
   const outer = useRef<HTMLDivElement>(null)
   const inner = useRef<HTMLSpanElement>(null)
   const [distance, setDistance] = useState(0)
@@ -887,7 +888,7 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
     <span
       ref={inner}
       className={`marquee${distance > 0 ? ' scrolling' : ''}${strong ? ' strong' : ''}`}
-      style={distance > 0 ? { '--marquee-distance': `-${distance}px`, animationDuration: `${Math.max(8, Math.round(distance / 12))}s` } as React.CSSProperties : undefined}
+      style={distance > 0 ? { '--marquee-distance': `-${distance}px`, animationDuration: `${Math.max(8, Math.round(distance / 12))}s`, animationPlayState: visible ? 'running' : 'paused' } as React.CSSProperties : undefined}
     >{text}</span>
   </div>
 }
