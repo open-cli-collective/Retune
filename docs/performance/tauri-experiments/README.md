@@ -8,7 +8,7 @@ Keep these changes separate from main until each result has been assessed.
 | 1 | Isolate elapsed-only playback presentation | Library and playlist React duration, long tasks, frame gaps, rendered scope; pause, seek, track changes, external playback, queue authority | Fixture comparison complete; native validation pending |
 | 2 | Window large playlists; avoid rebuilding order/queue on unrelated renders | Opening, selection, scrolling, ticks, DOM count; duplicate entries, focus, multiselection, drag/reorder | Fixture comparison complete; native validation pending |
 | 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Document-visibility probe complete; native CPU/minimize pending (Mac locked) |
-| 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Pending |
+| 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Store benchmark complete; native launch timing pending |
 | 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Pending |
 | 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | Pending |
 | 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Pending |
@@ -135,3 +135,25 @@ and a generated 4,000-file silent-audio fixture are prepared using
 native baseline bundle is preserved separately. Computer Use reported that the
 Mac is locked, so native visible/hidden/minimized CPU and real WebKit visibility
 delivery remain **UNVERIFIED**. No native savings are inferred from these samples.
+
+## 4a. Startup settings writes
+
+Baseline `70c4a94` extracts the unchanged setup load/save sequence into
+`FsSettingsStore::load_for_startup` and benchmarks that real boundary. Candidate
+`eb7fae6` returns a valid loaded value directly, saving defaults only when absent.
+The ignored `startup_settings_performance` release test measures three temporary
+directories, each with one missing-file load and 100 existing-file loads.
+
+Existing-file load cost per invocation falls from 4.812 ms median
+(4.674–4.851) to 0.045 ms (0.044–0.054). Missing-file/default creation remains a
+real atomic write and is noisy: baseline 4.715 ms median (4.606–10.043), candidate
+5.339 ms (4.900–11.578); no first-launch improvement is demonstrated. This is
+warm local filesystem measurement, not a cold OS-cache or native launch result.
+Raw samples: `04a-{baseline,after}-settings.json`.
+
+The regression proves missing defaults are persisted, valid existing bytes are
+left unchanged, and invalid bytes remain intact while returning an error.
+Existing-file startup performs zero settings saves; missing-file startup still
+performs one. Normalization still occurs during load and future explicit writes.
+The gain is about 4.77 ms at this boundary, so it should not be presented as a
+large app-startup improvement. Native first-paint impact remains **UNVERIFIED**.

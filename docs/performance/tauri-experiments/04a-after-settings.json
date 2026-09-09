@@ -1,0 +1,11 @@
+{
+  "commit": "eb7fae6",
+  "tool": "cargo test --release -p retune-desktop startup_settings -- --include-ignored --nocapture",
+  "conditions": "macOS arm64; temporary directories on local filesystem; first missing-file load then 100 warm existing-file loads per sample; real atomic writes/fsync; no native window",
+  "samples": [
+    {"existingTotalMs":5.3585,"iterations":100,"missingMs":11.578375,"sample":1,"scenario":"startup-settings"},
+    {"existingTotalMs":4.437209,"iterations":100,"missingMs":4.900042,"sample":2,"scenario":"startup-settings"},
+    {"existingTotalMs":4.515291,"iterations":100,"missingMs":5.338583,"sample":3,"scenario":"startup-settings"}
+  ],
+  "checks": {"startup_settings_create_missing_defaults_without_rewriting_existing_or_invalid_files":"PASS"}
+}
