@@ -980,6 +980,71 @@ pub(crate) fn emit_main_event<R: tauri::Runtime>(
     state.main_events.send(event)
 }
 
+struct StartupFiles {
+    library: Library,
+    recovery_notice: Option<String>,
+    spotify_library: store::SpotifyLibraryState,
+    playlists: playlists::PlaylistCache,
+    settings: Settings,
+    startup_cooldown: Option<store::Cooldown>,
+}
+
+fn start_startup_load(
+    app_data_dir: PathBuf,
+) -> impl std::future::Future<Output = Result<StartupFiles, String>> + Send {
+    let result = load_startup_files(app_data_dir).map_err(|error| error.to_string());
+    async move { result }
+}
+
+fn load_startup_files(
+    app_data_dir: PathBuf,
+) -> Result<StartupFiles, Box<dyn std::error::Error + Send + Sync>> {
+    spotify_sync_commit::Store::new(&app_data_dir)
+        .recover()
+        .map_err(std::io::Error::other)?;
+    restore::RestoreStore::new(&app_data_dir)
+        .recover()
+        .map_err(std::io::Error::other)?;
+    let store = FsOverlayStore::new(&app_data_dir);
+    let (library, recovery_notice, needs_save) = match store.load() {
+        Ok(Some(library)) => (library, None, false),
+        Ok(None) => {
+            let library = initial_library(cfg!(debug_assertions));
+            (library, None, true)
+        }
+        Err(StoreError::Import(error)) => {
+            let corrupt = store.quarantine_corrupt()?;
+            let library = Library::new();
+            (
+            library,
+            Some(format!(
+                "Retune could not load your library ({error}). The corrupt file was moved to {} and an empty library was started.",
+                corrupt.display()
+            )),
+            true,
+        )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if needs_save {
+        store.save(&library)?;
+    }
+    let spotify_library = FsSpotifyLibraryStore::new(&app_data_dir).load()?;
+    let playlists = FsPlaylistStore::new(&app_data_dir).load()?;
+    let settings = FsSettingsStore::new(&app_data_dir).load_for_startup()?;
+    let startup_cooldown = FsCooldownStore::new(&app_data_dir)
+        .effective_cooldown(unix_now())
+        .map_err(std::io::Error::other)?;
+    Ok(StartupFiles {
+        library,
+        recovery_notice,
+        spotify_library,
+        playlists,
+        settings,
+        startup_cooldown,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -1111,41 +1176,12 @@ pub fn run() {
                 diagnostics::SESSION_START_MARKER
             );
             let app_data_dir = app.path().app_data_dir()?;
-            spotify_sync_commit::Store::new(&app_data_dir)
-                .recover()
-                .map_err(std::io::Error::other)?;
-            restore::RestoreStore::new(&app_data_dir)
-                .recover()
-                .map_err(std::io::Error::other)?;
+            let StartupFiles { library, recovery_notice, spotify_library, playlists, settings, startup_cooldown } = tauri::async_runtime::block_on(start_startup_load(app_data_dir.clone())).map_err(std::io::Error::other)?;
             let store = FsOverlayStore::new(&app_data_dir);
-            let (library, recovery_notice, needs_save) = match store.load() {
-                Ok(Some(library)) => (library, None, false),
-                Ok(None) => {
-                    let library = initial_library(cfg!(debug_assertions));
-                    (library, None, true)
-                }
-                Err(StoreError::Import(error)) => {
-                    let corrupt = store.quarantine_corrupt()?;
-                    let library = Library::new();
-                    (
-                        library,
-                        Some(format!(
-                            "Retune could not load your library ({error}). The corrupt file was moved to {} and an empty library was started.",
-                            corrupt.display()
-                        )),
-                        true,
-                    )
-                }
-                Err(error) => return Err(error.into()),
-            };
-            if needs_save {
-                store.save(&library)?;
-            }
             let settings_store = FsSettingsStore::new(&app_data_dir);
             let cooldown_store = FsCooldownStore::new(&app_data_dir);
             let artist_genres_store = FsArtistGenresStore::new(&app_data_dir);
             let spotify_library_store = FsSpotifyLibraryStore::new(&app_data_dir);
-            let spotify_library = spotify_library_store.load()?;
             let spotify_catalog_store = FsSpotifyCatalogStore::new(&app_data_dir);
             let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
             let spotify_catalog_saved_generation = Arc::new(AtomicU64::new(0));
@@ -1160,11 +1196,6 @@ pub fn run() {
                 },
             );
             let playlist_store = FsPlaylistStore::new(&app_data_dir);
-            let playlists = playlist_store.load()?;
-            let settings = settings_store.load_for_startup()?;
-            let startup_cooldown = cooldown_store
-                .effective_cooldown(unix_now())
-                .map_err(std::io::Error::other)?;
             let menu_checks = install_file_menu(app, &settings)?;
             // Dev builds keep tokens in a 0600 plaintext file. Release keeps
             // only the encryption key in the native credential store.
@@ -1575,6 +1606,32 @@ fn startup_action(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    #[ignore = "manual startup filesystem benchmark; generated fixture only"]
+    async fn startup_files_performance() {
+        let source = std::env::var_os("RETUNE_PERF_FIXTURE").expect("generated fixture directory");
+        for sample in 1..=3 {
+            let dir = tempfile::tempdir().unwrap();
+            for name in ["library.json", "settings.json"] {
+                std::fs::copy(
+                    std::path::Path::new(&source).join(name),
+                    dir.path().join(name),
+                )
+                .unwrap();
+            }
+            let started = std::time::Instant::now();
+            let pending = super::start_startup_load(dir.path().to_path_buf());
+            let dispatch_ms = started.elapsed().as_secs_f64() * 1000.;
+            let loaded = pending.await.unwrap();
+            let ready_ms = started.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(loaded.library.tracks().len(), 4000);
+            println!(
+                "{}",
+                serde_json::json!({"sample":sample,"dispatchMs":dispatch_ms,"readyMs":ready_ms,"tracks":loaded.library.tracks().len()})
+            );
+        }
+    }
 
     #[tokio::test]
     async fn playback_effect_shutdown_drains_queued_work_and_is_idempotent() {
