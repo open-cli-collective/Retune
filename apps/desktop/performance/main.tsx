@@ -28,7 +28,7 @@ panel.append(button, output); document.body.append(panel)
 const wait = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds))
 button.onclick = async () => {
   button.disabled = true
-  const first = document.querySelector<HTMLElement>('[data-track-id], [data-upstream-index]')
+  const first = document.querySelector<HTMLElement>('[data-track-id], .playlist-track-row')
   first?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
   emit({ type: 'playerState', payload: player(0) })
   await wait(1500)
