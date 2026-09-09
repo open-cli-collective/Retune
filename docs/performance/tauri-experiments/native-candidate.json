@@ -1,0 +1,7 @@
+{
+  "source": "fea5335577b5a2b78de98834fcec32fb8dcf5038",
+  "bundle": "/tmp/retune-performance-experiments/apps/final/Retune Performance.app",
+  "executableSha256": "ace0ec45559a07c8484d03e856301e91d3bded57c89983d33de92fa028b8b9d0",
+  "build": "release; dev-token-store; performance/native.config.json",
+  "runtimeValidation": "UNVERIFIED: Mac locked; bundle not launched"
+}

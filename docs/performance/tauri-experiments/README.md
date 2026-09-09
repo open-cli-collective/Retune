@@ -262,3 +262,34 @@ establish their value. Burst efficiency is demonstrated only in the fixture;
 native IPC, memory, account-bound interaction, and steady-refresh benefit remain
 **UNVERIFIED**. Start the existing performance Vite server and open
 `/performance/importer.html?window=lastfm-importer&queueFixture=1` to reproduce.
+
+## Combined validation and current assessment
+
+All seven discrete experiments have before/after measurements in this directory.
+The strongest fixture results are elapsed-render isolation and playlist windowing.
+Avoiding the existing-settings rewrite saves about 4.77 ms per startup load.
+Hidden presentation eliminates the remaining hidden transport work in the
+visibility seam. Entry splitting reduces bytes, background file loading changes
+scheduling, and importer cancellation reduces obsolete burst traffic; none of
+those last three demonstrates faster readiness in the measured fixture.
+
+The complete Rust workspace tests, Rust formatting and lint, frontend tests
+(96 Node checks plus 76 Vitest tests; 8 existing manual benchmarks skipped),
+frontend lint/build, Tauri ACL/permission checks, release contract, and documentation
+checks pass. A separate release-mode candidate bundle also builds successfully.
+Browser checks confirm global importer filtering/selection through batch 8,000
+and dark playlist End navigation through row 4,100 at verified 760×600 and
+1280×720 viewports. `validation.json` records scope and limitations.
+
+`recommendations.json` preserves the comparison inputs and full commit lineage.
+The skill's structural CLI was run for each input without an evidence registry;
+`structural-validation.json` records **UNVERIFIED** for all seven. No trusted
+registry or user acceptance threshold was invented. These exploratory local
+measurements support further evaluation, not an authenticated merge decision.
+
+**Remaining work:** unlock the Mac and measure the isolated native bundles,
+including visible/hidden/minimized CPU, WebKit visibility delivery, first paint,
+menu/media/exit behavior, and uninterrupted local playback. No native memory or
+CPU saving has been established. `native-candidate.json` identifies the prepared
+candidate. All changes remain on the experiment branch; main is not a candidate
+for merging until the native checks and per-step assessment are complete.
