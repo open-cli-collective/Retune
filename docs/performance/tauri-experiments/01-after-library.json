@@ -1,0 +1,97 @@
+{
+  "commit": "c504db2",
+  "tool": "React Profiler via Codex in-app Chromium; Vite development fixture; no StrictMode",
+  "samples": [
+    {
+      "scenario": "library-playback",
+      "durationMs": 12016.400000095367,
+      "commits": 13,
+      "totalRenderMs": 9.999999523162842,
+      "maxRenderMs": 1.0999999046325684,
+      "maxFrameGapMs": 17.700000000000728,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "12",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [
+        1.0999999046325684,
+        0,
+        0.39999985694885254,
+        1.0999999046325684,
+        0.9000000953674316,
+        0.40000009536743164,
+        1.0999999046325684,
+        1,
+        0.39999985694885254,
+        0.7999999523162842,
+        1,
+        0.7999999523162842,
+        1
+      ]
+    },
+    {
+      "scenario": "library-playback",
+      "durationMs": 12015.5,
+      "commits": 12,
+      "totalRenderMs": 9.799999475479126,
+      "maxRenderMs": 1,
+      "maxFrameGapMs": 17.700000000004366,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "12",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [
+        0.7000000476837158,
+        0.8999998569488525,
+        0.8999998569488525,
+        1,
+        1,
+        0.2999999523162842,
+        0.7000000476837158,
+        0.9000000953674316,
+        0.8999998569488525,
+        0.6999998092651367,
+        0.7999999523162842,
+        1
+      ]
+    },
+    {
+      "scenario": "library-playback",
+      "durationMs": 12017.700000047684,
+      "commits": 12,
+      "totalRenderMs": 9.300000190734863,
+      "maxRenderMs": 1.1000001430511475,
+      "maxFrameGapMs": 17.69999999999709,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "12",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [
+        0.9000000953674316,
+        1.1000001430511475,
+        0.5999999046325684,
+        0.7999999523162842,
+        1,
+        0.7999999523162842,
+        0.6000001430511475,
+        0.7999999523162842,
+        0.5,
+        0.7999999523162842,
+        0.5,
+        0.9000000953674316
+      ]
+    }
+  ]
+}

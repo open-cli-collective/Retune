@@ -5,7 +5,7 @@ Keep these changes separate from main until each result has been assessed.
 
 | Step | Experiment | Measurement and behavior checks | Status |
 | --- | --- | --- | --- |
-| 1 | Isolate elapsed-only playback presentation | Library and playlist React duration, long tasks, frame gaps, rendered scope; pause, seek, track changes, external playback, queue authority | Baseline preparation |
+| 1 | Isolate elapsed-only playback presentation | Library and playlist React duration, long tasks, frame gaps, rendered scope; pause, seek, track changes, external playback, queue authority | Fixture comparison complete; native validation pending |
 | 2 | Window large playlists; avoid rebuilding order/queue on unrelated renders | Opening, selection, scrolling, ticks, DOM count; duplicate entries, focus, multiselection, drag/reorder | Pending |
 | 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Pending |
 | 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Pending |
@@ -33,3 +33,43 @@ Open `http://127.0.0.1:5185/performance/`, wait for loading, and use the measure
 button. Repeat on the playlist. The visible JSON panel records React Profiler
 commits/durations, animation-frame gaps, long tasks when supported, IPC count,
 rendered rows, and the final elapsed display.
+
+## 1. Native elapsed presentation
+
+The experiment at `c504db219711d1b25f7133f939325a4d70fc86c2` sends native
+position changes to a per-player store read by the transport. Semantic changes
+and simulated playback retain the app reducer. No native controller or IPC
+contract changed.
+
+| 12 one-second updates | Baseline median (range), ms | Candidate median (range), ms |
+| --- | --- | --- |
+| Library total React render duration | 303.4 (303.1–309.0) | 9.8 (9.3–10.0) |
+| Playlist total React render duration | 3932.9 (3787.7–3938.1) | 9.0 (8.8–9.9) |
+| Playlist largest animation-frame gap | 317.4 (301.0–450.6) | 33.3 (18.7–50.0) |
+
+Three samples per cell. Both variants ended at elapsed 12 with zero IPC calls
+during ticks. Library retained 41 mounted rows and the playlist retained 4,100.
+Playlist baseline had repeated long tasks (180–462 ms); all three candidate
+samples had none. A regression check uses a counted Library DTO getter to prove
+elapsed-only events do not re-read that view, while pause still does. The
+baseline's second playlist commit per tick also disappears.
+
+Conditions: same Codex in-app Chromium session on the macOS arm64 host, 1280×720,
+Vite development mode without StrictMode, no added CPU/network throttling,
+signed-out deterministic native mock, warm loaded data, no service worker or
+extension added by this fixture. Exact Chromium version and native WebKit costs
+were not captured. Baseline Library source `cdb2648`, playlist source `8868b59`
+(only its seed-row selector changed); candidate source `c504db2`.
+Raw samples are the adjacent `01-{baseline,after}-{library,playlist}.json` files.
+
+Checks: 96 Node checks and 70 interaction tests passed (8 existing manual
+benchmarks skipped), lint and production build passed, documentation check
+passed after routing this report from AGENTS.md. The real fixture's keyboard
+seek changed 12→13 and Pause changed the accessible control to Play. Existing
+interaction coverage plus the added assertions exercise track replacement,
+external playback, selection while playing, and stop resetting/disabling seek.
+
+Result: strong reduction within this fixture; native-app recommendation remains
+**UNVERIFIED**. The Chromium fixture does not establish native CPU, memory,
+WebKit painting, or real audio behavior. Keep on the experiment branch and
+validate at the native boundary before proposing a merge.
