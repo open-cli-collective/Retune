@@ -1,0 +1,21 @@
+{
+  "source": "78ad327",
+  "conditions": "Same release Rust benchmark and generated 4000-track fixture; no UI/native paint measured. dispatchMs measures returning the pending load; readyMs includes awaited completion. This cannot resolve first-paint timing.",
+  "samples": [
+    {
+      "sample": 1,
+      "dispatchMs": 0.000291,
+      "readyMs": 10.7255
+    },
+    {
+      "sample": 2,
+      "dispatchMs": 0.012375,
+      "readyMs": 9.463167
+    },
+    {
+      "sample": 3,
+      "dispatchMs": 0.000208,
+      "readyMs": 8.349041
+    }
+  ]
+}

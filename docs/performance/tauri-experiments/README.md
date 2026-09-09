@@ -10,7 +10,7 @@ Keep these changes separate from main until each result has been assessed.
 | 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Document-visibility probe complete; native CPU/minimize pending (Mac locked) |
 | 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Store benchmark complete; native launch timing pending |
 | 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Bundle/startup fixture complete; no demonstrated latency gain |
-| 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | Pending |
+| 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | File-load benchmark complete; native first paint pending |
 | 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Pending |
 
 Measure at least three comparable samples before and after each discrete change.
@@ -200,3 +200,27 @@ gain**. Keep the experiment for comparison, but do not merge it solely as a
 latency optimization. Native WebKit startup and first-use costs remain
 **UNVERIFIED** while the Mac is locked. Raw timings are in
 `04b-{baseline,after}-startup.json`.
+
+## 4c. Startup file hydration
+
+Baseline `78c76f9`, candidate `78ad327`. Recovery and initial overlay, membership,
+playlist, settings, and cooldown reads now execute together on the blocking pool.
+Setup can return while they run. The application dispatcher waits for successful
+initialization, so no command receives an empty authoritative substitute. Recovery
+failure rejects pending commands. Native menu/media composition stays on the main
+thread; early exit waits for recovery before using the ordinary shutdown path.
+
+Three release-mode runs copy the same generated 4,000-track library/settings into
+fresh temporary directories on the warm local filesystem. The baseline load call
+occupies its caller for 10.448 ms median (9.535–14.910). The candidate returns a
+pending future in less than 0.013 ms, and awaiting it takes 9.463 ms median
+(8.349–10.726), compared with 10.448 ms baseline. These overlapping ranges do not
+establish faster data readiness. They isolate file-load scheduling, **not** full
+setup return time, rendering, native first paint, or cold disk startup.
+
+Startup checks pass for gating success/failure, abandoned initialization,
+corrupt-library quarantine, invalid settings preservation, and existing journal
+recovery. The native main-thread menu/media callback still needs packaged UI
+validation. This is the broadest experiment (it moves composition behind the file
+load), and the small fixture cost does not yet justify merging it. Native benefit
+remains **UNVERIFIED**. Raw data: `04c-{baseline,after}-files.json`.
