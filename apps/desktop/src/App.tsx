@@ -1,6 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
 import './App.css'
 import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
@@ -12,6 +12,7 @@ import { ArtworkLightbox, CheckboxMenu, ContextMenu, ModalDialog } from './viewS
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
+import { createPlaybackProgress, onlyPlaybackProgressChanged } from './playbackProgress.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
 import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
@@ -54,6 +55,7 @@ function useTauriInvalidationSnapshot<T>(event: string, snapshot: () => Promise<
 }
 
 function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
+  const [progress] = useState(createPlaybackProgress)
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const origin = useRef<PlaybackOrigin | undefined>(undefined)
   const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin; awaitingPlaybackAuthorization: boolean } | null>(null)
@@ -64,8 +66,13 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
   const onState = useCallback((player: import('./types.ts').PlayerState) => {
     if (player.external) origin.current = undefined
+    progress.update(player.elapsed)
+    const current = playingRef.current
+    if (onlyPlaybackProgressChanged(current, player)
+      && (player.external || current?.queue === queue.current)
+      && current?.origin === origin.current) return
     dispatch({ type: 'playerState', player, queue: queue.current, origin: origin.current })
-  }, [dispatch])
+  }, [dispatch, progress])
 
   const onAuthorizationRequired = useCallback((prompt: import('./types.ts').PlaybackAuthorizationPrompt) => {
     const id = pendingPlaybackTarget(prompt, queue.current)
@@ -173,8 +180,8 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
   return useMemo(
-    () => ({ start, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired }),
-    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, seek, setVolume, start, step, toggle],
+    () => ({ start, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired, progress }),
+    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, progress, seek, setVolume, start, step, toggle],
   )
 }
 
@@ -655,6 +662,7 @@ function App() {
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: appliedZoom(state.settings.zoom, ZOOM_BASE) }}>
       <TransportBar
         playing={state.playing}
+        progress={player.progress}
         track={playingTrack}
         query={state.query}
         queryReset={state.queryReset}
@@ -920,8 +928,11 @@ function TrackArtworkLightbox({ uri, name, onClose }: { uri: string; name: strin
   return <ArtworkLightbox artwork={artwork} name={name} onClose={onClose} />
 }
 
-export function TransportBar({ playing, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork, onContextMenu }: {
+const noProgressSubscription = () => () => {}
+
+export function TransportBar({ playing, progress, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork, onContextMenu }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; queryReset?: number; scope: State['scope']
+  progress?: ReturnType<typeof createPlaybackProgress>
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
@@ -943,7 +954,8 @@ export function TransportBar({ playing, track, query, queryReset, scope, volume,
     window.clearTimeout(queryTimer.current)
     if (next !== query) onQuery(next)
   }
-  const elapsed = playing?.elapsed ?? 0
+  const nativeElapsed = useSyncExternalStore(progress?.subscribe ?? noProgressSubscription, progress?.getSnapshot ?? (() => playing?.elapsed ?? 0))
+  const elapsed = !playing ? 0 : playing.simulated ? playing.elapsed : nativeElapsed
   const shown = playing?.external ? {
     name: `${playing.name ?? 'Unknown Track'} (Spotify)`,
     art: playing.art ?? '',

@@ -589,8 +589,9 @@ describe('mounted native interaction boundaries', () => {
 
   it('shares track-list actions with now playing and keeps the clicked track despite selection or playback changes', async () => {
     const tracks = [track(1, 'Playing'), track(2, 'Selected'), track(3, 'Also Selected'), { ...track(4, 'Local'), uri: 'file:///local.mp3', isLocal: true }]
+    const readTracks = vi.fn(() => tracks)
     const browse: BrowseView = {
-      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, get tracks() { return readTracks() },
       albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
       counts: { tracks: tracks.length, totalSecs: 720, perSource: { music: tracks.length, podcasts: 0, audiobooks: 0 } },
     }
@@ -628,6 +629,14 @@ describe('mounted native interaction boundaries', () => {
     expect(menuItems()).toHaveLength(0)
     await act(async () => view.querySelector('[data-track-id="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
     await waitFor(() => expect(view.querySelector('.lcd .marquee')?.textContent).toBe('Playing'))
+    readTracks.mockClear()
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 11 }) }))
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('11')
+    expect(readTracks).not.toHaveBeenCalled()
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 12, isPlaying: false }) }))
+    expect(view.querySelector('[aria-label="Play"]')).not.toBeNull()
+    expect(readTracks).toHaveBeenCalled()
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 13 }) }))
     await act(async () => {
       view.querySelector('[data-track-id="2"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -635,6 +644,7 @@ describe('mounted native interaction boundaries', () => {
       view.querySelector('[data-track-id="3"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }))
     })
     expect(view.querySelectorAll('.track-row.selected')).toHaveLength(2)
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('13')
     await contextMenu('[data-track-id="2"]')
     const listActions = menuItems().map((item) => item.textContent)
     await act(async () => menuItems()[4].click())
@@ -675,6 +685,9 @@ describe('mounted native interaction boundaries', () => {
     expect(menuItems()[3].disabled).toBe(true)
     await act(async () => menuItems()[0].click())
     expect(invokeMock).toHaveBeenCalledWith('playlists_list', { uris: ['spotify:track:external'] })
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { trackId: null, uri: null, elapsed: 0, name: null, isPlaying: false }) }))
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('0')
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.disabled).toBe(true)
   })
 
   it('clears whole-album mode when a release loses its album selection, including stale saved options', async () => {
