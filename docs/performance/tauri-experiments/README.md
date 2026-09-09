@@ -7,7 +7,7 @@ Keep these changes separate from main until each result has been assessed.
 | --- | --- | --- | --- |
 | 1 | Isolate elapsed-only playback presentation | Library and playlist React duration, long tasks, frame gaps, rendered scope; pause, seek, track changes, external playback, queue authority | Fixture comparison complete; native validation pending |
 | 2 | Window large playlists; avoid rebuilding order/queue on unrelated renders | Opening, selection, scrolling, ticks, DOM count; duplicate entries, focus, multiselection, drag/reorder | Fixture comparison complete; native validation pending |
-| 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Pending |
+| 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Document-visibility probe complete; native CPU/minimize pending (Mac locked) |
 | 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Pending |
 | 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Pending |
 | 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | Pending |
@@ -108,3 +108,30 @@ viewport was restored afterward.
 Result: strong fixture improvement for opening/selection/sort; scrolling unchanged
 within the measurement's resolution. Native-app recommendation remains
 **UNVERIFIED** pending WebKit/native validation.
+
+## 3. Hidden presentation
+
+Baseline `71467f3`, candidate `ca9a4ee`. The fixture now uses a long first-track
+title and an explicitly simulated document-visibility seam. This isolates the
+visibility event contract; it does **not** simulate macOS occlusion, App Nap,
+native minimization, or process CPU.
+
+Across three 12-tick samples, hidden React render work fell from 8.2 ms median
+(7.7–9.0) to zero commits and zero render duration. The baseline title animation
+remained running; the candidate animation was paused in all three samples.
+The hidden transport retained its initial elapsed display, then immediately
+displayed the latest native position (12) on visibility restoration and resumed
+the animation. Raw data: `03-{baseline,after}-hidden.json`.
+
+The store continues accepting every position while hidden; semantic player
+updates still use the reducer, and simulated playback/controller timing is
+unchanged. Tests additionally cover hidden 11→42 updates staying unpainted until
+show, without reading Library data. All 96 Node checks and 71 interaction tests,
+lint, and production build pass.
+
+An isolated release-mode native build (development token store, no credentials)
+and a generated 4,000-file silent-audio fixture are prepared using
+`performance/native.config.json` and `performance/native_fixture.py`. The
+native baseline bundle is preserved separately. Computer Use reported that the
+Mac is locked, so native visible/hidden/minimized CPU and real WebKit visibility
+delivery remain **UNVERIFIED**. No native savings are inferred from these samples.

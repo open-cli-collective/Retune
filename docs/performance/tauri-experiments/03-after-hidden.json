@@ -1,0 +1,69 @@
+{
+  "commit": "ca9a4ee",
+  "tool": "React Profiler; simulated document visibility in Chromium, not native hiding",
+  "samples": [
+    {
+      "scenario": "library-playback",
+      "durationMs": 12009.100000143051,
+      "commits": 0,
+      "totalRenderMs": 0,
+      "maxRenderMs": 0,
+      "maxFrameGapMs": 17.700000000000728,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "0",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [],
+      "simulatedVisibility": "hidden",
+      "animationStates": [
+        "paused"
+      ]
+    },
+    {
+      "scenario": "library-playback",
+      "durationMs": 12018.200000047684,
+      "commits": 0,
+      "totalRenderMs": 0,
+      "maxRenderMs": 0,
+      "maxFrameGapMs": 18.700000000004366,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "0",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [],
+      "simulatedVisibility": "hidden",
+      "animationStates": [
+        "paused"
+      ]
+    },
+    {
+      "scenario": "library-playback",
+      "durationMs": 12019.099999904633,
+      "commits": 0,
+      "totalRenderMs": 0,
+      "maxRenderMs": 0,
+      "maxFrameGapMs": 18.69999999999709,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "0",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [],
+      "simulatedVisibility": "hidden",
+      "animationStates": [
+        "paused"
+      ]
+    }
+  ]
+}
