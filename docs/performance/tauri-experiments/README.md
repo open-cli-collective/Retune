@@ -9,7 +9,7 @@ Keep these changes separate from main until each result has been assessed.
 | 2 | Window large playlists; avoid rebuilding order/queue on unrelated renders | Opening, selection, scrolling, ticks, DOM count; duplicate entries, focus, multiselection, drag/reorder | Fixture comparison complete; native validation pending |
 | 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Document-visibility probe complete; native CPU/minimize pending (Mac locked) |
 | 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Store benchmark complete; native launch timing pending |
-| 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Pending |
+| 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Bundle/startup fixture complete; no demonstrated latency gain |
 | 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | Pending |
 | 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Pending |
 
@@ -157,3 +157,46 @@ Existing-file startup performs zero settings saves; missing-file startup still
 performs one. Normalization still occurs during load and future explicit writes.
 The gain is about 4.77 ms at this boundary, so it should not be presented as a
 large app-startup improvement. Native first-paint impact remains **UNVERIFIED**.
+
+## 4b. Window entry loading
+
+Baseline `67f09f6`, corrected candidate `48456a6`. The real `src/main.tsx` now
+chooses one dynamic view loader; common theme/dialog CSS remains eager. The
+first candidate (`280e840`) demonstrated a functional regression: Vite combined
+the conditional loader's preload helper, requesting App dependencies for the
+importer and omitting importer CSS. Its failed resource observations are kept
+in `04b-rejected-conditional-loader.json`. Separate loader functions fix that
+association; `performance/check-startup.mjs` checks both windows' observed
+resource lists and specifically guards this regression.
+
+Production JavaScript required for either window falls from 446,859 bytes to
+377,118 (main) / 377,075 (importer), about 15.6%. Independently gzipping each
+required file with Python's default compression gives 130,008 bytes before and
+112,673 / 112,533 after, about 13.3%. These are byte counts, not native memory
+measurements. Manifests, file hashes, and sizes are in
+`04b-{baseline,after}-bundle.json`.
+
+The production startup fixture uses the actual entry and views with deterministic
+native responses, three warm-cache reloads per window, and the same 1280×720
+Chromium session. Initial cold navigations warm the resources and are excluded.
+
+| Window / metric | Baseline median (range), ms | Candidate median (range), ms |
+| --- | --- | --- |
+| Main DOM ready | 30.8 (29.7–33.3) | 31.0 (30.8–31.0) |
+| Main ready + two animation frames | 51.1 (36.2–51.3) | 48.9 (42.7–54.2) |
+| Importer DOM ready | 16.6 (14.9–18.4) | 17.2 (17.2–19.3) |
+| Importer ready + two animation frames | 44.3 (34.6–44.6) | 49.0 (34.3–52.5) |
+
+No latency improvement clears the observed noise. Splitting adds dependency
+requests and provides an explicit loading/error/retry UI. The corrected importer
+requests its own stylesheet and no App chunk; main requests no importer chunk.
+The importer shortcuts dialog opens correctly with keyboard focus. Three entry
+tests cover selected-module isolation and accessible chunk-load failure; the
+96 Node and 71 existing interaction checks also pass. Build, lint, documentation,
+and Tauri ACL checks pass.
+
+Result: demonstrated per-window byte reduction; **no demonstrated startup speed
+gain**. Keep the experiment for comparison, but do not merge it solely as a
+latency optimization. Native WebKit startup and first-use costs remain
+**UNVERIFIED** while the Mac is locked. Raw timings are in
+`04b-{baseline,after}-startup.json`.
