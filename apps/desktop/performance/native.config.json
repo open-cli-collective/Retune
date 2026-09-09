@@ -1,0 +1,7 @@
+{
+  "productName": "Retune Performance",
+  "identifier": "com.rianjs.retune.performance",
+  "app": {
+    "windows": [{ "label": "main", "title": "Retune Performance", "width": 1120, "height": 720, "resizable": true }]
+  }
+}

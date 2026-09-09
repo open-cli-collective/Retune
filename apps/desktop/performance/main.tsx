@@ -25,6 +25,16 @@ const button = document.createElement('button')
 button.textContent = 'Measure 12 playback ticks'
 const output = document.createElement('pre'); output.id = 'performance-results'
 panel.append(button, output); document.body.append(panel)
+// A controlled document-visibility seam; this does not model native occlusion/CPU.
+let simulatedVisibility: DocumentVisibilityState = 'visible'
+Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => simulatedVisibility })
+const hiddenLabel = document.createElement('label')
+const hiddenInput = document.createElement('input'); hiddenInput.type = 'checkbox'
+hiddenLabel.append(hiddenInput, 'Simulate hidden document'); panel.append(hiddenLabel)
+hiddenInput.onchange = () => {
+  simulatedVisibility = hiddenInput.checked ? 'hidden' : 'visible'
+  document.dispatchEvent(new Event('visibilitychange'))
+}
 const wait = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds))
 const painted = async () => { await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame) }
 const interactionButton = document.createElement('button')
@@ -77,6 +87,7 @@ button.onclick = async () => {
     ipcDuringTicks: calls.length - callsBefore, rows: document.querySelectorAll('[data-track-id], .playlist-track-row').length,
     elapsed: document.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value,
     viewport: [innerWidth, innerHeight], samples: renders,
+    simulatedVisibility, animationStates: document.querySelector('.marquee')?.getAnimations().map(animation => animation.playState),
   }
   results.push(sample); output.textContent = JSON.stringify(results, null, 2); button.disabled = false
 }

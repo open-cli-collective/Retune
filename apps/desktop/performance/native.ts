@@ -3,7 +3,7 @@ import type { MainEvent } from '../src/ipc.ts'
 import type { PlayerState, Track } from '../src/types.ts'
 
 export const tracks: Track[] = Array.from({ length: 4000 }, (_, index) => ({
-  id: index + 1, uri: `file:///fixture/${index}`, name: `Track ${index}`, art: `Artist ${index % 200}`,
+  id: index + 1, uri: `file:///fixture/${index}`, name: index === 0 ? 'Track 0 — a deliberately long track title to exercise native marquee presentation while playback continues' : `Track ${index}`, art: `Artist ${index % 200}`,
   alb: `Album ${index % 400}`, cat: 'Soundtrack', durationSecs: 3600, enabled: true, rating: null,
   isLocal: true, discNo: 1, trackNo: index % 12 + 1, playCount: 0, kind: 'MP3', bitrateKbps: 320,
   lastPlayedAt: null, addedAt: null, releaseDate: null,
