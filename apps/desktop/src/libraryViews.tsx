@@ -1,18 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
 import { browseFacetValues, COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 
-export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle, onPrefix }: {
+export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle, onPrefix, onNavigate }: {
   state: { source: Source; view: BrowseView | null; viewKey?: string; browseKey: string; settings: Pick<Settings, 'browserPanes' | 'browserVisible'>; sel: Selection }
   anchors: { current: Partial<Record<keyof Selection, string>> }
   onActivate: (facet: keyof Selection) => void
   onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
   onPlay: (facet: keyof Selection, values: string[], anchor?: string) => void
   onToggle: (facet: keyof Selection) => void
+  onNavigate: (facet: 'art' | 'alb', value: string) => void
   onPrefix: (event: React.KeyboardEvent, facet: keyof Selection) => boolean
 }) {
-  const [menu, setMenu] = useState<{ x: number; y: number }>()
+  const [menu, setMenu] = useState<{ x: number; y: number; target?: { facet: 'art' | 'alb'; value: string } }>()
   const [height, setHeight] = useState(200)
   const pane = useRef<HTMLDivElement>(null)
   const resize = useRef<{ pointerId: number; startY: number; startHeight: number; maxHeight: number; zoom: number } | undefined>(undefined)
@@ -25,12 +26,13 @@ export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onTo
   const adjustHeight = (delta: number) => setHeight((current) => resizedPaneHeight(current, 0, delta, maxHeight(), 1))
   return <div ref={pane} className="browser-pane" style={{ height, flexBasis: height }}>
     <div className="browser-scroll"><div className="browser-columns" style={{ minWidth: `${visible.length * 200}px`, gridTemplateColumns: `repeat(${visible.length}, minmax(200px, 1fr))` }}>
-      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onPlay={(selected, anchor) => onPlay(facet, selected, anchor)} onPrefix={(event) => onPrefix(event, facet)} onContextMenu={(event) => {
+      {facets.map((facet, index) => state.settings.browserPanes[facet] && <FacetColumn key={facet} facet={facet} title={sourceLabels[index]} values={values[index]} selected={state.sel[facet]} anchor={anchors.current[facet]} onActivate={() => onActivate(facet)} onSelect={(selected, anchor) => onSelect(facet, selected, anchor)} onPlay={(selected, anchor) => onPlay(facet, selected, anchor)} onPrefix={(event) => onPrefix(event, facet)} onContextMenu={(event, value) => {
         event.preventDefault()
-        setMenu({ x: event.clientX, y: event.clientY })
+        event.stopPropagation()
+        setMenu({ x: event.clientX, y: event.clientY, target: state.source === 'music' && facet !== 'cat' && value !== undefined ? { facet, value } : undefined })
       }} />)}
     </div></div>
-    {menu && <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={facets.map((facet, index) => ({ key: facet, label: sourceLabels[index], checked: state.settings.browserPanes[facet], onChange: () => onToggle(facet) }))} />}
+    {menu && <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={facets.map((facet, index) => ({ key: facet, label: sourceLabels[index], checked: state.settings.browserPanes[facet], onChange: () => onToggle(facet) }))}>{menu.target && <button onClick={() => { setMenu(undefined); if (menu.target) onNavigate(menu.target.facet, menu.target.value) }}>{menu.target.facet === 'alb' ? 'View album in Spotify' : 'View artist albums in Spotify'}</button>}</CheckboxMenu>}
     <span className="browser-resize-handle" role="separator" aria-label="Resize column browser" aria-orientation="horizontal" tabIndex={0} onPointerDown={(event) => {
       if (event.button !== 0 || !pane.current) return
       event.preventDefault()
@@ -65,7 +67,7 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
   onSelect: (values: string[], anchor?: string) => void
   onPlay: (values: string[], anchor?: string) => void
   onPrefix: (event: React.KeyboardEvent) => boolean
-  onContextMenu: (event: React.MouseEvent) => void
+  onContextMenu: (event: React.MouseEvent, value?: string) => void
 }) {
   const select = (value: string, event: React.MouseEvent) => {
     if (event.shiftKey) {
@@ -85,7 +87,7 @@ function FacetColumn({ facet, title, values, selected, anchor, onActivate, onSel
       {values.map((value, index) => {
         const label = facetLabel(title, value)
         const meta = label !== value
-        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} onDoubleClick={() => onPlay([value], value)} onKeyDown={onPrefix} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
+        return <button key={value} data-row-index={index + 1} className={`${selected?.includes(value) ? 'active' : ''} ${meta ? 'meta' : ''}`} onClick={(event) => select(value, event)} onDoubleClick={() => onPlay([value], value)} onKeyDown={onPrefix} onContextMenu={(event) => { event.currentTarget.focus(); onContextMenu(event, value) }} title={meta ? 'Tracks without genre metadata' : value}>{label}</button>
       })}
     </div>
   </div>
@@ -142,8 +144,8 @@ export function TrackContextMenu({ x, y, onClose, onPlaylist, onGoToAlbum, onGoT
   </ContextMenu>
 }
 
-export function TrackList({ tracks, label, selectedIds, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort, onPrefix, onMerge, onRemoveRetune, onRemoveSpotify }: {
-  tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; playing: Playing | null
+export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing, columnOrder, columnWidths, hiddenColumns, sortColumn, sortDesc, empty, onActivate, onSetup, onSelect, onClearSelection, onPlay, onEnabled, onRate, onInfo, onPlaylist, onGoToAlbum, onGoToArtist, onReorder, onColumnWidths, onHiddenColumns, onSort, onPrefix, onMerge, onRemoveRetune, onRemoveSpotify }: {
+  tracks: Track[]; label: (typeof labels)[Source]; selectedIds: Set<number>; selectionAnchor?: number; playing: Playing | null
   columnOrder: ColumnKey[]; columnWidths: Partial<Record<ColumnKey, number>>; hiddenColumns: ColumnKey[]; sortColumn: ColumnKey | null; sortDesc: boolean; empty: boolean; onSelect: (id: number, event: Pick<React.MouseEvent | React.KeyboardEvent, 'shiftKey' | 'metaKey' | 'ctrlKey'>) => void; onPlay: (id: number) => void; onEnabled: (id: number, enabled: boolean) => void
   onRate: (id: number, stars: number) => void; onInfo: (id: number) => void; onReorder: (order: ColumnKey[]) => void
   onColumnWidths: (widths: Partial<Record<ColumnKey, number>>) => void
@@ -156,6 +158,43 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
   const [focusedTrackId, setFocusedTrackId] = useState<number>()
+  const scroll = useRef<HTMLDivElement>(null)
+  const [viewport, setViewport] = useState({ top: 0, height: 600 })
+  // Matches the fixed library row height; scrollTop/clientHeight are unscaled by CSS zoom.
+  const rowHeight = 18
+  const overscan = 12
+  const visibleCount = Math.ceil(viewport.height / rowHeight) + overscan * 2
+  const first = Math.max(0, Math.min(Math.floor(viewport.top / rowHeight) - overscan, tracks.length - visibleCount))
+  const last = Math.min(tracks.length, first + visibleCount)
+  const readViewport = useCallback(() => {
+    const element = scroll.current
+    if (element) setViewport((current) => {
+      const next = { top: element.scrollTop, height: element.clientHeight || 600 }
+      return current.top === next.top && current.height === next.height ? current : next
+    })
+  }, [])
+  useLayoutEffect(() => {
+    readViewport()
+    const observer = new ResizeObserver(readViewport)
+    if (scroll.current) observer.observe(scroll.current)
+    return () => observer.disconnect()
+  }, [readViewport])
+  const reveal = (index: number) => {
+    const element = scroll.current
+    if (!element || index < 0) return
+    const top = index * rowHeight
+    const bottom = top + rowHeight + (element.firstElementChild as HTMLElement).offsetHeight
+    if (top < element.scrollTop) element.scrollTop = top
+    else if (bottom > element.scrollTop + element.clientHeight) element.scrollTop = Math.max(0, bottom - (element.clientHeight || 600))
+    readViewport()
+  }
+  const revealSelection = useEffectEvent((id: number) => {
+    const index = tracks.findIndex((track) => track.id === id)
+    if (index >= 0) { reveal(index); setFocusedTrackId(id) }
+  })
+  useLayoutEffect(() => {
+    if (selectionAnchor !== undefined) revealSelection(selectionAnchor)
+  }, [selectionAnchor])
   const headerDragged = useRef(false)
   const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLSpanElement } | undefined>(undefined)
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
@@ -166,6 +205,11 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
   const rovingTrackId = tracks.some((track) => track.id === focusedTrackId)
     ? focusedTrackId
     : tracks.find((track) => selectedIds.has(track.id))?.id ?? tracks[0]?.id
+  const rowIndices = Array.from({ length: last - first }, (_, index) => first + index)
+  const focusedIndex = tracks.findIndex((track) => track.id === rovingTrackId)
+  // Keep the keyboard's current row mounted even when it scrolls out of view.
+  if (focusedIndex >= 0 && (focusedIndex < first || focusedIndex >= last)) rowIndices.push(focusedIndex)
+  rowIndices.sort((left, right) => left - right)
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
@@ -211,8 +255,8 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
     setLiveWidths(columnWidths)
   }
   const menuTrack = menu?.trackId === undefined ? undefined : tracks.find((track) => track.id === menu.trackId)
-  return <div className="track-list" onMouseDown={onActivate}>
-    <div className={`track-scroll ${empty ? 'empty-library' : ''}`} aria-label="Library tracks" onClick={(event) => { if (event.target === event.currentTarget) onClearSelection() }}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
+  return <div className="track-list" style={{ '--track-row-height': `${rowHeight}px` } as React.CSSProperties} onMouseDown={onActivate}>
+    <div ref={scroll} onScroll={readViewport} className={`track-scroll ${empty ? 'empty-library' : ''}`} aria-label="Library tracks" onClick={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('track-window')) onClearSelection() }}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
     }}><span className="track-enabled-cell" />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
@@ -233,9 +277,10 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
       event.preventDefault()
       event.stopPropagation()
     }} /></span>)}</div>
-      {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : tracks.map((track) => {
+      {empty ? <div className="empty-prompt"><span className="empty-glyph" aria-hidden="true">♪</span><strong>Your library is empty</strong><span>Connect Spotify and sync to pull your saved music into a local overlay.</span><button onClick={onSetup}>Set Up Library…</button></div> : <div className="track-window" role="list" aria-label="Tracks" style={{ height: tracks.length * rowHeight }}>{rowIndices.map((index) => {
+        const track = tracks[index]
         const isPlaying = isCurrentTrack(playing, track)
-        return <div key={track.id} data-track-id={track.id} role="group" aria-label={`${track.name} by ${track.art}`} data-keyboard-row tabIndex={rovingTrackId === track.id ? 0 : -1} draggable className={`track-row ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns }} onFocus={() => setFocusedTrackId(track.id)} onClick={(event) => { setFocusedTrackId(track.id); onSelect(track.id, event) }} onDoubleClick={() => onPlay(track.id)} onKeyDown={(event) => {
+        return <div key={track.id} data-track-id={track.id} role="listitem" aria-posinset={index + 1} aria-setsize={tracks.length} aria-label={`${track.name} by ${track.art}`} data-keyboard-row tabIndex={rovingTrackId === track.id ? 0 : -1} draggable className={`track-row ${index % 2 ? 'alternate' : ''} ${selectedIds.has(track.id) ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`} style={{ gridTemplateColumns: columns, top: index * rowHeight }} onFocus={() => setFocusedTrackId(track.id)} onClick={(event) => { setFocusedTrackId(track.id); onSelect(track.id, event) }} onDoubleClick={() => onPlay(track.id)} onKeyDown={(event) => {
           if (event.target !== event.currentTarget) return
           if (event.key === 'Enter') {
             event.preventDefault()
@@ -254,6 +299,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? tracks.length - 1 : Math.max(0, Math.min(tracks.length - 1, index + (event.key === 'ArrowUp' ? -1 : 1)))
           const next = tracks[nextIndex]
           if (!next) return
+          reveal(nextIndex)
           setFocusedTrackId(next.id)
           onSelect(next.id, event)
           window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${next.id}"]`)?.focus())
@@ -272,7 +318,7 @@ export function TrackList({ tracks, label, selectedIds, playing, columnOrder, co
           <span className="track-enabled-cell"><input type="checkbox" checked={track.enabled} aria-label={`${track.enabled ? 'Exclude' : 'Include'} ${track.name} from sequential playback`} title={track.enabled ? 'Uncheck to skip during sequential playback' : 'Check to include in sequential playback'} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onChange={(event) => onEnabled(track.id, event.target.checked)} /></span>
           {visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isPlaying ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selectedIds.has(track.id)} onInfo={() => onInfo(track.id)} onRate={(stars) => onRate(track.id, stars)} />)}
         </div>
-      })}
+      })}</div>}
     </div>
     {menu && (menu.trackId === undefined
       ? <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={columnOrder.map((column) => ({

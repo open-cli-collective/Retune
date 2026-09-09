@@ -43,6 +43,17 @@ test('subscribe-then-snapshot unregisters after an early unmount', async () => {
   assert.equal(unlistened, true)
 })
 
+test('subscribe-then-snapshot unregisters when hydration fails', async () => {
+  let unlistened = false
+  await assert.rejects(subscribeThenSnapshot(
+    async () => () => { unlistened = true },
+    async () => { throw new Error('Snapshot failed') },
+    () => assert.fail('failed hydration must not install a snapshot'),
+    () => true,
+  ), /Snapshot failed/)
+  assert.equal(unlistened, true)
+})
+
 test('invalidation snapshot ignores stale hydration after an event', async () => {
   let invalidate!: () => void
   const resolvers: Array<(value: string) => void> = []
@@ -65,6 +76,7 @@ test('invalidation snapshot ignores stale hydration after an event', async () =>
 test('main event dispatch is exhaustive over the tagged contract', () => {
   const received: string[] = []
   const handlers = {
+    spotifyPlayRequested: () => received.push('spotifyPlayRequested'),
     playerState: () => received.push('playerState'),
     playbackAuthorizationRequired: () => received.push('playbackAuthorizationRequired'),
     operationError: (payload: string) => received.push(payload),
@@ -262,6 +274,7 @@ test('app gateway preserves shell command names and argument shapes', async () =
 
 test('Last.fm gateway owns the consumed event names', () => {
   assert.deepEqual(lastfmEvents, {
+    playback: 'lastfm-import-playback',
     changed: 'lastfm-import-changed',
     applyFinished: 'lastfm-import-apply-finished',
   })

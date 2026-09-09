@@ -63,6 +63,8 @@ const importerCommands = [
   "lastfm_import_collection_remove_album",
   "lastfm_import_collection_set_album_import",
   "lastfm_import_activate_collection",
+  "lastfm_import_play_track",
+  "lastfm_import_playback",
   "lastfm_import_change_track",
   "lastfm_import_change_album",
   "lastfm_import_apply",

@@ -248,7 +248,6 @@ impl LastFmImportSessionV2 {
         album: &str,
         rows: &[&SourceRow],
     ) -> PageOptions {
-        let batch_ids = batch.source_ids.iter().collect::<BTreeSet<_>>();
         let batch_options = self
             .page_options
             .get(&batch_options_key(batch.page))
@@ -262,20 +261,32 @@ impl LastFmImportSessionV2 {
             .clone()
             .or(legacy_options.clone())
             .unwrap_or_else(|| PageOptions::from_defaults(&self.defaults));
-        if customized {
-            options
-                .selected_track_ids
-                .retain(|id| batch_ids.contains(id));
-        } else {
-            options.selected_track_ids = rows
-                .iter()
-                .filter(|row| is_actionable(self, &row.stable_id))
-                .map(|row| row.stable_id.clone())
-                .collect();
+        if !customized {
             options.whole_album =
                 options.import_content && exact_album_match_for_rows(self, batch.page, rows);
         }
         let collection_shaped = batch_is_collection_shaped(self, batch, rows);
+        // Saved IDs retain completed history participation; unfinished rows follow mappings.
+        options.selected_track_ids = rows
+            .iter()
+            .filter(|row| {
+                let decision = default_decision(self, &row.stable_id);
+                !decision.excluded
+                    && if decision.status == RowStatus::Done {
+                        options.selected_track_ids.contains(&row.stable_id)
+                    } else {
+                        is_actionable(self, &row.stable_id)
+                            && self
+                                .matches
+                                .get(&row.stable_id)
+                                .and_then(|result| {
+                                    matched_track_uri_for_row(result, row, collection_shaped)
+                                })
+                                .is_some()
+                    }
+            })
+            .map(|row| row.stable_id.clone())
+            .collect();
         options.whole_album &= collection_shaped
             || rows.iter().any(|row| {
                 self.matches
@@ -1055,11 +1066,7 @@ async fn select_best_matches_for_batch(
         .is_some_and(|session| batch_is_collection_shaped_for_id(&session, batch_id));
     let mut selected_album_uris = BTreeSet::new();
     for item in page.rows {
-        if !page
-            .options
-            .selected_track_ids
-            .contains(&item.source.stable_id)
-            || item.decision.excluded
+        if item.decision.excluded
             || !matches!(
                 item.decision.status,
                 RowStatus::Pending | RowStatus::Skipped

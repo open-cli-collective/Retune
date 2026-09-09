@@ -230,7 +230,7 @@ pub(super) fn build_apply_plan(
             .any(|row| !target_by_source.contains_key(&row.stable_id))
     {
         return Err(
-            "Every selected source track needs a supported Spotify match before this batch can be accepted. Change its match or uncheck it first."
+            "Every selected source track needs a supported Spotify match before this batch can be accepted. Map it before accepting."
                 .into(),
         );
     }

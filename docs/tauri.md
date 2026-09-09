@@ -52,10 +52,16 @@ absence of raw frontend path import, and the absence of sensitive core-event
 payloads.
 
 The importer receives the narrow appearance and genre queries it needs. It
-does not receive full settings, Spotify connection or mutation, playback,
+does not receive full settings, Spotify connection or mutation, direct playback control,
 diagnostics, local import, or main-event subscription authority. Shared
 commands still validate their resource and state inputs; the ACL answers only
-which window may call them.
+which window may call them. The importer can request playback of a validated
+Spotify track through `lastfm_import_play_track`; the private main channel
+forwards that request to the main player, which owns connection, authorization,
+and queue state. `lastfm_import_playback` returns only the current controlled
+Spotify track URI and playing flag. The targeted `lastfm-import-playback` event
+publishes that same safe projection when either value changes; local file paths,
+external playback, and the rest of the private player state are omitted.
 
 ## IPC and events
 

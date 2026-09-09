@@ -61,8 +61,8 @@ impl ReviewAction {
 
     pub(super) fn sweeps_backlog(self) -> bool {
         match self {
-            Self::IgnoreAlbum | Self::IgnoreArtist | Self::Restore => true,
-            Self::Exclude | Self::UndoExclude | Self::SkipAlbum => false,
+            Self::IgnoreArtist | Self::Restore => true,
+            Self::Exclude | Self::UndoExclude | Self::IgnoreAlbum | Self::SkipAlbum => false,
         }
     }
 }
@@ -812,7 +812,7 @@ mod tests {
         for (action, wire, requires_ids, sweeps_backlog) in [
             (ReviewAction::Exclude, "exclude", true, false),
             (ReviewAction::UndoExclude, "undo-exclude", true, false),
-            (ReviewAction::IgnoreAlbum, "ignore-album", false, true),
+            (ReviewAction::IgnoreAlbum, "ignore-album", false, false),
             (ReviewAction::IgnoreArtist, "ignore-artist", false, true),
             (ReviewAction::SkipAlbum, "skip-album", false, false),
             (ReviewAction::Restore, "restore", false, true),

@@ -5,7 +5,10 @@ export type Invoker = <T>(command: string, args?: Record<string, unknown>) => Pr
 
 export const tauriInvoker: Invoker = (command, args) => invoke(command, args)
 
+export type SpotifyPlayRequest = { uri: string; name: string; artist: string; album: string }
+
 export type MainEvent =
+  | { type: 'spotifyPlayRequested'; payload: SpotifyPlayRequest }
   | { type: 'playerState'; payload: PlayerState }
   | { type: 'playbackAuthorizationRequired'; payload: PlaybackAuthorizationPrompt }
   | { type: 'operationError'; payload: string }
@@ -21,6 +24,7 @@ export type MainEventHandlers = {
 
 export function dispatchMainEvent(event: MainEvent, handlers: MainEventHandlers) {
   switch (event.type) {
+    case 'spotifyPlayRequested': handlers.spotifyPlayRequested(event.payload); break
     case 'playerState': handlers.playerState(event.payload); break
     case 'playbackAuthorizationRequired': handlers.playbackAuthorizationRequired(event.payload); break
     case 'operationError': handlers.operationError(event.payload); break
@@ -77,8 +81,13 @@ export async function subscribeThenSnapshot<T>(
     if (active()) install(value)
   })
   if (!active()) return unlisten
-  const value = await snapshot()
-  if (active() && !eventSeen) install(value)
+  try {
+    const value = await snapshot()
+    if (active() && !eventSeen) install(value)
+  } catch (error) {
+    unlisten()
+    throw error
+  }
   return unlisten
 }
 

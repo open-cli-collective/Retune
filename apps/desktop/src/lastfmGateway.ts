@@ -1,4 +1,4 @@
-import { tauriInvoker, type Invoker } from './ipc.ts'
+import { tauriInvoker, type Invoker, type SpotifyPlayRequest } from './ipc.ts'
 import type { CountMode, ImportQueuePage, ImportSourceRow } from './lastfmImportState.ts'
 import type { LastFmImportDefaults, LastFmImportState, LastFmState } from './types.ts'
 
@@ -15,13 +15,18 @@ export type ReviewAction = 'exclude' | 'undo-exclude' | 'skip-album' | 'restore'
 
 type Batch = { batchId: number; artist: string; album: string }
 
+export type ImporterPlayback = { uri: string | null; isPlaying: boolean }
+
 export const lastfmEvents = {
+  playback: 'lastfm-import-playback',
   changed: 'lastfm-import-changed',
   applyFinished: 'lastfm-import-apply-finished',
 } as const
 
 export function createLastFmGateway(invoke: Invoker) {
   return {
+    playback: () => invoke<ImporterPlayback>('lastfm_import_playback'),
+    playTrack: (track: SpotifyPlayRequest) => invoke<void>('lastfm_import_play_track', { track }),
     state: () => invoke<LastFmImportState>('lastfm_import_state'),
     queue: (cursor: number, limit: number) => invoke<ImportQueuePage>('lastfm_import_queue', { cursor, limit }),
     page: ({ batchId, artist, album }: Batch) => invoke<PageView | null>('lastfm_import_page', { batchId, artist, album }),

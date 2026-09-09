@@ -22,6 +22,17 @@ function TrackSummary({ track }: { track: Pick<DecisionTrack, 'name' | 'art' | '
   return <><strong>{track.name}</strong><span>{track.art} · {track.alb || 'No album'}</span><small>{formatTime(track.durationSecs)} · {track.playCount.toLocaleString()} plays</small></>
 }
 
+function MergeRecordingSummary({ track, mostPlays }: { track: DecisionTrack; mostPlays: number }) {
+  return <><span className="merge-recording-copy"><span className="merge-recording-title"><strong>{track.name}</strong>
+    {track.sources.savedAlbums.length > 0 && <span className="merge-badge">Saved album</span>}
+    {track.sources.savedTrack && <span className="merge-badge">Saved individually</span>}
+    {track.sources.localFile && <span className="merge-badge">Local file</span>}
+    {track.sources.retained && <span className="merge-badge">Kept in Retune</span>}
+    {!track.sources.membershipKnown && !track.sources.localFile && <span className="merge-badge">Membership unknown</span>}
+    {track.playCount > 0 && track.playCount === mostPlays && <span className="merge-badge">Most plays</span>}
+  </span><span>{track.art} · {track.alb || 'No album'} · {formatTime(track.durationSecs)}</span></span><span className="merge-recording-plays">{track.playCount.toLocaleString()} plays</span></>
+}
+
 type Draft = Omit<TrackMergeEdit, 'rating' | 'playCount'> & { rating: string }
 function contributors(preview: TrackMergePreview): DecisionTrack[] {
   return preview.target?.id !== null && preview.target && !preview.tracks.some((track) => track.uri === preview.target?.uri)
@@ -40,10 +51,9 @@ function initialDraft(preview: TrackMergePreview): Draft {
 export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; onClose: () => void; onChanged: (id?: number) => void }) {
   const [preview, setPreview] = useState<TrackMergePreview>()
   const [draft, setDraft] = useState<Draft>()
-  const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(true)
   const [error, setError] = useState('')
-  const [mode, setMode] = useState<MergePlayCount['mode']>('highest')
+  const [mode, setMode] = useState<MergePlayCount['mode']>('sum')
   const [custom, setCustom] = useState('')
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchTrack[]>([])
@@ -67,7 +77,7 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
     try {
       const value = await libraryGateway.mergePreview(ids, targetUri)
       if (request !== generation.current) return
-      setPreview(value); setDraft(initialDraft(value)); setStep(0)
+      setPreview(value); setDraft(initialDraft(value))
     } catch (error) { if (request === generation.current) setError(String(error)) }
     finally { if (request === generation.current) setBusy(false) }
   }
@@ -105,45 +115,49 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
   const { genres, ratings } = preview ? choices(preview) : { genres: [], ratings: [] }
   const added = all.flatMap((track) => track.addedAt === null ? [] : [track.addedAt])
   const played = all.flatMap((track) => track.lastPlayedAt === null ? [] : [track.lastPlayedAt])
-  return <ModalDialog className="get-info track-merge" labelledBy="track-merge-title" onCancel={busy ? undefined : onClose} onSubmit={busy ? undefined : merged !== undefined ? onClose : step === 2 ? commit : () => { if (step === 0 ? preview?.target : validMetadata && validCount) setStep(step + 1) }}>
-    <h2 id="track-merge-title">{merged === undefined ? `Merge ${ids.length} tracks` : 'Tracks merged'}</h2>
-    {merged === undefined && <ol className="merge-steps" aria-label="Merge steps">{['Recording', 'Metadata & history', 'Review'].map((label, index) => <li key={label} aria-current={index === step ? 'step' : undefined}>{index + 1}. {label}</li>)}</ol>}
+  const mostPlays = Math.max(0, ...all.map((track) => track.playCount))
+  const countExplanation = mode === 'sum' ? `${all.map((track) => track.playCount.toLocaleString()).join(' + ')} summed` : mode === 'highest' ? 'Highest count kept' : 'Custom total'
+  const ratingDescription = !draft?.rating ? 'Choose a rating' : draft.rating === 'none' ? 'No track rating override' : `${draft.rating} stars`
+  return <ModalDialog className="get-info track-merge" labelledBy="track-merge-title" onCancel={busy ? undefined : onClose} onSubmit={busy ? undefined : merged !== undefined ? onClose : commit}>
+    <header className="merge-header"><h2 id="track-merge-title">{merged === undefined ? `Merge ${ids.length} tracks` : 'Tracks merged'}</h2>{merged === undefined && <p>Combine library entries into one recording.</p>}</header>
     <div className="decision-body" aria-busy={busy}>
-      {merged !== undefined ? <><p>The selected entries now share one Retune recording. Your Spotify library and local files are unchanged.</p><p>You can also undo this merge later from Get Info.</p></> : !preview || !draft ? <p role="status">{busy ? 'Loading selected tracks…' : 'The selected tracks could not be loaded.'}</p> : <>
-        {step === 0 && <>
-          <p>Choose the recording Retune should play. A saved album is recommended first, then the entry with the most plays.</p>
+      {merged !== undefined ? <><p>The selected entries now share one Retune recording. Your Spotify library and local files are unchanged.</p><p>You can also undo this merge later from Get Info.</p></> : !preview || !draft ? <p role="status">{busy ? 'Loading selected tracks…' : 'The selected tracks could not be loaded.'}</p> : <fieldset className="merge-editor" disabled={busy}>
+        <section className="merge-section" aria-labelledby="merge-recordings-title">
+          <div className="merge-section-heading"><h3 id="merge-recordings-title">Recording Retune plays</h3><p>A saved album first, then the entry with the most plays.</p></div>
           <div className="merge-recordings">{preview.tracks.map((track) => <label key={track.uri} className={`merge-recording ${preview.target?.uri === track.uri ? 'chosen' : ''}`}>
-            <input type="radio" name="merge-recording" checked={preview.target?.uri === track.uri} disabled={busy} onChange={() => void reload(track.uri)} aria-label={`Use ${track.name} from ${track.alb}`} />
-            <span className="decision-track"><TrackSummary track={track} /><SourcesList sources={track.sources} /></span>
+            <input type="radio" name="merge-recording" checked={preview.target?.uri === track.uri} onChange={() => void reload(track.uri)} aria-label={`Use ${track.name} from ${track.alb}`} />
+            <MergeRecordingSummary track={track} mostPlays={mostPlays} />
           </label>)}</div>
-          {preview.target && !preview.tracks.some((track) => track.uri === preview.target?.uri) && <div className="merge-recording chosen"><span className="decision-track"><strong>Different recording selected</strong><TrackSummary track={preview.target} /></span></div>}
-          <details><summary>Choose a different Spotify recording</summary><div className="merge-search"><input aria-label="Search recordings" value={query} placeholder="Track and artist" disabled={busy} onChange={(event) => { searchGeneration.current++; setQuery(event.target.value); setResults([]); setNextOffset(null); setSearching(false) }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search() } }} /><button type="button" disabled={busy || searching || !query.trim()} onClick={() => void search()}>{searching ? 'Searching…' : 'Search'}</button></div>
+          {preview.target && !preview.tracks.some((track) => track.uri === preview.target?.uri) && <div className="merge-external-recording"><p>Different recording selected</p><div className="merge-recording chosen"><MergeRecordingSummary track={preview.target} mostPlays={mostPlays} /></div></div>}
+          <details><summary>Choose a different Spotify recording</summary><div className="merge-search"><input aria-label="Search recordings" value={query} placeholder="Track and artist" onChange={(event) => { searchGeneration.current++; setQuery(event.target.value); setResults([]); setNextOffset(null); setSearching(false) }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search() } }} /><button type="button" disabled={searching || !query.trim()} onClick={() => void search()}>{searching ? 'Searching…' : 'Search'}</button></div>
             {searchError && <p role="alert">{searchError}</p>}
-            <div className="merge-search-results">{results.map((track) => <button type="button" disabled={busy} key={track.uri} onClick={() => void reload(track.uri)}><strong>{track.name}</strong><span>{track.artist} · {track.alb} · {formatTime(track.durationSecs)}</span></button>)}</div>
-            {nextOffset !== null && <button type="button" disabled={searching || busy} onClick={() => void search(nextOffset)}>More results</button>}
+            <div className="merge-search-results">{results.map((track) => <button type="button" key={track.uri} onClick={() => void reload(track.uri)}><strong>{track.name}</strong><span>{track.artist} · {track.alb} · {formatTime(track.durationSecs)}</span></button>)}</div>
+            {nextOffset !== null && <button type="button" disabled={searching} onClick={() => void search(nextOffset)}>More results</button>}
           </details>
-        </>}
-        {step === 1 && <>
-          <div className="merge-fields">{(['name', 'art', 'alb', 'cat'] as const).map((key) => <label key={key}>{({ name: 'Title', art: 'Artist', alb: 'Album', cat: 'Genre' })[key]}<input maxLength={1024} required={key !== 'alb'} value={draft[key]} list={key === 'cat' ? 'merge-genres' : undefined} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} /></label>)}<datalist id="merge-genres">{genres.map((genre) => <option key={genre}>{genre}</option>)}</datalist>
-            {genres.length > 1 && <p className="merge-conflict">Genres differ: {genres.join(', ')}. Choose one or enter your own.</p>}
+        </section>
+        <section className="merge-section" aria-labelledby="merge-details-title">
+          <div className="merge-section-heading"><h3 id="merge-details-title">Surviving details</h3><p>Seeded from “{preview.target?.name ?? preview.tracks[0].name}”. Edit anything here.</p></div>
+          <div className="merge-fields">{(['name', 'art', 'alb', 'cat'] as const).map((key) => <label key={key} className={key === 'name' ? 'merge-title-field' : undefined}>{({ name: 'Title', art: 'Artist', alb: 'Album', cat: 'Genre' })[key]}<input maxLength={1024} required={key !== 'alb'} value={draft[key]} list={key === 'cat' ? 'merge-genres' : undefined} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} /></label>)}
             <label>Rating<select value={draft.rating} onChange={(event) => setDraft({ ...draft, rating: event.target.value })}><option value="" disabled>Choose a rating</option><option value="none">No track override</option>{[1, 2, 3, 4, 5].map((stars) => <option key={stars} value={stars}>{stars} stars</option>)}</select></label>
-            {ratings.length > 1 && <p className="merge-conflict">Ratings differ: {ratings.join(', ')} stars. Choose the resulting rating.</p>}
           </div>
-          <fieldset className="merge-count"><legend>Play count</legend><p>Retune cannot tell whether these histories overlap.</p>{(['highest', 'sum', 'custom'] as const).map((option) => <label key={option}><input type="radio" name="play-count" checked={mode === option} onChange={() => setMode(option)} />{{ highest: 'Keep highest (recommended)', sum: 'Add counts together', custom: 'Set a custom total' }[option]}</label>)}
-            {mode === 'custom' && <label>Custom total<input aria-label="Custom play count" type="number" min={0} max={4_294_967_295} step={1} required value={custom} onChange={(event) => setCustom(event.target.value)} /></label>}
-            <p className="merge-total">Result: <strong>{validCount ? total.toLocaleString() : '—'} plays</strong></p>
-          </fieldset>
-        </>}
-        {step === 2 && <>
-          <div className="merge-review-sources">{all.map((track) => <div key={track.uri}><span>{track.name}<small>{track.alb}</small></span><strong>{track.playCount.toLocaleString()}</strong></div>)}</div>
-          <div className="merge-result"><small>One Retune entry</small><strong>{draft.name}</strong><span>{draft.art} · {draft.alb}</span><span>{draft.cat} · {draft.rating === 'none' ? 'No track rating override' : `${draft.rating} stars`}</span><b>{total.toLocaleString()} plays</b><small>First added {date(added.length ? Math.min(...added) : null)} · Last played {date(played.length ? Math.max(...played) : null)}</small></div>
-          {preview.target && !preview.tracks.some((track) => track.uri === preview.target?.uri) && <p className="merge-conflict">You chose a different recording. Playback will use “{preview.target.name}” ({formatTime(preview.target.durationSecs)}).{preview.target.id !== null && ' Its existing history is included above.'}</p>}
-          <p>Future plays and imports for merged recordings follow this entry. Merge changes only Retune. Undo restores the originals and keeps later edits and plays.</p>
-        </>}
-      </>}
+          <datalist id="merge-genres">{genres.map((genre) => <option key={genre}>{genre}</option>)}</datalist>
+          {genres.length > 1 && !draft.cat.trim() && <p className="merge-conflict">Genres differ: {genres.join(', ')}. Choose one or enter your own.</p>}
+          {ratings.length > 1 && !draft.rating && <p className="merge-conflict">Ratings differ: {ratings.join(', ')} stars. Choose the resulting rating.</p>}
+        </section>
+        <fieldset className="merge-count"><legend>Play count</legend><p>Retune can’t tell whether these histories overlap.</p>
+          <div className="merge-count-options">{(['sum', 'highest', 'custom'] as const).map((option) => <label key={option}><input type="radio" name="play-count" checked={mode === option} onChange={() => setMode(option)} />{{ highest: 'Keep highest', sum: 'Sum (recommended)', custom: 'Set a custom total' }[option]}</label>)}</div>
+          {mode === 'custom' && <label className="merge-custom-count">Custom total<input aria-label="Custom play count" type="number" min={0} max={4_294_967_295} step={1} required value={custom} onChange={(event) => setCustom(event.target.value)} /></label>}
+        </fieldset>
+        <section className="merge-preview" aria-label="Merge preview">
+          <div className="merge-review-sources">{all.map((track) => <div key={track.uri}><span title={`${track.name} · ${track.alb}`}>{track.name}</span><strong>{track.playCount.toLocaleString()}</strong></div>)}</div>
+          <span className="merge-flow-arrow" aria-hidden="true">→</span>
+          <div className="merge-result"><h3>One Retune entry</h3><strong>{draft.name || 'Enter a title'}</strong><span title={`${draft.art} · ${draft.alb}`}>{draft.art} · {draft.alb}</span><div className="merge-total"><output aria-live="polite">{validCount ? total.toLocaleString() : '—'} plays</output><small>{countExplanation}</small></div><small>{draft.cat || 'Choose a genre'} · {ratingDescription} · first added {date(added.length ? Math.min(...added) : null)} · last played {date(played.length ? Math.max(...played) : null)}</small></div>
+        </section>
+        {preview.target && !preview.tracks.some((track) => track.uri === preview.target?.uri) && <p className="merge-conflict">You chose a different recording. Playback will use “{preview.target.name}” ({formatTime(preview.target.durationSecs)}).{preview.target.id !== null && ' Its existing history is included above.'}</p>}
+      </fieldset>}
       {error && <div className="decision-error" role="alert">{error}{merged === undefined && <button type="button" disabled={busy} onClick={() => void reload(preview?.target?.uri)}>Reload preview</button>}</div>}
     </div>
-    <div className="modal-actions">{merged !== undefined ? <><button type="button" disabled={busy} onClick={() => void undo()}>Undo merge</button><button type="submit" className="primary" disabled={busy}>Done</button></> : <><button type="button" disabled={busy} onClick={onClose}>Cancel</button>{step > 0 && <button type="button" disabled={busy} onClick={() => setStep(step - 1)}>Back</button>}<button type="submit" className="primary" disabled={busy || !preview?.target || (step > 0 && (!validMetadata || !validCount))}>{busy ? 'Working…' : step === 2 ? 'Merge tracks' : 'Continue'}</button></>}</div>
+    <footer className="modal-actions">{merged !== undefined ? <><button type="button" disabled={busy} onClick={() => void undo()}>Undo merge</button><button type="submit" className="primary" disabled={busy}>Done</button></> : <><p>Merge changes only Retune. Undo restores the originals and keeps later edits and plays.</p><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={busy || !preview?.target || !validMetadata || !validCount}>{busy ? 'Working…' : 'Merge tracks'}</button></>}</footer>
   </ModalDialog>
 }
 

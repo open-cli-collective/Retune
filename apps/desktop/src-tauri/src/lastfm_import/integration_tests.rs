@@ -1737,44 +1737,61 @@ fn test_app_state_with_lastfm_executor(
 }
 
 #[tokio::test]
-async fn review_use_case_persists_before_returning_its_view() {
-    let directory = tempfile::tempdir().unwrap();
-    let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
-    state.spotify_membership.set_for_test(SpotifyLibraryState {
-        account_id: "spotify".into(),
-        complete: true,
-        ..SpotifyLibraryState::default()
-    });
-    let mut session =
-        LastFmImportSessionV2::new_with_defaults("user".into(), 10, ImportDefaults::default());
-    aggregate_scrobbles(&mut session.rows, &[scrobble("Artist", "Album", "Song", 1)]);
-    session.phase = ImportPhase::Review;
-    session.spotify_account_id = Some("spotify".into());
-    session.batches = build_review_batches(&session.rows);
-    let id = session.rows[0].stable_id.clone();
-    service.save(session).await.unwrap();
+async fn review_use_case_persists_without_waiting_for_backlog_reconciliation() {
+    for action in [ReviewAction::Exclude, ReviewAction::IgnoreAlbum] {
+        let directory = tempfile::tempdir().unwrap();
+        let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+        state.spotify_membership.set_for_test(SpotifyLibraryState {
+            account_id: "spotify".into(),
+            complete: true,
+            ..SpotifyLibraryState::default()
+        });
+        let mut session =
+            LastFmImportSessionV2::new_with_defaults("user".into(), 10, ImportDefaults::default());
+        aggregate_scrobbles(&mut session.rows, &[scrobble("Artist", "Album", "Song", 1)]);
+        session.phase = ImportPhase::Review;
+        session.spotify_account_id = Some("spotify".into());
+        session.batches = build_review_batches(&session.rows);
+        let id = session.rows[0].stable_id.clone();
+        service.save(session).await.unwrap();
 
-    let view = review_import(
-        service.as_ref(),
-        lastfm.as_ref(),
-        &state.spotify_membership,
-        &state.library,
-        &|| Err::<Arc<crate::SpotifyProvider>, _>("provider should not be needed".into()),
-        || Ok(true),
-        ReviewBatchKey {
-            batch_id: 1,
-            artist: "Artist".into(),
-            album: "Album".into(),
-        },
-        Some(std::slice::from_ref(&id)),
-        ReviewAction::Exclude,
-    )
-    .await
-    .unwrap();
+        let _blocked_reconciliation = service.reconciliation_lock.lock().await;
+        let view = tokio::time::timeout(
+            Duration::from_secs(5),
+            review_import(
+                service.as_ref(),
+                lastfm.as_ref(),
+                &state.spotify_membership,
+                &state.library,
+                &|| Err::<Arc<crate::SpotifyProvider>, _>("provider should not be needed".into()),
+                || Ok(true),
+                ReviewBatchKey {
+                    batch_id: 1,
+                    artist: "Artist".into(),
+                    album: "Album".into(),
+                },
+                Some(std::slice::from_ref(&id)),
+                action,
+            ),
+        )
+        .await
+        .expect("review must not wait for a backlog sweep")
+        .unwrap();
 
-    assert_eq!(view.pending_review, 0);
-    let reloaded = Service::new(directory.path()).snapshot().await.unwrap();
-    assert!(reloaded.decisions[&id].excluded);
+        assert_eq!(view.pending_review, 0);
+        let reloaded = Service::new(directory.path()).snapshot().await.unwrap();
+        if action == ReviewAction::Exclude {
+            assert!(reloaded.decisions[&id].excluded);
+        } else {
+            assert_eq!(reloaded.decisions[&id].status, RowStatus::IgnoredAlbum);
+            assert!(Service::new(directory.path())
+                .mappings_for("user", Some("spotify"))
+                .await
+                .unwrap()
+                .ignored_albums
+                .contains(&source_album_key("Artist", "Album")));
+        }
+    }
 }
 
 #[tokio::test]
@@ -3977,7 +3994,7 @@ fn review_batches_keep_large_single_groups_together() {
 }
 
 #[tokio::test]
-async fn large_batch_default_options_include_every_row_and_commit_once() {
+async fn large_batch_default_options_include_every_mapped_row_and_commit_once() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
     let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 1000);
@@ -3987,6 +4004,19 @@ async fn large_batch_default_options_include_every_row_and_commit_once() {
             .map(|index| scrobble("Artist", "Album", &format!("Track {index}"), index + 1))
             .collect::<Vec<_>>(),
     );
+    for row in &session.rows {
+        session.matches.insert(
+            row.stable_id.clone(),
+            MatchResult {
+                source_id: row.stable_id.clone(),
+                search_term: row.track.clone(),
+                confidence: Some(Confidence::Exact),
+                selected_uri: Some("spotify:track:matched".into()),
+                candidates: Vec::new(),
+                track_matches: BTreeMap::new(),
+            },
+        );
+    }
     session.phase = ImportPhase::Review;
     service.save(session).await.unwrap();
 
@@ -4372,7 +4402,10 @@ fn accept_all_entity_counts_are_unique_across_batches() {
                 confidence: Some(Confidence::Exact),
                 selected_uri: Some("spotify:album:shared".into()),
                 candidates: Vec::new(),
-                track_matches: BTreeMap::new(),
+                track_matches: BTreeMap::from([(
+                    row.stable_id.clone(),
+                    "spotify:track:shared".into(),
+                )]),
             },
         );
     }
@@ -9008,79 +9041,123 @@ fn content_and_history_intents_are_independent_but_not_both_empty() {
 }
 
 #[tokio::test]
-async fn accept_and_next_marks_unselected_source_rows_skipped() {
-    let dir = tempfile::tempdir().unwrap();
-    let service = Service::new(dir.path());
-    let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
-    session.rows = vec![
-        SourceRow {
-            stable_id: "matched".into(),
-            artist: "Artist".into(),
-            album: "Album".into(),
-            track: "Matched".into(),
-            variants: Vec::new(),
-            play_count: 1,
-            earliest: 1,
-            latest: 1,
-        },
-        SourceRow {
-            stable_id: "unmatched".into(),
-            artist: "Artist".into(),
-            album: "Album".into(),
-            track: "Unmatched".into(),
-            variants: Vec::new(),
-            play_count: 1,
-            earliest: 1,
-            latest: 1,
-        },
-    ];
-    session.batches = build_review_batches(&session.rows);
-    session.phase = ImportPhase::Review;
-    session.matches.insert(
-        "matched".into(),
-        MatchResult {
-            source_id: "matched".into(),
-            search_term: "Matched".into(),
-            confidence: Some(Confidence::Exact),
-            selected_uri: Some("spotify:track:matched".into()),
-            candidates: Vec::new(),
-            track_matches: BTreeMap::from([("matched".into(), "spotify:track:matched".into())]),
-        },
-    );
-    service.save(session).await.unwrap();
-    let session = service.snapshot().await.unwrap();
-    let options = PageOptions {
-        import_content: false,
-        selected_track_ids: BTreeSet::from(["matched".into()]),
-        ..PageOptions::default()
-    };
-    let plan = build_apply_plan(
-        &session,
-        "spotify",
-        1,
-        "Artist",
-        "Album",
-        &["matched".into()],
-        true,
-        options.clone(),
-    )
-    .unwrap();
-    assert_eq!(plan.committed_ids, vec!["matched"]);
-    commit_apply_plan(&service, &plan).await.unwrap();
-    let session = service.snapshot().await.unwrap();
-    assert_eq!(session.remaining(), 1);
-    assert_eq!(
-        default_decision(&session, "matched").status,
-        RowStatus::Done
-    );
-    assert_eq!(
-        default_decision(&session, "unmatched").status,
-        RowStatus::Skipped
-    );
-    assert_eq!(
-        session.page_options[&batch_options_key(1)].selected_track_ids,
-        options.selected_track_ids
-    );
+async fn accepting_mapped_rows_keeps_the_unmapped_tail_for_later() {
+    for archive_batch in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.rows = vec![
+            SourceRow {
+                stable_id: "matched".into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                track: "Matched".into(),
+                variants: Vec::new(),
+                play_count: 900,
+                earliest: 1,
+                latest: 1,
+            },
+            SourceRow {
+                stable_id: "unmatched".into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                track: "Unmatched".into(),
+                variants: Vec::new(),
+                play_count: 1,
+                earliest: 1,
+                latest: 1,
+            },
+        ];
+        session.batches = build_review_batches(&session.rows);
+        session.phase = ImportPhase::Review;
+        session.matches.insert(
+            "matched".into(),
+            MatchResult {
+                source_id: "matched".into(),
+                search_term: "Matched".into(),
+                confidence: Some(Confidence::Exact),
+                selected_uri: Some("spotify:track:matched".into()),
+                candidates: Vec::new(),
+                track_matches: BTreeMap::from([("matched".into(), "spotify:track:matched".into())]),
+            },
+        );
+        session.page_options.insert(
+            batch_options_key(1),
+            PageOptions {
+                import_content: false,
+                selected_track_ids: BTreeSet::from(["unmatched".into()]),
+                ..PageOptions::default()
+            },
+        );
+        service.save(session).await.unwrap();
+        let session = service.snapshot().await.unwrap();
+        let options = service.page(1, "Artist", "Album").await.unwrap().options;
+        assert_eq!(
+            options.selected_track_ids,
+            BTreeSet::from(["matched".into()])
+        );
+        let plan = build_apply_plan(
+            &session,
+            "spotify",
+            1,
+            "Artist",
+            "Album",
+            &["matched".into()],
+            archive_batch,
+            options.clone(),
+        )
+        .unwrap();
+        assert_eq!(plan.committed_ids, vec!["matched"]);
+        assert_eq!(plan.updates.len(), 1);
+        assert_eq!(plan.updates[0].play_count, Some(900));
+        assert_eq!(plan.mappings.len(), 1);
+        commit_apply_plan(&service, &plan).await.unwrap();
+        let session = service.snapshot().await.unwrap();
+        assert_eq!(session.remaining(), 1);
+        assert_eq!(
+            default_decision(&session, "matched").status,
+            RowStatus::Done
+        );
+        assert_eq!(
+            default_decision(&session, "unmatched").status,
+            if archive_batch {
+                RowStatus::Skipped
+            } else {
+                RowStatus::Pending
+            }
+        );
+        assert_eq!(
+            session.page_options[&batch_options_key(1)].selected_track_ids,
+            options.selected_track_ids
+        );
+        // Mapping the leftover later must preserve the first accepted count contribution.
+        let mut session = session;
+        let mut tail_match = session.matches["matched"].clone();
+        tail_match.source_id = "unmatched".into();
+        tail_match.track_matches =
+            BTreeMap::from([("unmatched".into(), "spotify:track:matched".into())]);
+        session.matches.insert("unmatched".into(), tail_match);
+        service.save(session).await.unwrap();
+        let session = service.snapshot().await.unwrap();
+        let options = service.page(1, "Artist", "Album").await.unwrap().options;
+        assert_eq!(
+            options.selected_track_ids,
+            BTreeSet::from(["matched".into(), "unmatched".into()])
+        );
+        let next = build_apply_plan(
+            &session,
+            "spotify",
+            1,
+            "Artist",
+            "Album",
+            &["unmatched".into()],
+            false,
+            options,
+        )
+        .unwrap();
+        assert_eq!(next.committed_ids, vec!["unmatched"]);
+        assert_eq!(next.updates[0].play_count, Some(901));
+    }
 }
 
 #[tokio::test]
@@ -9266,10 +9343,10 @@ async fn fake_spotify_transport_keeps_album_and_track_import_memberships_exact()
 }
 
 #[test]
-fn track_exclusions_defer_backlog_sweeps() {
+fn track_exclusions_and_batch_ignores_defer_backlog_sweeps() {
     assert!(!ReviewAction::Exclude.sweeps_backlog());
     assert!(!ReviewAction::UndoExclude.sweeps_backlog());
-    assert!(ReviewAction::IgnoreAlbum.sweeps_backlog());
+    assert!(!ReviewAction::IgnoreAlbum.sweeps_backlog());
     assert!(ReviewAction::IgnoreArtist.sweeps_backlog());
     assert!(ReviewAction::Restore.sweeps_backlog());
 }

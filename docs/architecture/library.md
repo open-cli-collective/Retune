@@ -50,7 +50,11 @@ Manual merges accept two or more active entries of one media type and an
 explicit target: an existing entry or a newly selected Spotify track. The
 dialog recommends a recording supplied by a saved full album, then the highest
 play count. Users review title/artist/album, resolve conflicting genres and
-ratings, and choose Highest (default), Sum, or Custom play count. Merge retains
+ratings, and choose Sum (default), Highest, or Custom play count. One dialog shows the recording
+choices, editable surviving details, and a live source-to-result count preview.
+Conflicting genre/rating choices and invalid custom totals block the Merge
+action; choosing another recording reloads its defaults and freezes editing
+until the preview returns. Merge retains
 the earliest addition and latest play. It changes no Spotify membership or
 playlist.
 
@@ -137,8 +141,8 @@ resolved tracks not covered by a pressed album are saved individually. Content-o
 acceptance saves membership and applies source `added_at` without changing
 plays or `last_played_at`; counts-only performs no Spotify write and updates
 only already-materialized matched Retune tracks.
-Enabling whole-album mode repairs an empty source-row selection by selecting all
-actionable, non-excluded rows; an existing partial selection remains unchanged.
+Whole-album mode controls content membership; acceptance includes mapped,
+actionable source rows independently of that option.
 
 The importer’s “Show Spotify search terms” preference is session-level and is
 restored on resume. Fuzzy disclosures are bounded to the visible persisted
@@ -208,9 +212,8 @@ quota errors without a Spotify deadline say so instead of inventing one.
 The importer state also projects the earliest active persisted Spotify cooldown,
 so the same deadline remains visible without a selected failure and after relaunch.
 
-The visible review-page projection stably partitions actionable selected rows
-whose IDs are in `requiredImportMatchIds` (selected rows without a track target)
-ahead of the remaining rows, preserving source order inside both groups. A
+The visible review-page projection stably partitions actionable unmapped rows
+(those without a track target) ahead of the remaining rows, preserving source order inside both groups. A
 successful mapping therefore moves that row below any remaining work without
 changing the persisted source order. For collection rows, a same-artist
 `same-songs` track is never ratified automatically: the UI shows it through
@@ -267,8 +270,10 @@ Unknown or unavailable targets remain in the stable importer backlog, which can
 accept later windows without blocking their download. Explicit accepted matches
 and permanent track, album, and artist ignore rules are reusable and sweep
 applicable backlog occurrences; Skip is temporary. Accept & Next archives a
-reviewed batch from the queue, records mappings only for selected rows, and leaves
-future occurrences of unselected rows eligible for review. No target is silently added
+reviewed batch from the queue, imports all mapped actionable rows, and leaves
+unmapped rows skipped and eligible for later review. Accept imports the same
+mapped subset while keeping the batch open; neither action requires resolving
+the entire batch or checking individual rows. No target is silently added
 to the library: explicit reviewed content choices use the existing Spotify save
 operations.
 
@@ -339,6 +344,10 @@ albums, both, or neither.
 
 ## Browse projection
 
+The search field owns its immediate edit buffer and coalesces updates to the
+applied query. Delayed query echoes never replace newer text or cancel its
+pending update. Only an explicit navigation reset clears the edit buffer.
+
 The three-column browser is a pure projection over `Library`. `Selection`
 contains source/category/artist/album filters; `Facets` and visible tracks are
 derived from it. Facets deduplicate borrowed exact values and cache normalized
@@ -348,6 +357,13 @@ hierarchically by clearing category, artist, and album for a missing category,
 or artist and album for a missing artist or album.
 Alternate views should consume the same library rather than introduce another
 canonical model.
+
+The Library track list mounts the visible rows plus a small overscan and its
+current keyboard row. Fixed row geometry preserves the full scroll extent and
+row striping; keyboard navigation and prefix selection reveal offscreen targets
+before focusing them. Selection, sorting, playback queues, and search continue
+to use the complete result set. List items expose their position and total count
+to assistive technology.
 
 The UI keeps the last resolved projection visible while the same source and
 facet selection is refreshed or its Library query changes. Source or facet
@@ -361,6 +377,13 @@ and album candidates on source, category, and artist, so a focused pane can
 finish a prefix while its own selection request is pending. Double-clicking a
 facet row waits for that exact projection, then starts its first enabled visible
 track with the enabled projection as the new queue.
+
+Right-clicking an artist or album value offers the corresponding Spotify
+navigation before a separator and the column visibility controls. The action
+reads the clicked value's local browse projection with the broader facet filters,
+then uses a Spotify track from that group with the tracklist's destination
+resolver. It does not depend on the selected track or change the facet selection.
+Headers, All rows, and genre values offer only column visibility controls.
 
 ## Track sorting
 

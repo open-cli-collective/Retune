@@ -30,8 +30,6 @@
 .import-queue { border-right: 1px solid var(--border); background: var(--panel); }
 .import-queue-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 13px 9px; border-bottom: 1px solid var(--border); }
 .import-queue-header h2 { margin: 0; font-size: 12px; }
-.import-queue-header small, .import-queue-header > span { color: var(--dim); font-size: 10px; }
-.import-queue-header div { display: flex; flex-direction: column; gap: 3px; }
 .import-queue-filter { display: flex; flex-direction: column; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
 .import-queue-filter input { box-sizing: border-box; width: 100%; min-height: 26px; padding: 4px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--control); }
 .import-queue-bulk-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -118,9 +116,10 @@
 .import-track-row.excluded .import-track-copy strong, .import-track-row.excluded .import-match-cell { text-decoration: line-through; }
 .import-source-cell, .import-match-cell { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 9px 12px; }
 .import-source-cell { border-right: 1px solid var(--border); }
-.import-match-cell { flex-direction: column; gap: 3px; }
+.import-match-cell { position: relative; flex-direction: column; gap: 3px; }
+.import-match-cell.has-play-button { padding-right: 106px; }
+.lastfm-importer .import-play-button { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 82px; min-height: 30px; padding: 3px 10px; border-radius: 999px; font-size: 14px; font-weight: 650; line-height: 20px; white-space: nowrap; }
 .import-match-cell.needs-action { box-shadow: inset 4px 0 #a64b00; background: color-mix(in srgb, #d97822 14%, var(--list)); }
-.import-track-check { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; padding-top: 2px; }
 .import-track-copy, .import-match-cell { min-width: 0; }
 .import-track-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; }
 .import-track-copy strong, .import-match-cell > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
@@ -179,8 +178,8 @@
 .import-review-footer, .import-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 16px; border-top: 1px solid var(--border); color: var(--dim); font-size: 10.5px; }
 .import-page-error { margin: 0; padding: 8px 16px; border-top: 1px solid #d97822; color: var(--text); background: color-mix(in srgb, #d97822 16%, var(--list)); font-size: 11px; font-weight: 650; }
 .import-footer > span { min-width: 0; }
-.import-footer-hints { flex: 1; text-align: center; }
-.import-footer { min-height: 27px; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
+.import-footer-counts { margin-right: auto; }
+.import-footer { justify-content: flex-end; min-height: 27px; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); }
 .import-picker-dialog, .import-confirm-dialog, .import-collection-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 36px)); max-height: min(720px, calc(100vh - 36px)); display: flex; flex-direction: column; gap: 13px; padding: 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); box-shadow: 0 24px 60px rgb(0 0 0 / .38); }
 .import-collection-dialog { width: min(760px, calc(100vw - 36px)); height: min(720px, calc(100vh - 36px)); min-width: min(520px, calc(100vw - 36px)); min-height: min(420px, calc(100vh - 36px)); max-width: calc(100vw - 36px); max-height: calc(100vh - 36px); resize: both; overflow: hidden; }
 .import-dialog-drag-handle { cursor: move; user-select: none; }
@@ -267,5 +266,5 @@ button.import-picker-option { width: 100%; grid-template-columns: minmax(0, 1fr)
   .import-fuzzy-connector { min-height: 18px; background: none; }
   .import-fuzzy-connector::before { inset: 0 auto 7px 50%; width: 0; height: auto; border: 0; border-left: 1px solid var(--accent); border-radius: 0; }
   .import-fuzzy-connector::after { top: auto; right: auto; bottom: 0; left: calc(50% - 4px); width: 7px; height: 7px; border: 0; border-right: 1px solid var(--accent); border-bottom: 1px solid var(--accent); transform: rotate(45deg); }
-  .import-review-footer, .import-footer { align-items: flex-start; flex-direction: column; }
+  .import-review-footer { align-items: flex-start; flex-direction: column; }
 }
