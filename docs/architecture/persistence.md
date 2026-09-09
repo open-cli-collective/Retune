@@ -445,3 +445,9 @@ the unsafe boundary receives only live, nul-terminated UTF-16 path buffers.
 Persist only state that must survive relaunch. Keep caches reconstructible, use
 atomic replacement for new state files, and define migration/default behavior in
 tests whenever a serialized shape changes.
+
+Startup recovery and the initial overlay, membership, playlist, settings, and
+cooldown reads run together on the blocking pool. The shell publishes their
+results only after all reads succeed; application commands wait at the shell
+dispatcher until initialization finishes. Existing valid settings are read without
+a redundant save; missing defaults still use atomic persistence.
