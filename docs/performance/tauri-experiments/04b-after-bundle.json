@@ -1,0 +1,110 @@
+{
+  "commit": "48456a6",
+  "tool": "npm run build -- --manifest; Python stdlib gzip/SHA256",
+  "manifest": {
+    "_lastfmImportState-C3C4uACG.css": {
+      "file": "assets/lastfmImportState-C3C4uACG.css",
+      "src": "_lastfmImportState-C3C4uACG.css"
+    },
+    "_lastfmImportState-Dd4bgDdE.js": {
+      "file": "assets/lastfmImportState-Dd4bgDdE.js",
+      "name": "lastfmImportState",
+      "imports": [
+        "index.html"
+      ],
+      "css": [
+        "assets/lastfmImportState-C3C4uACG.css"
+      ]
+    },
+    "index.html": {
+      "file": "assets/index-DrbSfPCQ.js",
+      "name": "index",
+      "src": "index.html",
+      "isEntry": true,
+      "dynamicImports": [
+        "src/App.tsx",
+        "src/LastFmImporter.tsx"
+      ],
+      "css": [
+        "assets/index-Dxds_cH_.css"
+      ]
+    },
+    "src/App.tsx": {
+      "file": "assets/App-DhC3qZxu.js",
+      "name": "App",
+      "src": "src/App.tsx",
+      "isDynamicEntry": true,
+      "imports": [
+        "index.html",
+        "_lastfmImportState-Dd4bgDdE.js"
+      ]
+    },
+    "src/LastFmImporter.tsx": {
+      "file": "assets/LastFmImporter-D_S9Mc6S.js",
+      "name": "LastFmImporter",
+      "src": "src/LastFmImporter.tsx",
+      "isDynamicEntry": true,
+      "imports": [
+        "index.html",
+        "_lastfmImportState-Dd4bgDdE.js"
+      ],
+      "css": [
+        "assets/LastFmImporter-DryE5JpI.css"
+      ]
+    }
+  },
+  "files": [
+    {
+      "path": "assets/App-DhC3qZxu.js",
+      "bytes": 74107,
+      "gzipBytes": 21853,
+      "sha256": "9ba19a268abc0bac4a31a649126b243ccfad0a3400201ecbe6945c1e1b9ddcf7"
+    },
+    {
+      "path": "assets/LastFmImporter-D_S9Mc6S.js",
+      "bytes": 74064,
+      "gzipBytes": 21713,
+      "sha256": "a2c81988ff6a253b88c565adcae6a306977be26a2fd5de674f816b332b700ed7"
+    },
+    {
+      "path": "assets/LastFmImporter-DryE5JpI.css",
+      "bytes": 27890,
+      "gzipBytes": 5269,
+      "sha256": "a92d5493e629794719453bbd9f0355b35a19247a26a2af5755ad396bcb60299b"
+    },
+    {
+      "path": "assets/index-DrbSfPCQ.js",
+      "bytes": 208815,
+      "gzipBytes": 63938,
+      "sha256": "029df3118c43a15a83db3b2d7d33ecc716fc858cd327c2048e9bef3ae75646da"
+    },
+    {
+      "path": "assets/index-Dxds_cH_.css",
+      "bytes": 43127,
+      "gzipBytes": 8390,
+      "sha256": "6f14dea48475071526aff9283f33c722a58232929d0c1f3a343b26bd466f33fb"
+    },
+    {
+      "path": "assets/lastfmImportState-C3C4uACG.css",
+      "bytes": 6827,
+      "gzipBytes": 1804,
+      "sha256": "b46b95a28972be1e5e3af7569b995ca35cf20ae8f85332881cc75691954a27a2"
+    },
+    {
+      "path": "assets/lastfmImportState-Dd4bgDdE.js",
+      "bytes": 94196,
+      "gzipBytes": 26882,
+      "sha256": "575ed34ac03d8d5e2e72adcb0fc422a5b0c21a8e149ab70cf61594fa1c406607"
+    }
+  ],
+  "routes": {
+    "main": {
+      "jsBytes": 377118,
+      "gzipJsBytes": 112673
+    },
+    "importer": {
+      "jsBytes": 377075,
+      "gzipJsBytes": 112533
+    }
+  }
+}

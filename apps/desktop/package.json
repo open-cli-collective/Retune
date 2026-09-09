@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint --deny-warnings",
-    "test": "node --test --experimental-strip-types test/ui.test.ts test/gateways.test.ts && vitest run test/interactions.test.tsx",
+    "test": "node --test --experimental-strip-types test/ui.test.ts test/gateways.test.ts && vitest run test/interactions.test.tsx test/mainEntry.test.tsx",
     "preview": "vite preview"
   },
   "dependencies": {
