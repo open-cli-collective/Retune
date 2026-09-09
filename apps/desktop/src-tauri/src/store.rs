@@ -1407,6 +1407,12 @@ impl FsSettingsStore {
         }
     }
 
+    pub fn load_for_startup(&self) -> StoreResult<Settings> {
+        let settings = self.load()?.unwrap_or_default();
+        self.save(&settings)?;
+        Ok(settings)
+    }
+
     pub fn save(&self, settings: &Settings) -> StoreResult<()> {
         #[cfg(test)]
         if let Some(hook) = self.save_hook.lock().unwrap().take() {
@@ -1701,6 +1707,26 @@ mod tests {
 
     use super::*;
     use crate::fixture;
+
+    #[test]
+    #[ignore = "manual startup settings performance experiment"]
+    fn startup_settings_performance() {
+        for sample in 1..=3 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FsSettingsStore::new(dir.path());
+            let start = std::time::Instant::now();
+            std::hint::black_box(store.load_for_startup().unwrap());
+            let missing_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(store.load_for_startup().unwrap());
+            }
+            println!("TAURI_PERF {}", serde_json::json!({
+                "scenario": "startup-settings", "sample": sample, "iterations": 100,
+                "missingMs": missing_ms, "existingTotalMs": start.elapsed().as_secs_f64() * 1000.0,
+            }));
+        }
+    }
 
     #[test]
     fn delayed_user_patch_preserves_newer_sync_bookkeeping_in_memory_and_on_disk() {

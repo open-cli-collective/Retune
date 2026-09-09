@@ -1161,8 +1161,7 @@ pub fn run() {
             );
             let playlist_store = FsPlaylistStore::new(&app_data_dir);
             let playlists = playlist_store.load()?;
-            let settings = settings_store.load()?.unwrap_or_default();
-            settings_store.save(&settings)?;
+            let settings = settings_store.load_for_startup()?;
             let startup_cooldown = cooldown_store
                 .effective_cooldown(unix_now())
                 .map_err(std::io::Error::other)?;
