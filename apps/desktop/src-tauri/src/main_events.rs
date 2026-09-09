@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub(crate) enum MainEvent {
+    SpotifyPlayRequested(SpotifyPlayRequest),
     PlayerState(PlayerStateEvent),
     PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt),
     OperationError(String),
@@ -22,6 +23,7 @@ pub(crate) enum MainEvent {
 impl MainEvent {
     fn kind(&self) -> Option<MainEventKind> {
         match self {
+            Self::SpotifyPlayRequested(_) => Some(MainEventKind::SpotifyPlayRequested),
             Self::PlayerState(_) => Some(MainEventKind::PlayerState),
             Self::PlaybackAuthorizationRequired(_) => {
                 Some(MainEventKind::PlaybackAuthorizationRequired)
@@ -36,6 +38,7 @@ impl MainEvent {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MainEventKind {
+    SpotifyPlayRequested,
     PlayerState,
     PlaybackAuthorizationRequired,
     OperationError,
@@ -43,19 +46,84 @@ enum MainEventKind {
     StartupNotice,
 }
 
-const MAX_PENDING_MAIN_EVENTS: usize = 5;
+const MAX_PENDING_MAIN_EVENTS: usize = 6;
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub(crate) struct SpotifyPlayRequest {
+    pub uri: String,
+    pub name: String,
+    pub artist: String,
+    pub album: String,
+}
+
+#[tauri::command]
+pub(crate) fn lastfm_import_play_track(
+    state: tauri::State<'_, crate::AppState>,
+    track: SpotifyPlayRequest,
+) -> Result<(), String> {
+    state.main_events.request_spotify_play(track)
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImporterPlayback {
+    uri: Option<String>,
+    is_playing: bool,
+}
+
+#[tauri::command]
+pub(crate) fn lastfm_import_playback(state: tauri::State<'_, crate::AppState>) -> ImporterPlayback {
+    state
+        .main_events
+        .0
+        .lock()
+        .expect("main event sink mutex poisoned")
+        .importer_playback
+        .clone()
+}
 
 #[derive(Default)]
 struct Subscription {
     generation: u64,
     channel: Option<(u64, Channel<MainEvent>)>,
     pending: VecDeque<MainEvent>,
+    importer_playback: ImporterPlayback,
 }
 
 #[derive(Default)]
 pub(crate) struct MainEventSink(Mutex<Subscription>);
 
 impl MainEventSink {
+    pub(crate) fn update_importer_playback(
+        &self,
+        player: &PlayerStateEvent,
+    ) -> Option<ImporterPlayback> {
+        let uri = player
+            .uri
+            .as_ref()
+            .filter(|uri| !player.external && uri.starts_with("spotify:track:"))
+            .cloned();
+        let next = ImporterPlayback {
+            is_playing: uri.is_some() && player.is_playing,
+            uri,
+        };
+        let mut subscription = self.0.lock().expect("main event sink mutex poisoned");
+        if subscription.importer_playback == next {
+            return None;
+        }
+        subscription.importer_playback = next.clone();
+        Some(next)
+    }
+
+    fn request_spotify_play(&self, track: SpotifyPlayRequest) -> Result<(), String> {
+        if !track.uri.starts_with("spotify:track:") {
+            return Err("Invalid Spotify track URI.".into());
+        }
+        crate::provider::spotify_id(&track.uri, "track")?;
+        self.send(MainEvent::SpotifyPlayRequested(track))
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn new(startup_notice: Option<String>) -> Self {
         let sink = Self::default();
         if let Some(notice) = startup_notice {
@@ -172,6 +240,81 @@ mod tests {
     }
 
     #[test]
+    fn importer_playback_reports_only_controlled_spotify_track_and_transport_changes() {
+        let sink = MainEventSink::default();
+        let mut player = crate::empty_player_state(false);
+        assert_eq!(sink.update_importer_playback(&player), None);
+        player.uri = Some("spotify:track:first".into());
+        player.is_playing = true;
+        let playing = sink.update_importer_playback(&player).unwrap();
+        assert_eq!(
+            serde_json::to_value(playing).unwrap(),
+            serde_json::json!({
+                "uri": "spotify:track:first", "isPlaying": true,
+            })
+        );
+        player.elapsed = 30;
+        assert_eq!(sink.update_importer_playback(&player), None);
+        player.is_playing = false;
+        assert!(!sink.update_importer_playback(&player).unwrap().is_playing);
+        player.uri = Some("spotify:track:second".into());
+        player.is_playing = true;
+        assert_eq!(
+            sink.update_importer_playback(&player).unwrap().uri,
+            player.uri
+        );
+        player.uri = Some("file:///private/music.mp3".into());
+        assert_eq!(
+            sink.update_importer_playback(&player),
+            Some(ImporterPlayback::default())
+        );
+        player.uri = Some("spotify:track:external".into());
+        player.external = true;
+        assert_eq!(sink.update_importer_playback(&player), None);
+        assert_eq!(
+            sink.0.lock().unwrap().importer_playback,
+            ImporterPlayback::default()
+        );
+    }
+
+    #[test]
+    fn importer_play_requests_validate_track_uris_and_retain_only_the_latest_request() {
+        let sink = MainEventSink::default();
+        let mut track = SpotifyPlayRequest {
+            uri: "spotify:track:first".into(),
+            name: "Track".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+        };
+        sink.request_spotify_play(track.clone()).unwrap();
+        for uri in [
+            "file:///music.mp3",
+            "spotify:album:first",
+            "first",
+            "spotify:track:../bad",
+        ] {
+            track.uri = uri.into();
+            assert!(sink.request_spotify_play(track.clone()).is_err());
+        }
+        track.uri = "spotify:track:latest".into();
+        sink.request_spotify_play(track.clone()).unwrap();
+        let expected = serde_json::json!({ "type": "spotifyPlayRequested", "payload": track });
+        assert_eq!(sink.0.lock().unwrap().pending.len(), 1);
+        sink.subscribe(Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Json(json) = body else {
+                panic!("expected JSON")
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+                expected
+            );
+            Ok(())
+        }))
+        .unwrap();
+        assert!(sink.0.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
     fn stale_unsubscribe_does_not_clear_replacement_channel() {
         let sink = MainEventSink::default();
         let first = Arc::new(AtomicUsize::new(0));
@@ -205,9 +348,9 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(sink.0.lock().unwrap().pending.len(), 2);
-        // Five payload-bearing variants are the only retainable keys;
+        // Six payload-bearing variants are the only retainable keys;
         // recovery is an action that removes the pending error.
-        assert_eq!(MAX_PENDING_MAIN_EVENTS, 5);
+        assert_eq!(MAX_PENDING_MAIN_EVENTS, 6);
         assert!(sink.0.lock().unwrap().pending.len() <= MAX_PENDING_MAIN_EVENTS);
         let count = Arc::new(AtomicUsize::new(0));
 

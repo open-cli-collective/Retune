@@ -131,7 +131,7 @@ pub(super) fn page_view(
     let page_number = visible().position(|candidate| candidate.page == batch_id)? + 1;
     let page_count = visible().count();
     let options = session.options_for_page_batch(batch, artist, album, &rows);
-    let required_ids = required_import_match_ids(session, &options, &rows);
+    let required_ids = required_import_match_ids(session, &rows);
     let chosen_tracks = selected_batch_track_candidates(session, batch);
     let items = rows
         .iter()
@@ -1909,16 +1909,11 @@ pub(super) fn is_actionable(session: &LastFmImportSessionV2, id: &str) -> bool {
 
 pub(super) fn required_import_match_ids(
     session: &LastFmImportSessionV2,
-    options: &PageOptions,
     rows: &[&SourceRow],
 ) -> BTreeSet<String> {
-    if !options.include_historical_play_counts && options.whole_album {
-        return BTreeSet::new();
-    }
     rows.iter()
         .filter(|row| {
-            options.selected_track_ids.contains(&row.stable_id)
-                && is_actionable(session, &row.stable_id)
+            is_actionable(session, &row.stable_id)
                 && session
                     .matches
                     .get(&row.stable_id)

@@ -59,12 +59,6 @@ export function moveImportNavigationRow(current: number, rowCount: number, direc
   return Math.min(Math.max(0, current + direction), Math.max(0, rowCount - 1))
 }
 
-export function requiredImportMatchIds(selectedIds: Iterable<string>, matchedIds: Iterable<string>, includeHistoricalPlayCounts: boolean, wholeAlbum: boolean): string[] {
-  if (!includeHistoricalPlayCounts && wholeAlbum) return []
-  const matched = new Set(matchedIds)
-  return [...selectedIds].filter((id) => !matched.has(id))
-}
-
 export type ImportStrongMatchCandidate = {
   artist: string
   relation: ImportMatchRelation
@@ -152,8 +146,8 @@ export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[]
   return selectedIndex >= 0 ? selectedIndex : Math.min(Math.max(currentIndex, 0), Math.max(0, items.length - 1))
 }
 
-export function activeImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
-  return items.filter((item) => item.remaining || item.status === 'failed')
+export function activeImportQueue(items: ImportQueueItem[], pendingIgnores?: ReadonlySet<number>): ImportQueueItem[] {
+  return items.filter((item) => !pendingIgnores?.has(item.page) && (item.remaining || item.status === 'failed'))
 }
 
 export function filterImportQueue(items: ImportQueueItem[], query: string): ImportQueueItem[] {
@@ -211,6 +205,8 @@ export type ImportCollectionSuggestionMatch = {
 export type CollectionAmbiguousChoice = {
   uri: string
   track: string
+  artist: string
+  durationSecs: number | null
   album: string
   projectedMatches: number
   totalTracks: number
@@ -220,7 +216,7 @@ export type CollectionAmbiguousChoice = {
 export function collectionAmbiguousChoices(
   sourceId: string,
   match: ImportCollectionSuggestionMatch | null,
-  albums: Array<{ uri: string; name: string; trackUris: string[]; trackNames: string[] }>,
+  albums: Array<{ uri: string; name: string; artist?: string; trackUris: string[]; trackNames: string[]; trackArtists?: string[]; trackDurations?: number[] }>,
   selectedAlbumUris: string[],
   coverage: Array<{ uri: string; matched: number; uniqueCoverage: number }>,
 ): CollectionAmbiguousChoice[] {
@@ -233,6 +229,8 @@ export function collectionAmbiguousChoices(
     return album.trackUris.flatMap((uri, index) => supportedUris.has(uri) ? [{
       uri,
       track: album.trackNames[index] || `Track ${index + 1}`,
+      artist: album.trackArtists?.[index] || album.artist || '',
+      durationSecs: album.trackDurations?.[index] || null,
       album: album.name,
       projectedMatches: Math.min(album.trackUris.length, (albumCoverage?.matched ?? 0) + 1),
       totalTracks: album.trackUris.length,
@@ -390,7 +388,6 @@ export type ImportDecision = { status: ReviewStatus; excluded: boolean }
 export type ReviewState = {
   rows: ImportSourceRow[]
   decisions: Record<string, ImportDecision>
-  checked: Set<string>
   importContent: boolean
   includeHistoricalPlayCounts: boolean
   wholeAlbum: boolean
@@ -405,12 +402,8 @@ export const sameReviewBatch = (left: ReviewBatchKey, right: ReviewBatchKey) =>
 
 export function mergeReviewBatchDraft(current: ReviewState, currentKey: ReviewBatchKey, incoming: ReviewState, incomingKey: ReviewBatchKey): ReviewState {
   if (!sameReviewBatch(currentKey, incomingKey)) return incoming
-  const currentIds = new Set(current.rows.map((row) => row.stableId))
-  const checked = new Set(incoming.rows.flatMap((row) =>
-    (currentIds.has(row.stableId) ? current.checked : incoming.checked).has(row.stableId) ? [row.stableId] : []))
   return {
     ...incoming,
-    checked,
     importContent: current.importContent,
     includeHistoricalPlayCounts: current.includeHistoricalPlayCounts,
     wholeAlbum: current.wholeAlbum,
@@ -432,41 +425,13 @@ function reviewable(state: ReviewState, id: string) {
   return decision.status === 'pending' || decision.status === 'skipped'
 }
 
-export function toggleImportRow(state: ReviewState, id: string): ReviewState {
-  const decision = state.decisions[id] ?? pending
-  if (decision.excluded || !reviewable(state, id)) return state
-  const checked = new Set(state.checked)
-  if (!checked.delete(id)) checked.add(id)
-  return { ...state, checked }
-}
-
-export function setWholeAlbumImport(state: ReviewState, wholeAlbum: boolean): ReviewState {
-  if (!wholeAlbum || selectedImportCount(state)) return { ...state, wholeAlbum }
-  const checked = new Set(state.rows.filter((row) => reviewable(state, row.stableId) && !state.decisions[row.stableId]?.excluded).map((row) => row.stableId))
-  return { ...state, wholeAlbum, checked }
-}
-
 export function excludeImportRows(state: ReviewState, ids: Iterable<string>, excluded = true): ReviewState {
   const reviewableIds = [...new Set(ids)].filter((id) => reviewable(state, id))
   return reviewableIds.length ? withDecision(state, reviewableIds, { excluded }) : state
 }
 
-export function selectedImportCount(state: ReviewState): number {
-  return [...state.checked].filter((id) => {
-    const decision = state.decisions[id] ?? pending
-    return !decision.excluded && (decision.status === 'pending' || decision.status === 'skipped')
-  }).length
-}
-
 export function excludedImportCount(state: ReviewState): number {
   return state.rows.filter((row) => state.decisions[row.stableId]?.excluded).length
-}
-
-export function restPendingImportCount(state: ReviewState): number {
-  return state.rows.filter((row) => {
-    const decision = state.decisions[row.stableId] ?? pending
-    return !decision.excluded && (decision.status === 'pending' || decision.status === 'skipped') && !state.checked.has(row.stableId)
-  }).length
 }
 
 export function validImportIntent(importContent: boolean, includeHistoricalPlayCounts: boolean): boolean {

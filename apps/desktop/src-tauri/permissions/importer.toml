@@ -21,6 +21,8 @@ permissions = [
   "allow-lastfm-import-collection-remove-album",
   "allow-lastfm-import-collection-set-album-import",
   "allow-lastfm-import-activate-collection",
+  "allow-lastfm-import-play-track",
+  "allow-lastfm-import-playback",
   "allow-lastfm-import-change-track",
   "allow-lastfm-import-change-album",
   "allow-lastfm-import-apply",

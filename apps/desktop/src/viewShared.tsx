@@ -102,13 +102,14 @@ export function ContextMenu({ x, y, onClose, children }: { x: number; y: number;
     })}</div>
 }
 
-export function CheckboxMenu({ x, y, onClose, items }: {
+export function CheckboxMenu({ x, y, onClose, items, children }: {
+  children?: ReactNode
   x: number
   y: number
   onClose: () => void
   items: { key: string; label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }[]
 }) {
-  return <ContextMenu x={x} y={y} onClose={onClose}>{items.map((item) => <label key={item.key} role="menuitemcheckbox" aria-checked={item.checked} aria-disabled={item.disabled || undefined} tabIndex={-1}><input type="checkbox" checked={item.checked} disabled={item.disabled} tabIndex={-1} onChange={(event) => item.onChange(event.target.checked)} />{item.label}</label>)}</ContextMenu>
+  return <ContextMenu x={x} y={y} onClose={onClose}>{children}{children && <hr />}{items.map((item) => <label key={item.key} role="menuitemcheckbox" aria-checked={item.checked} aria-disabled={item.disabled || undefined} tabIndex={-1}><input type="checkbox" checked={item.checked} disabled={item.disabled} tabIndex={-1} onChange={(event) => item.onChange(event.target.checked)} />{item.label}</label>)}</ContextMenu>
 }
 export function RatingStars({ rating, explicit = false, onRate }: { rating: number | null; explicit?: boolean; onRate?: (stars: number) => void }) {
   return <span className={`rating-stars ${rating ? explicit ? 'explicit' : 'inherited' : 'empty'} ${onRate ? '' : 'inert'}`} aria-label={rating ? `${rating} out of 5 stars` : 'Unrated'}>

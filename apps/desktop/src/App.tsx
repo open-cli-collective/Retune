@@ -13,7 +13,7 @@ import { importDownloadPercent, importDownloadProgressLabel, importStatusText } 
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
-import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers } from './ipc.ts'
+import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
 import { RemovedTracksDialog, RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
@@ -136,6 +136,14 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     else dispatch({ type: 'togglePlay' })
   }, [dispatch, liveBackend, run])
 
+  const playRequestedTrack = useCallback((track: SpotifyPlayRequest) => {
+    const current = playingRef.current
+    if (current?.uri === track.uri && !current.external) toggle()
+    else start(SYNTHETIC_BASE, [{
+      id: SYNTHETIC_BASE, uri: track.uri, name: track.name, art: track.artist, alb: track.album, durationSecs: 0, enabled: true,
+    }])
+  }, [start, toggle])
+
   const step = useCallback((direction: number) => {
     const current = playingRef.current
     if (liveBackend()) {
@@ -165,8 +173,8 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
   return useMemo(
-    () => ({ start, toggle, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired }),
-    [cancelPending, onAuthorizationRequired, onState, seek, setVolume, start, step, toggle],
+    () => ({ start, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired }),
+    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, seek, setVolume, start, step, toggle],
   )
 }
 
@@ -203,7 +211,9 @@ function App() {
   const libraryEmpty = view?.counts.perSource[state.source] === 0 && !state.syncPhase && !state.syncProgress
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connection.connected, state.connection.playback_authorized, state.playing, dispatch)
+
   const mainEventHandlers = useRef<MainEventHandlers>({
+    spotifyPlayRequested: player.playRequestedTrack,
     playerState: player.onState,
     playbackAuthorizationRequired: player.onAuthorizationRequired,
     operationError: (error) => dispatch({ type: 'error', error }),
@@ -212,6 +222,7 @@ function App() {
     startupNotice: (notice) => dispatch({ type: 'notice', notice }),
   })
   mainEventHandlers.current = {
+    spotifyPlayRequested: player.playRequestedTrack,
     playerState: player.onState,
     playbackAuthorizationRequired: player.onAuthorizationRequired,
     operationError: (error) => dispatch({ type: 'error', error }),
@@ -440,6 +451,15 @@ function App() {
   const navigateSpotify = (track: Pick<Track, 'uri'>, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
     .then((entry) => dispatch({ type: 'spotifyNavigate', entry }))
     .catch(fail)
+  const navigateFacetSpotify = async (facet: 'art' | 'alb', value: string) => {
+    try {
+      const selection = selectionAfterFacet(state.sel, facet, [value])
+      const result = await libraryGateway.browse(state.source, selection, state.query.trim() || undefined)
+      const track = result.tracks.find((track) => track.uri.startsWith('spotify:track:'))
+      if (!track) throw new Error(`This ${facet === 'alb' ? 'album' : 'artist'} has no Spotify tracks to open.`)
+      await navigateSpotify(track, facet === 'alb' ? 'album' : 'artist')
+    } catch (error) { fail(error) }
+  }
   const setZoom = useCallback((zoom: number) => {
     updateSettings({ zoom: normalizeZoom(zoom, ZOOM_MIN, ZOOM_MAX) })
   }, [updateSettings])
@@ -743,7 +763,7 @@ function App() {
           />
           : (
             <>
-              <BrowserPane state={{ ...state, browseKey }} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onPlay={playFacet} onToggle={toggleBrowserPane} onPrefix={(event, facet) => handlePrefix(event.nativeEvent, facet)} />
+              <BrowserPane state={{ ...state, browseKey }} anchors={facetAnchors} onActivate={setActivePane} onSelect={selectFacet} onPlay={playFacet} onToggle={toggleBrowserPane} onNavigate={(facet, value) => void navigateFacetSpotify(facet, value)} onPrefix={(event, facet) => handlePrefix(event.nativeEvent, facet)} />
               {selectedAlbum !== undefined && view && !view.albumRatingAmbiguous && view.albumRatingArtist !== null && (
                 <AlbumRatingStrip
                   album={selectedAlbum}
@@ -757,6 +777,7 @@ function App() {
                 tracks={displayedTracks}
                 label={labels[state.source]}
                 selectedIds={state.selectedTrackIds}
+                selectionAnchor={state.selectionAnchor}
                 playing={state.playing}
                 columnOrder={state.settings.columnOrder}
                 columnWidths={state.settings.columnWidths}
@@ -909,7 +930,11 @@ export function TransportBar({ playing, track, query, queryReset, scope, volume,
 }) {
   const [queryDraft, setQueryDraft] = useState(query)
   const queryTimer = useRef(0)
+  const previousQueryReset = useRef(queryReset)
   useEffect(() => {
+    // Only navigation resets the edit buffer; an applied query may be an older edit.
+    if (previousQueryReset.current === queryReset) return
+    previousQueryReset.current = queryReset
     window.clearTimeout(queryTimer.current)
     setQueryDraft(query)
   }, [query, queryReset])

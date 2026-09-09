@@ -61,7 +61,7 @@ The matching boundary preserves these invariants:
 - A heuristic may select only one strongest target. Equally strong distinct
   targets remain unresolved for the user.
 - More than one Last.fm source row may map to the same Spotify track. Count
-  merging is intentional and independent of candidate ambiguity.
+merging is intentional and independent of candidate ambiguity.
 - Matching never changes Spotify membership. Only explicit import acceptance
   may save an album or tracks.
 
@@ -107,23 +107,43 @@ row-scoped matches or decisions. Review then has two shapes:
   A literal album actually named `Singles` remains release-shaped.
 
 Persisted batches preserve complete source clusters without a row-count cap.
+The footer totals cover the entire loaded review queue, regardless of its text
+filter. Imported batches require a completed batch status and all of its source
+plays accounted for as imported; ignored, excluded, skipped, partial, and merely
+queued batches do not count as imported.
 Queue projections report imported and remaining play totals separately so a
 cluster containing completed rows does not present its full history as new
 work. Queue-filter keystrokes remain local to the queue control and coalesce
-before updating its projection, so they do not reconcile the visible review
+before updating its projection. Applied-filter echoes never overwrite newer
+text or cancel its pending update, and keystrokes do not reconcile the visible review
 draft on every character. The genre field likewise owns its live draft and
 flushes it on blur or Enter and before any whole-options write or Apply; page
 refreshes still merge authoritative rows with the current batch draft.
+Option writes retain one in-flight save and only the newest queued options per
+batch. Acceptance supplies the complete current options, drops superseded queued
+options for that batch, and waits for an already-started write before enqueueing.
+`Accept` acknowledges the durable apply job without waiting for a full
+queue refresh. Its batch stays visible with frozen choices and an applying
+status while queue navigation remains available. Completion refreshes that page
+directly if it is still selected; queue totals reconcile separately in the
+background. Late completions never replace a newer selection, and failures keep
+the existing frozen-choice retry path.
 `genre_values` projects only distinct genres instead of constructing unused
 artist and album suggestions. The visible batch is the unit of lazy Spotify
 work and review. Review exclude/undo actions
 may address one or more source IDs, but every ID must belong to the requested
 batch and remain reviewable; empty, cross-batch, and completed-row requests are
 rejected before any decision changes. A bulk action persists the session and
-reusable mappings once. Track exclusions do not rebuild the incremental backlog
+reusable mappings once. Track exclusions and batch ignores do not rebuild the incremental backlog
 on the review click path; the normal incremental-sync entrypoint applies those
-durable mappings before fetching more plays. Album and artist cascades still
-sweep applicable backlog immediately.
+durable mappings before fetching more plays. Artist-wide ignores and restore
+actions still sweep applicable backlog immediately.
+
+`Ignore batch` preserves the album-ignore rule for the automatic batch's source
+album identities. The review advances immediately while the durable save runs,
+with a pending-save count. A failed save restores only that batch to the queue
+and reports the error without changing the current selection. Once pending
+saves settle, one background refresh reconciles the queue.
 
 The user may combine any two or more queue batches into one custom
 collection-shaped batch without a row-count cap. Bulk row actions likewise
@@ -149,7 +169,9 @@ position is not evidence for automatic selection. Previously selected candidates
 absent from a new search are retained after its results.
 
 Matching candidates persist optional-by-default `trackDurations` in seconds,
-aligned with `trackUris`; unknown durations render as a dash in the track picker.
+aligned with `trackUris`; the track picker and ambiguous-match dropdown render
+unknown durations as a dash. Ambiguous choices also show the cached track artist
+so repeated titles on compilations remain distinguishable.
 Search and cached album data supply those values without extra metadata requests.
 Older import candidates remain readable with an empty duration vector. Collection
 album JSON retains its existing flattened `trackDurations` property.
@@ -338,9 +360,9 @@ from the match set.
 ## Confidence, required work, and count merges
 
 `Exact`, `Likely`, and `Low` describe evidence for the projected target; they do
-not themselves change membership or play counts. A selected actionable row is
-`ACTION REQUIRED` only when it has no supported Spotify track URI. Required rows
-are stably partitioned above resolved rows without changing persisted source
+not themselves change membership or play counts. An actionable row is
+`Unmapped` when it has no supported Spotify track URI. Unmapped rows
+are stably partitioned above mapped rows without changing persisted source
 order.
 
 Several source rows may intentionally resolve to one Spotify URI—for example,
@@ -356,7 +378,7 @@ authoritative target-wide result including eligible completed rows, resolved
 with the selected count mode. Count projection determines collection shape once
 per batch per request, reusing that result across completed source rows; it does
 not rebuild the full review queue for every historical row. The review UI collapses contributing rows into one entry per target and review
-state, with an expanded count flow. Its inclusion, exclusion, selection, and
+state, with an expanded count flow. Its exclusion, selection, and
 track-picker actions address all represented source IDs. Unmerge reveals original
 rows for individual editing without changing mappings or count policy; this
 display choice lasts for the current batch. Raw names already aggregated into
@@ -387,7 +409,20 @@ or options action. Ratings are displayed without preselecting an import rating.
 
 ## Acceptance and reusable mappings
 
-Accepting a batch freezes an account- and session-bound apply plan. Release
+Both `Accept` and `Accept & Next Batch` freeze all mapped, actionable source
+rows into an account- and session-bound apply plan. Row checkboxes are absent:
+legacy inclusion choices do not gate unfinished mapped rows. Completed and
+excluded rows never reapply, and suggestions or ambiguous candidates require a
+mapping before acceptance. Source-row selection is only for bulk mapping and
+exclusion. The buttons enable as soon as any actionable row is mapped.
+`Accept` keeps the batch visible; `Accept & Next Batch` advances and marks the
+unmapped leftovers skipped, available to resume later. Neither action creates
+ignore rules or mappings for leftovers. Full-album membership remains an
+independent explicit option; it does not mark unmapped source history imported.
+The existing persisted `selectedTrackIds` field records history participation
+for completed rows and the mapped set for unfinished rows. Review derives the
+latter from current mappings, while retaining completed membership so accepting
+later leftovers preserves prior target-wide count contributions. Release
 whole-album mode saves one album URI. A collection plan saves every pressed
 album in full plus distinct resolved track URIs not covered by those albums;
 unpressed albums still participate in matching. Counts-only mode performs no
@@ -397,8 +432,8 @@ metadata, reusable mappings, and review decisions in checkpointed order.
 
 Accepted track mappings and permanent album/artist ignore decisions are reused
 by incremental Last.fm reconciliation so later external-device scrobbles can be
-applied without repeating review. Skip is temporary. Unselected or unresolved
-rows do not silently create a mapping or add content.
+applied without repeating review. Skip is temporary. Unmapped
+rows do not silently create a mapping or import historical plays.
 
 ## Change checklist
 

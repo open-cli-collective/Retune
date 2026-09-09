@@ -1,5 +1,15 @@
 # Playback
 
+The Last.fm importer’s matched-track Play/Pause buttons forward a single Spotify
+track to the main player through the private main channel. A request for the
+current controlled URI toggles playback without replacing its queue or restarting
+the track; another URI uses the normal single-track start. Both windows share
+connection, authorization, and the controller's one-audible-backend rule.
+Listening does not apply an import decision. Rust resolves authoritative playback
+metadata through the existing resource resolver. The importer subscribes before
+reading its initial playback snapshot and receives only the controlled Spotify
+track URI and playing flag; elapsed-time updates do not refresh the review.
+
 The desktop playback module is an application controller around three execution
 paths: built-in Spotify playback, Spotify Connect, and local-file playback.
 

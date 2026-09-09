@@ -971,7 +971,13 @@ pub(crate) fn emit_main_event<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     event: main_events::MainEvent,
 ) -> tauri::Result<()> {
-    app.state::<AppState>().main_events.send(event)
+    let state = app.state::<AppState>();
+    if let main_events::MainEvent::PlayerState(player) = &event {
+        if let Some(snapshot) = state.main_events.update_importer_playback(player) {
+            let _ = app.emit_to("lastfm-importer", "lastfm-import-playback", snapshot);
+        }
+    }
+    state.main_events.send(event)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1079,6 +1085,8 @@ pub fn run() {
             lastfm_import::commands::lastfm_import_collection_remove_album,
             lastfm_import::commands::lastfm_import_collection_set_album_import,
             lastfm_import::commands::lastfm_import_activate_collection,
+            main_events::lastfm_import_play_track,
+            main_events::lastfm_import_playback,
             lastfm_import::commands::lastfm_import_change_track,
             lastfm_import::commands::lastfm_import_change_album,
             lastfm_import::commands::lastfm_import_apply,
