@@ -26,6 +26,37 @@ button.textContent = 'Measure 12 playback ticks'
 const output = document.createElement('pre'); output.id = 'performance-results'
 panel.append(button, output); document.body.append(panel)
 const wait = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds))
+const painted = async () => { await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame) }
+const interactionButton = document.createElement('button')
+interactionButton.textContent = 'Measure playlist interactions'
+const interactionOutput = document.createElement('pre'); interactionOutput.id = 'performance-interactions'
+panel.append(interactionButton, interactionOutput)
+const interactionResults: unknown[] = []
+interactionButton.onclick = async () => {
+  interactionButton.disabled = true; button.disabled = true
+  document.querySelector<HTMLButtonElement>('.source-row')!.click()
+  await wait(500)
+  const actions: unknown[] = []
+  const measure = async (name: string, action: () => void) => {
+    renders = []; frames = []; longTasks = []; measuring = true
+    const started = performance.now()
+    action(); await painted()
+    measuring = false
+    actions.push({ name, durationMs: performance.now() - started, renderMs: renders.reduce((sum, value) => sum + value, 0),
+      commits: renders.length, rows: document.querySelectorAll('.playlist-track-row').length,
+      focusedRow: document.activeElement?.getAttribute('aria-label'),
+      longTasksMs: longTasks, maxFrameGapMs: Math.max(0, ...frames) })
+  }
+  await measure('open', () => document.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+  await measure('select', () => document.querySelector<HTMLElement>('.playlist-track-row')!.click())
+  await measure('end', () => document.querySelector<HTMLElement>('.playlist-track-row')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })))
+  await measure('shift-home', () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', shiftKey: true, bubbles: true })))
+  await measure('sort', () => document.querySelector<HTMLButtonElement>('.playlist-track-header [data-column="name"]')!.click())
+  await measure('scroll-middle', () => { const scroll = document.querySelector<HTMLElement>('.playlist-track-scroll')!; scroll.scrollTop = scroll.scrollHeight / 2 })
+  interactionResults.push({ viewport: [innerWidth, innerHeight], actions })
+  interactionOutput.textContent = JSON.stringify(interactionResults, null, 2)
+  interactionButton.disabled = false; button.disabled = false
+}
 button.onclick = async () => {
   button.disabled = true
   const first = document.querySelector<HTMLElement>('[data-track-id], .playlist-track-row')
