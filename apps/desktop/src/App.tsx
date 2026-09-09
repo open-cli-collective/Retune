@@ -13,6 +13,7 @@ import { importDownloadPercent, importDownloadProgressLabel, importStatusText } 
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
 import { createPlaybackProgress, onlyPlaybackProgressChanged } from './playbackProgress.ts'
+import { useTrackWindow } from './useTrackWindow.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
 import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
@@ -1254,11 +1255,13 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     window.addEventListener('keydown', selectAll)
     return () => window.removeEventListener('keydown', selectAll)
   }, [tracks])
-  const rows = playlistRows(tracks, sortColumn, sortDesc)
+  const rows = useMemo(() => playlistRows(tracks, sortColumn, sortDesc), [tracks, sortColumn, sortDesc])
   const rovingUpstreamIndex = rows.some((row) => row.upstreamIndex === focusedUpstreamIndex)
     ? focusedUpstreamIndex
     : rows.find((row) => selected.has(row.upstreamIndex))?.upstreamIndex ?? rows[0]?.upstreamIndex
-  const queue: PlaybackTrack[] = rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex }))
+  const queue = useMemo(() => rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex })), [rows])
+  const rowHeight = 20
+  const { scroll, readViewport, reveal, indices: rowIndices } = useTrackWindow(rows.length, rowHeight, rows.findIndex(row => row.upstreamIndex === rovingUpstreamIndex))
   const headings = { ...trackColumnHeadings(labels.music), track: 'Track' }
   const customizableColumns = columnOrder.filter((column) => PLAYLIST_COLUMNS.includes(column))
   const visibleColumns = visibleColumnOrder(customizableColumns, hiddenColumns)
@@ -1395,8 +1398,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     <SpotifyPageBack label={backLabel} onBack={onBack} />
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}{sortColumn ? ` · sorted by ${headings[sortColumn]}` : ''}</span>{playlist.owned && <button disabled={!canChangePlaylist || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
     {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify does not allow third-party apps to interact with playlists not owned by you. :-(</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
-    <div className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
-      if (event.target !== event.currentTarget && !(event.target as Element).closest('.playlist-end-drop')) return
+    <div ref={scroll} onScroll={readViewport} className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
+      if (event.target !== event.currentTarget && !(event.target as Element).matches('.playlist-end-drop, .playlist-track-window')) return
       setSelected(new Set())
       setSelectionAnchor(undefined)
     }}>
@@ -1422,14 +1425,19 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           event.stopPropagation()
         }} /></button>)}
       </div>
-      {rows.map(({ track, upstreamIndex }, rowIndex) => <div
+      <div className="playlist-track-window" role="list" aria-label="Playlist tracks" style={{ height: rows.length * rowHeight }}>{rowIndices.map(rowIndex => {
+        const { track, upstreamIndex } = rows[rowIndex]
+        return <div
         key={`${track.uri}-${upstreamIndex}`}
-        role="group"
+        role="listitem"
+        aria-posinset={rowIndex + 1}
+        aria-setsize={rows.length}
+        data-upstream-index={upstreamIndex}
         aria-label={`${track.name} by ${track.art}`}
         data-keyboard-row
         tabIndex={rovingUpstreamIndex === upstreamIndex ? 0 : -1}
-        className={`playlist-track-row track-row ${canReorder && !mutating ? 'reorderable' : ''} ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
-        style={{ gridTemplateColumns: columns }}
+        className={`playlist-track-row track-row ${rowIndex % 2 === 0 ? 'alternate' : ''} ${canReorder && !mutating ? 'reorderable' : ''} ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
+        style={{ gridTemplateColumns: columns, top: rowIndex * rowHeight }}
         onFocus={() => setFocusedUpstreamIndex(upstreamIndex)}
         onClick={(event) => {
           if (suppressTrackClick.current) { suppressTrackClick.current = false; event.preventDefault(); return }
@@ -1454,11 +1462,14 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           const next = rows[nextIndex]
           if (!next) return
           select(next.upstreamIndex, event)
+          setFocusedUpstreamIndex(next.upstreamIndex)
+          reveal(nextIndex)
           const rowContainer = event.currentTarget.parentElement
-          window.requestAnimationFrame(() => rowContainer?.querySelectorAll<HTMLElement>('.playlist-track-row')[nextIndex]?.focus())
+          window.requestAnimationFrame(() => rowContainer?.querySelector<HTMLElement>(`[data-upstream-index="${next.upstreamIndex}"]`)?.focus())
         }}
         onPointerDown={canReorder && !mutating ? (event) => {
           if (event.button !== 0) return
+          setFocusedUpstreamIndex(upstreamIndex)
           suppressTrackClick.current = false
           trackDrag.current = { indices: selected.has(upstreamIndex) ? [...selected] : [upstreamIndex], pointerId: event.pointerId, startY: event.clientY, moved: false }
           event.currentTarget.setPointerCapture(event.pointerId)
@@ -1473,8 +1484,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           }
           drag.moved = true
           event.preventDefault()
-          const trackRows = [...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>('.playlist-track-row')]
-          const target = insertionIndexAtY(trackRows.map((row) => { const bounds = row.getBoundingClientRect(); return bounds.top + bounds.height / 2 }), event.clientY)
+          const bounds = event.currentTarget.parentElement!.getBoundingClientRect()
+          const target = Math.max(0, Math.min(rows.length, Math.floor((event.clientY - bounds.top) / (bounds.height / rows.length) + 0.5)))
           dragInsertBefore.current = target
           setInsertBefore(target)
         } : undefined}
@@ -1498,7 +1509,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           if (!selected.has(upstreamIndex)) select(upstreamIndex, event)
           setMenu({ x: event.clientX, y: event.clientY, upstreamIndex })
         }}
-      ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isCurrentTrack(playing, queue[rowIndex]) ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>)}
+      ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isCurrentTrack(playing, queue[rowIndex]) ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>
+      })}</div>
       {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} />}
     </div>
     {menu && (menu.upstreamIndex === undefined

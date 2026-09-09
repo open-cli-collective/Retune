@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import type { BrowseView, ColumnKey, Playing, PlaylistSubject, Selection, Settings, Source, Track } from './types.ts'
 import { browseFacetValues, COLUMN_SPECS, DRAG_LOCAL_TYPE, DRAG_TYPE, facetLabel, formatTime, hasLocalTracks, isCurrentTrack, labels, moveBefore, resizedColumnWidth, resizedPaneHeight, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
+import { useTrackWindow } from './useTrackWindow.ts'
 
 export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle, onPrefix, onNavigate }: {
   state: { source: Source; view: BrowseView | null; viewKey?: string; browseKey: string; settings: Pick<Settings, 'browserPanes' | 'browserVisible'>; sel: Selection }
@@ -158,36 +159,11 @@ export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing
   const [liveWidths, setLiveWidths] = useState(columnWidths)
   const [menu, setMenu] = useState<{ x: number; y: number; trackId?: number }>()
   const [focusedTrackId, setFocusedTrackId] = useState<number>()
-  const scroll = useRef<HTMLDivElement>(null)
-  const [viewport, setViewport] = useState({ top: 0, height: 600 })
-  // Matches the fixed library row height; scrollTop/clientHeight are unscaled by CSS zoom.
   const rowHeight = 18
-  const overscan = 12
-  const visibleCount = Math.ceil(viewport.height / rowHeight) + overscan * 2
-  const first = Math.max(0, Math.min(Math.floor(viewport.top / rowHeight) - overscan, tracks.length - visibleCount))
-  const last = Math.min(tracks.length, first + visibleCount)
-  const readViewport = useCallback(() => {
-    const element = scroll.current
-    if (element) setViewport((current) => {
-      const next = { top: element.scrollTop, height: element.clientHeight || 600 }
-      return current.top === next.top && current.height === next.height ? current : next
-    })
-  }, [])
-  useLayoutEffect(() => {
-    readViewport()
-    const observer = new ResizeObserver(readViewport)
-    if (scroll.current) observer.observe(scroll.current)
-    return () => observer.disconnect()
-  }, [readViewport])
-  const reveal = (index: number) => {
-    const element = scroll.current
-    if (!element || index < 0) return
-    const top = index * rowHeight
-    const bottom = top + rowHeight + (element.firstElementChild as HTMLElement).offsetHeight
-    if (top < element.scrollTop) element.scrollTop = top
-    else if (bottom > element.scrollTop + element.clientHeight) element.scrollTop = Math.max(0, bottom - (element.clientHeight || 600))
-    readViewport()
-  }
+  const rovingTrackId = tracks.some((track) => track.id === focusedTrackId)
+    ? focusedTrackId
+    : tracks.find((track) => selectedIds.has(track.id))?.id ?? tracks[0]?.id
+  const { scroll, readViewport, reveal, indices: rowIndices } = useTrackWindow(tracks.length, rowHeight, tracks.findIndex(track => track.id === rovingTrackId))
   const revealSelection = useEffectEvent((id: number) => {
     const index = tracks.findIndex((track) => track.id === id)
     if (index >= 0) { reveal(index); setFocusedTrackId(id) }
@@ -202,14 +178,6 @@ export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing
   const headings = trackColumnHeadings(label)
   const visibleColumns = visibleColumnOrder(columnOrder, hiddenColumns)
   const columns = trackGridColumns(visibleColumns, liveWidths)
-  const rovingTrackId = tracks.some((track) => track.id === focusedTrackId)
-    ? focusedTrackId
-    : tracks.find((track) => selectedIds.has(track.id))?.id ?? tracks[0]?.id
-  const rowIndices = Array.from({ length: last - first }, (_, index) => first + index)
-  const focusedIndex = tracks.findIndex((track) => track.id === rovingTrackId)
-  // Keep the keyboard's current row mounted even when it scrolls out of view.
-  if (focusedIndex >= 0 && (focusedIndex < first || focusedIndex >= last)) rowIndices.push(focusedIndex)
-  rowIndices.sort((left, right) => left - right)
   const moveColumn = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = columnDrag.current
     if (!active || active.pointerId !== event.pointerId) return
