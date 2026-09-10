@@ -1,0 +1,60 @@
+{
+  "before": {
+    "playlist": {
+      "open": 785,
+      "select": 261,
+      "end": 61,
+      "shift-home": 125,
+      "sort": 707,
+      "scroll-middle": 31
+    },
+    "startup": {
+      "medianMs": 607.6279296875,
+      "minMs": 594.52392578125,
+      "maxMs": 666.1201171875
+    },
+    "idle": {
+      "visible": {
+        "cpuPercent": 0.7400149102322422,
+        "summedPhysicalFootprintMiB": 351.76949310302734
+      },
+      "hidden": {
+        "cpuPercent": 0.7401223965596931,
+        "summedPhysicalFootprintMiB": 349.56639099121094
+      },
+      "minimized": {
+        "cpuPercent": 0.8184559897309194,
+        "summedPhysicalFootprintMiB": 207.45701599121094
+      }
+    }
+  },
+  "after": {
+    "playlist": {
+      "open": 45,
+      "select": 33,
+      "end": 33,
+      "shift-home": 33.00000000000091,
+      "sort": 32.99999999999909,
+      "scroll-middle": 34
+    },
+    "startup": {
+      "medianMs": 616.43798828125,
+      "minMs": 604.083984375,
+      "maxMs": 638.344970703125
+    },
+    "idle": {
+      "visible": {
+        "cpuPercent": 0.7262130767852024,
+        "summedPhysicalFootprintMiB": 145.36273956298828
+      },
+      "hidden": {
+        "cpuPercent": 0.9041342688997197,
+        "summedPhysicalFootprintMiB": 145.80023956298828
+      },
+      "minimized": {
+        "cpuPercent": 1.097465997571969,
+        "summedPhysicalFootprintMiB": 149.14401245117188
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "productName": "Retune Performance",
+  "identifier": "com.rianjs.retune.performance",
+  "build": { "beforeBuildCommand": "npm exec vite -- build --config performance/native.vite.config.mjs" },
+  "app": {
+    "windows": [{ "label": "main", "title": "Retune Performance", "width": 1120, "height": 720, "resizable": true }]
+  }
+}

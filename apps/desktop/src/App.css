@@ -310,8 +310,10 @@ button.spotify-page-art:focus-visible { outline: 2px solid var(--accent); outlin
 .playlist-unavailable button { padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--control); }
 .playlist-unavailable button:first-child { border-color: var(--accent); color: #fff; background: var(--accent); }
 .playlist-track-row { height: 20px; border-top: 2px solid transparent; white-space: nowrap; }
-.zebra .playlist-track-row:nth-child(even) { background: var(--alt); }
-.playlist-track-row.selected, .zebra .playlist-track-row.selected:nth-child(even) { color: #fff; background: var(--accent); }
+.playlist-track-window { position: relative; min-width: 620px; }
+.playlist-track-window > .playlist-track-row { position: absolute; width: 100%; }
+.zebra .playlist-track-row.alternate { background: var(--alt); }
+.playlist-track-row.selected, .zebra .playlist-track-row.selected.alternate { color: #fff; background: var(--accent); }
 .playlist-track-row.selected > :first-child, .playlist-track-row.selected time { color: #fff; }
 .playlist-track-row > * { min-width: 0; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; }
 .playlist-track-row > :first-child, .playlist-track-row time { color: var(--dim); font-weight: 400; }

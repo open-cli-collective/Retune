@@ -1,0 +1,40 @@
+{
+  "codeRevision": "fea5335577b5a2b78de98834fcec32fb8dcf5038",
+  "fixtureRevision": "948e1b44df3b50f703e968dd54a31d954bb86f22",
+  "scope": "Combined experiment branch; individual step checks and exact measurements are in README.md and adjacent raw files. These are recorded local observations, not authenticated evidence-registry records.",
+  "automated": {
+    "cargo fmt --all --check": "PASS",
+    "cargo clippy --workspace --all-targets -- -D warnings": "PASS",
+    "cargo test --workspace": "PASS",
+    "startup release tests including manual file/settings benchmarks": "PASS",
+    "npm test": "PASS: 96 Node checks; 76 Vitest tests; 8 existing manual benchmarks skipped",
+    "npm run lint": "PASS",
+    "npm run build": "PASS",
+    "node scripts/check-tauri-acl.mjs": "PASS: 90 commands",
+    "node scripts/check-docs.mjs": "PASS: 19 files",
+    "node scripts/check-release.mjs": "PASS",
+    "npm exec tauri -- permission list": "PASS",
+    "isolated release app bundle with dev-token-store": "PASS: native-candidate.json"
+  },
+  "browser": {
+    "globalImporterFilter": "PASS: Batch 8000 found beyond first response page",
+    "globalImporterSelection": "PASS: select last batch, clear filter, select all -> Combine selected (8000)",
+    "darkPlaylist": "PASS: visual check at 1280x720 and 760x600",
+    "narrowPlaylistKeyboard": "PASS: verified innerWidth=760, innerHeight=600; End focuses Track 99 at aria-posinset=4100, aria-setsize=4100",
+    "viewportCleanup": "PASS: explicit override reset"
+  },
+  "native": {
+    "status": "PASS for measured local scope",
+    "evidence": [
+      "native-manifest.json",
+      "native-summary.json",
+      "native-before.json",
+      "native-after.json",
+      "native-after-marquee.json"
+    ],
+    "scope": "Combined before/final release builds on macOS; three native interaction and warm-startup samples, three consecutive paused CPU/footprint samples per visible/hidden/minimized state. Local silent playback, visibility/animation and normal shutdown checked.",
+    "outcome": "Large native playlist responsiveness gain. No native startup or idle CPU gain. Lower post-workload footprint snapshots are observational, not independent memory trials.",
+    "limitations": "No physical media keys, deliberately stalled native startup/exit race, OAuth, account-bound importer IPC, cold storage, other operating systems, or direct hardware scanout timing tested."
+  },
+  "formalRecommendation": "UNVERIFIED: no authenticated registry or agreed acceptance threshold; structural-validation.json records the CLI result."
+}

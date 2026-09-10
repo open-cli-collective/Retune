@@ -761,7 +761,7 @@ fn import_local_folder(app: &tauri::AppHandle) {
 }
 
 fn handle_local_drag_event(app: &tauri::AppHandle, label: &str, event: &tauri::WindowEvent) {
-    if label != "main" {
+    if label != "main" || app.try_state::<AppState>().is_none() {
         return;
     }
     let tauri::WindowEvent::DragDrop(event) = event else {
@@ -785,7 +785,7 @@ fn handle_local_drag_event(app: &tauri::AppHandle, label: &str, event: &tauri::W
     }
 }
 
-fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<MenuChecks> {
+fn install_file_menu(app: &tauri::AppHandle, settings: &Settings) -> tauri::Result<MenuChecks> {
     let preferences = MenuItemBuilder::with_id("preferences", "Preferences…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
@@ -894,62 +894,67 @@ fn install_file_menu(app: &tauri::App, settings: &Settings) -> tauri::Result<Men
     ]);
     let menu = menu.item(&help).build()?;
     app.set_menu(menu)?;
-    app.on_menu_event(|app, event| match event.id().as_ref() {
-        "get_info" => {
-            let _ = emit_main(app, "get-info", ());
+    app.on_menu_event(|app, event| {
+        if app.try_state::<AppState>().is_none() {
+            return;
         }
-        "setup_library" => {
-            let _ = emit_main(app, "open-setup", ());
+        match event.id().as_ref() {
+            "get_info" => {
+                let _ = emit_main(app, "get-info", ());
+            }
+            "setup_library" => {
+                let _ = emit_main(app, "open-setup", ());
+            }
+            "add_local_files" => import_local_files(app),
+            "add_local_folder" => import_local_folder(app),
+            "export_library" => backup::export_library(app),
+            "restore_library" => backup::import_library(app, true),
+            "merge_library" => backup::import_library(app, false),
+            "sync_spotify" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = sync_spotify(&handle).await {
+                        notify_error(&handle, error);
+                    }
+                });
+            }
+            "connect_spotify" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = spotify_commands::connect_spotify(handle.clone()).await {
+                        notify_error(&handle, error);
+                    }
+                });
+            }
+            "disconnect_spotify" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = spotify_commands::disconnect_spotify(handle.clone()).await {
+                        notify_error(&handle, error);
+                    }
+                });
+            }
+            "about_retune" => {
+                app.dialog()
+                    .message(format!(
+                        "Retune {}\n\nOverlay edits stay local",
+                        app.package_info().version
+                    ))
+                    .title("About Retune")
+                    .show(|_| {});
+            }
+            "preferences" => {
+                let _ = emit_main(app, "open-preferences", ());
+            }
+            "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "toggle_browser"
+            | "theme_system" | "theme_light" | "theme_dark" => {
+                let _ = emit_main(app, "view-action", event.id().as_ref());
+            }
+            "play_pause" | "previous" | "next" => {
+                let _ = emit_main(app, "player-action", event.id().as_ref());
+            }
+            _ => {}
         }
-        "add_local_files" => import_local_files(app),
-        "add_local_folder" => import_local_folder(app),
-        "export_library" => backup::export_library(app),
-        "restore_library" => backup::import_library(app, true),
-        "merge_library" => backup::import_library(app, false),
-        "sync_spotify" => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = sync_spotify(&handle).await {
-                    notify_error(&handle, error);
-                }
-            });
-        }
-        "connect_spotify" => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = spotify_commands::connect_spotify(handle.clone()).await {
-                    notify_error(&handle, error);
-                }
-            });
-        }
-        "disconnect_spotify" => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = spotify_commands::disconnect_spotify(handle.clone()).await {
-                    notify_error(&handle, error);
-                }
-            });
-        }
-        "about_retune" => {
-            app.dialog()
-                .message(format!(
-                    "Retune {}\n\nOverlay edits stay local",
-                    app.package_info().version
-                ))
-                .title("About Retune")
-                .show(|_| {});
-        }
-        "preferences" => {
-            let _ = emit_main(app, "open-preferences", ());
-        }
-        "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "toggle_browser"
-        | "theme_system" | "theme_light" | "theme_dark" => {
-            let _ = emit_main(app, "view-action", event.id().as_ref());
-        }
-        "play_pause" | "previous" | "next" => {
-            let _ = emit_main(app, "player-action", event.id().as_ref());
-        }
-        _ => {}
     });
     Ok(MenuChecks {
         zebra,
@@ -980,6 +985,418 @@ pub(crate) fn emit_main_event<R: tauri::Runtime>(
     state.main_events.send(event)
 }
 
+struct StartupFiles {
+    library: Library,
+    recovery_notice: Option<String>,
+    spotify_library: store::SpotifyLibraryState,
+    playlists: playlists::PlaylistCache,
+    settings: Settings,
+    startup_cooldown: Option<store::Cooldown>,
+}
+
+async fn start_startup_load(app_data_dir: PathBuf) -> Result<StartupFiles, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        load_startup_files(app_data_dir).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn await_startup(
+    mut ready: tokio::sync::watch::Receiver<Option<Result<(), String>>>,
+) -> Result<(), String> {
+    ready
+        .wait_for(Option::is_some)
+        .await
+        .map_err(|_| "Startup task ended before initialization completed.".to_string())?
+        .clone()
+        .unwrap()
+}
+
+fn load_startup_files(
+    app_data_dir: PathBuf,
+) -> Result<StartupFiles, Box<dyn std::error::Error + Send + Sync>> {
+    spotify_sync_commit::Store::new(&app_data_dir)
+        .recover()
+        .map_err(std::io::Error::other)?;
+    restore::RestoreStore::new(&app_data_dir)
+        .recover()
+        .map_err(std::io::Error::other)?;
+    let store = FsOverlayStore::new(&app_data_dir);
+    let (library, recovery_notice, needs_save) = match store.load() {
+        Ok(Some(library)) => (library, None, false),
+        Ok(None) => {
+            let library = initial_library(cfg!(debug_assertions));
+            (library, None, true)
+        }
+        Err(StoreError::Import(error)) => {
+            let corrupt = store.quarantine_corrupt()?;
+            let library = Library::new();
+            (
+            library,
+            Some(format!(
+                "Retune could not load your library ({error}). The corrupt file was moved to {} and an empty library was started.",
+                corrupt.display()
+            )),
+            true,
+        )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if needs_save {
+        store.save(&library)?;
+    }
+    let spotify_library = FsSpotifyLibraryStore::new(&app_data_dir).load()?;
+    let playlists = FsPlaylistStore::new(&app_data_dir).load()?;
+    let settings = FsSettingsStore::new(&app_data_dir).load_for_startup()?;
+    let startup_cooldown = FsCooldownStore::new(&app_data_dir)
+        .effective_cooldown(unix_now())
+        .map_err(std::io::Error::other)?;
+    Ok(StartupFiles {
+        library,
+        recovery_notice,
+        spotify_library,
+        playlists,
+        settings,
+        startup_cooldown,
+    })
+}
+
+fn finish_startup(
+    app: &tauri::AppHandle,
+    app_data_dir: PathBuf,
+    files: StartupFiles,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let StartupFiles {
+        library,
+        recovery_notice,
+        spotify_library,
+        playlists,
+        settings,
+        startup_cooldown,
+    } = files;
+    let store = FsOverlayStore::new(&app_data_dir);
+    let settings_store = FsSettingsStore::new(&app_data_dir);
+    let cooldown_store = FsCooldownStore::new(&app_data_dir);
+    let artist_genres_store = FsArtistGenresStore::new(&app_data_dir);
+    let spotify_library_store = FsSpotifyLibraryStore::new(&app_data_dir);
+    let spotify_catalog_store = FsSpotifyCatalogStore::new(&app_data_dir);
+    let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
+    let spotify_catalog_saved_generation = Arc::new(AtomicU64::new(0));
+    let spotify_catalog_flush_gate = Arc::new(Mutex::new(()));
+    let catalog_hydration = spawn_catalog_hydration(
+        Arc::clone(&spotify_catalog),
+        Arc::clone(&spotify_catalog_saved_generation),
+        Arc::clone(&spotify_catalog_flush_gate),
+        {
+            let store = spotify_catalog_store.clone();
+            move || store.load()
+        },
+    );
+    let playlist_store = FsPlaylistStore::new(&app_data_dir);
+    let menu_checks = install_file_menu(app, &settings)?;
+    // Dev builds keep tokens in a 0600 plaintext file. Release keeps
+    // only the encryption key in the native credential store.
+    let use_dev_token_store = cfg!(any(debug_assertions, feature = "dev-token-store"));
+    let backing: Box<dyn TokenStore> = if use_dev_token_store {
+        Box::new(store::FsTokenStore::new(&app_data_dir))
+    } else {
+        Box::new(EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?)
+    };
+    let token_store = Arc::new(CachedTokenStore::new(backing));
+    let lastfm_app = app.clone();
+    let lastfm = lastfm::Service::new_unhydrated(
+        &app_data_dir,
+        use_dev_token_store,
+        settings.lastfm_scrobbling,
+        lastfm::credentials_from(
+            option_env!("RETUNE_LASTFM_API_KEY"),
+            option_env!("RETUNE_LASTFM_SHARED_SECRET"),
+        ),
+        Arc::new(move |_| {
+            let _ = emit_main(&lastfm_app, "lastfm-changed", ());
+        }),
+    );
+    let restore_mutations = Arc::new(restore_latch::RestoreMutationState::default());
+    let lastfm_import = lastfm_import::Service::new_unhydrated_with_restore_state(
+        &app_data_dir,
+        Arc::clone(&restore_mutations),
+    );
+    let connection = ConnectionState::from_tokens(None);
+    menu_checks.sync_connection(&connection)?;
+    let spotify = spotify_provider(
+        &settings.spotify_client_id,
+        Arc::clone(&token_store),
+        Arc::clone(&spotify_catalog),
+    )
+    .map_err(std::io::Error::other)?;
+    let startup_client_id = settings.spotify_client_id.clone();
+    let startup_auto_connect = settings.auto_connect;
+    let startup_last_full_sync = settings.last_full_sync;
+    let startup_next_spotify_sync = settings.next_spotify_sync;
+    let startup_backend = settings.playback_backend;
+    let initial_volume = settings.volume;
+    let playback = Arc::new(Playback::new(
+        settings.repeat,
+        settings.shuffle,
+        settings.play_threshold_percent,
+        AudioSettings {
+            bitrate: settings.streaming_bitrate,
+            normalize: settings.normalize_volume,
+            gapless: settings.gapless,
+        },
+        Some(app_data_dir.clone()),
+    ));
+    playback.set_requested_backend(settings.playback_backend);
+    let media_control_app = app.clone();
+    let media_keys = media_keys::MediaKeys::spawn(app, move |control| {
+        let app = media_control_app.clone();
+        tauri::async_runtime::spawn(async move {
+            if app.try_state::<AppState>().is_none() {
+                return;
+            }
+            if let Err(error) = playback_commands::handle_media_control(&app, control).await {
+                notify_error(&app, error);
+            }
+        });
+    });
+    let lastfm_enabled = settings.lastfm_scrobbling;
+    let lastfm_import_startup = Arc::clone(&lastfm_import);
+    let playback_effects = PlaybackEffects::start(app.clone(), Arc::clone(&lastfm));
+    app.manage(AppState {
+        library: LibraryState::new_with_restore_state(
+            library,
+            store,
+            Arc::clone(&restore_mutations),
+        ),
+        spotify_membership: spotify_membership::SpotifyMembership::new_with_restore_state(
+            spotify_library,
+            spotify_library_store,
+            Arc::clone(&restore_mutations),
+        ),
+        settings: SettingsState::new_with_restore_state(
+            settings,
+            settings_store,
+            Arc::clone(&restore_mutations),
+        ),
+        cooldown_store,
+        artist_genres_store,
+        playlists: PlaylistState::new_with_restore_state(
+            playlists,
+            playlist_store,
+            Arc::clone(&restore_mutations),
+        ),
+        menu_checks: Some(menu_checks),
+        main_events: main_events::MainEventSink::new(recovery_notice),
+        token_store,
+        spotify_catalog,
+        spotify_catalog_store,
+        spotify_catalog_saved_generation,
+        spotify_catalog_flush_gate,
+        spotify: Mutex::new(spotify),
+        artwork_cache: Mutex::default(),
+        playback: Arc::clone(&playback),
+        playback_effects,
+        lastfm: Arc::clone(&lastfm),
+        lastfm_import,
+        media_keys,
+        spotify_session: spotify_commands::SpotifySession::default(),
+        sync_orchestrator: SyncOrchestrator::default(),
+        catalog_flush_task: Mutex::new(None),
+        playlist_reauth_notified: AtomicBool::new(false),
+        local_import_active: Arc::new(AtomicBool::new(false)),
+        restore_mutations,
+        shutdown_state: AtomicU8::new(0),
+    });
+    let catalog_app = app.clone();
+    let catalog_task = tauri::async_runtime::spawn(async move {
+        match catalog_hydration.await {
+            Ok(Ok(true)) => {
+                let _ = emit_main(&catalog_app, "library-changed", ());
+            }
+            Ok(Ok(false)) => {
+                log::debug!("Skipped stale Spotify catalog hydration");
+            }
+            Ok(Err(error)) => notify_error(
+                &catalog_app,
+                format!("Could not load the Spotify catalog: {error}"),
+            ),
+            Err(error) => notify_error(
+                &catalog_app,
+                format!("Spotify catalog hydration failed: {error}"),
+            ),
+        }
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let flush_app = catalog_app.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                let state = flush_app.state::<AppState>();
+                flush_spotify_catalog(&state)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    log::warn!("Could not persist Spotify catalog: {error}");
+                }
+                Err(error) => {
+                    log::warn!("Spotify catalog persistence task failed: {error}");
+                }
+            }
+        }
+    });
+    *app.state::<AppState>()
+        .catalog_flush_task
+        .lock()
+        .expect("catalog flush-task mutex poisoned") = Some(catalog_task);
+    let backfill_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let event_app = backfill_app.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            backfill_app
+                .state::<AppState>()
+                .library
+                .mutate(|library| Ok(localfiles::backfill_metadata(library)))
+        })
+        .await
+        {
+            Ok(Ok(true)) => {
+                let _ = emit_main(&event_app, "library-changed", ());
+            }
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => notify_error(&event_app, error),
+            Err(error) => notify_error(&event_app, error.to_string()),
+        }
+    });
+    let lastfm_startup = Arc::clone(&lastfm);
+    let profile_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let import_hydration = async {
+            let result = lastfm_import_startup.hydrate().await;
+            if result.is_ok() {
+                let _ = profile_app.emit_to("main", "lastfm-import-changed", ());
+                let _ = profile_app.emit_to("lastfm-importer", "lastfm-import-changed", ());
+            }
+            result
+        };
+        let (lastfm_result, import_result) =
+            tokio::join!(lastfm_startup.hydrate(), import_hydration);
+        if let Err(error) = &lastfm_result {
+            notify_error(&profile_app, error.clone());
+        }
+        if let Err(error) = &import_result {
+            notify_error(&profile_app, error.clone());
+        }
+        lastfm_startup.set_enabled(lastfm_enabled).await;
+        let _ = settings_commands::set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
+        if import_result.is_ok() {
+            lastfm_import::resume_persisted_import(profile_app.clone()).await;
+            lastfm_import::resume_persisted_apply(profile_app.clone()).await;
+            let _ = lastfm_import_startup.backfill_completed_mappings().await;
+            if lastfm_result.is_ok() && lastfm_startup.state().await.connected {
+                let _ = lastfm_import::commands::sync_lastfm_plays(profile_app.clone()).await;
+            }
+        }
+    });
+    let provider_app = app.clone();
+    let playback_effect_app = app.clone();
+    playback.listen(
+        move || provider_from(&provider_app.state::<AppState>()),
+        move |effect| playback_commands::execute_effect(&playback_effect_app, effect),
+    );
+    {
+        let handle = app.clone();
+        let credential_dir = app_data_dir.clone();
+        tauri::async_runtime::spawn(async move {
+            let load_handle = handle.clone();
+            let loaded = load_startup_credentials(move || {
+                match load_handle.state::<AppState>().token_store.load() {
+                    Ok(tokens) => Ok((ConnectionState::from_tokens(tokens), None)),
+                    Err(retune_spotify::Error::TokenStoreCorrupt(error)) => {
+                        let corrupt = quarantine_token_file(
+                            &credential_dir,
+                            use_dev_token_store,
+                            unix_now(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        Ok((
+                            ConnectionState::from_tokens(None),
+                            Some(format!(
+                                "Retune could not load your Spotify credentials ({error}). The damaged file was moved to {}. Reconnect Spotify to continue.",
+                                corrupt.display()
+                            )),
+                        ))
+                    }
+                    Err(error) => {
+                        log::warn!("Token store unavailable at startup: {error}");
+                        Ok((ConnectionState::from_tokens(None), None))
+                    }
+                }
+            })
+            .await;
+            let (connection, notice) = match loaded {
+                Ok(Ok(loaded)) => loaded,
+                Ok(Err(error)) => {
+                    notify_error(&handle, error);
+                    (ConnectionState::from_tokens(None), None)
+                }
+                Err(error) => {
+                    notify_error(&handle, error.to_string());
+                    (ConnectionState::from_tokens(None), None)
+                }
+            };
+            if let Some(notice) = notice {
+                log::warn!("{notice}");
+                let _ = emit_main_event(&handle, main_events::MainEvent::StartupNotice(notice));
+            }
+            if let Err(error) = emit_connection_state_async(&handle).await {
+                notify_error(&handle, error);
+            }
+            let startup_action = startup_action(
+                &connection,
+                &startup_client_id,
+                startup_auto_connect,
+                startup_last_full_sync,
+                startup_next_spotify_sync,
+                startup_cooldown,
+                unix_now(),
+            );
+            if startup_action == StartupAction::Nothing && connection.connected {
+                if let Some(deadline) = effective_sync_deadline(
+                    scheduled_sync_deadline(startup_next_spotify_sync, startup_last_full_sync),
+                    startup_cooldown,
+                    unix_now(),
+                ) {
+                    spotify_commands::schedule_auto_resume(&handle, deadline);
+                }
+            }
+            let activate_local = connection.connected
+                && connection.playback_authorized
+                && startup_backend == PlaybackBackend::Local;
+            if activate_local {
+                let state = handle.state::<AppState>();
+                if let Err(error) = switch_to_local(&state, initial_volume).await {
+                    notify_error(&handle, error);
+                }
+            }
+            let result = match startup_action {
+                StartupAction::Sync => sync_spotify(&handle).await,
+                StartupAction::Connect => spotify_commands::connect_spotify(handle.clone()).await,
+                StartupAction::Nothing => match provider_from(&handle.state::<AppState>()) {
+                    Ok(client) => playlist_commands::sync_playlists(&handle, client.as_ref()).await,
+                    Err(error) => Err(error),
+                },
+            };
+            if let Err(error) = result {
+                notify_error(&handle, error);
+            }
+        });
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -1005,7 +1422,10 @@ pub fn run() {
             )
             .build(),
     );
-    let app = builder.invoke_handler(tauri::generate_handler![
+    let (startup_completion, startup_ready) = tokio::sync::watch::channel(None);
+    let invoke_ready = startup_ready.clone();
+    let commands: Arc<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+        Arc::new(tauri::generate_handler![
             library_commands::browse,
             library_commands::metadata_values,
             library_commands::genre_values,
@@ -1096,8 +1516,39 @@ pub fn run() {
             diagnostics::load_diagnostics,
             diagnostics::email_diagnostics,
             external_links::open_external_destination
-        ])
-        .setup(|app| {
+        ]);
+    let app = builder
+        .invoke_handler(move |invoke| {
+            let readiness = invoke_ready.borrow().clone();
+            if let Some(result) = readiness {
+                return match result {
+                    Ok(()) => commands(invoke),
+                    Err(error) => {
+                        invoke
+                            .resolver
+                            .reject(format!("Retune could not start: {error}"));
+                        true
+                    }
+                };
+            }
+            let ready = invoke_ready.clone();
+            let commands = Arc::clone(&commands);
+            tauri::async_runtime::spawn(async move {
+                match await_startup(ready).await {
+                    Ok(()) => {
+                        let resolver = invoke.resolver.clone();
+                        if !commands(invoke) {
+                            resolver.reject("Unknown Retune command");
+                        }
+                    }
+                    Err(error) => invoke
+                        .resolver
+                        .reject(format!("Retune could not start: {error}")),
+                }
+            });
+            true
+        })
+        .setup(move |app| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
@@ -1111,374 +1562,26 @@ pub fn run() {
                 diagnostics::SESSION_START_MARKER
             );
             let app_data_dir = app.path().app_data_dir()?;
-            spotify_sync_commit::Store::new(&app_data_dir)
-                .recover()
-                .map_err(std::io::Error::other)?;
-            restore::RestoreStore::new(&app_data_dir)
-                .recover()
-                .map_err(std::io::Error::other)?;
-            let store = FsOverlayStore::new(&app_data_dir);
-            let (library, recovery_notice, needs_save) = match store.load() {
-                Ok(Some(library)) => (library, None, false),
-                Ok(None) => {
-                    let library = initial_library(cfg!(debug_assertions));
-                    (library, None, true)
-                }
-                Err(StoreError::Import(error)) => {
-                    let corrupt = store.quarantine_corrupt()?;
-                    let library = Library::new();
-                    (
-                        library,
-                        Some(format!(
-                            "Retune could not load your library ({error}). The corrupt file was moved to {} and an empty library was started.",
-                            corrupt.display()
-                        )),
-                        true,
-                    )
-                }
-                Err(error) => return Err(error.into()),
-            };
-            if needs_save {
-                store.save(&library)?;
-            }
-            let settings_store = FsSettingsStore::new(&app_data_dir);
-            let cooldown_store = FsCooldownStore::new(&app_data_dir);
-            let artist_genres_store = FsArtistGenresStore::new(&app_data_dir);
-            let spotify_library_store = FsSpotifyLibraryStore::new(&app_data_dir);
-            let spotify_library = spotify_library_store.load()?;
-            let spotify_catalog_store = FsSpotifyCatalogStore::new(&app_data_dir);
-            let spotify_catalog = Arc::new(Mutex::new(SpotifyCatalog::default()));
-            let spotify_catalog_saved_generation = Arc::new(AtomicU64::new(0));
-            let spotify_catalog_flush_gate = Arc::new(Mutex::new(()));
-            let catalog_hydration = spawn_catalog_hydration(
-                Arc::clone(&spotify_catalog),
-                Arc::clone(&spotify_catalog_saved_generation),
-                Arc::clone(&spotify_catalog_flush_gate),
-                {
-                    let store = spotify_catalog_store.clone();
-                    move || store.load()
-                },
-            );
-            let playlist_store = FsPlaylistStore::new(&app_data_dir);
-            let playlists = playlist_store.load()?;
-            let settings = settings_store.load()?.unwrap_or_default();
-            settings_store.save(&settings)?;
-            let startup_cooldown = cooldown_store
-                .effective_cooldown(unix_now())
-                .map_err(std::io::Error::other)?;
-            let menu_checks = install_file_menu(app, &settings)?;
-            // Dev builds keep tokens in a 0600 plaintext file. Release keeps
-            // only the encryption key in the native credential store.
-            let use_dev_token_store = cfg!(any(debug_assertions, feature = "dev-token-store"));
-            let backing: Box<dyn TokenStore> = if use_dev_token_store {
-                Box::new(store::FsTokenStore::new(&app_data_dir))
-            } else {
-                Box::new(EncryptedFsTokenStore::new(&app_data_dir).map_err(std::io::Error::other)?)
-            };
-            let token_store = Arc::new(CachedTokenStore::new(backing));
-            let lastfm_app = app.handle().clone();
-            let lastfm = lastfm::Service::new_unhydrated(
-                &app_data_dir,
-                use_dev_token_store,
-                settings.lastfm_scrobbling,
-                lastfm::credentials_from(
-                    option_env!("RETUNE_LASTFM_API_KEY"),
-                    option_env!("RETUNE_LASTFM_SHARED_SECRET"),
-                ),
-                Arc::new(move |_| {
-                    let _ = emit_main(&lastfm_app, "lastfm-changed", ());
-                }),
-            );
-            let restore_mutations = Arc::new(restore_latch::RestoreMutationState::default());
-            let lastfm_import = lastfm_import::Service::new_unhydrated_with_restore_state(
-                &app_data_dir,
-                Arc::clone(&restore_mutations),
-            );
-            let connection = ConnectionState::from_tokens(None);
-            menu_checks.sync_connection(&connection)?;
-            let spotify = spotify_provider(
-                &settings.spotify_client_id,
-                Arc::clone(&token_store),
-                Arc::clone(&spotify_catalog),
-            )
-                .map_err(std::io::Error::other)?;
-            let startup_client_id = settings.spotify_client_id.clone();
-            let startup_auto_connect = settings.auto_connect;
-            let startup_last_full_sync = settings.last_full_sync;
-            let startup_next_spotify_sync = settings.next_spotify_sync;
-            let startup_backend = settings.playback_backend;
-            let initial_volume = settings.volume;
-            let playback = Arc::new(Playback::new(
-                settings.repeat,
-                settings.shuffle,
-                settings.play_threshold_percent,
-                AudioSettings {
-                    bitrate: settings.streaming_bitrate,
-                    normalize: settings.normalize_volume,
-                    gapless: settings.gapless,
-                },
-                Some(app_data_dir.clone()),
-            ));
-            playback.set_requested_backend(settings.playback_backend);
-            let media_control_app = app.handle().clone();
-            let media_keys = media_keys::MediaKeys::spawn(app.handle(), move |control| {
-                let app = media_control_app.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) = playback_commands::handle_media_control(&app, control).await
-                    {
-                        notify_error(&app, error);
-                    }
-                });
-            });
-            let lastfm_enabled = settings.lastfm_scrobbling;
-            let lastfm_import_startup = Arc::clone(&lastfm_import);
-            let playback_effects =
-                PlaybackEffects::start(app.handle().clone(), Arc::clone(&lastfm));
-            app.manage(AppState {
-                library: LibraryState::new_with_restore_state(
-                    library,
-                    store,
-                    Arc::clone(&restore_mutations),
-                ),
-                spotify_membership: spotify_membership::SpotifyMembership::new_with_restore_state(
-                    spotify_library,
-                    spotify_library_store,
-                    Arc::clone(&restore_mutations),
-                ),
-                settings: SettingsState::new_with_restore_state(
-                    settings,
-                    settings_store,
-                    Arc::clone(&restore_mutations),
-                ),
-                cooldown_store,
-                artist_genres_store,
-                playlists: PlaylistState::new_with_restore_state(
-                    playlists,
-                    playlist_store,
-                    Arc::clone(&restore_mutations),
-                ),
-                menu_checks: Some(menu_checks),
-                main_events: main_events::MainEventSink::new(recovery_notice),
-                token_store,
-                spotify_catalog,
-                spotify_catalog_store,
-                spotify_catalog_saved_generation,
-                spotify_catalog_flush_gate,
-                spotify: Mutex::new(spotify),
-                artwork_cache: Mutex::default(),
-                playback: Arc::clone(&playback),
-                playback_effects,
-                lastfm: Arc::clone(&lastfm),
-                lastfm_import,
-                media_keys,
-                spotify_session: spotify_commands::SpotifySession::default(),
-                sync_orchestrator: SyncOrchestrator::default(),
-                catalog_flush_task: Mutex::new(None),
-                playlist_reauth_notified: AtomicBool::new(false),
-                local_import_active: Arc::new(AtomicBool::new(false)),
-                restore_mutations,
-                shutdown_state: AtomicU8::new(0),
-            });
-            let catalog_app = app.handle().clone();
-            let catalog_task = tauri::async_runtime::spawn(async move {
-                match catalog_hydration.await {
-                    Ok(Ok(true)) => {
-                        let _ = emit_main(&catalog_app, "library-changed", ());
-                    }
-                    Ok(Ok(false)) => {
-                        log::debug!("Skipped stale Spotify catalog hydration");
-                    }
-                    Ok(Err(error)) => notify_error(
-                        &catalog_app,
-                        format!("Could not load the Spotify catalog: {error}"),
-                    ),
-                    Err(error) => notify_error(
-                        &catalog_app,
-                        format!("Spotify catalog hydration failed: {error}"),
-                    ),
-                }
-                let mut interval = tokio::time::interval(Duration::from_secs(30));
-                interval.tick().await;
-                loop {
-                    interval.tick().await;
-                    let flush_app = catalog_app.clone();
-                    match tauri::async_runtime::spawn_blocking(move || {
-                        let state = flush_app.state::<AppState>();
-                        flush_spotify_catalog(&state)
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            log::warn!("Could not persist Spotify catalog: {error}");
-                        }
-                        Err(error) => {
-                            log::warn!("Spotify catalog persistence task failed: {error}");
-                        }
-                    }
-                }
-            });
-            *app
-                .state::<AppState>()
-                .catalog_flush_task
-                .lock()
-                .expect("catalog flush-task mutex poisoned") = Some(catalog_task);
-            let backfill_app = app.handle().clone();
+            let handle = app.handle().clone();
+            let completion = startup_completion.clone();
             tauri::async_runtime::spawn(async move {
-                let event_app = backfill_app.clone();
-                match tauri::async_runtime::spawn_blocking(move || {
-                    backfill_app
-                        .state::<AppState>()
-                        .library
-                        .mutate(|library| Ok(localfiles::backfill_metadata(library)))
-                })
-                .await
-                {
-                    Ok(Ok(true)) => {
-                        let _ = emit_main(&event_app, "library-changed", ());
+                match start_startup_load(app_data_dir.clone()).await {
+                    Ok(files) => {
+                        let main_handle = handle.clone();
+                        let main_completion = completion.clone();
+                        if let Err(error) = handle.run_on_main_thread(move || {
+                            let result = finish_startup(&main_handle, app_data_dir, files)
+                                .map_err(|error| error.to_string());
+                            main_completion.send_replace(Some(result));
+                        }) {
+                            completion.send_replace(Some(Err(error.to_string())));
+                        }
                     }
-                    Ok(Ok(false)) => {}
-                    Ok(Err(error)) => notify_error(&event_app, error),
-                    Err(error) => notify_error(&event_app, error.to_string()),
-                }
-            });
-            let lastfm_startup = Arc::clone(&lastfm);
-            let profile_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let import_hydration = async {
-                    let result = lastfm_import_startup.hydrate().await;
-                    if result.is_ok() {
-                        let _ = profile_app.emit_to("main", "lastfm-import-changed", ());
-                        let _ = profile_app.emit_to(
-                            "lastfm-importer",
-                            "lastfm-import-changed",
-                            (),
-                        );
-                    }
-                    result
-                };
-                let (lastfm_result, import_result) =
-                    tokio::join!(lastfm_startup.hydrate(), import_hydration);
-                if let Err(error) = &lastfm_result {
-                    notify_error(&profile_app, error.clone());
-                }
-                if let Err(error) = &import_result {
-                    notify_error(&profile_app, error.clone());
-                }
-                lastfm_startup.set_enabled(lastfm_enabled).await;
-                let _ = settings_commands::set_lastfm_scrobbling(&profile_app, lastfm_enabled).await;
-                if import_result.is_ok() {
-                    lastfm_import::resume_persisted_import(profile_app.clone()).await;
-                    lastfm_import::resume_persisted_apply(profile_app.clone()).await;
-                    let _ = lastfm_import_startup.backfill_completed_mappings().await;
-                    if lastfm_result.is_ok() && lastfm_startup.state().await.connected {
-                        let _ =
-                            lastfm_import::commands::sync_lastfm_plays(profile_app.clone()).await;
+                    Err(error) => {
+                        completion.send_replace(Some(Err(error)));
                     }
                 }
             });
-            let provider_app = app.handle().clone();
-            let playback_effect_app = app.handle().clone();
-            playback.listen(
-                move || provider_from(&provider_app.state::<AppState>()),
-                move |effect| playback_commands::execute_effect(&playback_effect_app, effect),
-            );
-            {
-                let handle = app.handle().clone();
-                let credential_dir = app_data_dir.clone();
-                tauri::async_runtime::spawn(async move {
-                    let load_handle = handle.clone();
-                    let loaded = load_startup_credentials(move || {
-                        match load_handle.state::<AppState>().token_store.load() {
-                            Ok(tokens) => Ok((ConnectionState::from_tokens(tokens), None)),
-                            Err(retune_spotify::Error::TokenStoreCorrupt(error)) => {
-                                let corrupt = quarantine_token_file(
-                                    &credential_dir,
-                                    use_dev_token_store,
-                                    unix_now(),
-                                )
-                                .map_err(|error| error.to_string())?;
-                                Ok((
-                                    ConnectionState::from_tokens(None),
-                                    Some(format!(
-                                        "Retune could not load your Spotify credentials ({error}). The damaged file was moved to {}. Reconnect Spotify to continue.",
-                                        corrupt.display()
-                                    )),
-                                ))
-                            }
-                            Err(error) => {
-                                log::warn!("Token store unavailable at startup: {error}");
-                                Ok((ConnectionState::from_tokens(None), None))
-                            }
-                        }
-                    })
-                    .await;
-                    let (connection, notice) = match loaded {
-                        Ok(Ok(loaded)) => loaded,
-                        Ok(Err(error)) => {
-                            notify_error(&handle, error);
-                            (ConnectionState::from_tokens(None), None)
-                        }
-                        Err(error) => {
-                            notify_error(&handle, error.to_string());
-                            (ConnectionState::from_tokens(None), None)
-                        }
-                    };
-                    if let Some(notice) = notice {
-                        log::warn!("{notice}");
-                        let _ = emit_main_event(
-                            &handle,
-                            main_events::MainEvent::StartupNotice(notice),
-                        );
-                    }
-                    if let Err(error) = emit_connection_state_async(&handle).await {
-                        notify_error(&handle, error);
-                    }
-                    let startup_action = startup_action(
-                        &connection,
-                        &startup_client_id,
-                        startup_auto_connect,
-                        startup_last_full_sync,
-                        startup_next_spotify_sync,
-                        startup_cooldown,
-                        unix_now(),
-                    );
-                    if startup_action == StartupAction::Nothing && connection.connected {
-                        if let Some(deadline) = effective_sync_deadline(
-                            scheduled_sync_deadline(
-                                startup_next_spotify_sync,
-                                startup_last_full_sync,
-                            ),
-                            startup_cooldown,
-                            unix_now(),
-                        ) {
-                            spotify_commands::schedule_auto_resume(&handle, deadline);
-                        }
-                    }
-                    let activate_local = connection.connected
-                        && connection.playback_authorized
-                        && startup_backend == PlaybackBackend::Local;
-                    if activate_local {
-                        let state = handle.state::<AppState>();
-                        if let Err(error) = switch_to_local(&state, initial_volume).await {
-                            notify_error(&handle, error);
-                        }
-                    }
-                    let result = match startup_action {
-                        StartupAction::Sync => sync_spotify(&handle).await,
-                        StartupAction::Connect => spotify_commands::connect_spotify(handle.clone()).await,
-                        StartupAction::Nothing => match provider_from(&handle.state::<AppState>()) {
-                            Ok(client) => {
-                                playlist_commands::sync_playlists(&handle, client.as_ref()).await
-                            }
-                            Err(error) => Err(error),
-                        },
-                    };
-                    if let Err(error) = result {
-                        notify_error(&handle, error);
-                    }
-                });
-            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1490,13 +1593,27 @@ pub fn run() {
             handle_local_drag_event(app, &label, &event);
         }
         tauri::RunEvent::Resumed if ready => {
-            let playback = Arc::clone(&app.state::<AppState>().playback);
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let playback = Arc::clone(&state.playback);
             tauri::async_runtime::spawn(async move {
                 playback.invalidate_local().await;
             });
         }
         tauri::RunEvent::ExitRequested { api, .. } => {
-            let state = app.state::<AppState>();
+            let Some(state) = app.try_state::<AppState>() else {
+                if startup_ready.borrow().is_none() {
+                    api.prevent_exit();
+                    let handle = app.clone();
+                    let ready = startup_ready.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = await_startup(ready).await;
+                        handle.exit(0);
+                    });
+                }
+                return;
+            };
             match exit_action(&state.shutdown_state) {
                 ExitAction::Allow => return,
                 ExitAction::WaitForDrain => {
@@ -1576,6 +1693,79 @@ fn startup_action(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn startup_gate_waits_for_authoritative_success_and_preserves_failure() {
+        let (complete, ready) = tokio::sync::watch::channel(None);
+        let mut pending = Box::pin(super::await_startup(ready.clone()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut pending)
+                .await
+                .is_err()
+        );
+        complete.send_replace(Some(Ok(())));
+        assert_eq!(pending.await, Ok(()));
+        complete.send_replace(Some(Err("recovery conflict".into())));
+        assert_eq!(
+            super::await_startup(ready).await,
+            Err("recovery conflict".into())
+        );
+        let (_, abandoned) = tokio::sync::watch::channel(None);
+        assert!(super::await_startup(abandoned).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn startup_file_recovery_is_off_caller_thread_and_preserves_corrupt_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("library.json"), "invalid library").unwrap();
+        let loaded = super::start_startup_load(dir.path().to_path_buf())
+            .await
+            .unwrap();
+        assert!(loaded.library.tracks().is_empty());
+        assert!(loaded.recovery_notice.is_some());
+        assert!(std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| std::fs::read_to_string(entry.path())
+                .is_ok_and(|bytes| bytes == "invalid library")));
+        let (complete, ready) = tokio::sync::watch::channel(None);
+        let path = dir.path().to_path_buf();
+        std::fs::write(path.join("settings.json"), "invalid settings").unwrap();
+        complete.send_replace(Some(
+            super::start_startup_load(path.clone()).await.map(|_| ()),
+        ));
+        assert!(super::await_startup(ready).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(path.join("settings.json")).unwrap(),
+            "invalid settings"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "manual startup filesystem benchmark; generated fixture only"]
+    async fn startup_files_performance() {
+        let source = std::env::var_os("RETUNE_PERF_FIXTURE").expect("generated fixture directory");
+        for sample in 1..=3 {
+            let dir = tempfile::tempdir().unwrap();
+            for name in ["library.json", "settings.json"] {
+                std::fs::copy(
+                    std::path::Path::new(&source).join(name),
+                    dir.path().join(name),
+                )
+                .unwrap();
+            }
+            let started = std::time::Instant::now();
+            let pending = super::start_startup_load(dir.path().to_path_buf());
+            let dispatch_ms = started.elapsed().as_secs_f64() * 1000.;
+            let loaded = pending.await.unwrap();
+            let ready_ms = started.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(loaded.library.tracks().len(), 4000);
+            println!(
+                "{}",
+                serde_json::json!({"sample":sample,"dispatchMs":dispatch_ms,"readyMs":ready_ms,"tracks":loaded.library.tracks().len()})
+            );
+        }
+    }
 
     #[tokio::test]
     async fn playback_effect_shutdown_drains_queued_work_and_is_idempotent() {

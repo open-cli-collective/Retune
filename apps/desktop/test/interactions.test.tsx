@@ -589,8 +589,9 @@ describe('mounted native interaction boundaries', () => {
 
   it('shares track-list actions with now playing and keeps the clicked track despite selection or playback changes', async () => {
     const tracks = [track(1, 'Playing'), track(2, 'Selected'), track(3, 'Also Selected'), { ...track(4, 'Local'), uri: 'file:///local.mp3', isLocal: true }]
+    const readTracks = vi.fn(() => tracks)
     const browse: BrowseView = {
-      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, get tracks() { return readTracks() },
       albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
       counts: { tracks: tracks.length, totalSecs: 720, perSource: { music: tracks.length, podcasts: 0, audiobooks: 0 } },
     }
@@ -628,6 +629,28 @@ describe('mounted native interaction boundaries', () => {
     expect(menuItems()).toHaveLength(0)
     await act(async () => view.querySelector('[data-track-id="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
     await waitFor(() => expect(view.querySelector('.lcd .marquee')?.textContent).toBe('Playing'))
+    readTracks.mockClear()
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 11 }) }))
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('11')
+    expect(readTracks).not.toHaveBeenCalled()
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    try {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+      await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 42 }) }))
+      expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('11')
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+      expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('42')
+      expect(readTracks).not.toHaveBeenCalled()
+    } finally {
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 12, isPlaying: false }) }))
+    expect(view.querySelector('[aria-label="Play"]')).not.toBeNull()
+    expect(readTracks).toHaveBeenCalled()
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { elapsed: 13 }) }))
     await act(async () => {
       view.querySelector('[data-track-id="2"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -635,6 +658,7 @@ describe('mounted native interaction boundaries', () => {
       view.querySelector('[data-track-id="3"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }))
     })
     expect(view.querySelectorAll('.track-row.selected')).toHaveLength(2)
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('13')
     await contextMenu('[data-track-id="2"]')
     const listActions = menuItems().map((item) => item.textContent)
     await act(async () => menuItems()[4].click())
@@ -675,6 +699,9 @@ describe('mounted native interaction boundaries', () => {
     expect(menuItems()[3].disabled).toBe(true)
     await act(async () => menuItems()[0].click())
     expect(invokeMock).toHaveBeenCalledWith('playlists_list', { uris: ['spotify:track:external'] })
+    await act(async () => channel.onmessage({ type: 'playerState', payload: playerState(0, { trackId: null, uri: null, elapsed: 0, name: null, isPlaying: false }) }))
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.value).toBe('0')
+    expect(view.querySelector<HTMLInputElement>('[aria-label="Playback position"]')?.disabled).toBe(true)
   })
 
   it('clears whole-album mode when a release loses its album selection, including stale saved options', async () => {
@@ -910,6 +937,54 @@ describe('mounted native interaction boundaries', () => {
     }
     await act(async () => root?.render(<TrackList {...props} columnOrder={[...props.columnOrder]} tracks={[tracks[0]]} />))
     expect(view.querySelector<HTMLElement>('[data-track-id="1"]')?.tabIndex).toBe(0)
+  })
+
+  it('windows playlist rows while retaining duplicate positions, range selection, playback, and drag indices', async () => {
+    const tracks = Array.from({ length: 4000 }, (_, index) => ({ ...track(index, `Track ${index % 100}`), id: null, uri: `spotify:track:${index % 100}` }))
+    invokeMock.mockImplementation(async command => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return [{ id: 'fixture', name: 'Fixture', owned: true, itemsAvailable: true, trackCount: tracks.length }]
+      if (command === 'playlist_tracks') return tracks
+      if (command === 'play_tracks') return 'started'
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => view.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+    const row = (index: number) => view.querySelector<HTMLElement>(`[data-upstream-index="${index}"]`)!
+    expect(view.querySelectorAll('.playlist-track-row').length).toBeLessThan(100)
+    expect(row(0).getAttribute('aria-setsize')).toBe('4000')
+    await act(async () => { row(0).focus(); key(row(0), 'End'); await new Promise(requestAnimationFrame) })
+    expect(document.activeElement).toBe(row(3999))
+    expect(row(3999).getAttribute('aria-posinset')).toBe('4000')
+    await act(async () => key(row(3999), 'Enter'))
+    const play = invokeMock.mock.calls.find(([command]) => command === 'play_tracks')![1]!
+    expect(play.startIndex).toBe(3999)
+    expect(play.resources).toHaveLength(4000)
+    const resources = play.resources as { id: number; uri: string }[]
+    expect(resources[3999].uri).toBe(resources[99].uri)
+    expect(resources[3999].id).not.toBe(resources[99].id)
+    await act(async () => { key(row(3999), 'Home', { shiftKey: true }); await new Promise(requestAnimationFrame) })
+    expect(document.activeElement).toBe(row(0))
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      await act(async () => view.querySelector<HTMLButtonElement>('.playlist-header button')!.click())
+      expect(invokeMock).toHaveBeenCalledWith('playlist_remove', { id: 'fixture', indices: Array.from({ length: 4000 }, (_, index) => index) })
+    } finally { confirm.mockRestore() }
+    const scroll = view.querySelector<HTMLElement>('.playlist-track-scroll')!
+    await act(async () => { scroll.scrollTop = 40_000; scroll.dispatchEvent(new Event('scroll')) })
+    const dragged = row(2000)
+    dragged.setPointerCapture = vi.fn()
+    view.querySelector<HTMLElement>('.playlist-track-window')!.getBoundingClientRect = () => ({ top: -40_000, height: 80_000 }) as DOMRect
+    const pointer = (type: string, clientY: number) => dragged.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0, clientY }))
+    await act(async () => pointer('pointerdown', 0))
+    await act(async () => pointer('pointermove', 40))
+    await act(async () => pointer('pointerup', 40))
+    expect(invokeMock).toHaveBeenCalledWith('playlist_reorder', { id: 'fixture', rangeStart: 2000, insertBefore: 2002, rangeLength: 1 })
+    expect(view.querySelectorAll('.playlist-track-row').length).toBeLessThan(100)
   })
 
   it('focuses menu items and restores the trigger on Escape', async () => {

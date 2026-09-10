@@ -1,0 +1,220 @@
+{
+  "navigationTimeOrigin": 1789002970230,
+  "readyMs": 156,
+  "interactions": [
+    {
+      "viewport": [
+        1120,
+        688
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 798,
+          "mountedRows": 4100,
+          "selectedRows": 0,
+          "focusedRow": null
+        },
+        {
+          "name": "select",
+          "durationMs": 270.0000000000073,
+          "mountedRows": 4100,
+          "selectedRows": 1,
+          "focusedRow": null
+        },
+        {
+          "name": "end",
+          "durationMs": 61,
+          "mountedRows": 4100,
+          "selectedRows": 1,
+          "focusedRow": "Track 00099 — long playback title for native marquee measurement by Artist 099"
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 125,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "sort",
+          "durationMs": 707,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 30,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        }
+      ]
+    },
+    {
+      "viewport": [
+        1120,
+        688
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 785,
+          "mountedRows": 4100,
+          "selectedRows": 0,
+          "focusedRow": null
+        },
+        {
+          "name": "select",
+          "durationMs": 261,
+          "mountedRows": 4100,
+          "selectedRows": 1,
+          "focusedRow": null
+        },
+        {
+          "name": "end",
+          "durationMs": 66.00000000000728,
+          "mountedRows": 4100,
+          "selectedRows": 1,
+          "focusedRow": "Track 00099 — long playback title for native marquee measurement by Artist 099"
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 127.00000000000728,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "sort",
+          "durationMs": 725,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 31,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        }
+      ]
+    },
+    {
+      "viewport": [
+        1120,
+        688
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 777,
+          "mountedRows": 4100,
+          "selectedRows": 0,
+          "focusedRow": null
+        },
+        {
+          "name": "select",
+          "durationMs": 257.00000000001455,
+          "mountedRows": 4100,
+          "selectedRows": 1,
+          "focusedRow": null
+        },
+        {
+          "name": "end",
+          "durationMs": 57,
+          "mountedRows": 4100,
+          "selectedRows": 1,
+          "focusedRow": "Track 00099 — long playback title for native marquee measurement by Artist 099"
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 116,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "sort",
+          "durationMs": 692,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 31.999999999985448,
+          "mountedRows": 4100,
+          "selectedRows": 4100,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        }
+      ]
+    }
+  ],
+  "visibility": [
+    {
+      "atMs": 144125,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 144226,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 182024,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 182125,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 191237,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 191338,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 223029,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 223130,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    }
+  ],
+  "playback": [
+    {
+      "atMs": 94427,
+      "state": "visible",
+      "elapsed": "0",
+      "animationStates": []
+    },
+    {
+      "atMs": 99429,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    }
+  ]
+}

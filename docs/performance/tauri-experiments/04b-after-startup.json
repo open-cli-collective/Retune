@@ -1,0 +1,277 @@
+{
+  "commit": "48456a6",
+  "tool": "Vite production fixture, Chromium Performance API and DOM readiness + two animation frames",
+  "conditions": "same in-app Chromium session,1280x720,warm HTTP cache,full page reload each sample,no added throttling,real main.tsx with deterministic native mock",
+  "samples": [
+    {
+      "window": "main",
+      "readyMs": 31,
+      "paintedMs": 48.90000009536743,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-Ds67CJZD.js",
+          "durationMs": 3.200000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 2.799999952316284,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "App-BE13pB-k.js",
+          "durationMs": 1.5,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 0.7999999523162842,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-afqaLREX.js",
+          "durationMs": 1.0999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "main",
+      "readyMs": 31,
+      "paintedMs": 54.200000047683716,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 2.9000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-Ds67CJZD.js",
+          "durationMs": 3.700000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 207818
+        },
+        {
+          "name": "App-BE13pB-k.js",
+          "durationMs": 2.0999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 65753
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.3000001907348633,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-afqaLREX.js",
+          "durationMs": 3.3000001907348633,
+          "transferSize": 300,
+          "decodedBodySize": 85186
+        }
+      ]
+    },
+    {
+      "window": "main",
+      "readyMs": 30.799999952316284,
+      "paintedMs": 42.700000047683716,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 3.5999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-Ds67CJZD.js",
+          "durationMs": 3.200000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "App-BE13pB-k.js",
+          "durationMs": 1.1000001430511475,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-afqaLREX.js",
+          "durationMs": 1.7000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.2999999523162842,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 19.299999952316284,
+      "paintedMs": 52.5,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-Ds67CJZD.js",
+          "durationMs": 4.3999998569488525,
+          "transferSize": 300,
+          "decodedBodySize": 207818
+        },
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 3.3999998569488525,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-DfcuTYPD.js",
+          "durationMs": 3.3000001907348633,
+          "transferSize": 300,
+          "decodedBodySize": 72012
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.2000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-XF_fEw_J.css",
+          "durationMs": 1.8999998569488525,
+          "transferSize": 300,
+          "decodedBodySize": 27486
+        },
+        {
+          "name": "lastfmImportState-afqaLREX.js",
+          "durationMs": 1.5999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 85186
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 17.199999809265137,
+      "paintedMs": 49,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 3.200000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-Ds67CJZD.js",
+          "durationMs": 3.5999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-DfcuTYPD.js",
+          "durationMs": 1,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-afqaLREX.js",
+          "durationMs": 1.4000000953674316,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.7000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-XF_fEw_J.css",
+          "durationMs": 2.8999998569488525,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 17.199999809265137,
+      "paintedMs": 34.299999952316284,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-Ds67CJZD.js",
+          "durationMs": 3.6000001430511475,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-CQsGNWnw.css",
+          "durationMs": 3.200000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-CN6GnfYQ.css",
+          "durationMs": 1.5,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-DfcuTYPD.js",
+          "durationMs": 1.2000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "lastfmImportState-afqaLREX.js",
+          "durationMs": 3.200000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "LastFmImporter-XF_fEw_J.css",
+          "durationMs": 1.7000000476837158,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "tool": "/Users/rianjs/.codex/plugins/cache/monit-plugins/frontend/2.2.1/codex-skills/react-performance/scripts/validate-recommendation.mjs",
+  "registry": "Unavailable; no trusted registry or acceptance threshold was invented. The CLI was invoked with each report and without a registry.",
+  "results": [
+    {
+      "changeId": "01",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    },
+    {
+      "changeId": "02",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    },
+    {
+      "changeId": "03",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    },
+    {
+      "changeId": "04a",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    },
+    {
+      "changeId": "04b",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    },
+    {
+      "changeId": "04c",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    },
+    {
+      "changeId": "05",
+      "valid": false,
+      "decision": "UNVERIFIED",
+      "diagnostics": [
+        "registry must be an object",
+        "structural validation cannot authenticate evidence or derive a decision"
+      ]
+    }
+  ]
+}

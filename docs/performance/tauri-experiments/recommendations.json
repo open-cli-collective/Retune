@@ -1,0 +1,723 @@
+[
+  {
+    "changeId": "01",
+    "metric": {
+      "baseline": 3932.899995803833,
+      "after": 9.000000715255737,
+      "threshold": null,
+      "noiseBound": 150.4000096321106,
+      "direction": "lower",
+      "name": "total React render duration / 12 ticks",
+      "unit": "ms"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "playlist-playback",
+      "route": "/performance/",
+      "flow": "elapsed presentation",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "same in-app Chromium session; exact version not captured",
+      "device": "macOS arm64 host",
+      "viewport": "1280x720",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm loaded fixture",
+      "serviceWorker": "none added by fixture; host-wide state not captured",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "playlist-playback",
+      "lineage": {
+        "baseCommit": "8868b590b05efd5046367702f11acff9b95a1b05",
+        "headCommit": "c504db219711d1b25f7133f939325a4d70fc86c2"
+      }
+    },
+    "artifacts": {
+      "scenario": "playlist-playback",
+      "baseline": "01-baseline-playlist.json",
+      "after": "01-after-playlist.json",
+      "baselineContext": {
+        "scenario": "playlist-playback",
+        "route": "/performance/",
+        "flow": "elapsed presentation",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "playlist-playback"
+      },
+      "afterContext": {
+        "scenario": "playlist-playback",
+        "route": "/performance/",
+        "flow": "elapsed presentation",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "playlist-playback"
+      }
+    },
+    "evidence": {
+      "kind": "browser-fixture",
+      "tool": "React Profiler / DOM and native-mock counters",
+      "artifact": "01-after-playlist.json",
+      "link": "01-after-playlist.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "elapsed presentation",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        3787.6999979019165,
+        3938.100007534027
+      ],
+      "after": [
+        8.800000429153442,
+        9.900000095367432
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  },
+  {
+    "changeId": "02",
+    "metric": {
+      "baseline": 769.7000000476837,
+      "after": 32,
+      "threshold": null,
+      "noiseBound": 67.10000014305115,
+      "direction": "lower",
+      "name": "playlist open to two frames",
+      "unit": "ms"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "playlist-open",
+      "route": "/performance/",
+      "flow": "playlist windowing",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "same in-app Chromium session; exact version not captured",
+      "device": "macOS arm64 host",
+      "viewport": "1280x720",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm loaded fixture",
+      "serviceWorker": "none added by fixture; host-wide state not captured",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "playlist-open",
+      "lineage": {
+        "baseCommit": "22342c74f4779cdf124d0afae3a5393cbdfdf916",
+        "headCommit": "04ad86aff50363c70be44bfbf1d732ff7d16ccc7"
+      }
+    },
+    "artifacts": {
+      "scenario": "playlist-open",
+      "baseline": "02-baseline-interactions.json",
+      "after": "02-after-interactions.json",
+      "baselineContext": {
+        "scenario": "playlist-open",
+        "route": "/performance/",
+        "flow": "playlist windowing",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "playlist-open"
+      },
+      "afterContext": {
+        "scenario": "playlist-open",
+        "route": "/performance/",
+        "flow": "playlist windowing",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "playlist-open"
+      }
+    },
+    "evidence": {
+      "kind": "browser-fixture",
+      "tool": "React Profiler / DOM and native-mock counters",
+      "artifact": "02-after-interactions.json",
+      "link": "02-after-interactions.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "playlist windowing",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        730.2999999523163,
+        797.4000000953674
+      ],
+      "after": [
+        32,
+        50.40000009536743
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  },
+  {
+    "changeId": "03",
+    "metric": {
+      "baseline": 8.199999570846558,
+      "after": 0,
+      "threshold": null,
+      "noiseBound": 1.3000006675720215,
+      "direction": "lower",
+      "name": "hidden React render duration / 12 ticks",
+      "unit": "ms"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "simulated-hidden-playback",
+      "route": "/performance/",
+      "flow": "hidden presentation",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "same in-app Chromium session; exact version not captured",
+      "device": "macOS arm64 host",
+      "viewport": "1280x720",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm loaded fixture",
+      "serviceWorker": "none added by fixture; host-wide state not captured",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "simulated-hidden-playback",
+      "lineage": {
+        "baseCommit": "71467f37dfc0c1db221cda0dae453366669aadbf",
+        "headCommit": "ca9a4ee47f142d66fb9f05bfa3bdcb72650193e7"
+      }
+    },
+    "artifacts": {
+      "scenario": "simulated-hidden-playback",
+      "baseline": "03-baseline-hidden.json",
+      "after": "03-after-hidden.json",
+      "baselineContext": {
+        "scenario": "simulated-hidden-playback",
+        "route": "/performance/",
+        "flow": "hidden presentation",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "simulated-hidden-playback"
+      },
+      "afterContext": {
+        "scenario": "simulated-hidden-playback",
+        "route": "/performance/",
+        "flow": "hidden presentation",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "simulated-hidden-playback"
+      }
+    },
+    "evidence": {
+      "kind": "browser-fixture",
+      "tool": "React Profiler / DOM and native-mock counters",
+      "artifact": "03-after-hidden.json",
+      "link": "03-after-hidden.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "hidden presentation",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        7.6999993324279785,
+        9
+      ],
+      "after": [
+        0,
+        0
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  },
+  {
+    "changeId": "04a",
+    "metric": {
+      "baseline": 4.81194084,
+      "after": 0.045152910000000004,
+      "threshold": null,
+      "noiseBound": 0.17705958999999982,
+      "direction": "lower",
+      "name": "existing settings load",
+      "unit": "ms"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "startup-existing-settings",
+      "route": "native store benchmark",
+      "flow": "startup settings writes",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "not applicable",
+      "device": "macOS arm64 host",
+      "viewport": "not applicable",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm local filesystem",
+      "serviceWorker": "not applicable",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "startup-existing-settings",
+      "lineage": {
+        "baseCommit": "70c4a946d9801d66198a7bd53f9dd8d860e916ca",
+        "headCommit": "eb7fae6e0768cee454d0f0c37be244f4c40144c0"
+      }
+    },
+    "artifacts": {
+      "scenario": "startup-existing-settings",
+      "baseline": "04a-baseline-settings.json",
+      "after": "04a-after-settings.json",
+      "baselineContext": {
+        "scenario": "startup-existing-settings",
+        "route": "native store benchmark",
+        "flow": "startup settings writes",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "not applicable",
+        "device": "macOS arm64 host",
+        "viewport": "not applicable",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm local filesystem",
+        "serviceWorker": "not applicable",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "startup-existing-settings"
+      },
+      "afterContext": {
+        "scenario": "startup-existing-settings",
+        "route": "native store benchmark",
+        "flow": "startup settings writes",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "not applicable",
+        "device": "macOS arm64 host",
+        "viewport": "not applicable",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm local filesystem",
+        "serviceWorker": "not applicable",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "startup-existing-settings"
+      }
+    },
+    "evidence": {
+      "kind": "native-store",
+      "tool": "release Rust ignored benchmark",
+      "artifact": "04a-after-settings.json",
+      "link": "04a-after-settings.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "startup settings writes",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        4.673603330000001,
+        4.85066292
+      ],
+      "after": [
+        0.04437209,
+        0.053585
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  },
+  {
+    "changeId": "04b",
+    "metric": {
+      "baseline": 30.799999952316284,
+      "after": 31,
+      "threshold": null,
+      "noiseBound": 3.5999999046325684,
+      "direction": "lower",
+      "name": "main DOM ready",
+      "unit": "ms"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "main-startup",
+      "route": "/performance/startup.html",
+      "flow": "window entry loading",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "same in-app Chromium session; exact version not captured",
+      "device": "macOS arm64 host",
+      "viewport": "1280x720",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm loaded fixture",
+      "serviceWorker": "none added by fixture; host-wide state not captured",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "main-startup",
+      "lineage": {
+        "baseCommit": "67f09f62b127bd324d3a11b2d78fe00e307e7b60",
+        "headCommit": "48456a69aa02827aedf41e7bbb2319c4bacb4f68"
+      }
+    },
+    "artifacts": {
+      "scenario": "main-startup",
+      "baseline": "04b-baseline-startup.json",
+      "after": "04b-after-startup.json",
+      "baselineContext": {
+        "scenario": "main-startup",
+        "route": "/performance/startup.html",
+        "flow": "window entry loading",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "main-startup"
+      },
+      "afterContext": {
+        "scenario": "main-startup",
+        "route": "/performance/startup.html",
+        "flow": "window entry loading",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "main-startup"
+      }
+    },
+    "evidence": {
+      "kind": "browser-fixture",
+      "tool": "React Profiler / DOM and native-mock counters",
+      "artifact": "04b-after-startup.json",
+      "link": "04b-after-startup.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "window entry loading",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        29.700000047683716,
+        33.299999952316284
+      ],
+      "after": [
+        30.799999952316284,
+        31
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  },
+  {
+    "changeId": "04c",
+    "metric": {
+      "baseline": 10.448125,
+      "after": 9.463167,
+      "threshold": null,
+      "noiseBound": 5.375083999999999,
+      "direction": "lower",
+      "name": "startup files data ready",
+      "unit": "ms"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "startup-files",
+      "route": "native store benchmark",
+      "flow": "background startup files",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "not applicable",
+      "device": "macOS arm64 host",
+      "viewport": "not applicable",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm local filesystem",
+      "serviceWorker": "not applicable",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "startup-files",
+      "lineage": {
+        "baseCommit": "78c76f9cbfa5c4a0738dd889c3f06941e90243d2",
+        "headCommit": "78ad327b9cfdcd4b351405fd0f34180f930fe674"
+      }
+    },
+    "artifacts": {
+      "scenario": "startup-files",
+      "baseline": "04c-baseline-files.json",
+      "after": "04c-after-files.json",
+      "baselineContext": {
+        "scenario": "startup-files",
+        "route": "native store benchmark",
+        "flow": "background startup files",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "not applicable",
+        "device": "macOS arm64 host",
+        "viewport": "not applicable",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm local filesystem",
+        "serviceWorker": "not applicable",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "startup-files"
+      },
+      "afterContext": {
+        "scenario": "startup-files",
+        "route": "native store benchmark",
+        "flow": "background startup files",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "not applicable",
+        "device": "macOS arm64 host",
+        "viewport": "not applicable",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm local filesystem",
+        "serviceWorker": "not applicable",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "startup-files"
+      }
+    },
+    "evidence": {
+      "kind": "native-store",
+      "tool": "release Rust ignored benchmark",
+      "artifact": "04c-after-files.json",
+      "link": "04c-after-files.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "background startup files",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        9.535375,
+        14.910459
+      ],
+      "after": [
+        8.349041,
+        10.7255
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  },
+  {
+    "changeId": "05",
+    "metric": {
+      "baseline": 15850986,
+      "after": 4283276,
+      "threshold": null,
+      "noiseBound": 0,
+      "direction": "lower",
+      "name": "queue response bytes / burst",
+      "unit": "bytes"
+    },
+    "samples": {
+      "baseline": 3,
+      "after": 3
+    },
+    "comparison": {
+      "scenario": "importer-refresh-burst",
+      "route": "/performance/importer.html?window=lastfm-importer&queueFixture=1",
+      "flow": "superseded importer refresh",
+      "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+      "browser": "same in-app Chromium session; exact version not captured",
+      "device": "macOS arm64 host",
+      "viewport": "1280x720",
+      "networkThrottle": "none added; importer mock delay 15ms/page",
+      "cpuThrottle": "none added",
+      "cache": "warm loaded fixture",
+      "serviceWorker": "none added by fixture; host-wide state not captured",
+      "extensions": "not captured",
+      "account": "generated signed-out fixture",
+      "workspace": "codex/tauri-performance-experiments",
+      "test": "importer-refresh-burst",
+      "lineage": {
+        "baseCommit": "0c09cf86d19980c16936e506e4fdc7e71ddd3299",
+        "headCommit": "fea5335577b5a2b78de98834fcec32fb8dcf5038"
+      }
+    },
+    "artifacts": {
+      "scenario": "importer-refresh-burst",
+      "baseline": "05-baseline-refresh.json",
+      "after": "05-after-refresh.json",
+      "baselineContext": {
+        "scenario": "importer-refresh-burst",
+        "route": "/performance/importer.html?window=lastfm-importer&queueFixture=1",
+        "flow": "superseded importer refresh",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "importer-refresh-burst"
+      },
+      "afterContext": {
+        "scenario": "importer-refresh-burst",
+        "route": "/performance/importer.html?window=lastfm-importer&queueFixture=1",
+        "flow": "superseded importer refresh",
+        "dataset": "generated 4000 tracks / 4100 playlist entries; importer burst uses 8000 batches; see README for each fixture",
+        "browser": "same in-app Chromium session; exact version not captured",
+        "device": "macOS arm64 host",
+        "viewport": "1280x720",
+        "networkThrottle": "none added; importer mock delay 15ms/page",
+        "cpuThrottle": "none added",
+        "cache": "warm loaded fixture",
+        "serviceWorker": "none added by fixture; host-wide state not captured",
+        "extensions": "not captured",
+        "account": "generated signed-out fixture",
+        "workspace": "codex/tauri-performance-experiments",
+        "test": "importer-refresh-burst"
+      }
+    },
+    "evidence": {
+      "kind": "browser-fixture",
+      "tool": "React Profiler / DOM and native-mock counters",
+      "artifact": "05-after-refresh.json",
+      "link": "05-after-refresh.json"
+    },
+    "functionalArtifact": "validation.json",
+    "accessibilityArtifact": "validation.json",
+    "symptom": "superseded importer refresh",
+    "hypothesis": "Reduce the measured work at its owning boundary; see the step report for the disconfirming result.",
+    "successCriterion": "Exploratory comparison; no user acceptance threshold was agreed. Native validation is required before a merge recommendation.",
+    "range": {
+      "baseline": [
+        15850986,
+        15850986
+      ],
+      "after": [
+        4283276,
+        4283276
+      ]
+    },
+    "decision": "UNVERIFIED",
+    "unresolvedAssumptions": [
+      "No authenticated evidence registry is available.",
+      "Native WebKit/CPU/window/audio validation is blocked by the locked Mac."
+    ],
+    "nextAction": "Complete native comparison after unlock; assess each commit independently before any merge."
+  }
+]

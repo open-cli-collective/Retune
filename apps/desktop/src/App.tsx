@@ -1,6 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
 import './App.css'
 import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
@@ -12,6 +12,8 @@ import { ArtworkLightbox, CheckboxMenu, ContextMenu, ModalDialog } from './viewS
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
+import { createPlaybackProgress, documentVisible, onlyPlaybackProgressChanged, subscribeDocumentVisibility } from './playbackProgress.ts'
+import { useTrackWindow } from './useTrackWindow.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
 import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
@@ -54,6 +56,7 @@ function useTauriInvalidationSnapshot<T>(event: string, snapshot: () => Promise<
 }
 
 function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
+  const [progress] = useState(createPlaybackProgress)
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const origin = useRef<PlaybackOrigin | undefined>(undefined)
   const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin; awaitingPlaybackAuthorization: boolean } | null>(null)
@@ -64,8 +67,13 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
   const onState = useCallback((player: import('./types.ts').PlayerState) => {
     if (player.external) origin.current = undefined
+    progress.update(player.elapsed)
+    const current = playingRef.current
+    if (onlyPlaybackProgressChanged(current, player)
+      && (player.external || current?.queue === queue.current)
+      && current?.origin === origin.current) return
     dispatch({ type: 'playerState', player, queue: queue.current, origin: origin.current })
-  }, [dispatch])
+  }, [dispatch, progress])
 
   const onAuthorizationRequired = useCallback((prompt: import('./types.ts').PlaybackAuthorizationPrompt) => {
     const id = pendingPlaybackTarget(prompt, queue.current)
@@ -173,8 +181,8 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
   return useMemo(
-    () => ({ start, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired }),
-    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, seek, setVolume, start, step, toggle],
+    () => ({ start, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired, progress }),
+    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, progress, seek, setVolume, start, step, toggle],
   )
 }
 
@@ -655,6 +663,7 @@ function App() {
     <main className={`app-shell ${state.settings.zebra ? 'zebra' : ''}`} style={{ zoom: appliedZoom(state.settings.zoom, ZOOM_BASE) }}>
       <TransportBar
         playing={state.playing}
+        progress={player.progress}
         track={playingTrack}
         query={state.query}
         queryReset={state.queryReset}
@@ -865,6 +874,7 @@ function App() {
 }
 
 function Marquee({ text, strong }: { text: string; strong?: boolean }) {
+  const visible = useSyncExternalStore(subscribeDocumentVisibility, documentVisible)
   const outer = useRef<HTMLDivElement>(null)
   const inner = useRef<HTMLSpanElement>(null)
   const [distance, setDistance] = useState(0)
@@ -878,7 +888,7 @@ function Marquee({ text, strong }: { text: string; strong?: boolean }) {
     <span
       ref={inner}
       className={`marquee${distance > 0 ? ' scrolling' : ''}${strong ? ' strong' : ''}`}
-      style={distance > 0 ? { '--marquee-distance': `-${distance}px`, animationDuration: `${Math.max(8, Math.round(distance / 12))}s` } as React.CSSProperties : undefined}
+      style={distance > 0 ? { '--marquee-distance': `-${distance}px`, animationDuration: `${Math.max(8, Math.round(distance / 12))}s`, animationPlayState: visible ? 'running' : 'paused' } as React.CSSProperties : undefined}
     >{text}</span>
   </div>
 }
@@ -920,8 +930,11 @@ function TrackArtworkLightbox({ uri, name, onClose }: { uri: string; name: strin
   return <ArtworkLightbox artwork={artwork} name={name} onClose={onClose} />
 }
 
-export function TransportBar({ playing, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork, onContextMenu }: {
+const noProgressSubscription = () => () => {}
+
+export function TransportBar({ playing, progress, track, query, queryReset, scope, volume, searchRef, onQuery, onScope, onPlay, onPrev, onNext, onVolume, onSeek, onOrigin, onArtwork, onContextMenu }: {
   playing: State['playing']; track?: PlaybackTrack; query: string; queryReset?: number; scope: State['scope']
+  progress?: ReturnType<typeof createPlaybackProgress>
   volume: number
   searchRef: React.RefObject<HTMLInputElement | null>
   onQuery: (query: string) => void; onScope: (scope: State['scope']) => void; onSeek: (seconds: number) => void
@@ -943,7 +956,8 @@ export function TransportBar({ playing, track, query, queryReset, scope, volume,
     window.clearTimeout(queryTimer.current)
     if (next !== query) onQuery(next)
   }
-  const elapsed = playing?.elapsed ?? 0
+  const nativeElapsed = useSyncExternalStore(progress?.subscribe ?? noProgressSubscription, progress?.getSnapshot ?? (() => playing?.elapsed ?? 0))
+  const elapsed = !playing ? 0 : playing.simulated ? playing.elapsed : nativeElapsed
   const shown = playing?.external ? {
     name: `${playing.name ?? 'Unknown Track'} (Spotify)`,
     art: playing.art ?? '',
@@ -1242,11 +1256,13 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     window.addEventListener('keydown', selectAll)
     return () => window.removeEventListener('keydown', selectAll)
   }, [tracks])
-  const rows = playlistRows(tracks, sortColumn, sortDesc)
+  const rows = useMemo(() => playlistRows(tracks, sortColumn, sortDesc), [tracks, sortColumn, sortDesc])
   const rovingUpstreamIndex = rows.some((row) => row.upstreamIndex === focusedUpstreamIndex)
     ? focusedUpstreamIndex
     : rows.find((row) => selected.has(row.upstreamIndex))?.upstreamIndex ?? rows[0]?.upstreamIndex
-  const queue: PlaybackTrack[] = rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex }))
+  const queue = useMemo(() => rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex })), [rows])
+  const rowHeight = 20
+  const { scroll, readViewport, reveal, indices: rowIndices } = useTrackWindow(rows.length, rowHeight, rows.findIndex(row => row.upstreamIndex === rovingUpstreamIndex))
   const headings = { ...trackColumnHeadings(labels.music), track: 'Track' }
   const customizableColumns = columnOrder.filter((column) => PLAYLIST_COLUMNS.includes(column))
   const visibleColumns = visibleColumnOrder(customizableColumns, hiddenColumns)
@@ -1383,8 +1399,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     <SpotifyPageBack label={backLabel} onBack={onBack} />
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}{sortColumn ? ` · sorted by ${headings[sortColumn]}` : ''}</span>{playlist.owned && <button disabled={!canChangePlaylist || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
     {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify does not allow third-party apps to interact with playlists not owned by you. :-(</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
-    <div className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
-      if (event.target !== event.currentTarget && !(event.target as Element).closest('.playlist-end-drop')) return
+    <div ref={scroll} onScroll={readViewport} className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
+      if (event.target !== event.currentTarget && !(event.target as Element).matches('.playlist-end-drop, .playlist-track-window')) return
       setSelected(new Set())
       setSelectionAnchor(undefined)
     }}>
@@ -1410,14 +1426,19 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           event.stopPropagation()
         }} /></button>)}
       </div>
-      {rows.map(({ track, upstreamIndex }, rowIndex) => <div
+      <div className="playlist-track-window" role="list" aria-label="Playlist tracks" style={{ height: rows.length * rowHeight }}>{rowIndices.map(rowIndex => {
+        const { track, upstreamIndex } = rows[rowIndex]
+        return <div
         key={`${track.uri}-${upstreamIndex}`}
-        role="group"
+        role="listitem"
+        aria-posinset={rowIndex + 1}
+        aria-setsize={rows.length}
+        data-upstream-index={upstreamIndex}
         aria-label={`${track.name} by ${track.art}`}
         data-keyboard-row
         tabIndex={rovingUpstreamIndex === upstreamIndex ? 0 : -1}
-        className={`playlist-track-row track-row ${canReorder && !mutating ? 'reorderable' : ''} ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
-        style={{ gridTemplateColumns: columns }}
+        className={`playlist-track-row track-row ${rowIndex % 2 === 0 ? 'alternate' : ''} ${canReorder && !mutating ? 'reorderable' : ''} ${selected.has(upstreamIndex) ? 'selected' : ''} ${insertBefore === upstreamIndex ? 'insert-before' : ''} ${isCurrentTrack(playing, queue[rowIndex]) ? 'playing' : ''}`}
+        style={{ gridTemplateColumns: columns, top: rowIndex * rowHeight }}
         onFocus={() => setFocusedUpstreamIndex(upstreamIndex)}
         onClick={(event) => {
           if (suppressTrackClick.current) { suppressTrackClick.current = false; event.preventDefault(); return }
@@ -1442,11 +1463,14 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           const next = rows[nextIndex]
           if (!next) return
           select(next.upstreamIndex, event)
+          setFocusedUpstreamIndex(next.upstreamIndex)
+          reveal(nextIndex)
           const rowContainer = event.currentTarget.parentElement
-          window.requestAnimationFrame(() => rowContainer?.querySelectorAll<HTMLElement>('.playlist-track-row')[nextIndex]?.focus())
+          window.requestAnimationFrame(() => rowContainer?.querySelector<HTMLElement>(`[data-upstream-index="${next.upstreamIndex}"]`)?.focus())
         }}
         onPointerDown={canReorder && !mutating ? (event) => {
           if (event.button !== 0) return
+          setFocusedUpstreamIndex(upstreamIndex)
           suppressTrackClick.current = false
           trackDrag.current = { indices: selected.has(upstreamIndex) ? [...selected] : [upstreamIndex], pointerId: event.pointerId, startY: event.clientY, moved: false }
           event.currentTarget.setPointerCapture(event.pointerId)
@@ -1461,8 +1485,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           }
           drag.moved = true
           event.preventDefault()
-          const trackRows = [...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>('.playlist-track-row')]
-          const target = insertionIndexAtY(trackRows.map((row) => { const bounds = row.getBoundingClientRect(); return bounds.top + bounds.height / 2 }), event.clientY)
+          const bounds = event.currentTarget.parentElement!.getBoundingClientRect()
+          const target = Math.max(0, Math.min(rows.length, Math.floor((event.clientY - bounds.top) / (bounds.height / rows.length) + 0.5)))
           dragInsertBefore.current = target
           setInsertBefore(target)
         } : undefined}
@@ -1486,7 +1510,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           if (!selected.has(upstreamIndex)) select(upstreamIndex, event)
           setMenu({ x: event.clientX, y: event.clientY, upstreamIndex })
         }}
-      ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isCurrentTrack(playing, queue[rowIndex]) ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>)}
+      ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isCurrentTrack(playing, queue[rowIndex]) ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>
+      })}</div>
       {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} />}
     </div>
     {menu && (menu.upstreamIndex === undefined

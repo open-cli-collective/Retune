@@ -36,6 +36,12 @@ same text merges their Retune album group.
 
 Overlay edits never mutate source-file tags or Spotify metadata.
 
+Library and playlist views share fixed-height row windowing. The complete
+ordered data remains available for queues and range selection; only visible
+rows plus the focused row mount in the DOM. Playlist identity remains the
+upstream entry index, including duplicate URIs. Keyboard reveal and pointer
+insertion operate on the complete order, independently of mounted row indices.
+
 ## Track removal and merge decisions
 
 `Library` owns persistent local removal and merge decisions. Removing tracks

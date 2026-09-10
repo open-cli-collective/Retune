@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Retune startup benchmark</title></head>
+<body><div id="root"></div><script>
+  const importer = new URLSearchParams(location.search).get('window') === 'lastfm-importer'
+  const longTasks = []
+  if (PerformanceObserver.supportedEntryTypes.includes('longtask')) new PerformanceObserver(list => longTasks.push(...list.getEntries().map(entry => entry.duration))).observe({type:'longtask'})
+  const observer = new MutationObserver(() => {
+    const ready = importer ? document.querySelector('.lastfm-importer .import-empty') : document.querySelector('[data-track-id]')
+    if (!ready || (importer && document.querySelector('.import-error'))) return
+    observer.disconnect()
+    const readyMs = performance.now()
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const output = document.createElement('pre'); output.id = 'startup-results'
+      output.style.cssText = 'position:fixed;bottom:0;right:0;z-index:10000;background:white;color:black;font:12px monospace;max-width:540px;max-height:180px;overflow:auto'
+      output.textContent = JSON.stringify({ window: importer ? 'lastfm-importer' : 'main', readyMs, paintedMs: performance.now(), viewport:[innerWidth,innerHeight], longTasksMs:longTasks,
+        resources: performance.getEntriesByType('resource').filter(entry=> /\.(js|css)(\?|$)/.test(entry.name)).map(entry=>({name:entry.name.split('/').pop(),durationMs:entry.duration,transferSize:entry.transferSize,decodedBodySize:entry.decodedBodySize})) }, null, 2)
+      document.body.append(output)
+    }))
+  })
+  observer.observe(document.getElementById('root'), {childList:true,subtree:true})
+</script><script type="module" src="../src/main.tsx"></script></body></html>

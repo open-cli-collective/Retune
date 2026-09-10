@@ -1,0 +1,21 @@
+{
+  "source": "78c76f9",
+  "conditions": "Release Rust, warm local filesystem, copied generated 4000-track library/settings, no UI/native paint measured",
+  "samples": [
+    {
+      "sample": 1,
+      "dispatchMs": 14.910417,
+      "readyMs": 14.910459
+    },
+    {
+      "sample": 2,
+      "dispatchMs": 10.448042,
+      "readyMs": 10.448125
+    },
+    {
+      "sample": 3,
+      "dispatchMs": 9.535333,
+      "readyMs": 9.535375
+    }
+  ]
+}

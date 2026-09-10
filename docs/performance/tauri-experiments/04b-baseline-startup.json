@@ -1,0 +1,151 @@
+{
+  "commit": "67f09f6",
+  "tool": "Vite production fixture, Chromium Performance API and DOM readiness + two animation frames",
+  "conditions": "same in-app Chromium session,1280x720,warm HTTP cache,full page reload each sample,no added throttling,real main.tsx with deterministic native mock",
+  "samples": [
+    {
+      "window": "main",
+      "readyMs": 33.299999952316284,
+      "paintedMs": 51.299999952316284,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-Daf8KNiW.css",
+          "durationMs": 3.700000047683716,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-jyL-p--S.js",
+          "durationMs": 4.299999952316284,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "main",
+      "readyMs": 30.799999952316284,
+      "paintedMs": 51.09999990463257,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-Daf8KNiW.css",
+          "durationMs": 3.299999952316284,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-jyL-p--S.js",
+          "durationMs": 3.6999998092651367,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "main",
+      "readyMs": 29.700000047683716,
+      "paintedMs": 36.200000047683716,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-jyL-p--S.js",
+          "durationMs": 3.6000001430511475,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-Daf8KNiW.css",
+          "durationMs": 3.0999999046325684,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 18.40000009536743,
+      "paintedMs": 44.59999990463257,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-jyL-p--S.js",
+          "durationMs": 3.5,
+          "transferSize": 300,
+          "decodedBodySize": 426606
+        },
+        {
+          "name": "startup-Daf8KNiW.css",
+          "durationMs": 3.5,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 16.600000143051147,
+      "paintedMs": 34.60000014305115,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-jyL-p--S.js",
+          "durationMs": 3.5,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-Daf8KNiW.css",
+          "durationMs": 3,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    },
+    {
+      "window": "lastfm-importer",
+      "readyMs": 14.899999856948853,
+      "paintedMs": 44.299999952316284,
+      "viewport": [
+        1280,
+        720
+      ],
+      "longTasksMs": [],
+      "resources": [
+        {
+          "name": "startup-jyL-p--S.js",
+          "durationMs": 3.799999952316284,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        },
+        {
+          "name": "startup-Daf8KNiW.css",
+          "durationMs": 3.3999998569488525,
+          "transferSize": 300,
+          "decodedBodySize": 0
+        }
+      ]
+    }
+  ]
+}

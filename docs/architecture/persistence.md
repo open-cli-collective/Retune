@@ -57,6 +57,10 @@ reported to their caller or recovery coordinator instead of being silently
 discarded. Quarantine renames the evidence to a unique sibling and never writes
 a replacement over it during the failing load.
 
+Startup validates and normalizes existing settings in memory without rewriting
+the file. Only a missing settings file creates and atomically saves defaults;
+ordinary settings mutations persist normalized values through the same owner.
+
 `cooldowns.json` and `artist-genres.json` have separate concrete filesystem
 owners. Full Spotify sync receives both; content actions and importer policy
 receive only cooldown persistence. Their filenames and JSON formats are
@@ -441,3 +445,9 @@ the unsafe boundary receives only live, nul-terminated UTF-16 path buffers.
 Persist only state that must survive relaunch. Keep caches reconstructible, use
 atomic replacement for new state files, and define migration/default behavior in
 tests whenever a serialized shape changes.
+
+Startup recovery and the initial overlay, membership, playlist, settings, and
+cooldown reads run together on the blocking pool. The shell publishes their
+results only after all reads succeed; application commands wait at the shell
+dispatcher until initialization finishes. Existing valid settings are read without
+a redundant save; missing defaults still use atomic persistence.

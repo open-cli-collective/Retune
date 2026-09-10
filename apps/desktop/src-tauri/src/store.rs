@@ -1407,6 +1407,15 @@ impl FsSettingsStore {
         }
     }
 
+    pub fn load_for_startup(&self) -> StoreResult<Settings> {
+        if let Some(settings) = self.load()? {
+            return Ok(settings);
+        }
+        let settings = Settings::default();
+        self.save(&settings)?;
+        Ok(settings)
+    }
+
     pub fn save(&self, settings: &Settings) -> StoreResult<()> {
         #[cfg(test)]
         if let Some(hook) = self.save_hook.lock().unwrap().take() {
@@ -1701,6 +1710,44 @@ mod tests {
 
     use super::*;
     use crate::fixture;
+
+    #[test]
+    fn startup_settings_create_missing_defaults_without_rewriting_existing_or_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsSettingsStore::new(dir.path());
+        assert_eq!(store.load_for_startup().unwrap(), Settings::default());
+        assert_eq!(store.load().unwrap(), Some(Settings::default()));
+        let existing = serde_json::to_vec_pretty(&Settings::default()).unwrap();
+        fs::write(&store.path, &existing).unwrap();
+        assert_eq!(store.load_for_startup().unwrap(), Settings::default());
+        assert_eq!(fs::read(&store.path).unwrap(), existing);
+        fs::write(&store.path, b"invalid settings").unwrap();
+        assert!(store.load_for_startup().is_err());
+        assert_eq!(fs::read(&store.path).unwrap(), b"invalid settings");
+    }
+
+    #[test]
+    #[ignore = "manual startup settings performance experiment"]
+    fn startup_settings_performance() {
+        for sample in 1..=3 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FsSettingsStore::new(dir.path());
+            let start = std::time::Instant::now();
+            std::hint::black_box(store.load_for_startup().unwrap());
+            let missing_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(store.load_for_startup().unwrap());
+            }
+            println!(
+                "TAURI_PERF {}",
+                serde_json::json!({
+                    "scenario": "startup-settings", "sample": sample, "iterations": 100,
+                    "missingMs": missing_ms, "existingTotalMs": start.elapsed().as_secs_f64() * 1000.0,
+                })
+            );
+        }
+    }
 
     #[test]
     fn delayed_user_patch_preserves_newer_sync_bookkeeping_in_memory_and_on_disk() {

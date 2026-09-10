@@ -1,0 +1,109 @@
+{
+  "commit": "71467f3",
+  "tool": "React Profiler; simulated document visibility in Chromium, not native hiding",
+  "samples": [
+    {
+      "scenario": "library-playback",
+      "durationMs": 12015.399999856949,
+      "commits": 13,
+      "totalRenderMs": 7.6999993324279785,
+      "maxRenderMs": 0.7999999523162842,
+      "maxFrameGapMs": 17.700000000000728,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "12",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [
+        0.6999998092651367,
+        0,
+        0.6999998092651367,
+        0.3000001907348633,
+        0.6999998092651367,
+        0.7000000476837158,
+        0.7000000476837158,
+        0.6000001430511475,
+        0.5999999046325684,
+        0.6999998092651367,
+        0.5999999046325684,
+        0.5999999046325684,
+        0.7999999523162842
+      ],
+      "simulatedVisibility": "hidden",
+      "animationStates": [
+        "running"
+      ]
+    },
+    {
+      "scenario": "library-playback",
+      "durationMs": 12012.400000095367,
+      "commits": 12,
+      "totalRenderMs": 8.199999570846558,
+      "maxRenderMs": 0.8000001907348633,
+      "maxFrameGapMs": 17.700000000004366,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "12",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [
+        0.7999999523162842,
+        0.8000001907348633,
+        0.8000001907348633,
+        0.39999985694885254,
+        0.7999999523162842,
+        0.7000000476837158,
+        0.5999999046325684,
+        0.5999999046325684,
+        0.6999998092651367,
+        0.5999999046325684,
+        0.7000000476837158,
+        0.6999998092651367
+      ],
+      "simulatedVisibility": "hidden",
+      "animationStates": [
+        "running"
+      ]
+    },
+    {
+      "scenario": "library-playback",
+      "durationMs": 12012.100000143051,
+      "commits": 12,
+      "totalRenderMs": 9,
+      "maxRenderMs": 0.8000001907348633,
+      "maxFrameGapMs": 17.70000000001164,
+      "longTasksMs": [],
+      "ipcDuringTicks": 0,
+      "rows": 41,
+      "elapsed": "12",
+      "viewport": [
+        1280,
+        720
+      ],
+      "samples": [
+        0.7999999523162842,
+        0.7999999523162842,
+        0.7000000476837158,
+        0.7999999523162842,
+        0.7999999523162842,
+        0.7999999523162842,
+        0.6000001430511475,
+        0.8000001907348633,
+        0.7000000476837158,
+        0.6999998092651367,
+        0.7000000476837158,
+        0.7999999523162842
+      ],
+      "simulatedVisibility": "hidden",
+      "animationStates": [
+        "running"
+      ]
+    }
+  ]
+}

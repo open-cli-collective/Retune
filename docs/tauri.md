@@ -98,8 +98,13 @@ owns queue advancement and visible playback state.
 
 ## Runtime and lifecycle
 
-Startup creates the stores and performs crash recovery before publishing
-authoritative in-memory state. Long hydration and follow-up connection work is
+Startup performs crash recovery and reads the overlay, membership, playlists,
+settings, and cooldown on an owned blocking task before publishing authoritative
+in-memory state. Setup returns while that task runs; the application command
+dispatcher waits for its success or rejects calls with the startup failure.
+Native menu/media composition remains on the main thread. Early native actions
+are ignored until state exists, and exit waits for startup recovery to complete
+before the normal drain. Long hydration and follow-up connection work is
 owned by spawned tasks; startup notices are published through the main
 channel. Persistent mutations use their owning gate and detached completion so
 caller cancellation cannot leave durable state newer than an authoritative
@@ -131,6 +136,11 @@ The webview loads only bundled content. The CSP denies base, object, frame, and
 form destinations; permits scripts from self; permits artwork from self,
 `https://i.scdn.co`, and data URLs; and limits connections to Tauri IPC. Adding
 a remote origin requires an explicit architecture review.
+
+The frontend entry loads only the component for its native window label. Main
+and importer view modules are separate chunks; shared theme/dialog CSS remains
+eager. A loading status is replaced by the chosen view, and a chunk-load error
+offers a full-window retry without changing the webview's authority.
 
 Vite binds `127.0.0.1` on strict port `5173` and chooses the frontend target
 appropriate to the native webview floor. Tauri's development URL must remain

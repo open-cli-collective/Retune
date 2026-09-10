@@ -1,0 +1,249 @@
+{
+  "commit": "22342c7",
+  "tool": "React Profiler and two animation frames per action, Codex in-app Chromium",
+  "samples": [
+    {
+      "viewport": [
+        1280,
+        720
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 730.2999999523163,
+          "renderMs": 387.6999981403351,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": null,
+          "longTasksMs": [
+            430,
+            287
+          ],
+          "maxFrameGapMs": 700.3
+        },
+        {
+          "name": "select",
+          "durationMs": 333.89999985694885,
+          "renderMs": 202.29999947547913,
+          "commits": 1,
+          "rows": 4100,
+          "focusedRow": null,
+          "longTasksMs": [
+            319
+          ],
+          "maxFrameGapMs": 333.5
+        },
+        {
+          "name": "end",
+          "durationMs": 416.39999985694885,
+          "renderMs": 213.8000009059906,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": "Track 99 by Artist 99",
+          "longTasksMs": [
+            208,
+            208
+          ],
+          "maxFrameGapMs": 200.10000000000014
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 590.2999999523163,
+          "renderMs": 312.6000008583069,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [
+            279,
+            310
+          ],
+          "maxFrameGapMs": 316.8000000000002
+        },
+        {
+          "name": "sort",
+          "durationMs": 582.2999999523163,
+          "renderMs": 122.49999928474426,
+          "commits": 1,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [
+            575
+          ],
+          "maxFrameGapMs": 566.7999999999997
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 31.200000047683716,
+          "renderMs": 0,
+          "commits": 0,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [],
+          "maxFrameGapMs": 16.699999999999818
+        }
+      ]
+    },
+    {
+      "viewport": [
+        1280,
+        720
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 769.7000000476837,
+          "renderMs": 401.30000042915344,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": null,
+          "longTasksMs": [
+            443,
+            312
+          ],
+          "maxFrameGapMs": 750.3000000000029
+        },
+        {
+          "name": "select",
+          "durationMs": 370.30000019073486,
+          "renderMs": 216.60000014305115,
+          "commits": 1,
+          "rows": 4100,
+          "focusedRow": null,
+          "longTasksMs": [
+            364
+          ],
+          "maxFrameGapMs": 366.79999999999563
+        },
+        {
+          "name": "end",
+          "durationMs": 437.60000014305115,
+          "renderMs": 221.9000005722046,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": "Track 99 by Artist 99",
+          "longTasksMs": [
+            221,
+            216
+          ],
+          "maxFrameGapMs": 216.6999999999971
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 628,
+          "renderMs": 335.3000009059906,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [
+            313,
+            314
+          ],
+          "maxFrameGapMs": 317.6999999999971
+        },
+        {
+          "name": "sort",
+          "durationMs": 536.3999998569489,
+          "renderMs": 125.99999928474426,
+          "commits": 1,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [
+            536
+          ],
+          "maxFrameGapMs": 533.5999999999985
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 30.90000009536743,
+          "renderMs": 0,
+          "commits": 0,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [],
+          "maxFrameGapMs": 18.5
+        }
+      ]
+    },
+    {
+      "viewport": [
+        1280,
+        720
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 797.4000000953674,
+          "renderMs": 421.2000005245209,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": null,
+          "longTasksMs": [
+            463,
+            319
+          ],
+          "maxFrameGapMs": 767
+        },
+        {
+          "name": "select",
+          "durationMs": 350.30000019073486,
+          "renderMs": 203.70000052452087,
+          "commits": 1,
+          "rows": 4100,
+          "focusedRow": null,
+          "longTasksMs": [
+            345
+          ],
+          "maxFrameGapMs": 350.1999999999971
+        },
+        {
+          "name": "end",
+          "durationMs": 420.7000000476837,
+          "renderMs": 216.00000095367432,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": "Track 99 by Artist 99",
+          "longTasksMs": [
+            212,
+            208
+          ],
+          "maxFrameGapMs": 216.79999999999563
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 620.5,
+          "renderMs": 329.4000036716461,
+          "commits": 2,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [
+            309,
+            309
+          ],
+          "maxFrameGapMs": 316.79999999999563
+        },
+        {
+          "name": "sort",
+          "durationMs": 525.2999999523163,
+          "renderMs": 122.50000023841858,
+          "commits": 1,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [
+            523
+          ],
+          "maxFrameGapMs": 516.9000000000015
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 33,
+          "renderMs": 0,
+          "commits": 0,
+          "rows": 4100,
+          "focusedRow": "Track 0 by Artist 0",
+          "longTasksMs": [],
+          "maxFrameGapMs": 16.80000000000291
+        }
+      ]
+    }
+  ]
+}

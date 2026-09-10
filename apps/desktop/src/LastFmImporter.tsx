@@ -12,6 +12,7 @@ import { appGateway } from './appGateway.ts'
 import { activeImportQueue, applyCurrentImportPageResponse, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludeImportRows, excludedImportCount, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, isCurrentImportRefresh, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type CollectionAmbiguousChoice, type CollectionTrackStatusProjection, type CountMode, type ImportApplyErrorCode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueueTabTarget, type ImportRowSelection, type ImportSourceRow, type ReviewBatchKey, type ReviewState } from './lastfmImportState.ts'
 import { formatTime } from './ui.ts'
 import './lastfmImporter.css'
+import { loadImportQueue } from './loadImportQueue.ts'
 
 type ImportStateView = LastFmImportState
 type PickerKind = ImportPickerKind
@@ -22,7 +23,6 @@ const IMPORT_NAV_KEYS = 'ArrowUp ArrowDown Tab Shift+Tab Enter E Space X S A Esc
 
 const emptyDefaults: LastFmImportDefaults = { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }
 const emptyState: ImportStateView = { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: emptyDefaults, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: 'Retune is still loading Last.fm import state.', applyingAll: false, spotifyLimit: null }
-const importQueuePageLimit = 1000
 const invalidApplyResultMessage = 'Retune received an invalid Last.fm import result.'
 type DisplayError = { message: string; code: ImportApplyErrorCode; retryAt: number | null }
 
@@ -44,27 +44,6 @@ function SpotifyLimitNotice({ code, retryAt }: { code: ImportApplyErrorCode; ret
   return <span className="import-limit-reset">{now >= retryAt ? 'Spotify’s reported wait has ended; retry now.' : <>Available again <time dateTime={date.toISOString()}>{date.toLocaleString()}</time> · {spotifyLimitCountdown(retryAt, now)} remaining</>}</span>
 }
 
-async function loadImportQueue(): Promise<ImportQueueItem[]> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const items: ImportQueueItem[] = []
-    let cursor = 0
-    let total: number | undefined
-    while (true) {
-      const page = await lastfmGateway.queue(cursor, importQueuePageLimit)
-      if (page.cursor !== cursor || page.items.length > importQueuePageLimit) throw new Error('Last.fm import queue pagination is invalid.')
-      if (total !== undefined && page.total !== total) break
-      total ??= page.total
-      items.push(...page.items)
-      if (page.nextCursor === null) {
-        if (items.length === page.total) return items
-        break
-      }
-      if (!Number.isSafeInteger(page.nextCursor) || page.nextCursor <= cursor || page.nextCursor > page.total) throw new Error('Last.fm import queue pagination is invalid.')
-      cursor = page.nextCursor
-    }
-  }
-  throw new Error('Last.fm import queue changed while it was loading. Please retry.')
-}
 
 function reviewForPage(page: PageView): ReviewState {
   const rows = page.rows.map((item) => item.source)
@@ -1148,7 +1127,7 @@ export default function LastFmImporter() {
     const currentSelectedPage = selectedPageRef.current
     const currentSort = sortRef.current
     try {
-      const { value: [nextState, nextQueue], applied } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue()]), ([currentState, currentQueue]) => {
+      const { value: [nextState, nextQueue], applied } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue(() => isCurrentImportRefresh(requestGeneration, refreshGeneration))]), ([currentState, currentQueue]) => {
         setState(currentState)
         setShowQueries(currentState.searchTerms)
         setQueue(currentQueue)
@@ -1195,7 +1174,7 @@ export default function LastFmImporter() {
   const refreshQueueOnly = useCallback(async (strict = false): Promise<ImportQueueItem[]> => {
     const requestGeneration = beginImportRefresh(refreshGeneration)
     try {
-      const { value: [, nextQueue] } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue()]), ([nextState, currentQueue]) => {
+      const { value: [, nextQueue] } = await applyCurrentImportRefresh(requestGeneration, refreshGeneration, Promise.all([lastfmGateway.state(), loadImportQueue(() => isCurrentImportRefresh(requestGeneration, refreshGeneration))]), ([nextState, currentQueue]) => {
         setState(nextState)
         setShowQueries(nextState.searchTerms)
         setQueue(currentQueue)
