@@ -5,13 +5,13 @@ Keep these changes separate from main until each result has been assessed.
 
 | Step | Experiment | Measurement and behavior checks | Status |
 | --- | --- | --- | --- |
-| 1 | Isolate elapsed-only playback presentation | Library and playlist React duration, long tasks, frame gaps, rendered scope; pause, seek, track changes, external playback, queue authority | Fixture comparison complete; native validation pending |
-| 2 | Window large playlists; avoid rebuilding order/queue on unrelated renders | Opening, selection, scrolling, ticks, DOM count; duplicate entries, focus, multiselection, drag/reorder | Fixture comparison complete; native validation pending |
-| 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Document-visibility probe complete; native CPU/minimize pending (Mac locked) |
-| 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Store benchmark complete; native launch timing pending |
+| 1 | Isolate elapsed-only playback presentation | Library and playlist React duration, long tasks, frame gaps, rendered scope; pause, seek, track changes, external playback, queue authority | Fixture comparison complete; combined native checks complete |
+| 2 | Window large playlists; avoid rebuilding order/queue on unrelated renders | Opening, selection, scrolling, ticks, DOM count; duplicate entries, focus, multiselection, drag/reorder | Fixture comparison complete; combined native checks complete |
+| 3 | Suspend hidden presentation and decorative animation | Visible/hidden/minimized CPU and render activity; fresh state on show, uninterrupted controller/audio work | Fixture and native visibility/minimize complete; no idle CPU win |
+| 4a | Remove unnecessary startup settings writes | Warm/cold startup stage durations and write count; defaults and recovery | Store benchmark complete; combined native startup unchanged |
 | 4b | Load only the selected window entry | Production bundle/startup timing for main and importer; first interaction | Bundle/startup fixture complete; no demonstrated latency gain |
-| 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | File-load benchmark complete; native first paint pending |
-| 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Burst fixture complete; native IPC pending |
+| 4c | Move remaining eligible startup I/O off first-paint path | Native first-paint/usable-data timing, overlay/cache/playlist hydration, recovery-before-publication | File-load and native ready-view measurements complete; no startup win |
+| 5 | Reduce full importer queue refresh work | Queue IPC count/bytes/time, first useful paint and refresh; global sort/filter, combine/selection, stale responses | Burst fixture complete; no native/account-bound performance claim |
 
 Measure at least three comparable samples before and after each discrete change.
 Preserve raw data and exact source revisions. Browser fixtures and React timings
@@ -69,10 +69,9 @@ seek changed 12→13 and Pause changed the accessible control to Play. Existing
 interaction coverage plus the added assertions exercise track replacement,
 external playback, selection while playing, and stop resetting/disabling seek.
 
-Result: strong reduction within this fixture; native-app recommendation remains
-**UNVERIFIED**. The Chromium fixture does not establish native CPU, memory,
-WebKit painting, or real audio behavior. Keep on the experiment branch and
-validate at the native boundary before proposing a merge.
+Result: strong reduction within this fixture. The combined native checks below
+confirm local playback and transport behavior; they do not isolate a native CPU
+effect for this step. This is one of the two strongest candidates to adopt.
 
 ## 2. Playlist windowing
 
@@ -106,8 +105,8 @@ focus and correct position/total metadata through the last row; the normal
 viewport was restored afterward.
 
 Result: strong fixture improvement for opening/selection/sort; scrolling unchanged
-within the measurement's resolution. Native-app recommendation remains
-**UNVERIFIED** pending WebKit/native validation.
+within the measurement's resolution. The combined native comparison below confirms
+large WebKit interaction gains. This is the strongest candidate to adopt.
 
 ## 3. Hidden presentation
 
@@ -129,12 +128,11 @@ unchanged. Tests additionally cover hidden 11→42 updates staying unpainted unt
 show, without reading Library data. All 96 Node checks and 71 interaction tests,
 lint, and production build pass.
 
-An isolated release-mode native build (development token store, no credentials)
-and a generated 4,000-file silent-audio fixture are prepared using
-`performance/native.config.json` and `performance/native_fixture.py`. The
-native baseline bundle is preserved separately. Computer Use reported that the
-Mac is locked, so native visible/hidden/minimized CPU and real WebKit visibility
-delivery remain **UNVERIFIED**. No native savings are inferred from these samples.
+The isolated release builds and generated silent-audio fixture below now verify
+real WebKit visibility delivery, elapsed refresh, and animation pause/resume for
+hidden and minimized windows. Their idle CPU samples show no reduction; the CPU
+scenario had playback paused and no scrolling title, so it does not measure the
+active-animation optimization.
 
 ## 4a. Startup settings writes
 
@@ -197,8 +195,8 @@ and Tauri ACL checks pass.
 
 Result: demonstrated per-window byte reduction; **no demonstrated startup speed
 gain**. Keep the experiment for comparison, but do not merge it solely as a
-latency optimization. Native WebKit startup and first-use costs remain
-**UNVERIFIED** while the Mac is locked. Raw timings are in
+latency optimization. Combined native startup measurements below also show no
+readiness gain; importer first-use native cost was not measured. Raw timings are in
 `04b-{baseline,after}-startup.json`.
 
 ## 4c. Startup file hydration
@@ -220,10 +218,12 @@ setup return time, rendering, native first paint, or cold disk startup.
 
 Startup checks pass for gating success/failure, abandoned initialization,
 corrupt-library quarantine, invalid settings preservation, and existing journal
-recovery. The native main-thread menu/media callback still needs packaged UI
-validation. This is the broadest experiment (it moves composition behind the file
-load), and the small fixture cost does not yet justify merging it. Native benefit
-remains **UNVERIFIED**. Raw data: `04c-{baseline,after}-files.json`.
+recovery. The combined native build launches, plays local files, installs its
+menus, and exits normally. Physical media keys and an exit racing deliberately
+stalled recovery were not exercised in native UI. This is the broadest experiment
+(it moves composition behind the file load), and neither its small fixture cost
+nor the combined native startup result justifies merging it. Raw data:
+`04c-{baseline,after}-files.json`.
 
 ## 5. Superseded importer refreshes
 
@@ -287,9 +287,117 @@ The skill's structural CLI was run for each input without an evidence registry;
 registry or user acceptance threshold was invented. These exploratory local
 measurements support further evaluation, not an authenticated merge decision.
 
-**Remaining work:** unlock the Mac and measure the isolated native bundles,
-including visible/hidden/minimized CPU, WebKit visibility delivery, first paint,
-menu/media/exit behavior, and uninterrupted local playback. No native memory or
-CPU saving has been established. `native-candidate.json` identifies the prepared
-candidate. All changes remain on the experiment branch; main is not a candidate
-for merging until the native checks and per-step assessment are complete.
+## Combined native WebKit comparison
+
+The native complement is complete on this host. All seven discrete experiments
+remain preserved; nothing has been merged or pushed. The original `main` checkout
+is unchanged. These measurements compare the pre-step-1 baseline (`8868b59`) with
+the final production code (`fea5335`, packaged from `ebaf788`), not individual
+native effects of all seven changes. `native-manifest.json` records full source
+revisions, bundle hashes, and the shared probe hash.
+
+Both are release-mode Tauri `.app` bundles with `dev-token-store`, identifier
+`com.rianjs.retune.performance`, the real frontend entry and IPC, and the same
+generated 4,000-track Library / 4,100-entry playlist. No Spotify or Last.fm account
+was used. All playback used digital silence at app volume zero. Host: Apple M4
+Pro, 48 GiB RAM, macOS 26.6.2 (25G83), WebKit 21624.5.1.11.3. Main-window content
+viewport was 1120×688. Neither build compilation nor the browser benchmarks ran
+during the interaction samples. Other ordinary desktop processes remained running.
+
+`performance/native.vite.config.mjs` adds the opt-in bundled probe without
+changing the production entry, authority, or CSP. Its button runs three identical
+sequences against actual DOM controls. Open waits for IPC-populated playlist rows;
+each action then waits two animation frames. These are ready-view proxies, not
+hardware scanout timestamps, and have a roughly 33 ms frame floor. Browser-fixture
+and native open durations therefore must not be directly pooled.
+
+| Native action | Before median, ms | After median, ms |
+| --- | ---: | ---: |
+| Open 4,100-entry playlist | 785 | 45 |
+| Select first entry | 261 | 33 |
+| End | 61 | 33 |
+| Shift+Home | 125 | 33 |
+| Sort by song | 707 | 33 |
+| Scroll to middle | 31 | 34 |
+
+Three samples each, in `native-{before,after}.json`. Mounted playlist rows fell
+from 4,100 to 45–46. End focused the same last duplicate in both versions;
+Shift+Home and subsequent sort retained selection across the mounted window.
+The separate interaction regression proves complete upstream positions remain
+available for mutations. These observations support the playlist change strongly;
+scrolling is unchanged within the measurement floor.
+
+Three warm launches per variant, after a discarded initial launch, measured
+kernel process start through the populated Library plus two animation frames:
+**607.6 ms before (594.5–666.1), 616.4 ms after (604.1–638.3)**. These ranges overlap.
+`native-{before,after}-startup.json` records the samples and process counters.
+This is neither cold-storage startup nor direct first-composited-frame evidence,
+and it gives no reason to adopt the broader startup rewrite. Navigation timing
+alone excludes native setup and must not be presented as whole-app startup.
+
+Idle samples used three consecutive five-second windows in each state after the
+playlist sequence and brief playback had finished. `native-process.c` reads
+`proc_pid_rusage`, converts Mach ticks with `mach_timebase_info`, and reads process
+start from `PROC_PIDTBSDINFO`; its CPU units were cross-checked against `ps TIME`.
+`native-sample.py` records raw counters for the app and its GPU, Networking, and
+WebContent services. Services launched with the app and all exited with it;
+pre-existing WebKit processes were excluded. CPU 100% means one core.
+
+| Paused native state | Before CPU % | After CPU % | Before summed footprint, MiB | After summed footprint, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Visible | 0.74 | 0.73 | 351.8 | 145.4 |
+| Hidden | 0.74 | 0.90 | 349.6 | 145.8 |
+| Minimized | 0.82 | 1.10 | 207.5 | 149.1 |
+
+There is **no demonstrated idle CPU saving**. The footprint snapshots suggest
+lower retained memory after the playlist workload, but they are consecutive
+samples from one process lifetime per variant, depend on garbage collection and
+window state, and sum reported process footprints rather than unique system
+memory. They are not three independent memory trials or a peak-memory claim.
+Raw files are `native-{before,after}-{visible,hidden,minimized}-cpu.json`;
+`native-summary.json` contains their medians. The first baseline CPU trial began
+during brief playback and was discarded before collecting these paused samples.
+
+Native functional checks passed: local playback while signed out, automatic
+pause after five seconds, hidden playback advancing from elapsed zero to four
+without painting intervening positions, updated elapsed on show, hide/minimize
+visibility delivery, and normal quit with all attributed processes gone. A
+separate 900-pixel-wide window check exercised the scrolling title: running while
+visible, paused after hide/minimize, running after show. The event and animation
+states are in `native-after-marquee.json`. The tested apps are now stopped.
+Physical media keys, OAuth, account-bound importer IPC, cold storage, and other
+operating systems were not tested; this is a performance experiment, not release
+certification. No authenticated registry status has changed.
+
+Reproduce the opt-in native build from `apps/desktop` with:
+
+```sh
+rtk proxy npm exec tauri build -- --features dev-token-store --bundles app --config performance/native.config.json
+rtk proxy clang -Wall -Wextra -Werror performance/native-process.c -o /tmp/native-process
+rtk proxy python3 performance/native-sample.py /tmp/native-process /tmp/native-cpu.json PID GPU_PID NETWORK_PID WEB_PID
+```
+
+Seed only a fresh isolated `com.rianjs.retune.performance` data directory using
+`performance/native_fixture.py`; it refuses an existing Library. Launch each
+saved bundle through Computer Use, use the probe controls, and read its JSON
+textarea through accessibility. For startup, subtract the main process's
+`startEpochMs` from `navigationTimeOrigin + readyMs`. Preserve each sample before
+quitting; verify the attributed processes exit between launches.
+
+## Adoption assessment
+
+1. **Elapsed presentation: adopt first.** Large isolated reduction in unnecessary
+   React work; no native playback regression found.
+2. **Playlist windowing: adopt first.** Large isolated gains, confirmed by native
+   opening and sorting, with full-data keyboard/selection regression coverage.
+3. **Hidden presentation: reasonable small improvement.** Removes measured hidden
+   React work and actually pauses WebKit animation; no battery/idle-CPU claim.
+4. **Settings write removal: reasonable small improvement.** Avoids an unnecessary
+   atomic write, about 4.8 ms per warm existing-settings load in the microbenchmark.
+5. **Lazy window entry: optional.** About 13% less gzip JS per window, no measured
+   startup speedup. Keep only if the byte reduction is worth the loader complexity.
+6. **Async startup file load: defer.** Broadest lifecycle change and no measured
+   native startup gain on this Library size.
+7. **Superseded importer refresh stop: reasonable small improvement.** 73% less
+   fixture IPC under a refresh burst, no faster newest-result readiness. It still
+   reads the full current queue and is not a general importer paging redesign.

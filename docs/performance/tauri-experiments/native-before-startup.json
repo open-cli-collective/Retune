@@ -1,0 +1,104 @@
+[
+  {
+    "navigationReadyMs": 162,
+    "processToLibraryReadyMs": 666.1201171875,
+    "processes": [
+      {
+        "comm": "/private/tmp/retune-performance-experiments/apps/native-before/Retune Performance.app/Contents/MacOS/retune-desktop",
+        "pid": 73990,
+        "startEpochMs": 1789003215788.88,
+        "cpuNs": 367529041,
+        "physicalFootprintBytes": 61850800
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+        "pid": 73991,
+        "startEpochMs": 1789003216008.328,
+        "cpuNs": 103272541,
+        "physicalFootprintBytes": 178488112
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+        "pid": 73992,
+        "startEpochMs": 1789003216023.352,
+        "cpuNs": 29130666,
+        "physicalFootprintBytes": 7143976
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent",
+        "pid": 73993,
+        "startEpochMs": 1789003216026.036,
+        "cpuNs": 205702458,
+        "physicalFootprintBytes": 93225776
+      }
+    ]
+  },
+  {
+    "navigationReadyMs": 96,
+    "processToLibraryReadyMs": 607.6279296875,
+    "processes": [
+      {
+        "comm": "/private/tmp/retune-performance-experiments/apps/native-before/Retune Performance.app/Contents/MacOS/retune-desktop",
+        "pid": 74024,
+        "startEpochMs": 1789003217268.372,
+        "cpuNs": 358452208,
+        "physicalFootprintBytes": 59999360
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+        "pid": 74026,
+        "startEpochMs": 1789003217441.098,
+        "cpuNs": 103738375,
+        "physicalFootprintBytes": 180536064
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+        "pid": 74027,
+        "startEpochMs": 1789003217451.436,
+        "cpuNs": 30040958,
+        "physicalFootprintBytes": 7569936
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent",
+        "pid": 74028,
+        "startEpochMs": 1789003217454.153,
+        "cpuNs": 215841541,
+        "physicalFootprintBytes": 93930288
+      }
+    ]
+  },
+  {
+    "navigationReadyMs": 95,
+    "processToLibraryReadyMs": 594.52392578125,
+    "processes": [
+      {
+        "comm": "/private/tmp/retune-performance-experiments/apps/native-before/Retune Performance.app/Contents/MacOS/retune-desktop",
+        "pid": 74054,
+        "startEpochMs": 1789003218661.476,
+        "cpuNs": 360115291,
+        "physicalFootprintBytes": 61473968
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+        "pid": 74075,
+        "startEpochMs": 1789003218832.663,
+        "cpuNs": 102050458,
+        "physicalFootprintBytes": 180470456
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+        "pid": 74076,
+        "startEpochMs": 1789003218844.519,
+        "cpuNs": 28764916,
+        "physicalFootprintBytes": 7340560
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent",
+        "pid": 74077,
+        "startEpochMs": 1789003218847.806,
+        "cpuNs": 211007875,
+        "physicalFootprintBytes": 93569912
+      }
+    ]
+  }
+]

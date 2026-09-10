@@ -1,0 +1,28 @@
+{
+  "platform": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83\n",
+  "harnessSha256": "95db9448c9799247c721f3d7e3438e4f422e108d0a46a2e4e2855bc6fd02d2ce",
+  "fixture": {
+    "tracks": 4000,
+    "playlistEntries": 4100,
+    "volume": 0
+  },
+  "variants": {
+    "before": {
+      "sourceCommit": "8868b590b05efd5046367702f11acff9b95a1b05",
+      "app": "/tmp/retune-performance-experiments/apps/native-before/Retune Performance.app",
+      "binarySha256": "55288c7f7d978f544b730b9aca5a24eada608b8690d8bed00e00bccb3ab04ade"
+    },
+    "after": {
+      "sourceCommit": "ebaf7883b7b0f357503dde59b012af987b7c7466",
+      "app": "/tmp/retune-performance-experiments/apps/native-after/Retune Performance.app",
+      "binarySha256": "7f80a47bd23808f57931eada7835bdaf9454d69fe78a2b9ea516f5f1decc5e95"
+    }
+  },
+  "hardware": {
+    "cpu": "Apple M4 Pro",
+    "memoryBytes": 51539607552
+  },
+  "webKitVersion": "21624.5.1.11.3",
+  "webKitVersionSource": "macOS sample header from native baseline WebContent process",
+  "scope": "Opt-in identical native-probe.js, actual App and IPC. Source revisions differ in seven production experiments; measurements are combined native comparison."
+}

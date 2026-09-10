@@ -33,7 +33,10 @@ for index in range(args.count):
                        kind='WAV', bitrate_kbps=128, rating=None, orig_cat=None))
 settings = dict(theme='light', zoom=1, zebra=True, columnOrder=['track', 'name', 'artist', 'album', 'time', 'plays', 'rating', 'genre'],
                 autoAddSpotifyLibrary=False, autoConnect=False, spotifyClientId='', volume=0, lastfmScrobbling=False)
-for name, value in [('library.json', dict(version=1, library=dict(tracks=tracks, album_ratings=[], next_id=args.count + 1))), ('settings.json', settings)]:
+uris = [track['uri'] for track in tracks] + [track['uri'] for track in tracks[:100]]
+playlists = dict(playlists=[dict(id='fixture', name='Performance playlist', snapshot_id='fixture', owned=True,
+                               owner=None, track_count=len(uris), tracks=uris, track_metadata_version=1, spotify_tracks=[])])
+for name, value in [('library.json', dict(version=1, library=dict(tracks=tracks, album_ratings=[], next_id=args.count + 1))), ('settings.json', settings), ('playlists.json', playlists)]:
     temporary = args.data_dir / f'{name}.tmp'
     temporary.write_text(json.dumps(value))
     os.replace(temporary, args.data_dir / name)

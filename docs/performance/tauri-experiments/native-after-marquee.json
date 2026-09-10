@@ -1,0 +1,87 @@
+{
+  "navigationTimeOrigin": 1789003443482,
+  "readyMs": 179,
+  "interactions": [],
+  "visibility": [
+    {
+      "atMs": 49843,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": [
+        "running"
+      ]
+    },
+    {
+      "atMs": 49943,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": [
+        "paused"
+      ]
+    },
+    {
+      "atMs": 63386,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": [
+        "paused"
+      ]
+    },
+    {
+      "atMs": 63488,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": [
+        "running"
+      ]
+    },
+    {
+      "atMs": 64522.00000000001,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": [
+        "running"
+      ]
+    },
+    {
+      "atMs": 64622,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": [
+        "paused"
+      ]
+    },
+    {
+      "atMs": 93811,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": [
+        "paused"
+      ]
+    },
+    {
+      "atMs": 93912,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": [
+        "running"
+      ]
+    }
+  ],
+  "playback": [
+    {
+      "atMs": 31342.000000000004,
+      "state": "visible",
+      "elapsed": "0",
+      "animationStates": []
+    },
+    {
+      "atMs": 36344,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": [
+        "running"
+      ]
+    }
+  ]
+}

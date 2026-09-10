@@ -1,0 +1,244 @@
+{
+  "navigationTimeOrigin": 1789003231020,
+  "readyMs": 169,
+  "interactions": [
+    {
+      "viewport": [
+        1120,
+        688
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 50.99999999999909,
+          "mountedRows": 45,
+          "selectedRows": 0,
+          "focusedRow": null
+        },
+        {
+          "name": "select",
+          "durationMs": 33,
+          "mountedRows": 45,
+          "selectedRows": 1,
+          "focusedRow": null
+        },
+        {
+          "name": "end",
+          "durationMs": 34,
+          "mountedRows": 45,
+          "selectedRows": 1,
+          "focusedRow": "Track 00099 — long playback title for native marquee measurement by Artist 099"
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 33,
+          "mountedRows": 45,
+          "selectedRows": 45,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "sort",
+          "durationMs": 32,
+          "mountedRows": 45,
+          "selectedRows": 45,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 34,
+          "mountedRows": 46,
+          "selectedRows": 46,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        }
+      ]
+    },
+    {
+      "viewport": [
+        1120,
+        688
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 45,
+          "mountedRows": 45,
+          "selectedRows": 0,
+          "focusedRow": null
+        },
+        {
+          "name": "select",
+          "durationMs": 32.99999999999909,
+          "mountedRows": 45,
+          "selectedRows": 1,
+          "focusedRow": null
+        },
+        {
+          "name": "end",
+          "durationMs": 33,
+          "mountedRows": 45,
+          "selectedRows": 1,
+          "focusedRow": "Track 00099 — long playback title for native marquee measurement by Artist 099"
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 34,
+          "mountedRows": 45,
+          "selectedRows": 45,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "sort",
+          "durationMs": 33.00000000000091,
+          "mountedRows": 45,
+          "selectedRows": 45,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 32,
+          "mountedRows": 46,
+          "selectedRows": 46,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        }
+      ]
+    },
+    {
+      "viewport": [
+        1120,
+        688
+      ],
+      "actions": [
+        {
+          "name": "open",
+          "durationMs": 42,
+          "mountedRows": 45,
+          "selectedRows": 0,
+          "focusedRow": null
+        },
+        {
+          "name": "select",
+          "durationMs": 34,
+          "mountedRows": 45,
+          "selectedRows": 1,
+          "focusedRow": null
+        },
+        {
+          "name": "end",
+          "durationMs": 33,
+          "mountedRows": 45,
+          "selectedRows": 1,
+          "focusedRow": "Track 00099 — long playback title for native marquee measurement by Artist 099"
+        },
+        {
+          "name": "shift-home",
+          "durationMs": 33.00000000000091,
+          "mountedRows": 45,
+          "selectedRows": 45,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "sort",
+          "durationMs": 32.99999999999909,
+          "mountedRows": 45,
+          "selectedRows": 45,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        },
+        {
+          "name": "scroll-middle",
+          "durationMs": 34,
+          "mountedRows": 46,
+          "selectedRows": 46,
+          "focusedRow": "Track 00000 — long playback title for native marquee measurement by Artist 000"
+        }
+      ]
+    }
+  ],
+  "visibility": [
+    {
+      "atMs": 34683,
+      "state": "hidden",
+      "elapsed": "0",
+      "animationStates": []
+    },
+    {
+      "atMs": 34784,
+      "state": "hidden",
+      "elapsed": "0",
+      "animationStates": []
+    },
+    {
+      "atMs": 60473,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 60574,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 92473,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 92574,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 137797,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 137899,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 138920.00000000003,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 139022,
+      "state": "hidden",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 168369,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    },
+    {
+      "atMs": 168470,
+      "state": "visible",
+      "elapsed": "4",
+      "animationStates": []
+    }
+  ],
+  "playback": [
+    {
+      "atMs": 34266,
+      "state": "visible",
+      "elapsed": "0",
+      "animationStates": []
+    },
+    {
+      "atMs": 39267,
+      "state": "hidden",
+      "elapsed": "0",
+      "animationStates": []
+    }
+  ]
+}

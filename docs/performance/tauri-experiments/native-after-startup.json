@@ -1,0 +1,107 @@
+[
+  {
+    "navigationTimeOrigin": 1789003414852,
+    "navigationReadyMs": 158,
+    "processToLibraryReadyMs": 638.344970703125,
+    "processes": [
+      {
+        "comm": "/private/tmp/retune-performance-experiments/apps/native-after/Retune Performance.app/Contents/MacOS/retune-desktop",
+        "pid": 74437,
+        "startEpochMs": 1789003414371.655,
+        "cpuNs": 370724500,
+        "physicalFootprintBytes": 62014616
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+        "pid": 74438,
+        "startEpochMs": 1789003414586.973,
+        "cpuNs": 110898541,
+        "physicalFootprintBytes": 178914024
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+        "pid": 74439,
+        "startEpochMs": 1789003414599.946,
+        "cpuNs": 30059625,
+        "physicalFootprintBytes": 7406096
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent",
+        "pid": 74440,
+        "startEpochMs": 1789003414602.737,
+        "cpuNs": 213340416,
+        "physicalFootprintBytes": 101925776
+      }
+    ]
+  },
+  {
+    "navigationTimeOrigin": 1789003416194,
+    "navigationReadyMs": 167,
+    "processToLibraryReadyMs": 604.083984375,
+    "processes": [
+      {
+        "comm": "/private/tmp/retune-performance-experiments/apps/native-after/Retune Performance.app/Contents/MacOS/retune-desktop",
+        "pid": 74471,
+        "startEpochMs": 1789003415756.916,
+        "cpuNs": 371701583,
+        "physicalFootprintBytes": 61637808
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+        "pid": 74473,
+        "startEpochMs": 1789003415933.683,
+        "cpuNs": 108663833,
+        "physicalFootprintBytes": 178619160
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+        "pid": 74474,
+        "startEpochMs": 1789003415949.348,
+        "cpuNs": 31656041,
+        "physicalFootprintBytes": 7307768
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent",
+        "pid": 74475,
+        "startEpochMs": 1789003415954.544,
+        "cpuNs": 211774958,
+        "physicalFootprintBytes": 90260296
+      }
+    ]
+  },
+  {
+    "navigationTimeOrigin": 1789003417566,
+    "navigationReadyMs": 184,
+    "processToLibraryReadyMs": 616.43798828125,
+    "processes": [
+      {
+        "comm": "/private/tmp/retune-performance-experiments/apps/native-after/Retune Performance.app/Contents/MacOS/retune-desktop",
+        "pid": 74503,
+        "startEpochMs": 1789003417133.562,
+        "cpuNs": 363187750,
+        "physicalFootprintBytes": 59966640
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+        "pid": 74504,
+        "startEpochMs": 1789003417315.713,
+        "cpuNs": 108583875,
+        "physicalFootprintBytes": 180994792
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+        "pid": 74505,
+        "startEpochMs": 1789003417327.57,
+        "cpuNs": 29477708,
+        "physicalFootprintBytes": 7520784
+      },
+      {
+        "comm": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent",
+        "pid": 74506,
+        "startEpochMs": 1789003417330.533,
+        "cpuNs": 219171041,
+        "physicalFootprintBytes": 100254632
+      }
+    ]
+  }
+]

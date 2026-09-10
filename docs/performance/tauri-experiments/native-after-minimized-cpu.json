@@ -1,0 +1,173 @@
+[
+  {
+    "durationMs": 5064.781291,
+    "before": [
+      {
+        "pid": 74118,
+        "startEpochMs": 1789003229952.655,
+        "cpuNs": 1561820666,
+        "physicalFootprintBytes": 39339208
+      },
+      {
+        "pid": 74119,
+        "startEpochMs": 1789003230768.242,
+        "cpuNs": 369674333,
+        "physicalFootprintBytes": 144655176
+      },
+      {
+        "pid": 74120,
+        "startEpochMs": 1789003230781.02,
+        "cpuNs": 47912666,
+        "physicalFootprintBytes": 5718568
+      },
+      {
+        "pid": 74121,
+        "startEpochMs": 1789003230784.778,
+        "cpuNs": 1299321750,
+        "physicalFootprintBytes": 93438864
+      }
+    ],
+    "after": [
+      {
+        "pid": 74118,
+        "startEpochMs": 1789003229952.655,
+        "cpuNs": 1603042833,
+        "physicalFootprintBytes": 39257288
+      },
+      {
+        "pid": 74119,
+        "startEpochMs": 1789003230768.242,
+        "cpuNs": 391786625,
+        "physicalFootprintBytes": 22201184
+      },
+      {
+        "pid": 74120,
+        "startEpochMs": 1789003230781.02,
+        "cpuNs": 48601791,
+        "physicalFootprintBytes": 5702184
+      },
+      {
+        "pid": 74121,
+        "startEpochMs": 1789003230784.778,
+        "cpuNs": 1313739291,
+        "physicalFootprintBytes": 90833808
+      }
+    ],
+    "cpuPercent": 1.5487564120367463,
+    "summedPhysicalFootprintBytes": 157994464
+  },
+  {
+    "durationMs": 5064.80375,
+    "before": [
+      {
+        "pid": 74118,
+        "startEpochMs": 1789003229952.655,
+        "cpuNs": 1603342875,
+        "physicalFootprintBytes": 39257288
+      },
+      {
+        "pid": 74119,
+        "startEpochMs": 1789003230768.242,
+        "cpuNs": 391786625,
+        "physicalFootprintBytes": 22201184
+      },
+      {
+        "pid": 74120,
+        "startEpochMs": 1789003230781.02,
+        "cpuNs": 48601791,
+        "physicalFootprintBytes": 5702184
+      },
+      {
+        "pid": 74121,
+        "startEpochMs": 1789003230784.778,
+        "cpuNs": 1313944166,
+        "physicalFootprintBytes": 90833808
+      }
+    ],
+    "after": [
+      {
+        "pid": 74118,
+        "startEpochMs": 1789003229952.655,
+        "cpuNs": 1639265166,
+        "physicalFootprintBytes": 39257288
+      },
+      {
+        "pid": 74119,
+        "startEpochMs": 1789003230768.242,
+        "cpuNs": 402672291,
+        "physicalFootprintBytes": 21349216
+      },
+      {
+        "pid": 74120,
+        "startEpochMs": 1789003230781.02,
+        "cpuNs": 48601791,
+        "physicalFootprintBytes": 5702184
+      },
+      {
+        "pid": 74121,
+        "startEpochMs": 1789003230784.778,
+        "cpuNs": 1322720708,
+        "physicalFootprintBytes": 90080144
+      }
+    ],
+    "cpuPercent": 1.097465997571969,
+    "summedPhysicalFootprintBytes": 156388832
+  },
+  {
+    "durationMs": 5057.165791,
+    "before": [
+      {
+        "pid": 74118,
+        "startEpochMs": 1789003229952.655,
+        "cpuNs": 1639612291,
+        "physicalFootprintBytes": 39257288
+      },
+      {
+        "pid": 74119,
+        "startEpochMs": 1789003230768.242,
+        "cpuNs": 402672291,
+        "physicalFootprintBytes": 21349216
+      },
+      {
+        "pid": 74120,
+        "startEpochMs": 1789003230781.02,
+        "cpuNs": 48601791,
+        "physicalFootprintBytes": 5702184
+      },
+      {
+        "pid": 74121,
+        "startEpochMs": 1789003230784.778,
+        "cpuNs": 1322720708,
+        "physicalFootprintBytes": 90080144
+      }
+    ],
+    "after": [
+      {
+        "pid": 74118,
+        "startEpochMs": 1789003229952.655,
+        "cpuNs": 1676991625,
+        "physicalFootprintBytes": 39273672
+      },
+      {
+        "pid": 74119,
+        "startEpochMs": 1789003230768.242,
+        "cpuNs": 408957291,
+        "physicalFootprintBytes": 17253216
+      },
+      {
+        "pid": 74120,
+        "startEpochMs": 1789003230781.02,
+        "cpuNs": 48679833,
+        "physicalFootprintBytes": 5685800
+      },
+      {
+        "pid": 74121,
+        "startEpochMs": 1789003230784.778,
+        "cpuNs": 1330234416,
+        "physicalFootprintBytes": 90080144
+      }
+    ],
+    "cpuPercent": 1.0135337878623247,
+    "summedPhysicalFootprintBytes": 152292832
+  }
+]
