@@ -22,6 +22,13 @@ const MAX_MAPPINGS_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_REVIEW_TRANSACTION_BYTES: u64 = 256 * 1024 * 1024;
 const REVIEW_TRANSACTION_VERSION: u32 = 1;
 
+fn validate_session_size(size: usize) -> Result<(), String> {
+    if size > MAX_SERIALIZED_SESSION_BYTES {
+        return Err("The Last.fm import session exceeds the 512 MiB safety limit.".into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(super) struct ReviewTransaction {
     version: u32,
@@ -491,9 +498,7 @@ impl ImportSessionStore {
         validate_snapshot_cache_id(session)?;
         let bytes = serde_json::to_vec(session)
             .map_err(|_| "Could not serialize the Last.fm import session.".to_string())?;
-        if bytes.len() > MAX_SERIALIZED_SESSION_BYTES {
-            return Err("The Last.fm import session exceeds the 100 MB safety limit.".into());
-        }
+        validate_session_size(bytes.len())?;
         crate::persistence::atomic_write(&self.path, &bytes, Some(0o600))
             .map_err(|_| "Could not save the Last.fm import session.".to_string())
     }
@@ -953,5 +958,11 @@ mod tests {
                 .file_name()
                 .to_string_lossy()
                 .starts_with("lastfm-import.json.quarantine-")));
+    }
+
+    #[test]
+    fn import_session_size_limit_is_512_mib() {
+        assert!(validate_session_size(MAX_SERIALIZED_SESSION_BYTES).is_ok());
+        assert!(validate_session_size(MAX_SERIALIZED_SESSION_BYTES + 1).is_err());
     }
 }

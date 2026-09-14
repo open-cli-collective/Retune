@@ -9533,27 +9533,6 @@ fn persistence_round_trip_quarantines_corrupt_unknown_and_rejects_oversize() {
     store.save(&unknown).unwrap();
     assert_eq!(store.load().unwrap(), None);
     assert!(fs::read_dir(dir.path()).unwrap().count() >= 2);
-
-    let mut too_large = LastFmImportSessionV2::new("user".into(), "spotify".into(), 42);
-    too_large.rows.push(SourceRow {
-        stable_id: "x".into(),
-        artist: "a".into(),
-        album: "b".into(),
-        track: "c".into(),
-        variants: vec![SourceVariant {
-            artist: "a".into(),
-            album: "b".into(),
-            track: "c".into(),
-            play_count: 1,
-            earliest: 1,
-            latest: 1,
-        }],
-        play_count: 1,
-        earliest: 1,
-        latest: 1,
-    });
-    too_large.rows[0].variants[0].track = "x".repeat(MAX_SERIALIZED_SESSION_BYTES);
-    assert!(store.save(&too_large).is_err());
 }
 
 #[tokio::test]

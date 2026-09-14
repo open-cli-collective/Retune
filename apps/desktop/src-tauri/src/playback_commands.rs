@@ -380,15 +380,13 @@ mod tests {
     #[tokio::test]
     async fn resolver_preserves_a_mixed_local_and_spotify_queue() {
         let mut library = Library::new();
-        let local_id = library
-            .add(NewTrack {
-                uri: "file:///music/local.flac".into(),
-                source: SourceId::Music,
-                name: "Local".into(),
-                duration: Duration::from_secs(10),
-                ..NewTrack::default()
-            })
-            .0;
+        library.add(NewTrack {
+            uri: "file:///music/local.flac".into(),
+            source: SourceId::Music,
+            name: "Local".into(),
+            duration: Duration::from_secs(10),
+            ..NewTrack::default()
+        });
         let client = fake_client(Vec::<Response>::new(), "");
         let resources = [
             resource(999, "file:///music/local.flac"),
@@ -406,7 +404,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
-            vec![local_id, 9]
+            vec![999, 9]
         );
         assert_eq!(index, 1);
         assert!(client.transport().requests().is_empty());

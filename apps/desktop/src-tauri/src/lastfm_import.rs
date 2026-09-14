@@ -22,7 +22,7 @@ use crate::lastfm::{AcceptedScrobbleReceipt, ScrobbleMetadata};
 pub(crate) const SESSION_VERSION: u8 = 2;
 const LASTFM_PAGE_WINDOW_SIZE: u32 = 4;
 const LASTFM_QUEUE_PAGE_LIMIT: usize = 1000;
-pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 100 * 1024 * 1024;
+pub(crate) const MAX_SERIALIZED_SESSION_BYTES: usize = 512 * 1024 * 1024;
 const MAX_RAW_CACHE_BYTES: u64 = 100 * 1024 * 1024;
 const LASTFM_SYNC_VERSION: u8 = 1;
 pub(crate) const LASTFM_MAPPINGS_VERSION: u8 = 1;

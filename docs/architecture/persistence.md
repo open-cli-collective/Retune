@@ -36,10 +36,10 @@ before their contents are read.
 | `restore-journal.json` | Mode-0600 recoverable multi-file backup replacement journal; removed after completion |
 
 Reads are bounded before JSON allocation. Settings, credentials, tokens, and
-cooldowns are limited to 1 MiB; artist genres to 32 MiB; Last.fm raw cache,
-session, and mappings files to 100 MiB; playlists, Spotify membership, catalog,
-incremental Last.fm state, and the Last.fm review transaction to 256 MiB; the
-library to 512 MiB; and the
+cooldowns are limited to 1 MiB; artist genres to 32 MiB; Last.fm raw cache and
+mappings files to 100 MiB; playlists, Spotify membership, catalog, incremental
+Last.fm state, and the Last.fm review transaction to 256 MiB; the Last.fm import
+session and library to 512 MiB; and the
 restore journal to 1 GiB. Portable backup input is limited independently to
 128 MiB compressed/plain input and 512 MiB after gzip expansion. Oversized data
 follows the format's malformed/unsupported rejection or quarantine policy and

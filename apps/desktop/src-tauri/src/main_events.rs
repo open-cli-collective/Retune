@@ -49,6 +49,7 @@ enum MainEventKind {
 const MAX_PENDING_MAIN_EVENTS: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SpotifyPlayRequest {
     pub uri: String,
     pub name: String,
@@ -281,13 +282,14 @@ mod tests {
     #[test]
     fn importer_play_requests_validate_track_uris_and_retain_only_the_latest_request() {
         let sink = MainEventSink::default();
-        let mut track = SpotifyPlayRequest {
-            uri: "spotify:track:first".into(),
-            name: "Track".into(),
-            artist: "Artist".into(),
-            album: "Album".into(),
-            duration_secs: 180,
-        };
+        let mut track: SpotifyPlayRequest = serde_json::from_value(serde_json::json!({
+            "uri": "spotify:track:first",
+            "name": "Track",
+            "artist": "Artist",
+            "album": "Album",
+            "durationSecs": 180,
+        }))
+        .unwrap();
         sink.request_spotify_play(track.clone()).unwrap();
         for uri in [
             "file:///music.mp3",
@@ -300,7 +302,16 @@ mod tests {
         }
         track.uri = "spotify:track:latest".into();
         sink.request_spotify_play(track.clone()).unwrap();
-        let expected = serde_json::json!({ "type": "spotifyPlayRequested", "payload": track });
+        let expected = serde_json::json!({
+            "type": "spotifyPlayRequested",
+            "payload": {
+                "uri": "spotify:track:latest",
+                "name": "Track",
+                "artist": "Artist",
+                "album": "Album",
+                "durationSecs": 180,
+            },
+        });
         assert_eq!(sink.0.lock().unwrap().pending.len(), 1);
         sink.subscribe(Channel::new(move |body| {
             let tauri::ipc::InvokeResponseBody::Json(json) = body else {

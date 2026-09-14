@@ -44,7 +44,7 @@ pub(crate) fn resolve_cached(
             .get(library.canonical_uri(&resource.uri))
             .copied()
         {
-            tracks.push(Some(from_library(track)));
+            tracks.push(Some(from_library(resource, track)));
             enabled.push(track.enabled);
         } else if resource.uri.starts_with("file://") {
             return Err("Local playback resource is not in the library.".into());
@@ -168,9 +168,9 @@ fn validate_uri(uri: &str) -> Result<(), String> {
     }
 }
 
-fn from_library(track: &TrackRecord) -> SnapshotTrack {
+fn from_library(resource: &PlaybackResource, track: &TrackRecord) -> SnapshotTrack {
     SnapshotTrack {
-        id: track.id.0,
+        id: resource.id,
         uri: track.uri.clone(),
         name: track.name.clone(),
         art: track.art.clone(),
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn local_resources_require_exact_membership_and_use_canonical_metadata() {
         let mut library = Library::new();
-        let id = add(&mut library, "file:///music/song.flac", "canonical name");
+        add(&mut library, "file:///music/song.flac", "canonical name");
         let resolved = resolve_cached(
             &[resource(999, "file:///music/song.flac")],
             0,
@@ -227,7 +227,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (resolved.id, resolved.name.as_str()),
-            (id, "canonical name")
+            (999, "canonical name")
         );
         assert!(resolve_cached(
             &[resource(1, "file:///etc/passwd")],
