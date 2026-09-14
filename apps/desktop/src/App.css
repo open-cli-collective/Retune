@@ -137,11 +137,13 @@ button { color: inherit; }
 .rating-stars button:disabled { opacity: 1; }
 .track-list { position: relative; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .track-scroll { min-height: 0; flex: 1; overflow: auto; }
+.track-table { width: max-content; min-width: 100%; min-height: 100%; }
 .track-scroll::-webkit-scrollbar { width: 11px; height: 11px; }
 .track-scroll::-webkit-scrollbar-track { background: var(--control); }
 .track-scroll::-webkit-scrollbar-thumb { border: 2px solid var(--control); border-radius: 6px; background: var(--dim); }
 .track-scroll::-webkit-scrollbar-corner { background: var(--control); }
 .track-scroll.empty-library { display: flex; flex-direction: column; }
+.track-scroll.empty-library .track-table { flex: 1; width: 100%; display: flex; flex-direction: column; }
 .track-scroll.empty-library .empty-prompt { flex: 1; justify-content: center; }
 .empty-prompt { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px; color: var(--dim); text-align: center; }
 .empty-prompt .empty-glyph { color: color-mix(in srgb, var(--dim) 45%, transparent); font-size: 30px; line-height: 1; }
@@ -178,7 +180,7 @@ button { color: inherit; }
 .track-row.playing { font-weight: 700; }
 .playing-marker { color: var(--accent); }
 .selected .playing-marker { color: #fff; }
-.track-enabled-cell { display: grid; place-items: center; height: 100%; padding: 0 !important; border-right: 1px solid var(--border); }
+.track-enabled-cell { display: grid; place-items: center; height: 100%; padding: 0 !important; }
 .track-enabled-cell input { width: 12px; height: 12px; margin: 0; accent-color: var(--accent); }
 .spotify-stub { min-height: 0; flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 24px; color: var(--dim); background: var(--list); font-size: 12px; }
 .spotify-stub button, .spotify-add { padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px; color: var(--text); background: var(--control); }
@@ -255,8 +257,11 @@ button.spotify-page-art:focus-visible { outline: 2px solid var(--accent); outlin
 .top-tracks { padding-bottom: 12px; }
 .spotify-top-track-row { min-height: 22px; display: grid; grid-template-columns: 27px minmax(120px, 1fr) minmax(120px, 1fr) 42px; align-items: center; gap: 5px; padding: 0 10px 0 15px; }
 .spotify-top-track-row > strong, .spotify-top-track-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-bar { height: 26px; flex: 0 0 26px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 8px; overflow: hidden; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); white-space: nowrap; }
-.status-bar > span, .status-bar > button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.status-bar { height: 26px; flex: 0 0 26px; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; padding: 0 8px; overflow: hidden; border-top: 1px solid var(--border); background: linear-gradient(var(--head1), var(--head2)); color: var(--dim); white-space: nowrap; }
+.status-bar > span { min-width: 0; overflow: hidden; }
+.status-spotify { justify-self: stretch; text-align: left; }
+.status-library { z-index: 1; justify-self: center; padding: 0 8px; background: linear-gradient(var(--head1), var(--head2)); }
+.status-lastfm { justify-self: stretch; text-align: right; }
 .status-import-link { justify-self: center; padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
 .status-import-link:hover, .status-import-link:focus-visible { text-decoration: underline; }
 .status-sync-link { padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
@@ -304,6 +309,7 @@ button.spotify-page-art:focus-visible { outline: 2px solid var(--accent); outlin
 .playlist-track-header > button:first-child, .playlist-track-header > button.track-number { text-align: right; }
 .playlist-track-header > button.active { color: var(--text); font-weight: 700; }
 .playlist-track-scroll { min-height: 0; flex: 1; overflow: auto; }
+.playlist-track-table { width: max-content; min-width: 100%; min-height: 100%; }
 .playlist-unavailable { min-height: 0; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); text-align: center; }
 .playlist-unavailable strong { color: var(--text); font-size: 13px; }
 .playlist-open-actions { display: flex; gap: 8px; margin-top: 4px; }
@@ -398,6 +404,13 @@ button.spotify-page-art:focus-visible { outline: 2px solid var(--accent); outlin
 .lastfm-attribution { display: block; color: var(--dim); font-size: 10.5px; line-height: 1.25; }
 .lastfm-attribution a { color: inherit; text-decoration: none; }
 .lastfm-attribution a:hover, .lastfm-attribution a:focus-visible { text-decoration: underline; }
+.preference-recovery { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.preference-recovery > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.preference-recovery strong { font-weight: 500; }
+.preference-recovery small { color: var(--dim); font-size: 10.5px; line-height: 1.3; }
+.preference-recovery button { flex: 0 0 auto; }
+.preferences .removed-tracks-manager { min-height: 0; height: 100%; }
+.preferences .removed-tracks-manager .decision-body { flex: 1; max-height: none; overflow: auto; }
 .diagnostic-card { padding: 0; overflow: hidden; }
 .diagnostic-filters { min-height: 32px; display: flex; align-items: center; gap: 15px; padding: 0 10px; border-bottom: 1px solid var(--border); }
 .diagnostic-filters .preference-choice { align-items: center; gap: 5px; }

@@ -54,6 +54,7 @@ pub(crate) struct SpotifyPlayRequest {
     pub name: String,
     pub artist: String,
     pub album: String,
+    pub duration_secs: u64,
 }
 
 #[tauri::command]
@@ -285,6 +286,7 @@ mod tests {
             name: "Track".into(),
             artist: "Artist".into(),
             album: "Album".into(),
+            duration_secs: 180,
         };
         sink.request_spotify_play(track.clone()).unwrap();
         for uri in [

@@ -51,6 +51,42 @@ fn known_tags_and_artwork_are_read() {
 }
 
 #[test]
+fn artwork_is_read_from_every_tagged_container_lofty_supports() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = read_tags(fixture("cc0-audio-tagged.mp3"))
+        .unwrap()
+        .artwork
+        .unwrap()
+        .bytes;
+    for (source, tag_type) in [
+        ("cc0-audio-aac-lc.aac", TagType::Id3v2),
+        ("cc0-audio.aiff", TagType::Id3v2),
+        ("cc0-audio-vorbis.ogg", TagType::VorbisComments),
+        ("cc0-audio-opus.ogg", TagType::VorbisComments),
+        ("cc0-audio.wav", TagType::Id3v2),
+    ] {
+        let path = dir.path().join(source);
+        std::fs::copy(fixture(source), &path).unwrap();
+        let mut tag = Tag::new(tag_type);
+        tag.push_picture(
+            Picture::unchecked(png.clone())
+                .mime_type(MimeType::Png)
+                .build(),
+        );
+        tag.save_to_path(&path, WriteOptions::new()).unwrap();
+        assert_eq!(
+            read_artwork(&path, png.len()).unwrap().unwrap().bytes,
+            png,
+            "{source}"
+        );
+        assert!(matches!(
+            read_artwork(&path, png.len() - 1),
+            Err(AudioError::ArtworkTooLarge { .. })
+        ));
+    }
+}
+
+#[test]
 fn basic_tag_reads_preserve_text_without_materializing_embedded_artwork() {
     for name in ["cc0-audio-tagged.mp3", "cc0-audio-tagged.flac"] {
         let full = read_tags(fixture(name)).unwrap();
@@ -258,11 +294,6 @@ fn transformed_id3_pictures_and_overflowing_mp4_atoms_are_rejected() {
 
 #[test]
 fn unbounded_picture_paths_return_explicit_errors() {
-    assert!(matches!(
-        read_artwork(fixture("cc0-audio.wav"), 8 * 1024 * 1024),
-        Err(AudioError::Unsupported(_))
-    ));
-
     let dir = tempfile::tempdir().unwrap();
     let mp3 = dir.path().join("ape-tagged.mp3");
     let mut mp3_bytes = std::fs::read(fixture("cc0-audio.mp3")).unwrap();

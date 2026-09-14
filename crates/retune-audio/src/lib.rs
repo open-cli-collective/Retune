@@ -329,14 +329,17 @@ pub fn read_artwork(
         }
         Some(lofty::file::FileType::Flac) => check_flac_artwork_size(path, max_bytes)?,
         Some(lofty::file::FileType::Mp4) => check_mp4_artwork_size(path, max_bytes)?,
-        Some(file_type) => {
-            return Err(AudioError::Unsupported(format!(
-                "bounded embedded artwork is not supported for {file_type:?} files"
-            )));
-        }
+        Some(_) => {}
         None => return Err(AudioError::Unsupported("unknown file type".into())),
     }
-    read_tags(path).map(|tags| tags.artwork)
+    let artwork = read_tags(path)?.artwork;
+    if artwork
+        .as_ref()
+        .is_some_and(|artwork| artwork.bytes.len() > max_bytes)
+    {
+        return Err(AudioError::ArtworkTooLarge { max_bytes });
+    }
+    Ok(artwork)
 }
 
 fn check_id3_artwork_size(path: &Path, max_bytes: usize) -> Result<(), AudioError> {

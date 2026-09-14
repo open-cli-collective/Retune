@@ -911,6 +911,7 @@ pub(super) fn build_review_batches(rows: &[SourceRow]) -> Vec<ImportBatch> {
                 .map(|index| rows[*index].stable_id.clone())
                 .collect(),
             custom: false,
+            presentation_name: None,
             collection_shaped: Some(cluster.collection_shaped),
             representative_artist: Some(cluster.representative_artist),
             representative_album: Some(cluster.representative_album),
@@ -1230,6 +1231,7 @@ mod tests {
                 page: 7,
                 source_ids: vec![protected_id.clone()],
                 custom: false,
+                presentation_name: None,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,
@@ -1239,6 +1241,7 @@ mod tests {
                 page: 9,
                 source_ids: pending_ids.clone(),
                 custom: false,
+                presentation_name: None,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,
@@ -1265,7 +1268,6 @@ mod tests {
             .insert(protected_id.clone(), protected_match.clone());
         let protected_decision = RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         };
         session
             .decisions
@@ -1333,6 +1335,7 @@ mod tests {
                 page: 7,
                 source_ids: vec![first_id.clone()],
                 custom: false,
+                presentation_name: None,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,
@@ -1342,6 +1345,7 @@ mod tests {
                 page: 9,
                 source_ids: vec![second_id.clone()],
                 custom: false,
+                presentation_name: None,
                 collection_shaped: None,
                 representative_artist: None,
                 representative_album: None,

@@ -5,7 +5,7 @@ export type Invoker = <T>(command: string, args?: Record<string, unknown>) => Pr
 
 export const tauriInvoker: Invoker = (command, args) => invoke(command, args)
 
-export type SpotifyPlayRequest = { uri: string; name: string; artist: string; album: string }
+export type SpotifyPlayRequest = { uri: string; name: string; artist: string; album: string; durationSecs: number }
 
 export type MainEvent =
   | { type: 'spotifyPlayRequested'; payload: SpotifyPlayRequest }

@@ -8,6 +8,7 @@ permissions = [
   "allow-lastfm-import-queue",
   "allow-lastfm-import-page",
   "allow-lastfm-import-combine-batches",
+  "allow-lastfm-import-rename-batch",
   "allow-start-lastfm-import",
   "allow-lastfm-import-review",
   "allow-lastfm-import-options",

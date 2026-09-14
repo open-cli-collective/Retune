@@ -274,12 +274,11 @@ mapped event increments its materialized Retune track additively and advances
 threshold does not apply. An explicit track mapping wins over an album mapping.
 Unknown or unavailable targets remain in the stable importer backlog, which can
 accept later windows without blocking their download. Explicit accepted matches
-and permanent track, album, and artist ignore rules are reusable and sweep
-applicable backlog occurrences; Skip is temporary. Accept & Next archives a
-reviewed batch from the queue, imports all mapped actionable rows, and leaves
-unmapped rows skipped and eligible for later review. Accept imports the same
-mapped subset while keeping the batch open; neither action requires resolving
-the entire batch or checking individual rows. No target is silently added
+and permanent album and artist ignore rules are reusable and sweep applicable
+backlog occurrences; Skip is temporary. Accept archives a reviewed batch from
+the queue and imports all mapped actionable rows; unmapped rows remain available
+for later review. It does not require resolving the entire batch or checking
+individual rows. No target is silently added
 to the library: explicit reviewed content choices use the existing Spotify save
 operations.
 
@@ -313,9 +312,9 @@ without an API call; only legacy empty-album rows with album-shaped cached
 search terms refetch. Collection album cards independently choose which matched
 albums are saved in full. Accept All prepares all remaining
 batches sequentially before
-showing global unique album/track URI counts and awaiting confirmation. Excluded rows remain
-source-history decisions and can be undone before acceptance; they never remove
-a track inherently materialized by a saved whole album.
+showing global unique album/track URI counts and awaiting confirmation. Unmapped
+source rows remain available for later review; row decisions never remove a
+track inherently materialized by a saved whole album.
 
 Accepting one batch first persists a frozen, account/session-bound apply plan in
 `lastfm-sync.json`; the command waits only for that atomic enqueue. A serial Rust

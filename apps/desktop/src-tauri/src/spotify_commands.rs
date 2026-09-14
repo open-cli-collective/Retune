@@ -288,7 +288,7 @@ async fn record_failed_sync_schedule(app: &tauri::AppHandle) -> Option<u64> {
     let settings = match state
         .settings
         .mutate_private(|settings| {
-            record_sync_schedule(settings, true, now, cooldown_deadline);
+            schedule_next_sync(settings, now, cooldown_deadline);
             Ok(())
         })
         .await
@@ -421,15 +421,19 @@ pub(super) fn record_sync_schedule(
     cooldown_deadline: Option<u64>,
 ) -> bool {
     let completed = !partial;
-    settings.next_spotify_sync = Some(now.saturating_add(SPOTIFY_SYNC_INTERVAL_SECS));
+    schedule_next_sync(settings, now, cooldown_deadline);
+    settings.last_full_sync = Some(now);
     if completed {
         settings.spotify_sync_completed = true;
-        settings.last_full_sync = Some(now);
     }
+    completed
+}
+
+fn schedule_next_sync(settings: &mut Settings, now: u64, cooldown_deadline: Option<u64>) {
+    settings.next_spotify_sync = Some(now.saturating_add(SPOTIFY_SYNC_INTERVAL_SECS));
     if let Some(deadline) = cooldown_deadline.filter(|deadline| *deadline > now) {
         settings.next_spotify_sync = Some(deadline);
     }
-    completed
 }
 
 #[derive(Clone, Copy, Serialize)]

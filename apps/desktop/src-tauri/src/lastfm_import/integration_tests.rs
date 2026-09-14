@@ -85,6 +85,7 @@ async fn audit_apply_acceptance_cost() {
                 .cloned()
                 .collect::<Vec<_>>(),
             true,
+            false,
             page.options.clone(),
         )
         .await
@@ -502,6 +503,7 @@ fn selected_release_session() -> (LastFmImportSessionV2, Vec<SourceRow>, String)
         page: 1,
         source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
         custom: false,
+        presentation_name: None,
         collection_shaped: Some(false),
         representative_artist: Some("Artist".into()),
         representative_album: Some("Release".into()),
@@ -799,6 +801,7 @@ fn native_empty_album_collection_keeps_whole_album_acceptance() {
         page: 1,
         source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
         custom: false,
+        presentation_name: None,
         collection_shaped: None,
         representative_artist: None,
         representative_album: None,
@@ -937,6 +940,7 @@ fn converted_johnny_mathis_union_reranks_and_restores_ambiguities() {
         page: 1,
         source_ids: rows.iter().map(|row| row.stable_id.clone()).collect(),
         custom: false,
+        presentation_name: None,
         collection_shaped: None,
         representative_artist: None,
         representative_album: None,
@@ -1442,7 +1446,7 @@ async fn active_incremental_review_preserves_backlog_for_completion() {
 }
 
 #[tokio::test]
-async fn bulk_exclusion_is_atomic_and_persists_reusable_mappings() {
+async fn bulk_ignore_is_atomic_and_persists_reusable_mappings() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
     let rows = [
@@ -1456,6 +1460,7 @@ async fn bulk_exclusion_is_atomic_and_persists_reusable_mappings() {
             page: 1,
             source_ids: vec![rows[0].stable_id.clone(), rows[1].stable_id.clone()],
             custom: false,
+            presentation_name: None,
             collection_shaped: None,
             representative_artist: None,
             representative_album: None,
@@ -1465,6 +1470,7 @@ async fn bulk_exclusion_is_atomic_and_persists_reusable_mappings() {
             page: 2,
             source_ids: vec![rows[2].stable_id.clone()],
             custom: false,
+            presentation_name: None,
             collection_shaped: None,
             representative_artist: None,
             representative_album: None,
@@ -1473,163 +1479,53 @@ async fn bulk_exclusion_is_atomic_and_persists_reusable_mappings() {
     ];
     service.save(session.clone()).await.unwrap();
 
-    let ids = vec![
-        rows[0].stable_id.clone(),
-        rows[1].stable_id.clone(),
-        rows[0].stable_id.clone(),
-    ];
     service
         .review_action(
             "user",
             "spotify",
             1,
-            Some(ids.as_slice()),
-            ReviewAction::Exclude,
+            ReviewAction::IgnoreAlbum,
             "Artist",
             "",
         )
         .await
         .unwrap();
     let saved = service.snapshot().await.unwrap();
-    assert!(saved.decisions[&rows[0].stable_id].excluded);
-    assert!(saved.decisions[&rows[1].stable_id].excluded);
-    assert!(!default_decision(&saved, &rows[2].stable_id).excluded);
-    let expected_exclusions =
-        BTreeSet::from([rows[0].stable_id.clone(), rows[1].stable_id.clone()]);
     assert_eq!(
-        service.export_mappings().await.mappings.excluded_tracks,
-        expected_exclusions
+        saved.decisions[&rows[0].stable_id].status,
+        RowStatus::IgnoredAlbum
     );
+    assert_eq!(
+        saved.decisions[&rows[1].stable_id].status,
+        RowStatus::IgnoredAlbum
+    );
+    assert_eq!(
+        default_decision(&saved, &rows[2].stable_id).status,
+        RowStatus::IgnoredAlbum
+    );
+    assert!(service
+        .export_mappings()
+        .await
+        .mappings
+        .ignored_albums
+        .contains(&source_album_key("Artist", "")));
     let queue = service
         .queue_page(0, LASTFM_QUEUE_PAGE_LIMIT)
         .await
         .unwrap();
-    assert_eq!(queue.items[0].status, Some(QueueStatus::Excluded));
+    assert_eq!(queue.items[0].status, Some(QueueStatus::IgnoredAlbum));
     assert!(!queue.items[0].remaining);
 
     let reloaded = Service::new(dir.path());
     let reloaded_session = reloaded.snapshot().await.unwrap();
-    assert!(reloaded_session.decisions[&rows[0].stable_id].excluded);
-    assert!(reloaded_session.decisions[&rows[1].stable_id].excluded);
     assert_eq!(
-        reloaded.export_mappings().await.mappings.excluded_tracks,
-        expected_exclusions
+        reloaded_session.decisions[&rows[0].stable_id].status,
+        RowStatus::IgnoredAlbum
     );
-
-    let mut reset = saved.clone();
-    reset.decisions.clear();
-    service.save(reset.clone()).await.unwrap();
-    assert!(service
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            Some(&[]),
-            ReviewAction::Exclude,
-            "Artist",
-            "",
-        )
-        .await
-        .is_err());
-    assert!(!service
-        .snapshot()
-        .await
-        .unwrap()
-        .decisions
-        .values()
-        .any(|decision| decision.excluded));
     assert_eq!(
-        service.export_mappings().await.mappings.excluded_tracks,
-        expected_exclusions
+        reloaded_session.decisions[&rows[1].stable_id].status,
+        RowStatus::IgnoredAlbum
     );
-    assert!(service
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            Some(&[rows[0].stable_id.clone(), rows[2].stable_id.clone()]),
-            ReviewAction::Exclude,
-            "Artist",
-            "",
-        )
-        .await
-        .is_err());
-    assert!(!service
-        .snapshot()
-        .await
-        .unwrap()
-        .decisions
-        .values()
-        .any(|decision| decision.excluded));
-    assert_eq!(
-        service.export_mappings().await.mappings.excluded_tracks,
-        expected_exclusions
-    );
-
-    let mut nonreviewable = reset;
-    nonreviewable.decisions.insert(
-        rows[1].stable_id.clone(),
-        RowDecision {
-            status: RowStatus::Done,
-            excluded: false,
-        },
-    );
-    service.save(nonreviewable).await.unwrap();
-    assert!(service
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            Some(&[rows[0].stable_id.clone(), rows[1].stable_id.clone()]),
-            ReviewAction::Exclude,
-            "Artist",
-            "",
-        )
-        .await
-        .is_err());
-    assert!(!service
-        .snapshot()
-        .await
-        .unwrap()
-        .decisions
-        .values()
-        .any(|decision| decision.excluded));
-    assert_eq!(
-        service.export_mappings().await.mappings.excluded_tracks,
-        expected_exclusions
-    );
-
-    reloaded
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            Some(&[rows[0].stable_id.clone(), rows[1].stable_id.clone()]),
-            ReviewAction::UndoExclude,
-            "Artist",
-            "",
-        )
-        .await
-        .unwrap();
-    let undone = reloaded.snapshot().await.unwrap();
-    assert!(!undone.decisions[&rows[0].stable_id].excluded);
-    assert!(!undone.decisions[&rows[1].stable_id].excluded);
-    assert!(reloaded
-        .export_mappings()
-        .await
-        .mappings
-        .excluded_tracks
-        .is_empty());
-    let reloaded_after_undo = Service::new(dir.path());
-    let undone_after_reload = reloaded_after_undo.snapshot().await.unwrap();
-    assert!(!undone_after_reload.decisions[&rows[0].stable_id].excluded);
-    assert!(!undone_after_reload.decisions[&rows[1].stable_id].excluded);
-    assert!(reloaded_after_undo
-        .export_mappings()
-        .await
-        .mappings
-        .excluded_tracks
-        .is_empty());
 }
 
 fn receipt(
@@ -1738,7 +1634,7 @@ fn test_app_state_with_lastfm_executor(
 
 #[tokio::test]
 async fn review_use_case_persists_without_waiting_for_backlog_reconciliation() {
-    for action in [ReviewAction::Exclude, ReviewAction::IgnoreAlbum] {
+    {
         let directory = tempfile::tempdir().unwrap();
         let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
         state.spotify_membership.set_for_test(SpotifyLibraryState {
@@ -1770,8 +1666,7 @@ async fn review_use_case_persists_without_waiting_for_backlog_reconciliation() {
                     artist: "Artist".into(),
                     album: "Album".into(),
                 },
-                Some(std::slice::from_ref(&id)),
-                action,
+                ReviewAction::IgnoreAlbum,
             ),
         )
         .await
@@ -1780,17 +1675,13 @@ async fn review_use_case_persists_without_waiting_for_backlog_reconciliation() {
 
         assert_eq!(view.pending_review, 0);
         let reloaded = Service::new(directory.path()).snapshot().await.unwrap();
-        if action == ReviewAction::Exclude {
-            assert!(reloaded.decisions[&id].excluded);
-        } else {
-            assert_eq!(reloaded.decisions[&id].status, RowStatus::IgnoredAlbum);
-            assert!(Service::new(directory.path())
-                .mappings_for("user", Some("spotify"))
-                .await
-                .unwrap()
-                .ignored_albums
-                .contains(&source_album_key("Artist", "Album")));
-        }
+        assert_eq!(reloaded.decisions[&id].status, RowStatus::IgnoredAlbum);
+        assert!(Service::new(directory.path())
+            .mappings_for("user", Some("spotify"))
+            .await
+            .unwrap()
+            .ignored_albums
+            .contains(&source_album_key("Artist", "Album")));
     }
 }
 
@@ -2655,7 +2546,6 @@ fn reconciliation_ignores_and_unresolved_targets_are_independent() {
                 "spotify:track:unavailable".into(),
             ),
         ]),
-        excluded_tracks: BTreeSet::from([source_id("Ignored", "Album", "Song")]),
         ignored_albums: BTreeSet::from([source_album_key("Album ignored", "Album")]),
         ignored_artists: BTreeSet::from([normalize_for_match("Artist ignored")]),
         ..LastFmMappings::default()
@@ -2665,6 +2555,7 @@ fn reconciliation_ignores_and_unresolved_targets_are_independent() {
             event("Known", "Album", "Song", 10),
             event("Missing", "Album", "Song", 11),
             event("Unavailable", "Album", "Song", 11),
+            event("Ignored", "Album", "Song", 12),
             event("Ignored", "Album", "Song", 12),
             event("Album ignored", "Album", "Song", 13),
             event("Artist ignored", "Other", "Song", 14),
@@ -2682,6 +2573,8 @@ fn reconciliation_ignores_and_unresolved_targets_are_independent() {
         vec![
             event("Missing", "Album", "Song", 11),
             event("Unavailable", "Album", "Song", 11),
+            event("Ignored", "Album", "Song", 12),
+            event("Ignored", "Album", "Song", 12),
         ]
     );
     assert!(
@@ -3223,7 +3116,6 @@ async fn completed_v2_sessions_backfill_reusable_mappings_idempotently() {
         row.stable_id.clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session.matches.insert(
@@ -4181,11 +4073,6 @@ async fn large_release_batches_can_combine_and_accept_bulk_actions() {
         .iter()
         .map(|batch| batch.page)
         .collect::<Vec<_>>();
-    let source_ids = session
-        .rows
-        .iter()
-        .map(|row| row.stable_id.clone())
-        .collect::<Vec<_>>();
     session.phase = ImportPhase::Review;
     service.save(session).await.unwrap();
 
@@ -4202,28 +4089,9 @@ async fn large_release_batches_can_combine_and_accept_bulk_actions() {
             .len(),
         202
     );
-    service
-        .review_action(
-            "user",
-            "spotify",
-            batch_id,
-            Some(&source_ids),
-            ReviewAction::Exclude,
-            &artist,
-            &album,
-        )
-        .await
-        .unwrap();
     assert_eq!(
-        service
-            .snapshot()
-            .await
-            .unwrap()
-            .decisions
-            .values()
-            .filter(|decision| decision.excluded)
-            .count(),
-        202
+        service.page(batch_id, &artist, &album).await.unwrap().name,
+        "Custom batch"
     );
 }
 
@@ -4252,6 +4120,7 @@ async fn different_artist_batches_combine_as_various_artists() {
             page: index as u32 + 1,
             source_ids: vec![row.stable_id.clone()],
             custom: false,
+            presentation_name: None,
             collection_shaped: Some(false),
             representative_artist: Some(row.artist.clone()),
             representative_album: Some(row.album.clone()),
@@ -4278,7 +4147,7 @@ async fn different_artist_batches_combine_as_various_artists() {
     assert!(page.custom_batch);
     for action in [ReviewAction::IgnoreAlbum, ReviewAction::IgnoreArtist] {
         assert!(service
-            .review_action("user", "spotify", batch_id, None, action, &artist, &album,)
+            .review_action("user", "spotify", batch_id, action, &artist, &album)
             .await
             .is_err());
     }
@@ -4310,7 +4179,6 @@ async fn queue_separates_imported_plays_from_remaining_work() {
         imported_id,
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session.phase = ImportPhase::Review;
@@ -4346,6 +4214,7 @@ async fn large_queue_follows_every_cursor_in_order_without_materializing_prior_s
             page: index + 1,
             source_ids: vec![format!("source-{index}")],
             custom: false,
+            presentation_name: None,
             collection_shaped: None,
             representative_artist: None,
             representative_album: None,
@@ -5997,7 +5866,7 @@ fn cached_release_track_choice_is_shared_without_changing_the_selected_album() {
 }
 
 #[test]
-fn shared_track_choices_preserve_ties_existing_mappings_exclusions_and_batch_scope() {
+fn shared_track_choices_preserve_ties_existing_mappings_ignored_decisions_and_batch_scope() {
     let rows = (0..8)
         .map(|index| SourceRow {
             stable_id: format!("source-{index}"),
@@ -6042,14 +5911,12 @@ fn shared_track_choices_preserve_ties_existing_mappings_exclusions_and_batch_sco
         rows[4].stable_id.clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session.decisions.insert(
         rows[5].stable_id.clone(),
         RowDecision {
-            excluded: true,
-            ..RowDecision::default()
+            status: RowStatus::IgnoredAlbum,
         },
     );
     session.rows[6].artist = "Other Artist".into();
@@ -7093,8 +6960,7 @@ fn collection_projection_coverage_cases_are_authoritative() {
     aggregate_session.decisions.insert(
         aggregate_rows[3].stable_id.clone(),
         RowDecision {
-            status: RowStatus::Pending,
-            excluded: true,
+            status: RowStatus::IgnoredAlbum,
         },
     );
     aggregate_session.collection_album_matches.insert(
@@ -7143,7 +7009,7 @@ fn collection_projection_coverage_cases_are_authoritative() {
 
     let cases = vec![
         (
-            "aggregate and excluded rows",
+            "aggregate and ignored rows",
             aggregate_session,
             aggregate_rows,
             Expected {
@@ -7386,6 +7252,15 @@ fn setup_state_view_reports_review_only_remaining() {
     assert_eq!(state_view(Some(&session)).remaining, 0);
     session.phase = ImportPhase::Review;
     assert_eq!(state_view(Some(&session)).remaining, 1);
+    session.decisions.insert(
+        session.rows[0].stable_id.clone(),
+        RowDecision {
+            status: RowStatus::Done,
+        },
+    );
+    assert_eq!(state_view(Some(&session)).matched_scrobbles, 1);
+    session.phase = ImportPhase::Suspended;
+    assert_eq!(suspended_state_view(&session).matched_scrobbles, 1);
 }
 
 #[test]
@@ -7445,28 +7320,24 @@ async fn page_fuzzy_groups_stay_inside_the_requested_batch() {
         ids["Done"].clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session.decisions.insert(
         ids["Skipped"].clone(),
         RowDecision {
             status: RowStatus::Skipped,
-            excluded: false,
         },
     );
     session.decisions.insert(
         ids["Ignored"].clone(),
         RowDecision {
             status: RowStatus::IgnoredAlbum,
-            excluded: false,
         },
     );
     session.decisions.insert(
         ids["Excluded"].clone(),
         RowDecision {
-            status: RowStatus::Pending,
-            excluded: true,
+            status: RowStatus::IgnoredAlbum,
         },
     );
     for (album, selected) in [
@@ -7563,14 +7434,12 @@ async fn page_projects_count_modes_to_visible_fuzzy_targets() {
         visible_ids[0].clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session.decisions.insert(
         hidden_id.clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session
@@ -7684,7 +7553,6 @@ async fn count_mode_change_is_rejected_after_target_is_done() {
         source_id.clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session
@@ -7999,7 +7867,6 @@ fn selected_count_mode_is_session_scoped_across_pages_and_persisted() {
         first.clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session.batches = build_review_batches(&session.rows);
@@ -8049,7 +7916,6 @@ fn historical_target_counts_preserve_release_fallback_and_collection_boundaries(
         previous.clone(),
         RowDecision {
             status: RowStatus::Done,
-            excluded: false,
         },
     );
     session
@@ -9042,7 +8908,7 @@ fn content_and_history_intents_are_independent_but_not_both_empty() {
 
 #[tokio::test]
 async fn accepting_mapped_rows_keeps_the_unmapped_tail_for_later() {
-    for archive_batch in [false, true] {
+    for (archive_batch, archive_remainder) in [(false, false), (true, false), (true, true)] {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
         let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
@@ -9096,7 +8962,7 @@ async fn accepting_mapped_rows_keeps_the_unmapped_tail_for_later() {
             options.selected_track_ids,
             BTreeSet::from(["matched".into()])
         );
-        let plan = build_apply_plan(
+        let mut plan = build_apply_plan(
             &session,
             "spotify",
             1,
@@ -9107,13 +8973,14 @@ async fn accepting_mapped_rows_keeps_the_unmapped_tail_for_later() {
             options.clone(),
         )
         .unwrap();
+        plan.archive_remainder = archive_remainder;
         assert_eq!(plan.committed_ids, vec!["matched"]);
         assert_eq!(plan.updates.len(), 1);
         assert_eq!(plan.updates[0].play_count, Some(900));
         assert_eq!(plan.mappings.len(), 1);
         commit_apply_plan(&service, &plan).await.unwrap();
         let session = service.snapshot().await.unwrap();
-        assert_eq!(session.remaining(), 1);
+        assert_eq!(session.remaining(), usize::from(!archive_remainder));
         assert_eq!(
             default_decision(&session, "matched").status,
             RowStatus::Done
@@ -9130,6 +8997,13 @@ async fn accepting_mapped_rows_keeps_the_unmapped_tail_for_later() {
             session.page_options[&batch_options_key(1)].selected_track_ids,
             options.selected_track_ids
         );
+        if archive_remainder {
+            assert_eq!(
+                session.archived_source_ids,
+                BTreeSet::from(["matched".into(), "unmatched".into()])
+            );
+            continue;
+        }
         // Mapping the leftover later must preserve the first accepted count contribution.
         let mut session = session;
         let mut tail_match = session.matches["matched"].clone();
@@ -9343,16 +9217,14 @@ async fn fake_spotify_transport_keeps_album_and_track_import_memberships_exact()
 }
 
 #[test]
-fn track_exclusions_and_batch_ignores_defer_backlog_sweeps() {
-    assert!(!ReviewAction::Exclude.sweeps_backlog());
-    assert!(!ReviewAction::UndoExclude.sweeps_backlog());
+fn batch_ignores_defer_backlog_sweeps() {
     assert!(!ReviewAction::IgnoreAlbum.sweeps_backlog());
     assert!(ReviewAction::IgnoreArtist.sweeps_backlog());
     assert!(ReviewAction::Restore.sweeps_backlog());
 }
 
 #[tokio::test]
-async fn fully_excluded_review_action_reaches_done_and_has_view_only_queue_status() {
+async fn fully_ignored_review_action_reaches_done_and_has_queue_status() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
     start_bound(&service, "lastfm-user", "spotify-user", 500).await;
@@ -9375,25 +9247,24 @@ async fn fully_excluded_review_action_reaches_done_and_has_view_only_queue_statu
     let mut session = service.snapshot().await.unwrap();
     session.phase = ImportPhase::Review;
     service.save(session.clone()).await.unwrap();
-    for row in &session.rows {
-        let ids = vec![row.stable_id.clone()];
-        service
-            .review_action(
-                "lastfm-user",
-                "spotify-user",
-                1,
-                Some(ids.as_slice()),
-                ReviewAction::Exclude,
-                "A",
-                "Album",
-            )
-            .await
-            .unwrap();
-    }
+    service
+        .review_action(
+            "lastfm-user",
+            "spotify-user",
+            1,
+            ReviewAction::IgnoreAlbum,
+            "A",
+            "Album",
+        )
+        .await
+        .unwrap();
     let session = service.snapshot().await.unwrap();
     let refs = session.rows.iter().collect::<Vec<_>>();
     assert_eq!(session.phase, ImportPhase::Done);
-    assert_eq!(queue_status(&session, &refs), Some(QueueStatus::Excluded));
+    assert_eq!(
+        queue_status(&session, &refs),
+        Some(QueueStatus::IgnoredAlbum)
+    );
     assert_eq!(session.remaining(), 0);
 }
 
@@ -9411,37 +9282,11 @@ async fn album_review_actions_cover_an_unbounded_release_batch() {
     session.phase = ImportPhase::Review;
     service.save(session.clone()).await.unwrap();
 
-    assert!(service
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            None,
-            ReviewAction::Exclude,
-            "Artist",
-            "Album",
-        )
-        .await
-        .is_err());
-    assert!(service
-        .review_action(
-            "user",
-            "spotify",
-            1,
-            Some(&["not-in-batch".to_owned()]),
-            ReviewAction::Exclude,
-            "Artist",
-            "Album",
-        )
-        .await
-        .is_err());
-
     service
         .review_action(
             "user",
             "spotify",
             1,
-            None,
             ReviewAction::IgnoreAlbum,
             "Artist",
             "Album",
@@ -9463,7 +9308,6 @@ async fn album_review_actions_cover_an_unbounded_release_batch() {
             "user",
             "spotify",
             1,
-            None,
             ReviewAction::Restore,
             "Artist",
             "Album",
@@ -9484,7 +9328,6 @@ async fn album_review_actions_cover_an_unbounded_release_batch() {
             "user",
             "spotify",
             1,
-            None,
             ReviewAction::SkipAlbum,
             "Artist",
             "Album",
@@ -9521,7 +9364,6 @@ async fn album_review_actions_cover_every_identity_in_a_cluster() {
             "user",
             "spotify",
             1,
-            None,
             ReviewAction::IgnoreAlbum,
             "Artist",
             "Release: Best",
@@ -9546,7 +9388,6 @@ async fn album_review_actions_cover_every_identity_in_a_cluster() {
             "user",
             "spotify",
             1,
-            None,
             ReviewAction::Restore,
             "Artist",
             "Release: Best",
@@ -9587,8 +9428,7 @@ async fn owned_review_mutations_reject_mismatch_and_suspension() {
             "user",
             "spotify",
             1,
-            Some(&["id".to_owned()]),
-            ReviewAction::Exclude,
+            ReviewAction::IgnoreAlbum,
             "Artist",
             "Album"
         )
@@ -10072,6 +9912,7 @@ fn exact_album_match_defaults_to_whole_album_until_user_overrides_it() {
             .map(|row| row.stable_id.clone())
             .collect(),
         custom: false,
+        presentation_name: None,
         collection_shaped: None,
         representative_artist: None,
         representative_album: None,
@@ -10570,6 +10411,7 @@ fn apply_test_plan_for(
         album: "Album".into(),
         committed_ids: vec![source_id.into()],
         archive_batch: false,
+        archive_remainder: false,
         options: PageOptions::default(),
         membership: ApplyMembership::None,
         updates: vec![HistoryUpdate {
@@ -10688,6 +10530,7 @@ fn apply_test_session() -> LastFmImportSessionV2 {
         page: 1,
         source_ids: vec!["source".into()],
         custom: false,
+        presentation_name: None,
         collection_shaped: None,
         representative_artist: None,
         representative_album: None,
@@ -10719,6 +10562,7 @@ fn apply_test_session_with_two_batches() -> LastFmImportSessionV2 {
         page: 2,
         source_ids: vec!["source-two".into()],
         custom: false,
+        presentation_name: None,
         collection_shaped: None,
         representative_artist: None,
         representative_album: None,
@@ -11974,6 +11818,7 @@ async fn a_failed_decision_retry_reuses_the_frozen_plan_after_session_commit() {
         "Artist",
         "Album",
         &["source".into()],
+        false,
         false,
         &PageOptions::default(),
     ));

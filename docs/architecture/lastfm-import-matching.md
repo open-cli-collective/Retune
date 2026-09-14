@@ -91,7 +91,10 @@ album label. A cluster containing more than one exact group is collection-shaped
 and retains all source album labels for disclosure and album-level review
 actions. Persisted legacy batches with page-scoped choices or queued apply work
 keep their page identity; untouched legacy batches are rebuilt without losing
-row-scoped matches or decisions. Review then has two shapes:
+row-scoped matches or decisions. Each batch also has an optional persisted
+presentation name; older batches derive their display name from the source
+album or `Singles`, while combined batches start as `Custom batch`. Review then
+has two shapes:
 
 - A non-empty Last.fm album is **release-shaped**. Retune searches for an album,
   compares the source track set with each Spotify release, and may select one
@@ -109,8 +112,8 @@ row-scoped matches or decisions. Review then has two shapes:
 Persisted batches preserve complete source clusters without a row-count cap.
 The footer totals cover the entire loaded review queue, regardless of its text
 filter. Imported batches require a completed batch status and all of its source
-plays accounted for as imported; ignored, excluded, skipped, partial, and merely
-queued batches do not count as imported.
+plays accounted for as imported; ignored, skipped, and merely queued batches do
+not count as imported.
 Queue projections report imported and remaining play totals separately so a
 cluster containing completed rows does not present its full history as new
 work. Queue-filter keystrokes remain local to the queue control and coalesce
@@ -130,14 +133,17 @@ background. Late completions never replace a newer selection, and failures keep
 the existing frozen-choice retry path.
 `genre_values` projects only distinct genres instead of constructing unused
 artist and album suggestions. The visible batch is the unit of lazy Spotify
-work and review. Review exclude/undo actions
-may address one or more source IDs, but every ID must belong to the requested
-batch and remain reviewable; empty, cross-batch, and completed-row requests are
-rejected before any decision changes. A bulk action persists the session and
-reusable mappings once. Track exclusions and batch ignores do not rebuild the incremental backlog
-on the review click path; the normal incremental-sync entrypoint applies those
-durable mappings before fetching more plays. Artist-wide ignores and restore
-actions still sweep applicable backlog immediately.
+work and review. Review actions are batch-level skip/restore and ignore
+operations. There is no per-row permanent exclusion mapping in the Last.fm
+importer; source rows that need attention remain selectable until they are
+mapped, skipped, ignored, or accepted. Batch ignores continue to persist their
+account-bound reusable mappings, while artist-wide ignores and restore actions
+still sweep applicable backlog immediately.
+
+Archiving instead persists the batch's exact source row IDs in the import
+session. Archived rows leave the active queue and bulk work without creating
+ignore mappings, remain available in the Archives view, and can be restored;
+if a rebuilt batch gains a new row, the whole batch returns to the active queue.
 
 `Ignore batch` preserves the album-ignore rule for the automatic batch's source
 album identities. The review advances immediately while the durable save runs,
@@ -310,7 +316,7 @@ the same review batch; each row keeps its own source identity and contributes to
 the normal target-wide count merge. Choosing a track also shares its cached
 candidate with unresolved, actionable rows in that batch. One distinct exact
 normalized title-and-artist target is selected automatically; ties stay
-unresolved. Existing mappings, manual choices, completed rows, and exclusions
+unresolved. Existing mappings, manual choices, completed rows, and ignored rows
 are preserved. Compatible weaker candidates are projected as suggestions and
 require an explicit choice; those suggestions are not persisted into the
 automatic candidate pool. Reopening or reranking a batch preserves this behavior
@@ -378,8 +384,8 @@ authoritative target-wide result including eligible completed rows, resolved
 with the selected count mode. Count projection determines collection shape once
 per batch per request, reusing that result across completed source rows; it does
 not rebuild the full review queue for every historical row. The review UI collapses contributing rows into one entry per target and review
-state, with an expanded count flow. Its exclusion, selection, and
-track-picker actions address all represented source IDs. Unmerge reveals original
+state, with an expanded count flow. Its selection and track-picker actions
+address all represented source IDs. Unmerge reveals original
 rows for individual editing without changing mappings or count policy; this
 display choice lasts for the current batch. Raw names already aggregated into
 one source identity remain disclosure-only.
@@ -409,15 +415,15 @@ or options action. Ratings are displayed without preselecting an import rating.
 
 ## Acceptance and reusable mappings
 
-Both `Accept` and `Accept & Next Batch` freeze all mapped, actionable source
-rows into an account- and session-bound apply plan. Row checkboxes are absent:
-legacy inclusion choices do not gate unfinished mapped rows. Completed and
-excluded rows never reapply, and suggestions or ambiguous candidates require a
-mapping before acceptance. Source-row selection is only for bulk mapping and
-exclusion. The buttons enable as soon as any actionable row is mapped.
-`Accept` keeps the batch visible; `Accept & Next Batch` advances and marks the
-unmapped leftovers skipped, available to resume later. Neither action creates
-ignore rules or mappings for leftovers. Full-album membership remains an
+`Accept` freezes all mapped, actionable source rows into an account- and
+session-bound archive apply plan. Source-row checkboxes are read-only mapped /
+unmapped indicators; legacy inclusion choices do not gate unfinished mapped
+rows. Completed rows never reapply, and
+suggestions or ambiguous candidates require a mapping before acceptance.
+Source-row selection is only for bulk mapping. The button enables as soon as
+any actionable row is mapped and advances after the archive is acknowledged;
+unmapped leftovers remain available for later review. The action does not
+create ignore rules or mappings for leftovers. Full-album membership remains an
 independent explicit option; it does not mark unmapped source history imported.
 The existing persisted `selectedTrackIds` field records history participation
 for completed rows and the mapped set for unfinished rows. Review derives the

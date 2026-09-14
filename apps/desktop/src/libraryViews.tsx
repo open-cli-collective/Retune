@@ -173,7 +173,7 @@ export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing
   }, [selectionAnchor])
   const headerDragged = useRef(false)
   const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLSpanElement } | undefined>(undefined)
-  const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
+  const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number; scale: number } | undefined>(undefined)
   useEffect(() => setLiveWidths(columnWidths), [columnWidths])
   const headings = trackColumnHeadings(label)
   const visibleColumns = visibleColumnOrder(columnOrder, hiddenColumns)
@@ -203,17 +203,19 @@ export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing
     event.stopPropagation()
     headerDragged.current = true
     event.currentTarget.setPointerCapture(event.pointerId)
-    resize.current = { column, pointerId: event.pointerId, startX: event.clientX, startWidth: event.currentTarget.parentElement?.getBoundingClientRect().width ?? 60 }
+    const element = event.currentTarget.parentElement
+    const startWidth = element?.getBoundingClientRect().width ?? 60
+    resize.current = { column, pointerId: event.pointerId, startX: event.clientX, startWidth, scale: element?.offsetWidth ? startWidth / element.offsetWidth : 1 }
   }
   const moveResize = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = resize.current
     if (!active || active.pointerId !== event.pointerId) return
-    setLiveWidths((widths) => ({ ...widths, [active.column]: resizedColumnWidth(active.startWidth, active.startX, event.clientX) }))
+    setLiveWidths((widths) => ({ ...widths, [active.column]: resizedColumnWidth(active.startWidth, active.startX, event.clientX, active.scale) }))
   }
   const endResize = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = resize.current
     if (!active || active.pointerId !== event.pointerId) return
-    const width = resizedColumnWidth(active.startWidth, active.startX, event.clientX)
+    const width = resizedColumnWidth(active.startWidth, active.startX, event.clientX, active.scale)
     resize.current = undefined
     onColumnWidths({ ...columnWidths, [active.column]: width })
   }
@@ -224,7 +226,7 @@ export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing
   }
   const menuTrack = menu?.trackId === undefined ? undefined : tracks.find((track) => track.id === menu.trackId)
   return <div className="track-list" style={{ '--track-row-height': `${rowHeight}px` } as React.CSSProperties} onMouseDown={onActivate}>
-    <div ref={scroll} onScroll={readViewport} className={`track-scroll ${empty ? 'empty-library' : ''}`} aria-label="Library tracks" onClick={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('track-window')) onClearSelection() }}><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
+    <div ref={scroll} onScroll={readViewport} className={`track-scroll ${empty ? 'empty-library' : ''}`} aria-label="Library tracks" onClick={(event) => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('track-window')) onClearSelection() }}><div className="track-table"><div className="track-row track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => {
       event.preventDefault()
       setMenu({ x: event.clientX, y: event.clientY })
     }}><span className="track-enabled-cell" />{visibleColumns.map((column) => <span key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
@@ -287,7 +289,7 @@ export function TrackList({ tracks, label, selectedIds, selectionAnchor, playing
           {visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isPlaying ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selectedIds.has(track.id)} onInfo={() => onInfo(track.id)} onRate={(stars) => onRate(track.id, stars)} />)}
         </div>
       })}</div>}
-    </div>
+    </div></div>
     {menu && (menu.trackId === undefined
       ? <CheckboxMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)} items={columnOrder.map((column) => ({
         key: column,

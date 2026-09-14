@@ -82,7 +82,6 @@ fn apply_plan_to_effective_session(session: &mut LastFmImportSessionV2, plan: &A
             id.clone(),
             RowDecision {
                 status: RowStatus::Done,
-                excluded: false,
             },
         );
     }
@@ -132,6 +131,7 @@ pub(super) fn retry_plan_matches_request(
     album: &str,
     selected_ids: &[String],
     archive_batch: bool,
+    archive_remainder: bool,
     options: &PageOptions,
 ) -> bool {
     let selected = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
@@ -141,6 +141,7 @@ pub(super) fn retry_plan_matches_request(
         && plan.artist == artist
         && plan.album == album
         && plan.archive_batch == archive_batch
+        && plan.archive_remainder == archive_remainder
         && plan.options == *options
         && if archive_batch {
             selected.is_subset(&committed)
@@ -411,6 +412,7 @@ pub(super) fn build_apply_plan(
         album: album.to_owned(),
         committed_ids,
         archive_batch,
+        archive_remainder: false,
         options,
         membership,
         updates,
@@ -663,6 +665,7 @@ pub(super) async fn apply_page(
     (artist, album): (&str, &str),
     selected_ids: &[String],
     archive_batch: bool,
+    archive_remainder: bool,
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let (session, sync) = service.snapshot_with_sync().await;
@@ -688,6 +691,7 @@ pub(super) async fn apply_page(
             album,
             selected_ids,
             archive_batch,
+            archive_remainder,
             &options,
         ) {
             return Err(
@@ -696,7 +700,7 @@ pub(super) async fn apply_page(
         }
         failed.plan.clone()
     } else {
-        build_apply_plan(
+        let mut plan = build_apply_plan(
             &effective_session,
             &spotify_account_id,
             batch_id,
@@ -705,7 +709,9 @@ pub(super) async fn apply_page(
             selected_ids,
             archive_batch,
             options,
-        )?
+        )?;
+        plan.archive_remainder = archive_remainder;
+        plan
     };
     let view = service.enqueue_apply_plan(plan, None).await?;
     log::info!(
@@ -773,7 +779,6 @@ pub(super) async fn commit_apply_plan(service: &Service, plan: &ApplyPlan) -> Re
                     id.clone(),
                     RowDecision {
                         status: RowStatus::Done,
-                        excluded: false,
                     },
                 );
             }
@@ -782,9 +787,15 @@ pub(super) async fn commit_apply_plan(service: &Service, plan: &ApplyPlan) -> Re
                     id,
                     RowDecision {
                         status: RowStatus::Skipped,
-                        excluded: false,
                     },
                 );
+            }
+            if plan.archive_remainder {
+                let batch = requested_batch(&session, plan.batch_id, &plan.artist, &plan.album)
+                    .ok_or_else(|| "Unknown Last.fm import review batch.".to_string())?;
+                session
+                    .archived_source_ids
+                    .extend(batch.source_ids.iter().cloned());
             }
             update_review_phase(&mut session);
             Ok((Some(session), ()))

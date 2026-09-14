@@ -188,7 +188,6 @@ pub(super) async fn review_import<T, S>(
     provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     key: ReviewBatchKey,
-    ids: Option<&[String]>,
     action: ReviewAction,
 ) -> Result<ImportStateView, String>
 where
@@ -215,7 +214,6 @@ where
             &binding.lastfm_username,
             &binding.spotify_account_id,
             key.batch_id,
-            ids,
             action,
             &key.artist,
             &key.album,

@@ -52,7 +52,9 @@ where
     }
 
     async fn readable(&self) -> Result<bool, String> {
-        self.service.ensure_hydrated()?;
+        if !self.service.is_hydrated() || !self.lastfm.is_hydrated() {
+            return Ok(false);
+        }
         ensure_import_readable(
             self.service,
             self.lastfm,
@@ -73,10 +75,14 @@ where
     }
 
     pub(super) async fn state(&self, now: u64) -> Result<ImportStateView, String> {
-        if self.service.has_session().await {
+        let loading = !self.service.is_hydrated() || !self.lastfm.is_hydrated();
+        if !loading && self.service.has_session().await {
             let _ = self.readable().await?;
         }
         let mut view = self.service.state().await;
+        if loading {
+            view.sync_problem = Some("Retune is still loading Last.fm import state.".into());
+        }
         if view.phase.is_none() {
             view.username = lastfm_username(self.lastfm).await.ok();
         }
@@ -157,10 +163,35 @@ where
         Ok(self.with_library_metadata(self.service.page(batch_id, &artist, &album).await))
     }
 
+    pub(super) async fn rename_batch(&self, key: ReviewBatchKey, name: &str) -> Result<(), String> {
+        if !self.readable().await? {
+            return Err("The Last.fm import is not available for this account.".into());
+        }
+        super::ensure_review_mutable(self.service).await?;
+        let owner = self
+            .service
+            .owner_phase()
+            .await
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
+        let spotify_account_id = owner
+            .spotify_account_id
+            .as_deref()
+            .ok_or_else(|| "Connect Spotify before renaming Last.fm batches.".to_string())?;
+        self.service
+            .rename_batch(
+                &owner.lastfm_username,
+                spotify_account_id,
+                key.batch_id,
+                &key.artist,
+                &key.album,
+                name,
+            )
+            .await
+    }
+
     pub(super) async fn review(
         &self,
         key: ReviewBatchKey,
-        ids: Option<&[String]>,
         action: ReviewAction,
     ) -> Result<ImportStateView, String> {
         super::review_import(
@@ -171,7 +202,6 @@ where
             &self.provider,
             &self.connected,
             key,
-            ids,
             action,
         )
         .await
@@ -486,11 +516,13 @@ where
         result.map(|()| view)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn apply<StartWorker, Changed>(
         &self,
         key: ReviewBatchKey,
         selected_ids: &[String],
         archive_batch: bool,
+        archive_remainder: bool,
         options: PageOptions,
         mut start_worker: StartWorker,
         mut changed: Changed,
@@ -518,6 +550,7 @@ where
             (&key.artist, &key.album),
             selected_ids,
             archive_batch,
+            archive_remainder,
             options,
         )
         .await?;
@@ -798,6 +831,7 @@ mod tests {
     fn queue_item(code: ApplyFailureCode, retry_at: Option<u64>) -> ImportQueueItem {
         ImportQueueItem {
             page: 1,
+            name: "Album".into(),
             artist: "Artist".into(),
             album: "Album".into(),
             custom_batch: false,
@@ -809,6 +843,7 @@ mod tests {
             latest: 0,
             source_count: 1,
             remaining: true,
+            archived: false,
             album_entities: 0,
             track_entities: 0,
             status: Some(super::super::model::QueueStatus::Failed),

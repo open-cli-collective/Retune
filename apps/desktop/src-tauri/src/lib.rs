@@ -1273,16 +1273,12 @@ fn finish_startup(
     let lastfm_startup = Arc::clone(&lastfm);
     let profile_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let import_hydration = async {
-            let result = lastfm_import_startup.hydrate().await;
-            if result.is_ok() {
-                let _ = profile_app.emit_to("main", "lastfm-import-changed", ());
-                let _ = profile_app.emit_to("lastfm-importer", "lastfm-import-changed", ());
-            }
-            result
-        };
         let (lastfm_result, import_result) =
-            tokio::join!(lastfm_startup.hydrate(), import_hydration);
+            tokio::join!(lastfm_startup.hydrate(), lastfm_import_startup.hydrate());
+        if import_result.is_ok() {
+            let _ = profile_app.emit_to("main", "lastfm-import-changed", ());
+            let _ = profile_app.emit_to("lastfm-importer", "lastfm-import-changed", ());
+        }
         if let Err(error) = &lastfm_result {
             notify_error(&profile_app, error.clone());
         }
@@ -1491,6 +1487,7 @@ pub fn run() {
             lastfm_import::commands::lastfm_import_queue,
             lastfm_import::commands::lastfm_import_page,
             lastfm_import::commands::lastfm_import_combine_batches,
+            lastfm_import::commands::lastfm_import_rename_batch,
             lastfm_import::commands::start_lastfm_import,
             lastfm_import::commands::sync_lastfm_plays,
             lastfm_import::commands::lastfm_import_review,
@@ -2586,15 +2583,18 @@ mod tests {
 
         let wav = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../crates/retune-audio/tests/fixtures/cc0-audio.wav");
-        assert!(resolve_track_artwork(
-            None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
-            &cache,
-            Ok(Some(wav.clone())),
-            &localfiles::file_uri(&wav),
-            64
-        )
-        .await
-        .is_err());
+        assert_eq!(
+            resolve_track_artwork(
+                None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+                &cache,
+                Ok(Some(wav.clone())),
+                &localfiles::file_uri(&wav),
+                64
+            )
+            .await
+            .unwrap(),
+            None
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3208,14 +3208,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_completion_does_not_mark_a_full_sync() {
+    fn partial_completion_records_the_sync_without_marking_it_complete() {
         let mut settings = Settings::default();
         assert!(!record_full_sync(&mut settings, true, 42));
-        assert_eq!(settings.last_full_sync, None);
+        assert_eq!(settings.last_full_sync, Some(42));
         assert!(!settings.spotify_sync_completed);
 
-        assert!(record_full_sync(&mut settings, false, 42));
-        assert_eq!(settings.last_full_sync, Some(42));
+        assert!(record_full_sync(&mut settings, false, 43));
+        assert_eq!(settings.last_full_sync, Some(43));
         assert!(settings.spotify_sync_completed);
     }
 
@@ -3238,6 +3238,7 @@ mod tests {
             None,
         ));
         assert_eq!(settings.next_spotify_sync, Some(1_100 + 24 * 60 * 60));
+        assert_eq!(settings.last_full_sync, Some(1_100));
         assert_ne!(settings.next_spotify_sync, future);
 
         spotify_commands::record_sync_schedule(&mut settings, true, 1_100, Some(1_200));

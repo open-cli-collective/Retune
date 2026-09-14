@@ -9,7 +9,7 @@ import { libraryGateway } from './libraryGateway.ts'
 import { lastfmEvents, lastfmGateway, type AlbumCandidate, type CollectionMatchView, type ImportPageOptions, type ImporterPlayback, type LibraryMatchInfo, type MatchResult, type PageItem, type PageView, type ReviewAction } from './lastfmGateway.ts'
 import { openExternalDestination, subscribeThenSnapshot, subscriptionsThenSnapshot } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
-import { activeImportQueue, applyCurrentImportPageResponse, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludeImportRows, excludedImportCount, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, isCurrentImportRefresh, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type CollectionAmbiguousChoice, type CollectionTrackStatusProjection, type CountMode, type ImportApplyErrorCode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueueTabTarget, type ImportRowSelection, type ImportSourceRow, type ReviewBatchKey, type ReviewState } from './lastfmImportState.ts'
+import { activeImportQueue, archivedImportQueue, applyCurrentImportPageResponse, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importEmptyPageMessage, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, isCurrentImportRefresh, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextArchivedImportQueue, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, sortImportRows, spotifyLimitCountdown, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type CollectionAmbiguousChoice, type CollectionTrackStatusProjection, type CountMode, type ImportApplyErrorCode, type ImportConfidence, type ImportNavigationTarget, type ImportPickerKind, type ImportQueueItem, type ImportQueueTabTarget, type ImportRowSelection, type ImportRowSort, type ImportSourceRow, type ReviewBatchKey, type ReviewState } from './lastfmImportState.ts'
 import { formatTime } from './ui.ts'
 import './lastfmImporter.css'
 import { loadImportQueue } from './loadImportQueue.ts'
@@ -18,11 +18,16 @@ type ImportStateView = LastFmImportState
 type PickerKind = ImportPickerKind
 type PickerState = { kind: PickerKind; sourceId: string; sourceIds: string[]; query: string }
 type ShortcutStatus = (message: string) => void
+type BatchNameSurface = 'detail' | 'queue'
+type BatchNameEdit = { batchId: number; surface: BatchNameSurface; draft: string; selectAll: boolean }
+type BatchNameTarget = { batchId: number; artist: string; album: string; name?: string; customBatch?: boolean }
 
-const IMPORT_NAV_KEYS = 'ArrowUp ArrowDown Tab Shift+Tab Enter E Space X S A Escape ?'
+const IMPORT_BATCH_NAME_MAX_LENGTH = 120
+
+const IMPORT_NAV_KEYS = 'ArrowUp ArrowDown Tab Shift+Tab Enter E Space S A Escape ?'
 
 const emptyDefaults: LastFmImportDefaults = { importContent: true, includeHistoricalPlayCounts: true, wholeAlbum: false }
-const emptyState: ImportStateView = { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, defaults: emptyDefaults, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: 'Retune is still loading Last.fm import state.', applyingAll: false, spotifyLimit: null }
+const emptyState: ImportStateView = { phase: null, username: null, spotifyAccountId: null, historyTo: null, downloadedThrough: null, nextPage: 1, totalPages: null, downloadedPages: 0, totalScrobbles: 0, includedScrobbles: 0, processedScrobbles: 0, matchedScrobbles: 0, defaults: emptyDefaults, remaining: 0, retryableError: null, searchTerms: true, syncing: false, lastSyncedAt: null, pendingReview: 0, syncProblem: 'Retune is still loading Last.fm import state.', applyingAll: false, spotifyLimit: null }
 const invalidApplyResultMessage = 'Retune received an invalid Last.fm import result.'
 type DisplayError = { message: string; code: ImportApplyErrorCode; retryAt: number | null }
 
@@ -62,7 +67,11 @@ function reviewForPage(page: PageView): ReviewState {
 
 const reviewBatchKey = (page: PageView): ReviewBatchKey => ({ batchId: page.batchId, artist: page.artist, album: page.album })
 
-function pageOptions(review: ReviewState, page: PageView): ImportPageOptions {
+function importPageTitle(page: Pick<PageView, 'name' | 'customBatch' | 'album'>): string {
+  return page.name?.trim() || (page.customBatch ? 'Custom batch' : page.album || 'Singles')
+}
+
+function pageOptions(review: ReviewState, page: PageView, selectedIds?: ReadonlySet<string>): ImportPageOptions {
   return {
     importContent: review.importContent,
     includeHistoricalPlayCounts: review.includeHistoricalPlayCounts,
@@ -71,9 +80,9 @@ function pageOptions(review: ReviewState, page: PageView): ImportPageOptions {
     rating: review.rating,
     selectedTrackIds: page.rows.filter((item) => {
       const decision = review.decisions[item.source.stableId] ?? item.decision
-      return !decision.excluded && (decision.status === 'done'
+      return (decision.status === 'done'
         ? page.options.selectedTrackIds.includes(item.source.stableId)
-        : ['pending', 'skipped'].includes(decision.status) && Boolean(matchedTrack(item)))
+        : ['pending', 'skipped'].includes(decision.status) && Boolean(matchedTrack(item)) && (!selectedIds || selectedIds.has(item.source.stableId)))
     }).map((item) => item.source.stableId),
   }
 }
@@ -98,6 +107,7 @@ function matchedTrack(item: PageItem) {
     name: candidate.trackNames[index] || candidate.name,
     artist: candidate.trackArtists[index] || candidate.artist,
     album: candidate.trackAlbums[index] || '',
+    durationSecs: candidate.trackDurations?.[index] ?? 0,
   }
 }
 
@@ -154,7 +164,7 @@ function VerticalResizeHandle<T extends HTMLElement>({ target, label, minHeight 
     const height = Math.min(window.innerHeight * .55, Math.max(minHeight, clientY - element.getBoundingClientRect().top))
     element.style.height = `${height}px`
   }
-  return <div className="import-resize-handle" role="separator" aria-label={label} aria-orientation="horizontal" tabIndex={0} onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); resize(event.clientY) }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event.clientY) }} onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)} onPointerCancel={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }} onKeyDown={(event) => { if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return; event.preventDefault(); const element = target.current; if (element) resize(element.getBoundingClientRect().bottom + (event.key === 'ArrowUp' ? -24 : 24)) }}><span aria-hidden="true">↕</span></div>
+  return <div className="import-resize-handle" role="separator" aria-label={label} aria-orientation="horizontal" tabIndex={0} onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); resize(event.clientY) }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event.clientY) }} onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)} onPointerCancel={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }} onKeyDown={(event) => { if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return; event.preventDefault(); const element = target.current; if (element) resize(element.getBoundingClientRect().bottom + (event.key === 'ArrowUp' ? -24 : 24)) }}><span aria-hidden="true">↕</span></div>
 }
 
 function importNavigationKind(element: HTMLElement): ImportNavigationTarget | null {
@@ -204,7 +214,7 @@ function selectedAlbumAdvisory(page: PageView) {
     const targetUri = match?.trackMatches[item.source.stableId] ?? (match?.selectedUri?.startsWith('spotify:track:') ? match.selectedUri : null)
     const confidence = selectedImportTrackConfidence(item.source.stableId, match?.selectedUri ?? null, match?.trackMatches ?? {}, match?.confidence ?? null, match?.candidates ?? [])
     const standaloneLowConfidence = Boolean(targetUri && confidence === 'low' && match?.candidates.some((entry) => entry.uri === targetUri && entry.uri.startsWith('spotify:track:') && entry.relation === null))
-    return { excluded: item.decision.excluded, targetUri, standaloneLowConfidence }
+    return { targetUri, standaloneLowConfidence }
   }))
 }
 
@@ -372,7 +382,7 @@ function AcceptAllDialog({ albumEntities, trackEntities, busy, onCancel, onConfi
 function KeyboardShortcutsDialog({ onCancel }: { onCancel: () => void }) {
   return <ModalDialog className="import-shortcuts-dialog" labelledBy="import-shortcuts-title" onCancel={onCancel}>
     <header><p className="eyebrow">KEYBOARD SHORTCUTS</p><h2 id="import-shortcuts-title">Last.fm importer controls</h2></header>
-    <dl className="import-shortcuts-list"><dt>↑ / ↓</dt><dd>Move through the queue or mapping rows</dd><dt>Tab / Shift+Tab</dt><dd>Queue ↔ Last.fm source ↔ Spotify match</dd><dt>Enter</dt><dd>Open a queue batch or enter native controls</dd><dt>E</dt><dd>Open album matches or change a track match</dd><dt>Space</dt><dd>Toggle whole-album import or select a source row</dd><dt>X</dt><dd>Exclude or restore the focused source track</dd><dt>S</dt><dd>Skip or resume the focused album</dd><dt>A</dt><dd>Accept mapped tracks and advance</dd><dt>Esc</dt><dd>Exit control mode or close a dialog</dd><dt>?</dt><dd>Open this legend</dd></dl>
+    <dl className="import-shortcuts-list"><dt>↑ / ↓</dt><dd>Move through the queue or mapping rows</dd><dt>Tab / Shift+Tab</dt><dd>Queue ↔ Last.fm source ↔ Spotify match</dd><dt>Enter</dt><dd>Open a queue batch or enter native controls</dd><dt>E</dt><dd>Open album matches or change a track match</dd><dt>Space</dt><dd>Toggle whole-album import or select a source row</dd><dt>S</dt><dd>Skip or resume the focused album</dd><dt>A</dt><dd>Accept mapped tracks</dd><dt>⌘ / Ctrl + Enter</dt><dd>Accept and archive the remainder</dd><dt>Esc</dt><dd>Exit control mode or close a dialog</dd><dt>?</dt><dd>Open this legend</dd></dl>
     <footer><button type="button" onClick={onCancel}>Close</button></footer>
   </ModalDialog>
 }
@@ -381,6 +391,14 @@ function FuzzyPanel({ rows, targetUri, resultCount, mode, expanded, locked, chil
   const { sourceNameCount, resultCopy } = importCountMergePresentation(rows, mode, resultCount)
   const headingId = 'import-fuzzy-heading-' + rows[0].stableId.replace(/[^a-zA-Z0-9_-]/g, '-')
   const mergeId = headingId + '-details'
+  const focusSeparatedRow = (id: string) => document.querySelector<HTMLElement>(`[data-import-source-id="${CSS.escape(id)}"] .import-source-cell`)?.focus({ preventScroll: true })
+  const separateOne = (id: string, index: number) => {
+    const remaining = rows.filter((row) => row.stableId !== id)
+    const nextId = remaining[Math.min(index, remaining.length - 1)]?.stableId
+    onSeparate([id])
+    const next = nextId ? document.querySelector<HTMLButtonElement>(`[data-import-unmerge-id="${CSS.escape(nextId)}"]`) : null
+    if (next) next.focus({ preventScroll: true }); else focusSeparatedRow(id)
+  }
   return <section className="import-fuzzy-panel" aria-labelledby={headingId}>
     <div className="import-fuzzy-heading">
       <h3 id={headingId}>COUNT MERGE</h3>
@@ -388,13 +406,13 @@ function FuzzyPanel({ rows, targetUri, resultCount, mode, expanded, locked, chil
       <strong>{resultCount.toLocaleString()} plays</strong>
       {locked && <small className="muted">Locked after import</small>}
       <div className="import-fuzzy-actions"><button type="button" className="text-button" aria-expanded={expanded} aria-controls={mergeId} onClick={onToggle}>{expanded ? 'Hide flow' : 'Show flow'}</button>
-      {rows.length > 1 && <button type="button" className="text-button" title="Reveal original rows for individual editing; keep their matches" onClick={() => onSeparate(rows.map((row) => row.stableId))}>Unmerge all</button>}</div>
+      {rows.length > 1 && <button type="button" className="text-button" title="Reveal original rows for individual editing; keep their matches" onClick={() => { const firstId = rows[0].stableId; onSeparate(rows.map((row) => row.stableId)); focusSeparatedRow(firstId) }}>Unmerge all</button>}</div>
     </div>
     {children}
     <div id={mergeId} className="import-fuzzy-merge" hidden={!expanded}>
-      <ul className="import-fuzzy-sources" aria-label="Last.fm names and play counts">{rows.flatMap((row) => row.variants.map((variant, index) => {
+      <ul className="import-fuzzy-sources" aria-label="Last.fm names and play counts">{rows.flatMap((row, rowIndex) => row.variants.map((variant, index) => {
         const name = variant.artist + ' · ' + variant.album + ' · ' + variant.track
-        return <li key={row.stableId + '-' + index}><span title={name} aria-label={name}>{variant.track}</span><strong>{variant.playCount.toLocaleString()}</strong>{rows.length > 1 && index === 0 ? <button type="button" aria-label={'Unmerge ' + row.track} title="Reveal this source row for individual editing; keep its match" onClick={() => onSeparate([row.stableId])}>↶</button> : <span />}</li>
+        return <li key={row.stableId + '-' + index}><span title={name} aria-label={name}>{variant.track}</span><strong>{variant.playCount.toLocaleString()}</strong>{rows.length > 1 && index === 0 ? <button type="button" data-import-unmerge-id={row.stableId} aria-label={'Unmerge ' + row.track} title="Reveal this source row for individual editing; keep its match" onClick={() => separateOne(row.stableId, rowIndex)}>↶</button> : <span />}</li>
       }))}</ul>
       <div className="import-fuzzy-connector" aria-hidden="true" />
       <output className="import-fuzzy-result" aria-live="polite"><strong>{resultCount.toLocaleString()} plays</strong><small>{resultCopy}</small></output>
@@ -405,27 +423,28 @@ function FuzzyPanel({ rows, targetUri, resultCount, mode, expanded, locked, chil
 
 function LibraryMatchDetails({ info, kind }: { info?: LibraryMatchInfo; kind: 'Track' | 'Album' }) {
   if (!info || (!info.inLibrary && !info.albumInLibrary && !info.genres.length && info.playCount === null && info.rating === null)) return null
-  return <div className="import-library-metadata" role="group" aria-label={`${kind} library metadata`}>
-    <div className="import-library-badges">{info.inLibrary && <span className="import-library-badge">{kind} in library</span>}{kind === 'Track' && info.albumInLibrary && <span className="import-library-badge">Album in library</span>}</div>
-    <small>{info.genres.length > 0 && <span>Genre: {info.genres.join(' / ')}</span>}{info.playCount !== null && <span>{info.playCount.toLocaleString()} {kind === 'Album' ? 'total track plays in library' : 'plays in library'}</span>}{info.rating !== null && <span aria-label={`${info.rating} out of 5 stars`}>{'★'.repeat(info.rating)}</span>}</small>
-  </div>
+  const membership = kind === 'Album' ? info.inLibrary ? 'Album in library' : null : info.albumInLibrary ? 'Track + album in library' : info.inLibrary ? 'Track in library' : null
+  return <small className="import-library-metadata" role="group" aria-label={`${kind} library metadata`}>
+    {membership && <span className="import-library-badge">{membership}</span>}
+    {info.genres.length > 0 && <span>Genre: {info.genres.join(' / ')}</span>}
+    {info.playCount !== null && <span>{kind === 'Album' ? 'Track plays' : 'Plays'}: {info.playCount.toLocaleString()}</span>}
+    {info.rating !== null && <span aria-label={`${info.rating} out of 5 stars`}>Rating: {'★'.repeat(info.rating)}</span>}
+  </small>
 }
 
-function ImporterRow({ playback, item, rowNumber, selected, needsMatch, collection, selectedTrackUris, ambiguousChoices, libraryMatches, onExclude, onSelect, onChangeTrack, onUseTrack, onError, showQuery, locked, rejectLocked }: { playback: ImporterPlayback | null; item: PageItem; rowNumber: number; selected: boolean; needsMatch: boolean; collection: boolean; selectedTrackUris: Iterable<string>; ambiguousChoices: CollectionAmbiguousChoice[]; libraryMatches?: Record<string, LibraryMatchInfo>; onExclude: () => void; onSelect: (event: ReactMouseEvent<HTMLDivElement>) => void; onChangeTrack: () => void; onUseTrack: (uri: string) => void; onError: (error: unknown) => void; showQuery: boolean; locked: boolean; rejectLocked: boolean }) {
+function ImporterRow({ playback, item, rowNumber, selected, highlighted, needsMatch, collection, selectedTrackUris, ambiguousChoices, libraryMatches, onSelect, onToggle, onChangeTrack, onUseTrack, onError, showQuery, locked }: { playback: ImporterPlayback | null; item: PageItem; rowNumber: number; selected: boolean; highlighted: boolean; needsMatch: boolean; collection: boolean; selectedTrackUris: Iterable<string>; ambiguousChoices: CollectionAmbiguousChoice[]; libraryMatches?: Record<string, LibraryMatchInfo>; onSelect: (event: ReactMouseEvent<HTMLDivElement>) => void; onToggle: () => void; onChangeTrack: () => void; onUseTrack: (uri: string) => void; onError: (error: unknown) => void; showQuery: boolean; locked: boolean }) {
   const match = item.matchResult
   const track = matchedTrack(item)
   const isPlaying = Boolean(track && playback?.uri === track.uri && playback.isPlaying)
   const displayedSearchTerm = collection && !track ? trackPickerQuery(item.source) : match?.searchTerm
   const suggestion = collectionSuggestion(item.source, item.matchResult, selectedTrackUris)
   const trackConfidence: ImportConfidence = selectedImportTrackConfidence(item.source.stableId, match?.selectedUri ?? null, match?.trackMatches ?? {}, match?.confidence ?? null, match?.candidates ?? [])
-  const excluded = item.decision.excluded
   const imported = item.decision.status === 'done'
   const reviewable = ['pending', 'skipped'].includes(item.decision.status)
-  const disabled = locked || excluded || !reviewable
-  const excludeDisabled = rejectLocked || !reviewable
-  return <article className={`import-track-row${excluded ? ' excluded' : ''}${selected ? ' selected' : ''}`} data-review-status={item.decision.status} data-import-source-id={item.source.stableId}>
-    <div className="import-source-cell import-nav-target" data-import-nav="source" data-import-row={rowNumber} tabIndex={0} aria-label={`Last.fm source ${item.source.track}`} aria-keyshortcuts={IMPORT_NAV_KEYS} onClick={(event) => { if (!(event.target as Element).closest('button,input,select,textarea,a,label,[contenteditable="true"]')) onSelect(event) }}><button type="button" className="import-exclude-glyph" disabled={excludeDisabled} aria-label={excluded ? 'Undo exclusion' : `Exclude ${item.source.track}`} title={excluded ? 'Put this source row back in the queue' : 'Exclude this Last.fm source row'} onClick={onExclude}>{excluded ? '↺' : '⊘'}</button><div className="import-track-copy"><strong>{item.source.track}</strong><small>{item.source.playCount.toLocaleString()} plays · last {new Date(item.source.latest * 1000).toLocaleDateString()}</small>{imported && <small className="import-completed-copy">✓ Imported</small>}{excluded && <small className="import-excluded-copy">Excluded — won’t be imported or asked about again</small>}</div></div>
-    <div className={`import-match-cell import-nav-target${track ? ' has-play-button' : ''}${needsMatch ? ' needs-action' : ''}`} data-import-nav="match" data-import-row={rowNumber} tabIndex={0} aria-label={`Spotify match for ${item.source.track}`} aria-keyshortcuts={IMPORT_NAV_KEYS}>{track && <button type="button" className="import-play-button" aria-label={`${isPlaying ? 'Pause' : 'Play'} ${track.name} on Spotify`} title={`${isPlaying ? 'Pause' : 'Play'} ${track.name} on Spotify`} onClick={() => { void lastfmGateway.playTrack(track).catch(onError) }}><span aria-hidden="true">{isPlaying ? '⏸' : '▶'}</span>{isPlaying ? 'Pause' : 'Play'}</button>}{track ? <><strong>{track.name}</strong><small>{track.artist}{track.album ? ` · ${track.album}` : ''}</small><span className={`confidence ${trackConfidence ?? 'low'}`}>{confidenceLabel(trackConfidence ?? 'low')}</span>{collection && trackConfidence === 'exact' && !imported && <span className="import-strong-match">STRONG MATCH</span>}{imported && <span className="import-completed-badge">ALREADY IMPORTED</span>}<LibraryMatchDetails info={libraryMatches?.[track.uri]} kind="Track" /></> : ambiguousChoices.length ? <><strong className="import-action-required">Multiple matches</strong><small>Choose the Spotify track for this Last.fm row.</small><select className="import-ambiguity-select" aria-label={`Choose track match for ${item.source.track}`} value="" disabled={disabled} onChange={(event) => { if (event.target.value) onUseTrack(event.target.value) }}><option value="" disabled>Choose a track…</option>{ambiguousChoices.map((choice) => <option key={choice.uri} value={choice.uri}>{choice.track} · {choice.durationSecs ? formatTime(choice.durationSecs) : '—'}{choice.artist ? ` — ${choice.artist}` : ''} — {choice.album}{choice.recommended ? ' — recommended' : ''}</option>)}</select></> : suggestion ? <><strong>{suggestion.name}</strong><small>{suggestion.artist} · {suggestion.trackAlbums[0] || 'Track result'}</small><span className="import-suggestion-label">SUGGESTED</span><button type="button" className="import-match-action" disabled={disabled} onClick={() => onUseTrack(suggestion.uri)}>Use This Track</button></> : needsMatch ? <><strong className="import-action-required">Unmapped</strong><small>Left for later when you accept</small></> : <small className="muted">No supported match</small>}{showQuery && displayedSearchTerm && <code>q={displayedSearchTerm}</code>}<button type="button" className="text-button" disabled={disabled} onClick={onChangeTrack}>Change Track…</button></div>
+  const disabled = locked || !reviewable
+  return <article className={`import-track-row${highlighted ? ' selected' : ''}`} data-review-status={item.decision.status} data-import-source-id={item.source.stableId}>
+    <div className="import-source-cell import-nav-target" data-import-nav="source" data-import-row={rowNumber} tabIndex={0} aria-label={`Last.fm source ${item.source.track}`} aria-keyshortcuts={IMPORT_NAV_KEYS} onClick={(event) => { if (!(event.target as Element).closest('button,input,select,textarea,a,label,[contenteditable="true"]')) onSelect(event) }}><span className="import-mapped-status"><input type="checkbox" checked={selected} disabled={disabled} onChange={onToggle} aria-label={`Select ${item.source.track}`} /></span><div className="import-track-copy"><strong>{item.source.track}</strong><small>{item.source.playCount.toLocaleString()} plays · last {new Date(item.source.latest * 1000).toLocaleDateString()}</small>{imported && <small className="import-completed-copy">✓ Imported</small>}</div></div>
+    <div className={`import-match-cell import-nav-target${track ? ' has-play-button' : ''}${needsMatch ? ' needs-action' : ''}`} data-import-nav="match" data-import-row={rowNumber} tabIndex={0} aria-label={`Spotify match for ${item.source.track}`} aria-keyshortcuts={IMPORT_NAV_KEYS}>{track && <button type="button" className="import-play-button" aria-label={`${isPlaying ? 'Pause' : 'Play'} ${track.name} on Spotify`} title={`${isPlaying ? 'Pause' : 'Play'} ${track.name} on Spotify`} onClick={() => { void lastfmGateway.playTrack(track).catch(onError) }}><span aria-hidden="true">{isPlaying ? '⏸' : '▶'}</span>{isPlaying ? 'Pause' : 'Play'}</button>}{track ? <><strong>{track.name}</strong><small>Artist: {track.artist}{track.album && <> · Album: {track.album}</>}{track.durationSecs > 0 && <> · Length: {formatTime(track.durationSecs)}</>}</small><span className={`confidence ${trackConfidence ?? 'low'}`}>{confidenceLabel(trackConfidence ?? 'low')}</span>{collection && trackConfidence === 'exact' && !imported && <span className="import-strong-match">STRONG MATCH</span>}{imported && <span className="import-completed-badge">ALREADY IMPORTED</span>}<LibraryMatchDetails info={libraryMatches?.[track.uri]} kind="Track" /></> : ambiguousChoices.length ? <><strong className="import-action-required">Multiple matches</strong><small>Choose the Spotify track for this Last.fm row.</small><select className="import-ambiguity-select" aria-label={`Choose track match for ${item.source.track}`} value="" disabled={disabled} onChange={(event) => { if (event.target.value) onUseTrack(event.target.value) }}><option value="" disabled>Choose a track…</option>{ambiguousChoices.map((choice) => <option key={choice.uri} value={choice.uri}>{choice.track} · {choice.durationSecs ? formatTime(choice.durationSecs) : '—'}{choice.artist ? ` — ${choice.artist}` : ''} — {choice.album}{choice.recommended ? ' — recommended' : ''}</option>)}</select></> : suggestion ? <><strong>{suggestion.name}</strong><small>{suggestion.artist} · {suggestion.trackAlbums[0] || 'Track result'}</small><span className="import-suggestion-label">SUGGESTED</span><button type="button" className="import-match-action" disabled={disabled} onClick={() => onUseTrack(suggestion.uri)}>Use This Track</button></> : needsMatch ? <><strong className="import-action-required">Unmapped</strong><small>Left for later when you accept</small></> : <small className="muted">No supported match</small>}{showQuery && displayedSearchTerm && <code>q={displayedSearchTerm}</code>}<button type="button" className="text-button" disabled={disabled} onClick={onChangeTrack}>Change Track…</button></div>
   </article>
 }
 
@@ -445,7 +464,27 @@ function ImportGenreInput({ value, suggestions, disabled, onDraft, onCommit }: {
   }} placeholder="No change" />
 }
 
-function ImportPage({ playback, page, applying, onApply, failed, showQueries, onRefresh, onRejected, onNext, onApplied, onPrevious, onIgnoreBatch, onError, onCollectionPage, onTabToQueue, onShortcuts, onStatus, onMutation }: { playback: ImporterPlayback | null; page: PageView; applying: boolean; onApply: (page: PageView, ids: string[], advance: boolean, options: ImportPageOptions) => Promise<void>; failed: boolean; showQueries: boolean; onRefresh: (strict?: boolean) => Promise<ImportQueueItem[]>; onRejected: (page: PageView, remainingPlayCount: number, allExcluded: boolean) => ImportQueueItem[]; onNext: (queue?: ImportQueueItem[], focusQueue?: boolean) => void; onApplied: () => Promise<void>; onPrevious: () => void; onIgnoreBatch: () => void; onError: (error: unknown) => void; onCollectionPage: (page: PageView) => void; onTabToQueue: () => boolean; onShortcuts: () => void; onStatus: ShortcutStatus; onMutation: (running: boolean) => void }) {
+function BatchNameEditor({ value, target, surface, editing, error, disabled, onBegin, onChange, onCommit, onCancel }: { value: string; target: BatchNameTarget; surface: BatchNameSurface; editing: BatchNameEdit | null; error?: string | null; disabled?: boolean; onBegin: () => void; onChange: (value: string) => void; onCommit: (value: string) => void; onCancel: () => void }) {
+  const textarea = useRef<HTMLTextAreaElement>(null)
+  const blurHandled = useRef(false)
+  const cancelled = useRef(false)
+  const active = editing?.batchId === target.batchId && editing.surface === surface
+  useLayoutEffect(() => {
+    if (!active) return
+    blurHandled.current = false
+    cancelled.current = false
+    if (!textarea.current) return
+    textarea.current.focus()
+    if (editing?.selectAll) textarea.current.select()
+  }, [active, editing?.selectAll])
+  if (active) {
+    const errorId = `import-batch-name-error-${target.batchId}`
+    return <span className="import-batch-name-editor"><textarea ref={textarea} rows={1} maxLength={IMPORT_BATCH_NAME_MAX_LENGTH} aria-label="Batch name" aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined} value={editing.draft} disabled={disabled} onChange={(event) => { blurHandled.current = false; cancelled.current = false; onChange(event.currentTarget.value) }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); blurHandled.current = true; onCommit(editing.draft) } else if (event.key === 'Escape') { event.preventDefault(); cancelled.current = true; onCancel() } }} onBlur={() => { if (blurHandled.current || cancelled.current) return; blurHandled.current = true; onCommit(editing.draft) }} /><small id={errorId} className="import-batch-name-error" role={error ? 'alert' : undefined}>{error}</small></span>
+  }
+  return <span className="import-batch-name-display"><span>{value}</span><button type="button" className="import-batch-name-pencil" aria-label={`Rename ${value}`} title="Rename batch" disabled={disabled} onClick={(event) => { event.stopPropagation(); onBegin() }}>✎</button></span>
+}
+
+function ImportPage({ playback, page, onApply, failed, showQueries, onRefresh, onNext, onApplied, onPrevious, onArchiveBatch, onIgnoreBatch, onError, onCollectionPage, onTabToQueue, onShortcuts, onStatus, onMutation, batchNameEdit, batchNameError, onBeginBatchRename, onChangeBatchName, onCommitBatchName, onCancelBatchRename }: { playback: ImporterPlayback | null; page: PageView; onApply: (page: PageView, ids: string[], options: ImportPageOptions, archiveRemainder: boolean) => Promise<void>; failed: boolean; showQueries: boolean; onRefresh: (strict?: boolean) => Promise<ImportQueueItem[]>; onNext: (queue?: ImportQueueItem[], focusQueue?: boolean) => void; onApplied: (archiveRemainder: boolean, keepCurrentBatch: boolean) => Promise<void>; onPrevious: () => void; onArchiveBatch: () => void; onIgnoreBatch: () => void; onError: (error: unknown) => void; onCollectionPage: (page: PageView) => void; onTabToQueue: () => boolean; onShortcuts: () => void; onStatus: ShortcutStatus; onMutation: (running: boolean) => void; batchNameEdit: BatchNameEdit | null; batchNameError: string | null; onBeginBatchRename: (target: BatchNameTarget, surface: BatchNameSurface) => void; onChangeBatchName: (value: string) => void; onCommitBatchName: (target: BatchNameTarget, value: string) => void; onCancelBatchRename: () => void }) {
   const selectedAlbumItem = selectedAlbumRow(page)
   const selectedAlbumUri = selectedAlbumItem?.matchResult?.selectedUri
   const [reviewDraft, setReview] = useState<ReviewState>(() => reviewForPage(page))
@@ -456,10 +495,10 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
   const genreEdited = useRef(false)
   const updateGenreDraft = useCallback((genre: string) => { genreDraft.current = genre; genreEdited.current = true }, [])
   useEffect(() => { genreDraft.current = review.genre }, [review.genre])
-  const [mutationBusy, setBusy] = useState(false)
-  const busy = mutationBusy || applying
-  const [savingRejects, setSavingRejects] = useState(false)
   const [applyState, setApplyState] = useState<'ready' | 'enqueueing' | 'loading' | 'error'>('ready')
+  const [mutationBusy, setBusy] = useState(false)
+  const busy = mutationBusy || applyState === 'loading'
+  const [archiveRemainder, setArchiveRemainder] = useState(false)
   const [picker, setPicker] = useState<PickerState | null>(null)
   const [collectionDialogOpen, setCollectionDialogOpen] = useState(false)
   const [collectionPreviewUri, setCollectionPreviewUri] = useState<string>()
@@ -470,9 +509,8 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
   const [collapsedFuzzy, setCollapsedFuzzy] = useState<Set<string>>(new Set())
   const [pageError, setPageError] = useState<string>()
   const [rowSelection, setRowSelection] = useState<ImportRowSelection>({ ids: new Set(), anchor: null })
-  const queuedRejects = useRef({ exclude: new Set<string>(), restore: new Set<string>() })
-  const rejectSaveRunning = useRef(false)
-  const latestRejectProjection = useRef<{ page: PageView; remainingPlayCount: number; allExcluded: boolean } | undefined>(undefined)
+  const [selectionTouched, setSelectionTouched] = useState(false)
+  const [rowSort, setRowSort] = useState<ImportRowSort>('plays')
   const reviewKey = useRef(reviewBatchKey(page))
   useEffect(() => {
     const nextKey = reviewBatchKey(page)
@@ -486,10 +524,11 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
       return { ...next, wholeAlbum: next.wholeAlbum && Boolean(selectedAlbumUri), genre: useLibraryGenre ? incoming.genre : next.genre }
     })
     reviewKey.current = nextKey
+    setApplyState('ready')
     if (changed) { setSeparateSourceIds(new Set()); setCollapsedFuzzy(new Set()); setPageError(undefined) }
     if (!page.collection) { setCollectionDialogOpen(false); setCollectionPreviewUri(undefined) }
   }, [page, selectedAlbumUri])
-  useEffect(() => { setRowSelection({ ids: new Set(), anchor: null }) }, [page.batchId])
+  useEffect(() => { setRowSelection({ ids: new Set(), anchor: null }); setSelectionTouched(false) }, [page.batchId])
   useEffect(() => {
     let active = true
     libraryGateway.genreValues().then((values) => { if (active) setGenreSuggestions(values) }).catch((error) => { if (active) onError(error) })
@@ -546,68 +585,9 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
       return next
     } catch (error) { onError(error); return null } finally { onMutation(false); setBusy(false) }
   }
-  const flushRejectedRows = async () => {
-    let nextState: ImportStateView | undefined
-    try {
-      while (queuedRejects.current.exclude.size || queuedRejects.current.restore.size) {
-        const action = queuedRejects.current.exclude.size ? 'exclude' : 'undo-exclude'
-        const pending = action === 'exclude' ? queuedRejects.current.exclude : queuedRejects.current.restore
-        const ids = [...pending]
-        pending.clear()
-        nextState = await lastfmGateway.review({ batchId: page.batchId, ids, action, artist: page.artist, album: page.album })
-      }
-      const projection = latestRejectProjection.current
-      if (nextState && projection) {
-        const nextPage = { ...projection.page, state: nextState }
-        const nextQueue = onRejected(nextPage, projection.remainingPlayCount, projection.allExcluded)
-        if (!projection.remainingPlayCount) onNext(nextQueue)
-      }
-    } catch (error) {
-      queuedRejects.current.exclude.clear()
-      queuedRejects.current.restore.clear()
-      try { await onRefresh(true) } catch { /* Preserve the mutation error. */ }
-      setPageError(String(error))
-      onError(error)
-    } finally {
-      rejectSaveRunning.current = false
-      setSavingRejects(false)
-      setBusy(false)
-      onMutation(false)
-    }
-  }
-  const rejectRows = (ids: Iterable<string>, excluded: boolean) => {
-    const rowIds = [...new Set(ids)]
-    if (!rowIds.length || (busy && !rejectSaveRunning.current)) return
-    const nextReview = excludeImportRows(review, rowIds, excluded)
-    const nextDecisions = page.rows.map((item) => nextReview.decisions[item.source.stableId] ?? item.decision)
-    const remainingPlayCount = page.rows.reduce((total, item, index) => ['pending', 'skipped'].includes(nextDecisions[index].status) && !nextDecisions[index].excluded ? total + item.source.playCount : total, 0)
-    const allExcluded = nextDecisions.every((decision) => decision.excluded)
-    flushSync(() => {
-      setReview(nextReview)
-      setRowSelection((current) => ({ ids: new Set([...current.ids].filter((id) => !rowIds.includes(id))), anchor: rowIds.includes(current.anchor ?? '') ? null : current.anchor }))
-      setPageError(undefined)
-    })
-    const nextPage = { ...page, rows: page.rows.map((item, index) => ({ ...item, decision: nextDecisions[index] })) }
-    onRejected(nextPage, remainingPlayCount, allExcluded)
-    latestRejectProjection.current = { page: nextPage, remainingPlayCount, allExcluded }
-    for (const id of rowIds) {
-      if (excluded) {
-        if (!queuedRejects.current.restore.delete(id)) queuedRejects.current.exclude.add(id)
-      } else if (!queuedRejects.current.exclude.delete(id)) {
-        queuedRejects.current.restore.add(id)
-      }
-    }
-    if (!rejectSaveRunning.current) {
-      rejectSaveRunning.current = true
-      setSavingRejects(true)
-      setBusy(true)
-      onMutation(true)
-      requestAnimationFrame(() => setTimeout(() => void flushRejectedRows()))
-    }
-  }
   const projectedRows = page.rows.map((item) => ({ ...item, decision: review.decisions[item.source.stableId] ?? item.decision }))
   const projectedPage = { ...page, rows: projectedRows }
-  const reviewableAlbumRows = projectedRows.filter((item) => !item.decision.excluded && (item.decision.status === 'pending' || item.decision.status === 'skipped'))
+  const reviewableAlbumRows = page.archived ? [] : projectedRows.filter((item) => item.decision.status === 'pending' || item.decision.status === 'skipped')
   const canResumeAlbum = reviewableAlbumRows.length > 0 && reviewableAlbumRows.every((item) => item.decision.status === 'skipped')
   const toggleAlbumSkip = async () => {
     const action = canResumeAlbum ? 'restore' : 'skip-album'
@@ -616,8 +596,19 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
       if (importAlbumActionAdvances(action)) onNext(nextQueue)
     })
   }
-  const apply = async (advance: boolean) => {
-    if (!mappedIds.length) {
+  const toggleBatchArchive = async () => {
+    if (!page.archived) {
+      onArchiveBatch()
+      return
+    }
+    const action: ReviewAction = page.archived ? 'unarchive-batch' : 'archive-batch'
+    await run(() => lastfmGateway.review({ batchId: page.batchId, action, artist: page.artist, album: page.album }), (nextQueue) => {
+      onStatus(page.archived ? 'Batch returned to the import queue.' : 'Batch archived.')
+      onNext(nextQueue, true)
+    })
+  }
+  const apply = async (shouldArchiveRemainder = false) => {
+    if (!selectedMappedIds.length) {
       onStatus('Map at least one source track before accepting.')
       return
     }
@@ -626,6 +617,7 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
     let accepted = false
     try {
       const currentReview = withGenreDraft(review)
+      setArchiveRemainder(shouldArchiveRemainder)
       setReview(currentReview)
       setPageError(undefined)
       setApplyState('enqueueing')
@@ -633,12 +625,14 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
       // Apply carries the complete latest options; only an already-started save must finish.
       optionWrites.current.pending.delete(page.batchId)
       await optionSaves.current.catch(() => {})
-      await onApply(page, mappedIds, advance, pageOptions(currentReview, page))
+      await onApply(page, selectedMappedIds, pageOptions(currentReview, page, new Set(selectedMappedIds)), shouldArchiveRemainder)
       accepted = true
-      if (advance) setApplyState('loading')
-      else setApplyState('ready')
+      setApplyState('loading')
     } catch (error) { setApplyState('error'); setPageError(String(error)); onError(error) } finally { optionWrites.current.accepting = false; onMutation(false); setBusy(false) }
-    if (accepted && advance) await onApplied()
+    if (accepted) {
+      const hasRemainder = selectedMappedIds.length < reviewableAlbumRows.length
+      await onApplied(shouldArchiveRemainder && hasRemainder, !shouldArchiveRemainder && hasRemainder)
+    }
   }
   const retry = async () => {
     setBusy(true)
@@ -662,7 +656,7 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
   const pickerCandidatePool = picker ? [...new Map(picker.sourceIds.flatMap((sourceId) => page.rows.find((item) => item.source.stableId === sourceId)?.matchResult?.candidates ?? []).map((candidate) => [candidate.uri, candidate])).values()] : []
   const openTrackPicker = (sourceId: string) => {
     const item = page.rows.find((entry) => entry.source.stableId === sourceId)
-    setPicker({ kind: 'track', sourceId, sourceIds: mergedIds(sourceId), query: item ? trackPickerQuery(item.source) : '' })
+    setPicker({ kind: 'track', sourceId, sourceIds: selectionTouched && selectedRowIds.length ? selectedRowIds : mergedIds(sourceId), query: item ? trackPickerQuery(item.source) : '' })
   }
   const openAlbumPicker = () => {
     const sourceId = page.rows[0]?.source.stableId ?? ''
@@ -694,7 +688,10 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
     const next = await runPageMutation(() => activePicker.kind === 'track'
       ? lastfmGateway.selectMatches(page.batchId, activePicker.sourceIds.map((id) => ({ id, uri })))
       : lastfmGateway.selectMatch(page.batchId, activePicker.sourceId, uri))
-    if (next) setPicker((current) => current && current.kind === activePicker.kind && current.sourceId === activePicker.sourceId ? null : current)
+    if (next) {
+      if (activePicker.kind === 'track' && selectionTouched) setRowSelection((current) => ({ ids: new Set([...current.ids, ...activePicker.sourceIds]), anchor: current.anchor }))
+      setPicker((current) => current && current.kind === activePicker.kind && current.sourceId === activePicker.sourceId ? null : current)
+    }
   }
   const intentChange = (key: 'importContent' | 'includeHistoricalPlayCounts', checked: boolean) => {
     const next = { ...review, [key]: checked }
@@ -760,8 +757,8 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
         if (collection) openCollectionAlbums()
         else openAlbumPicker()
       }
-      else if (item && !item.decision.excluded && ['pending', 'skipped'].includes(item.decision.status)) openTrackPicker(item.source.stableId)
-      else onStatus('This source track is already done or excluded.')
+      else if (item && ['pending', 'skipped'].includes(item.decision.status)) openTrackPicker(item.source.stableId)
+      else onStatus('This source track is already done or ignored.')
       return
     }
     if (event.key === ' ') {
@@ -773,35 +770,22 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
         return
       }
       const item = visibleRows[row - 1]
-      if (item.decision.excluded || !['pending', 'skipped'].includes(item.decision.status)) onStatus('This source track cannot be selected.')
-      else setRowSelection((current) => {
-        const ids = new Set(current.ids)
-        for (const id of mergedIds(item.source.stableId)) {
-          if (current.ids.has(item.source.stableId)) ids.delete(id)
-          else ids.add(id)
-        }
-        return { ids, anchor: item.source.stableId }
-      })
-      return
-    }
-    if (event.key.toLowerCase() === 'x') {
-      const item = row === 0 ? undefined : visibleRows[row - 1]
-      if (!item) onStatus('Exclude is available on source-track rows.')
-      else if (!['pending', 'skipped'].includes(item.decision.status)) onStatus('Done or ignored source tracks cannot be excluded.')
-      else void rejectRows(mergedIds(item.source.stableId), !item.decision.excluded)
+      if (!['pending', 'skipped'].includes(item.decision.status)) onStatus('This source track cannot be selected.')
+      else toggleRow(item.source.stableId)
       return
     }
     if (event.key.toLowerCase() === 's') {
-      if (!reviewableAlbumRows.length) onStatus('This album is done, ignored, or excluded; nothing changed.')
+      if (!reviewableAlbumRows.length) onStatus('This album is done or ignored; nothing changed.')
       else void toggleAlbumSkip()
       return
     }
-    if (event.key.toLowerCase() === 'a') void apply(true)
+    if (event.key.toLowerCase() === 'a') void apply()
   }
   const selectedAlbumCandidate = selectedAlbumItem?.matchResult?.candidates.find((candidate) => candidate.uri === selectedAlbumUri)
   const albumAdvisory = selectedAlbumAdvisory(projectedPage)
   const selectedAlbumName = selectedAlbumCandidate?.name ?? 'Choose a release'
   const mappedIds = reviewableAlbumRows.filter((item) => matchedTrack(item)).map((item) => item.source.stableId)
+  const selectedMappedIds = selectionTouched ? mappedIds.filter((id) => rowSelection.ids.has(id)) : mappedIds
   const requiredMatchIds = reviewableAlbumRows.filter((item) => !matchedTrack(item)).map((item) => item.source.stableId)
   const requiredMatches = new Set(requiredMatchIds)
   const collection = page.collection !== null
@@ -818,13 +802,12 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
     const uri = chosen?.startsWith('spotify:track:') ? chosen : chosen ? item.matchResult?.trackMatches[item.source.stableId] : null
     if (uri) selectedCollectionTrackUris.add(uri)
   }
-  const rejectedIds = projectedRows.filter((item) => item.decision.excluded).map((item) => item.source.stableId)
-  const orderedRows = stablePartitionImportRows(projectedRows, requiredMatchIds, (item) => item.source.stableId, rejectedIds)
+  const orderedRows = sortImportRows(projectedRows, requiredMatchIds, rowSort)
   const mergeMembers = new Map(Object.entries(page.fuzzyGroups).map(([target, rows]) => [target, new Set(rows.map((row) => row.stableId))]))
   const mergeGroups = new Map<string, PageItem[]>()
   for (const item of orderedRows) {
     const target = matchedTrack(item)?.uri
-    if (!target || separateSourceIds.has(item.source.stableId) || item.decision.excluded || !mergeMembers.get(target)?.has(item.source.stableId)) continue
+    if (!target || separateSourceIds.has(item.source.stableId) || !mergeMembers.get(target)?.has(item.source.stableId)) continue
     const key = `${target}:${item.decision.status}`
     const group = mergeGroups.get(key) ?? []
     group.push(item)
@@ -838,21 +821,33 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
   }
   const mergedIds = (id: string) => mergedRows.get(id)?.map((item) => item.source.stableId) ?? [id]
   const visibleRows = orderedRows.filter((item) => !mergedRows.has(item.source.stableId) || mergedRows.get(item.source.stableId)![0] === item)
-  const rejectableIds = orderedRows.filter((item) => !item.decision.excluded && ['pending', 'skipped'].includes(item.decision.status)).map((item) => item.source.stableId)
-  const selectedRowIds = [...rowSelection.ids].filter((id) => rejectableIds.includes(id))
-  const selectRejectRow = (id: string, event: ReactMouseEvent<HTMLDivElement>) => {
+  const selectableIds = orderedRows.filter((item) => ['pending', 'skipped'].includes(item.decision.status)).map((item) => item.source.stableId)
+  const acceptedRowIds = (selectionTouched ? [...rowSelection.ids] : mappedIds).filter((id) => selectableIds.includes(id))
+  const selectedRowIds = selectionTouched ? acceptedRowIds : []
+  const allRowsSelected = selectableIds.length > 0 && acceptedRowIds.length === selectableIds.length
+  const selectRow = (id: string, event: ReactMouseEvent<HTMLDivElement>) => {
     if (busy || failed) return
-    const visibleIds = visibleRows.filter((item) => rejectableIds.includes(item.source.stableId)).map((item) => item.source.stableId)
+    const visibleIds = visibleRows.filter((item) => selectableIds.includes(item.source.stableId)).map((item) => item.source.stableId)
     const selected = new Set(visibleIds.filter((sourceId) => mergedIds(sourceId).some((member) => rowSelection.ids.has(member))))
     const next = selectImportRows(visibleIds, selected, rowSelection.anchor, id, event)
+    setSelectionTouched(true)
     setRowSelection({ ...next, ids: new Set([...next.ids].flatMap(mergedIds)) })
+  }
+  const toggleRow = (id: string) => {
+    setSelectionTouched(true)
+    setRowSelection((current) => {
+      const ids = new Set(selectionTouched ? current.ids : mappedIds)
+      const members = mergedIds(id)
+      if (members.some((member) => ids.has(member))) members.forEach((member) => ids.delete(member))
+      else members.forEach((member) => ids.add(member))
+      return { ids, anchor: id }
+    })
   }
   const separateRows = (ids: string[]) => {
     flushSync(() => setSeparateSourceIds((current) => new Set([...current, ...ids])))
     onStatus('Original source rows shown. Spotify matches and play counts are unchanged.')
-    document.querySelector<HTMLElement>(`[data-import-source-id="${CSS.escape(ids[0])}"] .import-source-cell`)?.focus()
   }
-  const selectAllRows = () => setRowSelection({ ids: new Set(rejectableIds), anchor: rejectableIds[0] ?? null })
+  const toggleAllRows = () => { setSelectionTouched(true); setRowSelection(allRowsSelected ? { ids: new Set(), anchor: null } : { ids: new Set(selectableIds), anchor: selectableIds[0] ?? null }) }
   const mapSelectedRows = () => {
     const sourceId = selectedRowIds[0]
     const item = page.rows.find((entry) => entry.source.stableId === sourceId)
@@ -860,35 +855,38 @@ function ImportPage({ playback, page, applying, onApply, failed, showQueries, on
   }
   const summary = collection ? collectionSummary(projectedPage, selectedCollectionTrackUris) : null
   const suggestedMatches = collection ? orderedRows.flatMap((item) => {
-    if (item.decision.excluded || !['pending', 'skipped'].includes(item.decision.status)) return []
+    if (!['pending', 'skipped'].includes(item.decision.status)) return []
     const suggestion = collectionSuggestion(item.source, item.matchResult, selectedCollectionTrackUris)
     return suggestion ? [{ id: item.source.stableId, uri: suggestion.uri }] : []
   }) : []
   const applySuggestedMatches = async () => {
     const next = await runPageMutation(() => lastfmGateway.selectMatches(page.batchId, suggestedMatches))
-    if (next) onStatus(`${suggestedMatches.length} suggested ${suggestedMatches.length === 1 ? 'match' : 'matches'} selected.`)
+    if (next) {
+      if (selectionTouched) setRowSelection((current) => ({ ids: new Set([...current.ids, ...suggestedMatches.map(({ id }) => id)]), anchor: current.anchor }))
+      onStatus(`${suggestedMatches.length} suggested ${suggestedMatches.length === 1 ? 'match' : 'matches'} selected.`)
+    }
   }
   // Release-shaped batches can opt into the same collection workflow used by
   // batches without Last.fm album metadata.
   return <section className="import-review" aria-labelledby="import-review-title" aria-busy={applyState === 'enqueueing' || applyState === 'loading'} onKeyDown={handleNavigationKeyDown}>
-    <header className="import-review-header"><div><p className="eyebrow">{page.artist}</p><h2 id="import-review-title">{page.customBatch ? 'Custom batch' : page.album || 'Singles'}</h2><p className="import-page-meta">{page.rows.length} source tracks · {page.rows.reduce((total, item) => total + item.source.playCount, 0).toLocaleString()} plays</p>{collection && <><p className="import-collection-note">{page.customBatch ? 'You combined these Last.fm batches. Added Spotify albums constrain and rerank all of their track choices together.' : page.album ? 'This Last.fm release started with one Spotify match. Added Spotify albums can narrow and rerank its track choices.' : 'Last.fm supplied no album metadata. Tracks are matched individually. Added Spotify albums can narrow the choices.'}</p>{summary && <div className="import-collection-summary">{summary.imported > 0 && <span className="is-imported">{summary.imported} tracks imported</span>}<span className="is-automatic">{summary.automatic} automatically selected</span><span className="is-suggested">{summary.suggested} suggested</span><span className="needs-review">{summary.needsReview} need review</span></div>}</>}</div><div className="import-page-actions"><button type="button" disabled={busy || failed || page.pageNumber <= 1} aria-label="Previous batch" onClick={onPrevious}>‹</button><span>Batch {page.pageNumber} of {page.pageCount}</span><button type="button" disabled={busy || failed || page.pageNumber >= page.pageCount} aria-label="Next batch" onClick={() => onNext()}>›</button>{collection ? <button type="button" disabled={busy || failed} onClick={() => openCollectionAlbums()}>Manage Albums…</button> : <><button type="button" disabled={busy || failed} onClick={openAlbumPicker}>Change Album…</button><button type="button" disabled={busy || failed} onClick={() => void activateCollection()}>Add Album…</button></>}<button type="button" disabled={busy || failed} onClick={() => void toggleAlbumSkip()}>{canResumeAlbum ? `Resume ${page.customBatch ? 'Batch' : 'Album'}` : `Skip ${page.customBatch ? 'Batch' : 'Album'}`}</button>{!page.customBatch && <><button type="button" disabled={busy || failed} onClick={onIgnoreBatch}>Ignore batch</button><button type="button" disabled={busy || failed} onClick={() => void run(() => lastfmGateway.review({ batchId: page.batchId, action: 'ignore-artist', artist: page.artist, album: page.album }), onNext)}>Ignore Artist</button></>}</div></header>
-    <div className="import-album-strip"><div className="import-nav-target" data-import-nav="source" data-import-row="0" tabIndex={0} aria-label="Last.fm album source" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>{collection && !page.album && !page.customBatch ? 'WHAT LAST.FM SUPPLIED' : 'WHAT I’M IMPORTING'}</p><strong>{page.customBatch ? 'Custom batch' : page.album || 'Singles'}</strong><small>{page.customBatch ? `${page.artist} · ${page.albumLabelCount ?? 0} source albums · ${page.rows.length} source tracks` : collection && !page.album ? `${page.artist} · no album metadata · ${page.rows.length} source tracks matched individually` : `${page.artist} · ${page.rows.length} source tracks${collection ? ' · matched across Spotify albums' : ''}`}</small></div>{collection ? <div className="import-nav-target" data-import-nav="match" data-import-row="0" tabIndex={0} aria-label="Spotify album matches" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>SPOTIFY ALBUM MATCHES</p><strong>{selectedCollectionUris.length ? selectedCollectionAlbumSummary : 'No album matches yet'}</strong><small>{collectionMatches ? collectionCoverageStatus(collectionMatches.coverage) : 'Search Spotify to build a match set'}</small><button type="button" disabled={busy || failed} onClick={() => openCollectionAlbums()}>{page.album ? 'Manage Albums…' : 'Add albums…'}</button></div> : <div className="import-nav-target" data-import-nav="match" data-import-row="0" tabIndex={0} aria-label="Spotify album match" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>SPOTIFY MATCH</p><strong>{selectedAlbumName}</strong><small>{selectedAlbumCandidate ? relationLabel(selectedAlbumCandidate.relation) : 'No release selected'}</small>{albumAdvisory.strong && <span className="import-strong-match" role="status">STRONG MATCH{albumAdvisory.extraTrackCount ? ` · ${albumAdvisory.extraTrackCount} extra Spotify track${albumAdvisory.extraTrackCount === 1 ? '' : 's'}` : ''}</span>}{selectedAlbumUri && <LibraryMatchDetails info={page.libraryMatches?.[selectedAlbumUri]} kind="Album" />}<button type="button" disabled={busy || failed} onClick={openAlbumPicker}>Change Album…</button></div>}</div>
+    <header className="import-review-header"><div><p className="eyebrow">{page.artist}</p><h2 id="import-review-title"><BatchNameEditor value={importPageTitle(page)} target={page} surface="detail" editing={batchNameEdit} error={batchNameError} disabled={busy || failed || page.archived} onBegin={() => onBeginBatchRename(page, 'detail')} onChange={onChangeBatchName} onCommit={(name) => onCommitBatchName(page, name)} onCancel={onCancelBatchRename} /></h2><p className="import-page-meta">{page.rows.length} source tracks · {page.rows.reduce((total, item) => total + item.source.playCount, 0).toLocaleString()} plays</p>{collection && <><p className="import-collection-note">{page.customBatch ? 'You combined these Last.fm batches. Added Spotify albums constrain and rerank all of their track choices together.' : page.album ? 'This Last.fm release started with one Spotify match. Added Spotify albums can narrow and rerank its track choices.' : 'Last.fm supplied no album metadata. Tracks are matched individually. Added Spotify albums can narrow the choices.'}</p>{summary && <div className="import-collection-summary">{summary.imported > 0 && <span className="is-imported">{summary.imported} tracks imported</span>}<span className="is-automatic">{summary.automatic} automatically selected</span><span className="is-suggested">{summary.suggested} suggested</span><span className="needs-review">{summary.needsReview} need review</span></div>}</>}</div><div className="import-page-actions"><button type="button" disabled={busy || failed || page.pageNumber <= 1} aria-label="Previous batch" onClick={onPrevious}>‹</button><span>Batch {page.pageNumber} of {page.pageCount}</span><button type="button" disabled={busy || failed || page.pageNumber >= page.pageCount} aria-label="Next batch" onClick={() => onNext()}>›</button>{page.archived ? <button type="button" disabled={busy || failed} onClick={() => void toggleBatchArchive()}>Unarchive Batch</button> : <>{!collection && <><button type="button" disabled={busy || failed} onClick={openAlbumPicker}>Change Album…</button><button type="button" disabled={busy || failed} onClick={() => void activateCollection()}>Add Album…</button></>}<button type="button" disabled={busy || failed} onClick={() => void toggleAlbumSkip()}>{canResumeAlbum ? `Resume ${page.customBatch ? 'Batch' : 'Album'}` : `Skip ${page.customBatch ? 'Batch' : 'Album'}`}</button>{!page.customBatch && <><button type="button" disabled={busy || failed} onClick={onIgnoreBatch}>Ignore batch</button><button type="button" disabled={busy || failed} onClick={() => void run(() => lastfmGateway.review({ batchId: page.batchId, action: 'ignore-artist', artist: page.artist, album: page.album }), onNext)}>Ignore Artist</button></>}</>}</div></header>
+    {page.archived ? <section className="import-archived"><strong>Archived batch</strong><span>This batch is out of the import queue and excluded from Accept All. Unarchive it to keep matching or import it.</span></section> : <><div className="import-album-strip"><div className="import-nav-target" data-import-nav="source" data-import-row="0" tabIndex={0} aria-label="Last.fm album source" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>{collection && !page.album && !page.customBatch ? 'WHAT LAST.FM SUPPLIED' : 'WHAT I’M IMPORTING'}</p><strong>{importPageTitle(page)}</strong><small>{page.customBatch ? `${page.artist} · ${page.albumLabelCount ?? 0} source albums · ${page.rows.length} source tracks` : collection && !page.album ? `${page.artist} · no album metadata · ${page.rows.length} source tracks matched individually` : `${page.artist} · ${page.rows.length} source tracks${collection ? ' · matched across Spotify albums' : ''}`}</small></div>{collection ? <div className="import-nav-target" data-import-nav="match" data-import-row="0" tabIndex={0} aria-label="Spotify album matches" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>SPOTIFY ALBUM MATCHES</p><strong>{selectedCollectionUris.length ? selectedCollectionAlbumSummary : 'No album matches yet'}</strong><small>{collectionMatches ? collectionCoverageStatus(collectionMatches.coverage) : 'Search Spotify to build a match set'}</small><button type="button" disabled={busy || failed} onClick={() => openCollectionAlbums()}>{page.album ? 'Manage Albums…' : 'Add albums…'}</button></div> : <div className="import-nav-target" data-import-nav="match" data-import-row="0" tabIndex={0} aria-label="Spotify album match" aria-keyshortcuts={IMPORT_NAV_KEYS}><p>SPOTIFY MATCH</p><strong>{selectedAlbumName}</strong><small>{selectedAlbumCandidate ? relationLabel(selectedAlbumCandidate.relation) : 'No release selected'}</small>{albumAdvisory.strong && <span className="import-strong-match" role="status">STRONG MATCH{albumAdvisory.extraTrackCount ? ` · ${albumAdvisory.extraTrackCount} extra Spotify track${albumAdvisory.extraTrackCount === 1 ? '' : 's'}` : ''}</span>}{selectedAlbumUri && <LibraryMatchDetails info={page.libraryMatches?.[selectedAlbumUri]} kind="Album" />}<button type="button" disabled={busy || failed} onClick={openAlbumPicker}>Change Album…</button></div>}</div>
     {collection && collectionMatches && selectedCollectionUris.length > 0 && <><details ref={selectedAlbums} className="import-selected-album-cards" open={selectedAlbumsExpanded} onToggle={(event) => setSelectedAlbumsExpanded(event.currentTarget.open)}><summary><strong>{selectedCollectionAlbumSummary}</strong><small>{collectionCoverageStatus(collectionMatches.coverage)}</small></summary>{selectedCollectionUris.map((uri) => { const candidate = collectionMatches.cachedAlbums.find((entry) => entry.uri === uri); const coverage = collectionMatches.coverage.selectedAlbums.find((entry) => entry.uri === uri); if (!candidate) return null; const metadata = [candidate.artist, candidate.releaseDate?.slice(0, 4), candidate.albumType].filter(Boolean).join(' · '); const importAlbum = collectionMatches.fullAlbumUris.includes(uri); return <article className="import-selected-album-card" key={uri}><div className="import-selected-album-art">{candidate.imageUrl ? <img src={candidate.imageUrl} alt="" /> : <span aria-hidden="true">♪</span>}</div><div className="import-selected-album-copy"><strong>{candidate.name}</strong><small>{metadata} · {coverage?.matched ?? 0} matches · {coverage?.uniqueCoverage ?? 0} unique</small><LibraryMatchDetails info={page.libraryMatches?.[uri]} kind="Album" /></div><span className="import-album-source">MATCH SET</span><label className="import-album-import-option"><input type="checkbox" aria-label={`Import full album: ${candidate.name}`} checked={importAlbum} disabled={busy || failed || !review.importContent} onChange={(event) => { const enabled = event.currentTarget.checked; void runPageMutation(() => lastfmGateway.collectionSetAlbumImport(page.batchId, page.artist, uri, enabled)) }} /><span><span>Import full album</span><small>{importAlbum ? 'Full album' : 'Matched tracks only'}</small></span></label><button type="button" disabled={busy || failed} onClick={() => openCollectionAlbums(uri)}>Preview</button><button type="button" disabled={busy || failed} onClick={() => void removeCollectionAlbum(uri)}>Remove</button></article> })}</details>{selectedAlbumsExpanded && <VerticalResizeHandle target={selectedAlbums} label="Resize album matches" minHeight={58} />}</>}
     <div className="import-options" role="group" aria-label="Import options"><label><input type="checkbox" aria-label="Import tracks and albums found in history" checked={review.importContent} disabled={busy || failed || (!review.includeHistoricalPlayCounts && review.importContent)} onChange={(event) => intentChange('importContent', event.target.checked)} /> Import tracks and albums found in history</label><label><input type="checkbox" aria-label="Include historical play counts" checked={review.includeHistoricalPlayCounts} disabled={busy || failed || (!review.importContent && review.includeHistoricalPlayCounts)} onChange={(event) => intentChange('includeHistoricalPlayCounts', event.target.checked)} /> Include historical play counts</label>{!collection && <label><input type="checkbox" aria-label="Import whole album" checked={review.wholeAlbum} disabled={wholeAlbumDisabled} onChange={(event) => void persist({ ...review, wholeAlbum: event.target.checked }, true)} /> Import whole album</label>}<label>Genre <ImportGenreInput key={`${page.batchId}:${page.artist}:${page.album}`} value={review.genre} suggestions={genreSuggestions} disabled={busy || failed} onDraft={updateGenreDraft} onCommit={persistGenre} /></label><label>Rating <select aria-label="Import rating" disabled={busy || failed} value={review.rating ?? ''} onChange={(event) => void persist({ ...review, rating: event.target.value ? Number(event.target.value) : null })}><option value="">No change</option>{[1, 2, 3, 4, 5].map((rating) => <option key={rating} value={rating}>{'★'.repeat(rating)}</option>)}</select></label></div>
-    {(review.wholeAlbum || Boolean(collectionMatches?.fullAlbumUris.length)) && <p className="import-exclusion-note">Exclude removes only this Last.fm source row. A track inherently included by a full album cannot be removed from Spotify here.</p>}
-    <div className="import-track-actions"><button type="button" disabled={busy || failed || !rejectableIds.length || selectedRowIds.length === rejectableIds.length} onClick={selectAllRows}>Select all rows</button><button type="button" disabled={busy || failed || !selectedRowIds.length} onClick={() => setRowSelection({ ids: new Set(), anchor: null })}>Clear selection</button><button type="button" disabled={busy || failed || selectedRowIds.length < 2} onClick={mapSelectedRows}>Map selected ({selectedRowIds.length})…</button>{separateSourceIds.size > 0 && <button type="button" onClick={() => { flushSync(() => setSeparateSourceIds(new Set())); focusImporterTarget('source', 1) }}>Merge matching rows</button>}<span>Click or Shift-click source rows to select them.</span></div>
+    <div className="import-track-actions"><button type="button" disabled={busy || failed || !selectableIds.length} onClick={toggleAllRows}>{allRowsSelected ? 'Clear selection' : 'Select all rows'}</button><select aria-label="Track order" disabled={busy || failed} value={rowSort} onChange={(event) => setRowSort(event.currentTarget.value as ImportRowSort)}><option value="plays">Most plays to import</option><option value="lastPlayed">Last played</option><option value="track">Track A–Z</option><option value="source">Original order</option></select><button type="button" disabled={busy || failed || selectedRowIds.length < 2} onClick={mapSelectedRows}>Map selected ({selectedRowIds.length})…</button>{separateSourceIds.size > 0 && <button type="button" onClick={() => { flushSync(() => setSeparateSourceIds(new Set())); focusImporterTarget('source', 1) }}>Merge matching rows</button>}<span>Checked mapped rows are accepted; the remainder stays queued or is archived.</span></div>
     <div className="import-track-list">{visibleRows.map((item, index) => {
       const group = mergedRows.get(item.source.stableId)
       const target = matchedTrack(item)?.uri
       const source = group ? { ...item.source, playCount: group.reduce((total, entry) => total + entry.source.playCount, 0), latest: group.reduce((latest, entry) => Math.max(latest, entry.source.latest), 0) } : item.source
       const ambiguousChoices = collectionMatches ? collectionAmbiguousChoices(item.source.stableId, item.matchResult, collectionMatches.cachedAlbums, selectedCollectionUris, collectionMatches.coverage.selectedAlbums) : []
-      const row = <ImporterRow playback={playback} key={item.source.stableId} item={{ ...item, source }} rowNumber={index + 1} selected={mergedIds(item.source.stableId).some((id) => rowSelection.ids.has(id))} needsMatch={requiredMatches.has(item.source.stableId)} collection={collection} selectedTrackUris={selectedCollectionTrackUris} ambiguousChoices={ambiguousChoices} libraryMatches={page.libraryMatches} onError={onError} showQuery={showQueries} onExclude={() => void rejectRows(mergedIds(item.source.stableId), !item.decision.excluded)} onSelect={(event) => selectRejectRow(item.source.stableId, event)} onChangeTrack={() => openTrackPicker(item.source.stableId)} onUseTrack={(uri) => void runPageMutation(() => lastfmGateway.selectMatch(page.batchId, item.source.stableId, uri))} locked={failed || busy} rejectLocked={failed || (busy && !savingRejects)} />
+      const rowSelected = mergedIds(item.source.stableId).some((id) => acceptedRowIds.includes(id))
+      const row = <ImporterRow playback={playback} key={item.source.stableId} item={{ ...item, source }} rowNumber={index + 1} selected={rowSelected} highlighted={selectionTouched && rowSelected} needsMatch={requiredMatches.has(item.source.stableId)} collection={collection} selectedTrackUris={selectedCollectionTrackUris} ambiguousChoices={ambiguousChoices} libraryMatches={page.libraryMatches} onError={onError} showQuery={showQueries} onSelect={(event) => selectRow(item.source.stableId, event)} onToggle={() => toggleRow(item.source.stableId)} onChangeTrack={() => openTrackPicker(item.source.stableId)} onUseTrack={(uri) => void runPageMutation(() => lastfmGateway.selectMatch(page.batchId, item.source.stableId, uri)).then((next) => { if (next && selectionTouched) setRowSelection((current) => ({ ids: new Set([...current.ids, ...mergedIds(item.source.stableId)]), anchor: current.anchor })) })} locked={failed || busy} />
       return group && target ? <FuzzyPanel key={item.source.stableId} rows={group.map((entry) => entry.source)} targetUri={target} resultCount={page.resolvedCounts[target]} mode={page.countModes[target] ?? 'sum'} locked={failed || busy || page.lockedCountModes.includes(target)} expanded={!collapsedFuzzy.has(target)} onMode={(mode) => void run(() => lastfmGateway.countMode(target, mode))} onToggle={() => setCollapsedFuzzy((current) => { const next = new Set(current); if (next.has(target)) next.delete(target); else next.add(target); return next })} onSeparate={separateRows}>{row}</FuzzyPanel> : row
     })}</div>
     {pageError && <p className="import-page-error" role="alert">{pageError}</p>}
-    <footer className="import-review-footer"><span role="status">{applyState === 'enqueueing' ? 'Saving accepted batch…' : applyState === 'loading' ? 'Loading next batch…' : applying ? 'Applying mapped tracks… You can review another batch.' : failed ? 'This batch failed and its choices are frozen.' : `${mappedIds.length} mapped · ${requiredMatchIds.length} unmapped · ${excludedImportCount(review)} excluded`}</span><div>{failed ? <button type="button" className="primary" disabled={busy} onClick={() => void retry()}>Retry Apply</button> : <><button type="button" disabled={busy || !selectedRowIds.length} onClick={() => void rejectRows(selectedRowIds, true)}>Reject selected ({selectedRowIds.length})</button>{suggestedMatches.length > 0 && <button type="button" disabled={busy} onClick={() => void applySuggestedMatches()}>Use {suggestedMatches.length} Suggestions</button>}<button type="button" disabled={busy || !mappedIds.length} onClick={() => void apply(false)}>Accept</button><button type="button" className="primary" disabled={busy || !mappedIds.length} onClick={() => void apply(true)}>{applyState === 'enqueueing' ? 'Saving…' : applyState === 'loading' ? 'Loading…' : 'Accept & Next Batch'}</button></>}</div></footer>
+    <footer className="import-review-footer"><span role="status">{applyState === 'enqueueing' ? 'Saving accepted batch…' : applyState === 'loading' ? 'Loading accepted changes…' : failed ? 'This batch failed and its choices are frozen.' : `${selectedMappedIds.length} selected · ${mappedIds.length} mapped · ${requiredMatchIds.length} unmapped`}</span><div>{failed ? <button type="button" className="primary" disabled={busy} onClick={() => void retry()}>Retry Apply</button> : <>{suggestedMatches.length > 0 && <button type="button" disabled={busy} onClick={() => void applySuggestedMatches()}>Use {suggestedMatches.length} Suggestions</button>}<button type="button" disabled={busy} onClick={() => void toggleBatchArchive()}>Archive Batch</button><button type="button" disabled={busy || !selectedMappedIds.length} onClick={() => void apply()}>{!archiveRemainder && applyState === 'enqueueing' ? 'Saving…' : !archiveRemainder && applyState === 'loading' ? 'Loading…' : 'Accept'}</button><button type="button" className="primary" data-import-accept-archive aria-keyshortcuts="Meta+Enter Control+Enter" disabled={busy || !selectedMappedIds.length} onClick={() => void apply(true)}>{archiveRemainder && applyState === 'enqueueing' ? 'Saving…' : archiveRemainder && applyState === 'loading' ? 'Loading…' : 'Accept & Archive remainder'}</button></>}</div></footer>
     {collectionDialogOpen && collectionMatches && <CollectionAlbumDialog page={page} collection={collectionMatches} initialPreviewUri={collectionPreviewUri} busy={busy || failed} onCancel={() => { setCollectionDialogOpen(false); setCollectionPreviewUri(undefined) }} onPage={onCollectionPage} onError={onError} />}
-    {picker && pickerItem && <MatchPickerDialog kind={picker.kind} targetCount={picker.sourceIds.length} query={picker.query} candidates={pickerCandidates(picker.kind, pickerCandidatePool)} selectedAlbums={collection ? addedCollectionAlbums : selectedAlbumCandidate ? [selectedAlbumCandidate] : []} selectedUri={pickerSelectedUri(picker.kind, picker.sourceId, pickerMatch?.selectedUri ?? null, pickerMatch?.trackMatches ?? {})} selectedConfidence={pickerMatch?.confidence ?? null} busy={busy || failed} onCancel={() => setPicker(null)} onSearch={searchPicker} onChoose={choosePicker} />}
+    {picker && pickerItem && <MatchPickerDialog kind={picker.kind} targetCount={picker.sourceIds.length} query={picker.query} candidates={pickerCandidates(picker.kind, pickerCandidatePool)} selectedAlbums={collection ? addedCollectionAlbums : selectedAlbumCandidate ? [selectedAlbumCandidate] : []} selectedUri={pickerSelectedUri(picker.kind, picker.sourceId, pickerMatch?.selectedUri ?? null, pickerMatch?.trackMatches ?? {})} selectedConfidence={pickerMatch?.confidence ?? null} busy={busy || failed} onCancel={() => setPicker(null)} onSearch={searchPicker} onChoose={choosePicker} />}</>}
   </section>
 }
 
@@ -896,10 +894,10 @@ const IMPORT_QUEUE_ROW_HEIGHT = 57
 const IMPORT_QUEUE_OVERSCAN = 4
 
 function importQueueItemTitle(item: ImportQueueItem): string {
-  return item.customBatch ? 'Custom batch' : item.album || 'Singles'
+  return item.name?.trim() || (item.customBatch ? 'Custom batch' : item.album || 'Singles')
 }
 
-function VirtualQueue({ items, selectedPage, selectedBatchPages, disabled, onOpen, onSelect, onSkip, onTab, onShortcuts }: { items: ImportQueueItem[]; selectedPage: number | null; selectedBatchPages: Set<number>; disabled: boolean; onOpen: (item: ImportQueueItem) => void; onSelect: (page: number, selected: boolean) => void; onSkip: (item: ImportQueueItem) => void; onTab: (shiftKey: boolean) => ImportQueueTabTarget | null; onShortcuts: () => void }) {
+function VirtualQueue({ items, selectedPage, selectedBatchPages, selectable, disabled, batchNameEdit, batchNameError, onOpen, onSelect, onSkip, onTab, onShortcuts, onBeginBatchRename, onChangeBatchName, onCommitBatchName, onCancelBatchRename }: { items: ImportQueueItem[]; selectedPage: number | null; selectedBatchPages: Set<number>; selectable: boolean; disabled: boolean; batchNameEdit: BatchNameEdit | null; batchNameError: string | null; onOpen: (item: ImportQueueItem) => void; onSelect: (page: number, selected: boolean) => void; onSkip: (item: ImportQueueItem) => void; onTab: (shiftKey: boolean) => ImportQueueTabTarget | null; onShortcuts: () => void; onBeginBatchRename: (target: BatchNameTarget, surface: BatchNameSurface) => void; onChangeBatchName: (value: string) => void; onCommitBatchName: (target: BatchNameTarget, value: string) => void; onCancelBatchRename: () => void }) {
   const list = useRef<HTMLDivElement>(null)
   const frame = useRef<number | null>(null)
   const focusPending = useRef(false)
@@ -1012,10 +1010,12 @@ function VirtualQueue({ items, selectedPage, selectedBatchPages, disabled, onOpe
         {items.slice(range.start, range.end).map((item, index) => {
           const absoluteIndex = range.start + index
           const title = importQueueItemTitle(item)
-          const status = item.status && item.status !== 'pending' ? ` · ${item.status.replaceAll('-', ' ')}` : ''
-          return <div className="import-queue-entry" key={item.page}>
-            <label className="import-queue-select"><input type="checkbox" aria-label={`Select ${title} by ${item.artist}`} checked={selectedBatchPages.has(item.page)} disabled={disabled || item.status === 'failed'} onChange={(event) => onSelect(item.page, event.currentTarget.checked)} /></label>
-            <button type="button" data-import-nav="queue" data-queue-index={absoluteIndex} data-highlighted={highlightedIndex === absoluteIndex ? 'true' : undefined} aria-current={selectedPage === item.page ? 'true' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Tab Shift+Tab Enter S ?" tabIndex={highlightedIndex === absoluteIndex ? 0 : -1} aria-label={`Batch ${absoluteIndex + 1} of ${items.length}: ${title} by ${item.artist}, ${item.remainingPlayCount.toLocaleString()} plays to import${item.importedPlayCount ? `, ${item.importedPlayCount.toLocaleString()} plays already imported` : ''}${status}`} disabled={disabled} className={`import-queue-row${selectedPage === item.page ? ' selected' : ''}${highlightedIndex === absoluteIndex ? ' highlighted' : ''}`} onFocus={() => { highlightedPageRef.current = item.page; setHighlightedIndex((current) => current === absoluteIndex ? current : absoluteIndex) }} onKeyDown={(event) => handleKeyDown(event, item, absoluteIndex)} onClick={() => { highlightedPageRef.current = item.page; setHighlightedIndex(absoluteIndex); onOpen(item) }}><span className="import-queue-copy"><strong>{title}</strong><small>{item.error ? `Apply failed: ${item.error}` : `${item.artist} · ${item.sourceCount} tracks${status}`}</small></span><span className="import-queue-count"><span className="plays-to-import">{item.remainingPlayCount.toLocaleString()} <small>plays to import</small></span>{item.importedPlayCount > 0 && <span className="plays-imported">{item.importedPlayCount.toLocaleString()} <small>plays imported</small></span>}</span></button>
+          const status = item.archived ? ' · archived' : item.status && item.status !== 'pending' ? ` · ${item.status.replaceAll('-', ' ')}` : ''
+          const editing = batchNameEdit?.batchId === item.page && batchNameEdit.surface === 'queue'
+          const target = { batchId: item.page, artist: item.artist, album: item.album, name: title, customBatch: item.customBatch }
+          return <div className={`import-queue-entry${selectable ? '' : ' unselectable'}`} key={item.page}>
+            {selectable && <label className="import-queue-select"><input type="checkbox" aria-label={`Select ${title} by ${item.artist}`} checked={selectedBatchPages.has(item.page)} disabled={disabled || item.status === 'failed'} onChange={(event) => onSelect(item.page, event.currentTarget.checked)} /></label>}
+            {editing ? <div className={`import-queue-row editing${selectedPage === item.page ? ' selected' : ''}`}><BatchNameEditor value={title} target={target} surface="queue" editing={batchNameEdit} error={batchNameError} disabled={disabled} onBegin={() => onBeginBatchRename(target, 'queue')} onChange={onChangeBatchName} onCommit={(name) => onCommitBatchName(target, name)} onCancel={onCancelBatchRename} /><button type="button" data-import-nav="queue" data-queue-index={absoluteIndex} data-highlighted={highlightedIndex === absoluteIndex ? 'true' : undefined} aria-current={selectedPage === item.page ? 'true' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Tab Shift+Tab Enter S ?" tabIndex={highlightedIndex === absoluteIndex ? 0 : -1} aria-label={`Open batch ${absoluteIndex + 1} of ${items.length}: ${title} by ${item.artist}`} disabled={disabled} className="import-queue-open" onFocus={() => { highlightedPageRef.current = item.page; setHighlightedIndex((current) => current === absoluteIndex ? current : absoluteIndex) }} onKeyDown={(event) => handleKeyDown(event, item, absoluteIndex)} onClick={() => { highlightedPageRef.current = item.page; setHighlightedIndex(absoluteIndex); onOpen(item) }}>Open</button></div> : <button type="button" data-import-nav="queue" data-queue-index={absoluteIndex} data-highlighted={highlightedIndex === absoluteIndex ? 'true' : undefined} aria-current={selectedPage === item.page ? 'true' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Tab Shift+Tab Enter S ?" tabIndex={highlightedIndex === absoluteIndex ? 0 : -1} aria-label={`Batch ${absoluteIndex + 1} of ${items.length}: ${title} by ${item.artist}, ${item.archived ? `${item.playCount.toLocaleString()} archived plays` : `${item.remainingPlayCount.toLocaleString()} plays to import`}${item.importedPlayCount ? `, ${item.importedPlayCount.toLocaleString()} plays already imported` : ''}${status}`} disabled={disabled} className={`import-queue-row${selectedPage === item.page ? ' selected' : ''}${highlightedIndex === absoluteIndex ? ' highlighted' : ''}`} onFocus={() => { highlightedPageRef.current = item.page; setHighlightedIndex((current) => current === absoluteIndex ? current : absoluteIndex) }} onKeyDown={(event) => handleKeyDown(event, item, absoluteIndex)} onClick={() => { highlightedPageRef.current = item.page; setHighlightedIndex(absoluteIndex); onOpen(item) }}><span className="import-queue-copy"><strong>{title}</strong><small>{item.error ? `Apply failed: ${item.error}` : `${item.artist} · ${item.sourceCount} tracks${status}`}</small></span><span className="import-queue-count"><span className="plays-to-import">{(item.archived ? item.playCount : item.remainingPlayCount).toLocaleString()} <small>{item.archived ? 'plays' : 'plays to import'}</small></span>{item.importedPlayCount > 0 && <span className="plays-imported">{item.importedPlayCount.toLocaleString()} <small>plays imported</small></span>}</span></button>}
           </div>
         })}
       </div>
@@ -1049,11 +1049,11 @@ export default function LastFmImporter() {
   const [state, setState] = useState(emptyState)
   const [initialLoad, setInitialLoad] = useState<'loading' | 'ready' | 'error'>('loading')
   const [queue, setQueue] = useState<ImportQueueItem[]>([])
+  const [queueView, setQueueView] = useState<'active' | 'archives'>('active')
   const [queueFilter, setQueueFilter] = useState('')
   const [queueFilterReset, setQueueFilterReset] = useState(0)
-  const partialApplies = useRef(new Map<number, PageView>())
-  const [applyingBatches, setApplyingBatches] = useState(new Set<number>())
   const pendingIgnores = useRef(new Set<number>())
+  const pendingArchives = useRef(new Set<number>())
   const [ignoringBatches, setIgnoringBatches] = useState(new Set<number>())
   const [selectedBatchPages, setSelectedBatchPages] = useState<Set<number>>(() => new Set())
   const [sort, setSort] = useState<'plays' | 'artist' | 'batch' | 'lastPlayed'>('plays')
@@ -1070,6 +1070,8 @@ export default function LastFmImporter() {
   const [shortcutStatus, setShortcutStatus] = useState('')
   const [pendingDefaults, setPendingDefaults] = useState<LastFmImportDefaults>(emptyDefaults)
   const [pageMutationRunning, setPageMutationRunning] = useState(false)
+  const [batchNameEdit, setBatchNameEdit] = useState<BatchNameEdit | null>(null)
+  const [batchNameError, setBatchNameError] = useState<string | null>(null)
   const reportError = useCallback((reason: unknown) => setError({ message: String(reason), code: 'apply-failed', retryAt: null }), [])
   useEffect(() => {
     let active = true
@@ -1090,8 +1092,10 @@ export default function LastFmImporter() {
   const prefetchedTransition = useRef('')
   const orderedQueue = useMemo(() => sortImportQueue(queue, sort), [queue, sort])
   const activeQueue = useMemo(() => activeImportQueue(orderedQueue, ignoringBatches), [orderedQueue, ignoringBatches])
-  const filteredQueue = useMemo(() => filterImportQueue(activeQueue, queueFilter), [activeQueue, queueFilter])
-  const selectableFilteredQueue = filteredQueue.filter((item) => item.status !== 'failed')
+  const archiveQueue = useMemo(() => archivedImportQueue(orderedQueue), [orderedQueue])
+  const visibleQueue = queueView === 'archives' ? archiveQueue : activeQueue
+  const filteredQueue = useMemo(() => filterImportQueue(visibleQueue, queueFilter), [visibleQueue, queueFilter])
+  const selectableFilteredQueue = queueView === 'active' ? filteredQueue.filter((item) => item.status !== 'failed') : []
   const selectAllBatches = useRef<HTMLInputElement>(null)
   const selectedBatchIds = activeQueue.filter((item) => item.status !== 'failed' && selectedBatchPages.has(item.page)).map((item) => item.page)
   const selectedFilteredCount = selectableFilteredQueue.filter((item) => selectedBatchPages.has(item.page)).length
@@ -1112,7 +1116,7 @@ export default function LastFmImporter() {
         remaining += 1
       }
     }
-    return { importedPlays, importedBatches, remainingPlays, remaining, reviewed: queue.length - remaining }
+    return { importedPlays, importedBatches, remainingPlays, remaining }
   }, [queue, ignoringBatches])
   const selectedPage = selected?.page
   const selectedPageRef = useRef<number | undefined>(undefined)
@@ -1121,6 +1125,8 @@ export default function LastFmImporter() {
   sortRef.current = sort
   const queueFilterRef = useRef('')
   queueFilterRef.current = queueFilter
+  const queueViewRef = useRef<'active' | 'archives'>('active')
+  queueViewRef.current = queueView
   const refresh = useCallback(async (strict = false): Promise<ImportQueueItem[]> => {
     const requestGeneration = beginImportRefresh(refreshGeneration)
     const startingPageGeneration = pageRequestGeneration.current
@@ -1134,15 +1140,15 @@ export default function LastFmImporter() {
         setPendingDefaults(currentState.defaults)
       }, strict)
       if (!applied) return nextQueue
-      if (currentSelectedPage !== undefined && partialApplies.current.has(currentSelectedPage)) return nextQueue
       const orderedNextQueue = sortImportQueue(nextQueue, currentSort)
-      const navigableNextQueue = filterImportQueue(activeImportQueue(orderedNextQueue, pendingIgnores.current), queueFilterRef.current)
+      const nextViewQueue = queueViewRef.current === 'archives' ? archivedImportQueue(orderedNextQueue) : activeImportQueue(orderedNextQueue, pendingIgnores.current)
+      const navigableNextQueue = filterImportQueue(nextViewQueue, queueFilterRef.current)
       const current = currentSelectedPage === undefined ? undefined : navigableNextQueue.find((item) => item.page === currentSelectedPage)
       const firstRemaining = navigableNextQueue[0]
       const target = current ?? ((nextState.phase === 'review' || nextState.phase === 'done') ? firstRemaining : undefined)
       if (startingPageGeneration !== pageRequestGeneration.current) return nextQueue
       if (target) {
-        if (target.page !== currentSelectedPage) setSelected(target)
+        setSelected(target)
         const pageGeneration = ++pageRequestGeneration.current
         await applyCurrentImportPageResponse(pageGeneration, () => pageRequestGeneration.current, lastfmGateway.page({ batchId: target.page, artist: target.artist, album: target.album }), (nextPage) => setPage(pageWithQueuePosition(nextPage, navigableNextQueue)))
       } else if (isCurrentImportRefresh(requestGeneration, refreshGeneration) && nextState.phase !== 'review' && nextState.phase !== 'done') {
@@ -1191,39 +1197,48 @@ export default function LastFmImporter() {
       return []
     }
   }, [reportError])
-  const submitApply = async (target: PageView, ids: string[], advance: boolean, options: ImportPageOptions) => {
-    if (advance) { await lastfmGateway.apply(target, ids, true, options); return }
-    partialApplies.current.set(target.batchId, target)
-    setApplyingBatches((current) => new Set(current).add(target.batchId))
-    ++refreshGeneration.current
-    ++pageRequestGeneration.current
-    try {
-      await lastfmGateway.apply(target, ids, false, options)
-      if (partialApplies.current.has(target.batchId)) setQueue((current) => current.filter((item) => item.page !== target.batchId))
-    } catch (error) {
-      partialApplies.current.delete(target.batchId)
-      setApplyingBatches((current) => { const next = new Set(current); next.delete(target.batchId); return next })
-      throw error
-    }
+  const submitApply = async (target: PageView, ids: string[], options: ImportPageOptions, archiveRemainder: boolean) => {
+    await lastfmGateway.apply(target, ids, true, archiveRemainder, options)
   }
-  const finishPartialApply = useCallback(async (target: PageView, failed: boolean) => {
-    partialApplies.current.delete(target.batchId)
-    ++refreshGeneration.current
-    try {
-      if (selectedPageRef.current === target.batchId) {
-        setSelected((current) => current?.page === target.batchId ? { ...current, status: failed ? 'failed' : null } : current)
-        const generation = ++pageRequestGeneration.current
-        await applyCurrentImportPageResponse(generation, () => pageRequestGeneration.current, lastfmGateway.page(target), setPage)
-      }
-    } catch (error) { reportError(error) } finally {
-      setApplyingBatches((current) => { const next = new Set(current); next.delete(target.batchId); return next })
-      if (!partialApplies.current.size) void refreshQueueOnly()
+  const beginBatchRename = useCallback((target: BatchNameTarget, surface: BatchNameSurface) => {
+    const current = queue.find((item) => item.page === target.batchId)
+    setBatchNameError(null)
+    setBatchNameEdit({ batchId: target.batchId, surface, draft: current?.name?.trim() || target.name?.trim() || (target.customBatch ? 'Custom batch' : target.album || 'Singles'), selectAll: false })
+  }, [queue])
+  const updateBatchName = useCallback((value: string) => {
+    setBatchNameEdit((current) => current ? { ...current, draft: value } : current)
+    setBatchNameError(null)
+  }, [])
+  const cancelBatchRename = useCallback(() => {
+    setBatchNameEdit(null)
+    setBatchNameError(null)
+  }, [])
+  const commitBatchRename = useCallback(async (target: BatchNameTarget, draft: string) => {
+    if (batchNameEdit?.batchId !== target.batchId) return
+    const name = draft.trim()
+    if (!name) {
+      setBatchNameError('Batch name cannot be empty.')
+      return
     }
-  }, [refreshQueueOnly, reportError])
+    if (name.length > IMPORT_BATCH_NAME_MAX_LENGTH) {
+      setBatchNameError(`Batch name must be ${IMPORT_BATCH_NAME_MAX_LENGTH} characters or fewer.`)
+      return
+    }
+    try {
+      await lastfmGateway.renameBatch(target, name)
+      setQueue((current) => current.map((item) => item.page === target.batchId ? { ...item, name } : item))
+      setSelected((current) => current?.page === target.batchId ? { ...current, name } : current)
+      setPage((current) => current?.batchId === target.batchId ? { ...current, name } : current)
+      setBatchNameEdit(null)
+      setBatchNameError(null)
+    } catch (reason) {
+      setBatchNameError(String(reason))
+    }
+  }, [batchNameEdit])
   const skipQueueItem = async (item: ImportQueueItem) => {
     if (pageMutationRunning) return
     if (!item.remaining) {
-      setShortcutStatus(item.status === 'done' ? 'That batch is already done.' : 'That batch is already ignored or excluded.')
+      setShortcutStatus(item.archived ? 'Unarchive that batch before resuming it.' : item.status === 'done' ? 'That batch is already done.' : 'That batch is already ignored.')
       return
     }
     const action: ReviewAction = item.status === 'skipped' ? 'restore' : 'skip-album'
@@ -1242,19 +1257,16 @@ export default function LastFmImporter() {
   }
   useEffect(() => {
     let active = true
-    const subscription = listen<ImportStateView>(lastfmEvents.changed, () => { if (shouldRefreshImportEvent(acceptAllRunning.current, queueMutationRunning.current || pendingIgnores.current.size > 0 || partialApplies.current.size > 0)) void refresh() })
+    const subscription = listen<ImportStateView>(lastfmEvents.changed, () => { if (shouldRefreshImportEvent(acceptAllRunning.current, queueMutationRunning.current || pendingIgnores.current.size > 0 || pendingArchives.current.size > 0)) void refresh() })
     const completions = listen<unknown>(lastfmEvents.applyFinished, (event) => {
       const result = parseImportApplyResult(event.payload)
-      const partial = result && partialApplies.current.get(result.batchId)
-      if (result && partial) {
-        setError(result.status === 'failed' ? result : null)
-        void finishPartialApply(partial, result.status === 'failed')
-      } else if (!result) {
+      if (!result) {
         setError({ message: invalidApplyResultMessage, code: 'apply-failed', retryAt: null })
         void refreshQueueOnly()
       } else if (result.status === 'failed') {
         setError(result)
-        void refreshQueueOnly()
+        if (result.batchId === selectedPageRef.current) void refresh()
+        else void refreshQueueOnly()
       } else if (!advancingApply.current && result.batchId === selectedPageRef.current) {
         setError(null)
         void refresh()
@@ -1265,7 +1277,7 @@ export default function LastFmImporter() {
       active = false
       void installed.then((stop) => stop())
     }
-  }, [finishPartialApply, refresh, refreshQueueOnly])
+  }, [refresh, refreshQueueOnly])
   useEffect(() => { setPage((current) => pageWithQueuePosition(current, filteredQueue)) }, [filteredQueue])
   useEffect(() => {
     if (!page || pageLoading || selected?.page !== page.batchId) return
@@ -1316,6 +1328,19 @@ export default function LastFmImporter() {
       if (isCurrentImportPageResponse(requestGeneration, pageRequestGeneration.current)) reportError(reason)
     }
   }
+  const showQueueView = (nextView: 'active' | 'archives') => {
+    queueViewRef.current = nextView
+    queueFilterRef.current = ''
+    setQueueView(nextView)
+    setQueueFilter('')
+    setQueueFilterReset((current) => current + 1)
+    setSelectedBatchPages(new Set())
+    setBatchNameEdit(null)
+    const nextQueue = nextView === 'archives' ? archiveQueue : activeQueue
+    const target = nextQueue[0]
+    if (target) void openQueueItem(target, nextQueue, true)
+    else { setSelected(null); setPage(null); setPageLoading(false) }
+  }
   const ignoreBatch = async () => {
     const target = selected
     if (!target || !page || page.batchId !== target.page || pendingIgnores.current.has(target.page)) return
@@ -1344,6 +1369,33 @@ export default function LastFmImporter() {
       if (!pendingIgnores.current.size) void refreshQueueOnly()
     }
   }
+  const archiveBatch = async () => {
+    const target = selected
+    if (!target || !page || page.batchId !== target.page || pendingArchives.current.has(target.page)) return
+    pendingArchives.current.add(target.page)
+    refreshGeneration.current += 1
+    pageRequestGeneration.current += 1
+    const projection = queue.map((item) => item.page === target.page ? { ...item, archived: true, remaining: false, error: null } : item)
+    const navigable = filterImportQueue(activeImportQueue(sortImportQueue(projection, sort), pendingIgnores.current), queueFilter)
+    setQueue(projection)
+    setSelected(null)
+    setPage(null)
+    setSelectedBatchPages((current) => { const next = new Set(current); next.delete(target.page); return next })
+    const next = nextRemainingImportQueue(navigable, target, sort)
+    if (next) void openQueueItem(next, navigable, true)
+    else setPageLoading(false)
+    try {
+      const nextState = await lastfmGateway.review({ batchId: target.page, action: 'archive-batch', artist: target.artist, album: target.album })
+      setState(nextState)
+      setShortcutStatus('Batch archived.')
+    } catch (reason) {
+      reportError(`Could not archive ${target.album || 'Singles'}: ${String(reason)}`)
+    } finally {
+      refreshGeneration.current += 1
+      pendingArchives.current.delete(target.page)
+      if (!pendingArchives.current.size) void refreshQueueOnly()
+    }
+  }
   const combineSelectedBatches = async () => {
     if (selectedBatchIds.length < 2 || pageMutationRunning) return
     queueMutationRunning.current = true
@@ -1359,6 +1411,8 @@ export default function LastFmImporter() {
       const navigable = activeImportQueue(sortImportQueue(nextQueue, sort), pendingIgnores.current)
       setSelected(navigable.find((item) => item.page === combined.batchId) ?? null)
       setPage(pageWithQueuePosition(combined, navigable))
+      setBatchNameError(null)
+      setBatchNameEdit({ batchId: combined.batchId, surface: 'queue', draft: importPageTitle(combined), selectAll: true })
       pageRequestGeneration.current += 1
     } catch (reason) {
       reportError(reason)
@@ -1376,29 +1430,21 @@ export default function LastFmImporter() {
     target.scrollIntoView({ block: 'nearest' })
   }, [filteredQueue, pageLoading, selected])
   const nextQueueItem = (queueSnapshot = queue, focusQueue = false) => {
-    const navigableSnapshot = filterImportQueue(activeImportQueue(sortImportQueue(queueSnapshot, sort), pendingIgnores.current), queueFilter)
-    const next = nextRemainingImportQueue(navigableSnapshot, selected, sort)
+    const ordered = sortImportQueue(queueSnapshot, sort)
+    const view = queueView === 'archives' ? archivedImportQueue(ordered) : activeImportQueue(ordered, pendingIgnores.current)
+    const navigableSnapshot = filterImportQueue(view, queueFilter)
+    const next = queueView === 'archives' ? nextArchivedImportQueue(navigableSnapshot, selected) : nextRemainingImportQueue(navigableSnapshot, selected, sort)
     if (next) {
       void openQueueItem(next, navigableSnapshot, focusQueue)
     }
     else { setSelected(null); setPage(null); void refresh() }
   }
-  const acknowledgeReviewExclusion = (nextPage: PageView, remainingPlayCount: number, allExcluded: boolean) => {
-    const nextQueue = projectImportQueueExclusion(queue, nextPage.batchId, remainingPlayCount, allExcluded)
-    setState(nextPage.state)
-    setQueue(nextQueue)
-    setPage(pageWithQueuePosition(nextPage, filterImportQueue(activeImportQueue(sortImportQueue(nextQueue, sort), pendingIgnores.current), queueFilter)))
-    return nextQueue
-  }
-  const appliedAndAdvance = async () => {
+  const appliedAndAdvance = async (archiveRemainder = false, keepCurrentBatch = false) => {
+    const appliedPage = selected?.page
+    if (appliedPage === undefined || keepCurrentBatch) return
     focusQueueAfterOpen.current = true
     advancingApply.current = true
-    const appliedPage = selected?.page
-    if (appliedPage === undefined) {
-      advancingApply.current = false
-      return
-    }
-    const projection = projectAcknowledgedImportApply(queue, appliedPage, sort)
+    const projection = projectAcknowledgedImportApply(queue, appliedPage, sort, archiveRemainder)
     const navigableProjection = filterImportQueue(activeImportQueue(sortImportQueue(projection.queue, sort), pendingIgnores.current), queueFilter)
     const next = nextRemainingImportQueue(navigableProjection, selected, sort)
     setQueue(projection.queue)
@@ -1418,7 +1464,7 @@ export default function LastFmImporter() {
   }
   const previousQueueItem = () => {
     const index = selected ? filteredQueue.findIndex((item) => item.page === selected.page) : filteredQueue.length
-    const previous = filteredQueue.slice(0, index).reverse().find((item) => item.remaining) ?? filteredQueue.slice(index + 1).reverse().find((item) => item.remaining)
+    const previous = queueView === 'archives' ? filteredQueue[index - 1] : filteredQueue.slice(0, index).reverse().find((item) => item.remaining) ?? filteredQueue.slice(index + 1).reverse().find((item) => item.remaining)
     if (previous) void openQueueItem(previous, filteredQueue)
   }
   const acceptAll = async () => {
@@ -1465,10 +1511,18 @@ export default function LastFmImporter() {
     }
     return next
   })
-  return <main className="lastfm-importer" aria-label="Last.fm importer">
+  const handleImporterShortcut = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || (event.target as Element).closest('[role="dialog"]')) return
+    const action = event.currentTarget.querySelector<HTMLButtonElement>('[data-import-accept-archive]')
+    if (!action || action.disabled) return
+    event.preventDefault()
+    event.stopPropagation()
+    action.click()
+  }
+  return <main className="lastfm-importer" aria-label="Last.fm importer" onKeyDownCapture={handleImporterShortcut}>
     <header className="import-toolbar"><div><p className="eyebrow">LAST.FM HISTORY</p><h1>Last.fm importer</h1><p className="import-status" aria-live="polite">{state.applyingAll ? 'Applying confirmed Last.fm imports' : state.syncing ? 'Syncing new Last.fm plays' : importStatusText(state.phase, state.username, state.syncProblem)}{showsImportRemaining(state.phase) && state.remaining ? ` · ${state.remaining.toLocaleString()} left` : ''}{state.pendingReview && !state.remaining ? ` · ${state.pendingReview.toLocaleString()} pending review` : ''}</p></div><div className="import-toolbar-actions"><a href="https://www.last.fm/" onClick={(event) => { event.preventDefault(); void openExternalDestination({ kind: 'lastFm' }).catch(reportError) }}>Powered by Last.fm</a><button type="button" aria-keyshortcuts="?" disabled={acceptAllOpen} onClick={() => setShortcutsOpen(true)}>Keyboard shortcuts (?)</button>{reviewReady && <><span className="import-sort-label">Sort</span><div className="import-sort-control" role="group" aria-label="Queue sort">{([['plays', 'Most to import'], ['artist', 'Artist A–Z'], ['batch', 'Batch size'], ['lastPlayed', 'Last played']] as const).map(([value, label]) => <button type="button" key={value} disabled={interactionBusy} aria-pressed={sort === value} className={sort === value ? 'active' : ''} onClick={() => setSort(value)}>{label}</button>)}</div><label className="import-query-toggle"><input type="checkbox" aria-label="Show Spotify search terms" checked={showQueries} disabled={interactionBusy} onChange={(event) => void setSearchTerms(event.target.checked)} /> Show Spotify search terms</label><button type="button" disabled={interactionBusy || state.applyingAll || !state.remaining} onClick={() => void prepareAcceptAll()}>Accept All Imports…</button></>}</div></header>
     {displayedError ? <div className="import-error" role="alert"><span>{displayedError.message}</span><SpotifyLimitNotice code={displayedError.code} retryAt={displayedError.retryAt} /></div> : state.spotifyLimit && <div className="import-limit" role="status"><span>{state.spotifyLimit.kind === 'quota' ? 'Spotify Development Mode quota is cooling down.' : 'Spotify is rate limited.'}</span><SpotifyLimitNotice code={state.spotifyLimit.kind === 'quota' ? 'spotify-quota-exhausted' : 'spotify-rate-limited'} retryAt={state.spotifyLimit.deadline} /></div>}
-    {initialLoad === 'loading' ? <ImportLoadingPane /> : initialLoad === 'error' ? <section className="import-empty"><strong>Couldn’t load Last.fm batches</strong><button type="button" onClick={() => { setInitialLoad('loading'); setError(null); void refresh() }}>Try again</button></section> : state.phase === 'downloading' || state.phase === 'aggregating' || state.phase === null || state.phase === 'suspended' ? <DownloadPane state={state} defaults={pendingDefaults} busy={busy} onDefaults={setPendingDefaults} onStart={() => void start()} /> : <div className="import-workspace" aria-busy={pageLoading || state.applyingAll || pageMutationRunning}><aside className="import-queue" aria-label="Import queue"><div className="import-queue-header"><h2>Import queue</h2></div><div className="import-queue-filter"><ImportQueueFilter key={queueFilterReset} value={queueFilter} onValue={setQueueFilter} /><div className="import-queue-bulk-actions"><label><input ref={selectAllBatches} type="checkbox" aria-label="Select all filtered batches" checked={allFilteredSelected} disabled={interactionBusy || !selectableFilteredQueue.length} onChange={(event) => setBatchSelection(selectableFilteredQueue.map((item) => item.page), event.currentTarget.checked)} /> Select all {selectableFilteredQueue.length.toLocaleString()} results</label><button type="button" disabled={interactionBusy || selectedBatchIds.length < 2} onClick={() => void combineSelectedBatches()}>Combine selected ({selectedBatchIds.length})</button></div></div>{filteredQueue.length || !queueFilter.trim() ? <VirtualQueue items={filteredQueue} selectedPage={selected?.page ?? null} selectedBatchPages={selectedBatchPages} disabled={interactionBusy || state.applyingAll} onOpen={(item) => void openQueueItem(item, filteredQueue, true)} onSelect={(batchPage, checked) => setBatchSelection([batchPage], checked)} onSkip={(item) => void skipQueueItem(item)} onTab={focusMappingFromQueue} onShortcuts={() => setShortcutsOpen(true)} /> : <p className="import-queue-empty" role="status">No matching batches.</p>}<div className="import-queue-progress"><progress max={queue.length || 1} value={queueSummary.reviewed} aria-label="Reviewed queue progress" /><span>Reviewed {queueSummary.reviewed} of {queue.length} batches</span></div></aside>{state.applyingAll ? <section className="import-empty"><strong>Applying confirmed imports…</strong><span>You can close this window; Retune will resume the queue after a restart.</span></section> : page ? <ImportPage playback={playback} page={page} applying={applyingBatches.has(page.batchId)} onApply={submitApply} failed={selected?.status === 'failed'} showQueries={showQueries} onRefresh={refresh} onRejected={acknowledgeReviewExclusion} onNext={nextQueueItem} onApplied={appliedAndAdvance} onPrevious={previousQueueItem} onIgnoreBatch={() => void ignoreBatch()} onError={reportError} onCollectionPage={(nextPage) => setPage(pageWithQueuePosition(nextPage, filteredQueue))} onTabToQueue={focusQueueTarget} onShortcuts={() => setShortcutsOpen(true)} onStatus={setShortcutStatus} onMutation={(running) => { queueMutationRunning.current = running; setPageMutationRunning(running) }} /> : <section className="import-empty"><strong>{emptyPage.title}</strong><span>{emptyPage.detail}</span></section>}</div>}
+    {initialLoad === 'loading' ? <ImportLoadingPane /> : initialLoad === 'error' ? <section className="import-empty"><strong>Couldn’t load Last.fm batches</strong><button type="button" onClick={() => { setInitialLoad('loading'); setError(null); void refresh() }}>Try again</button></section> : state.phase === 'downloading' || state.phase === 'aggregating' || state.phase === null || state.phase === 'suspended' ? <DownloadPane state={state} defaults={pendingDefaults} busy={busy} onDefaults={setPendingDefaults} onStart={() => void start()} /> : <div className="import-workspace" aria-busy={pageLoading || state.applyingAll || pageMutationRunning}><aside className="import-queue" aria-label={queueView === 'archives' ? 'Archived batches' : 'Import queue'}><div className="import-queue-header"><select aria-label="Queue view" value={queueView} disabled={interactionBusy} onChange={(event) => showQueueView(event.currentTarget.value as 'active' | 'archives')}><option value="active">Import queue ({activeQueue.length.toLocaleString()})</option><option value="archives">Archives ({archiveQueue.length.toLocaleString()})</option></select></div><div className="import-queue-filter"><ImportQueueFilter key={queueFilterReset} value={queueFilter} onValue={setQueueFilter} />{queueView === 'active' && <div className="import-queue-bulk-actions"><label><input ref={selectAllBatches} type="checkbox" aria-label="Select all filtered batches" checked={allFilteredSelected} disabled={interactionBusy || !selectableFilteredQueue.length} onChange={(event) => setBatchSelection(selectableFilteredQueue.map((item) => item.page), event.currentTarget.checked)} /> Select all {selectableFilteredQueue.length.toLocaleString()} results</label><button type="button" disabled={interactionBusy || selectedBatchIds.length < 2} onClick={() => void combineSelectedBatches()}>Combine selected ({selectedBatchIds.length})</button></div>}</div>{filteredQueue.length || !queueFilter.trim() ? <VirtualQueue items={filteredQueue} selectedPage={selected?.page ?? null} selectedBatchPages={selectedBatchPages} selectable={queueView === 'active'} disabled={interactionBusy || state.applyingAll} batchNameEdit={batchNameEdit} batchNameError={batchNameError} onOpen={(item) => void openQueueItem(item, filteredQueue, true)} onSelect={(batchPage, checked) => setBatchSelection([batchPage], checked)} onSkip={(item) => void skipQueueItem(item)} onTab={focusMappingFromQueue} onShortcuts={() => setShortcutsOpen(true)} onBeginBatchRename={beginBatchRename} onChangeBatchName={updateBatchName} onCommitBatchName={commitBatchRename} onCancelBatchRename={cancelBatchRename} /> : <p className="import-queue-empty" role="status">{queueView === 'archives' ? 'No archived batches.' : 'No matching batches.'}</p>}<div className="import-queue-progress"><progress max={queueSummary.importedPlays + queueSummary.remainingPlays || 1} value={queueSummary.importedPlays} aria-label="Imported play progress" /><span>{queueSummary.importedPlays.toLocaleString()} of {(queueSummary.importedPlays + queueSummary.remainingPlays).toLocaleString()} non-archived plays imported</span></div></aside>{state.applyingAll ? <section className="import-empty"><strong>Applying confirmed imports…</strong><span>You can close this window; Retune will resume the queue after a restart.</span></section> : page ? <ImportPage playback={playback} page={page} onApply={submitApply} failed={selected?.status === 'failed'} showQueries={showQueries} onRefresh={refresh} onNext={nextQueueItem} onApplied={appliedAndAdvance} onPrevious={previousQueueItem} onArchiveBatch={() => void archiveBatch()} onIgnoreBatch={() => void ignoreBatch()} onError={reportError} onCollectionPage={(nextPage) => setPage(pageWithQueuePosition(nextPage, filteredQueue))} onTabToQueue={focusQueueTarget} onShortcuts={() => setShortcutsOpen(true)} onStatus={setShortcutStatus} onMutation={(running) => { queueMutationRunning.current = running; setPageMutationRunning(running) }} batchNameEdit={batchNameEdit} batchNameError={batchNameError} onBeginBatchRename={beginBatchRename} onChangeBatchName={updateBatchName} onCommitBatchName={commitBatchRename} onCancelBatchRename={cancelBatchRename} /> : <section className="import-empty"><strong>{queueView === 'archives' ? 'No archived batches' : emptyPage.title}</strong><span>{queueView === 'archives' ? 'Archive a batch to move it out of the import queue.' : emptyPage.detail}</span></section>}</div>}
     <footer className="import-footer">{initialLoad === 'ready' && reviewReady && <span className="import-footer-counts" aria-live="polite">{queueSummary.importedPlays.toLocaleString()} {queueSummary.importedPlays === 1 ? 'play' : 'plays'} imported / {queueSummary.remainingPlays.toLocaleString()} {queueSummary.remainingPlays === 1 ? 'play' : 'plays'} remaining · {queueSummary.importedBatches.toLocaleString()} {queueSummary.importedBatches === 1 ? 'batch' : 'batches'} imported / {queueSummary.remaining.toLocaleString()} {queueSummary.remaining === 1 ? 'batch remains' : 'batches remain'}</span>}<span role="status" aria-live="polite">{ignoringBatches.size ? `Saving ${ignoringBatches.size} ignored ${ignoringBatches.size === 1 ? 'batch' : 'batches'}…` : shortcutStatus || (state.username ? `Last.fm: ${state.username}` : 'Account not connected')}</span></footer>
     {acceptAllOpen && acceptAllSummary && <AcceptAllDialog albumEntities={acceptAllSummary.albumEntities} trackEntities={acceptAllSummary.trackEntities} busy={interactionBusy} onCancel={() => { setAcceptAllOpen(false); setAcceptAllSummary(null) }} onConfirm={() => void acceptAll()} />}
     {shortcutsOpen && <KeyboardShortcutsDialog onCancel={() => setShortcutsOpen(false)} />}

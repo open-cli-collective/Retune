@@ -265,6 +265,10 @@ impl Service {
             .ok_or_else(|| "Retune is still loading Last.fm import state.".to_string())
     }
 
+    pub(super) fn is_hydrated(&self) -> bool {
+        self.hydration.load(Ordering::Acquire) == 1
+    }
+
     pub(crate) async fn hydrate(&self) -> Result<(), String> {
         let store = self.store.clone();
         let incremental_store = self.incremental_store.clone();
@@ -346,7 +350,9 @@ impl Service {
         }
         let session = self.session.lock().await;
         let mut view = match session.as_ref() {
-            Some(session) if session.phase == ImportPhase::Suspended => suspended_state_view(),
+            Some(session) if session.phase == ImportPhase::Suspended => {
+                suspended_state_view(session)
+            }
             Some(session) => state_view(Some(session)),
             None => state_view(None),
         };
@@ -714,10 +720,6 @@ impl Service {
                 .cloned()
                 .unwrap_or_else(|| row.stable_id.clone());
             let decision = default_decision(&session, &row.stable_id);
-            if decision.excluded {
-                mappings.excluded_tracks.insert(source_key.clone());
-                continue;
-            }
             match decision.status {
                 RowStatus::IgnoredAlbum => {
                     mappings
@@ -828,6 +830,9 @@ impl Service {
             session
                 .matches
                 .retain(|id, _| row_ids.contains(id.as_str()));
+            session
+                .archived_source_ids
+                .retain(|id| row_ids.contains(id.as_str()));
             let previous_batches = session.batches.clone();
             let mut custom_batches = previous_batches
                 .iter()
@@ -855,7 +860,8 @@ impl Service {
                 .map(|batch| batch.page)
                 .collect::<BTreeSet<_>>();
             let mut next_page = 1;
-            let mut next_batches = build_review_batches(&regular_rows);
+            let mut next_batches =
+                build_review_batches_preserving_names(&regular_rows, &previous_batches);
             for batch in &mut next_batches {
                 while reserved_pages.contains(&next_page) {
                     next_page += 1;
@@ -865,6 +871,17 @@ impl Service {
             }
             next_batches.extend(custom_batches);
             next_batches.sort_by_key(|batch| batch.page);
+            for batch in &next_batches {
+                if batch
+                    .source_ids
+                    .iter()
+                    .any(|id| !session.archived_source_ids.contains(id))
+                {
+                    for id in &batch.source_ids {
+                        session.archived_source_ids.remove(id);
+                    }
+                }
+            }
             session.page_options.retain(|key, _| {
                 let Some(batch_id) = key
                     .strip_prefix("batch:")
@@ -2222,18 +2239,37 @@ impl Service {
         .await
     }
 
+    pub(super) async fn rename_batch(
+        &self,
+        username: &str,
+        spotify_account_id: &str,
+        batch_id: u32,
+        artist: &str,
+        album: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        self.mutate_owned_session(
+            username,
+            spotify_account_id,
+            review_phase_allowed,
+            |session| {
+                rename_batch_in_session(session, batch_id, artist, album, name)
+                    .map(|session| (session, ()))
+            },
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn review_action(
         &self,
         username: &str,
         spotify_account_id: &str,
         batch_id: u32,
-        ids: Option<&[String]>,
         action: ReviewAction,
         artist: &str,
         album: &str,
     ) -> Result<(), String> {
-        validate_review_action_input(action, ids)?;
         self.mutate_review_state(|session, persisted| {
             let (session, persisted) = apply_review_action(
                 session,
@@ -2241,7 +2277,6 @@ impl Service {
                 username,
                 spotify_account_id,
                 batch_id,
-                ids,
                 action,
                 artist,
                 album,
@@ -2302,7 +2337,6 @@ impl Service {
                         id.clone(),
                         RowDecision {
                             status: RowStatus::Done,
-                            excluded: false,
                         },
                     );
                 }
@@ -2413,6 +2447,7 @@ mod hydration_tests {
             })
         };
         started.notified().await;
+        assert!(!service.is_hydrated());
         assert_eq!(
             service
                 .mutate_sync(|state| {
@@ -2429,6 +2464,7 @@ mod hydration_tests {
         );
         release.send(()).unwrap();
         hydration.await.unwrap().unwrap();
+        assert!(service.is_hydrated());
         service
             .mutate_sync(|state| {
                 state.sync_problem = None;

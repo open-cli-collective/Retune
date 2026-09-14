@@ -43,26 +43,21 @@ pub(crate) enum AlbumRelation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ReviewAction {
-    Exclude,
-    UndoExclude,
+    ArchiveBatch,
     IgnoreAlbum,
     IgnoreArtist,
     SkipAlbum,
+    UnarchiveBatch,
     Restore,
 }
 
 impl ReviewAction {
-    pub(super) fn requires_ids(self) -> bool {
-        match self {
-            Self::Exclude | Self::UndoExclude => true,
-            Self::IgnoreAlbum | Self::IgnoreArtist | Self::SkipAlbum | Self::Restore => false,
-        }
-    }
-
     pub(super) fn sweeps_backlog(self) -> bool {
         match self {
             Self::IgnoreArtist | Self::Restore => true,
-            Self::Exclude | Self::UndoExclude | Self::IgnoreAlbum | Self::SkipAlbum => false,
+            Self::ArchiveBatch | Self::IgnoreAlbum | Self::SkipAlbum | Self::UnarchiveBatch => {
+                false
+            }
         }
     }
 }
@@ -267,14 +262,12 @@ pub(crate) enum RowStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RowDecision {
     pub status: RowStatus,
-    pub excluded: bool,
 }
 
 impl Default for RowDecision {
     fn default() -> Self {
         Self {
             status: RowStatus::Pending,
-            excluded: false,
         }
     }
 }
@@ -342,6 +335,9 @@ pub(crate) struct ImportBatch {
     pub source_ids: Vec<String>,
     #[serde(default)]
     pub custom: bool,
+    /// Optional user-facing title. Older sessions leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_name: Option<String>,
     /// `None` identifies batches written before source clustering was persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_shaped: Option<bool>,
@@ -377,6 +373,8 @@ pub(crate) struct LastFmImportSessionV2 {
     pub rows: Vec<SourceRow>,
     pub matches: BTreeMap<String, MatchResult>,
     pub decisions: BTreeMap<String, RowDecision>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub archived_source_ids: BTreeSet<String>,
     pub page_options: BTreeMap<String, PageOptions>,
     pub count_modes: BTreeMap<String, CountMode>,
     #[serde(default)]
@@ -402,6 +400,7 @@ pub(crate) struct ImportStateView {
     pub total_scrobbles: u64,
     pub included_scrobbles: u64,
     pub processed_scrobbles: u64,
+    pub matched_scrobbles: u64,
     pub defaults: ImportDefaults,
     pub remaining: usize,
     pub retryable_error: Option<RetryableError>,
@@ -421,7 +420,6 @@ pub(crate) enum QueueStatus {
     Skipped,
     IgnoredAlbum,
     IgnoredArtist,
-    Excluded,
     Failed,
 }
 
@@ -466,6 +464,7 @@ pub(super) struct ApplyFailure {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportQueueItem {
     pub page: u32,
+    pub name: String,
     pub artist: String,
     pub album: String,
     pub custom_batch: bool,
@@ -477,6 +476,7 @@ pub(crate) struct ImportQueueItem {
     pub latest: u64,
     pub source_count: usize,
     pub remaining: bool,
+    pub archived: bool,
     pub album_entities: u32,
     pub track_entities: u32,
     pub status: Option<QueueStatus>,
@@ -524,9 +524,11 @@ pub(crate) struct LibraryMatchInfo {
 pub(crate) struct ImportPageView {
     pub state: ImportStateView,
     pub batch_id: u32,
+    pub name: String,
     pub artist: String,
     pub album: String,
     pub custom_batch: bool,
+    pub archived: bool,
     pub collection_shaped: bool,
     pub album_label_count: usize,
     pub page_number: usize,
@@ -587,7 +589,6 @@ pub(crate) struct LastFmMappings {
     pub default_count_mode: CountMode,
     pub track_mappings: BTreeMap<String, String>,
     pub album_mappings: BTreeMap<String, LastFmAlbumMapping>,
-    pub excluded_tracks: BTreeSet<String>,
     pub ignored_albums: BTreeSet<String>,
     pub ignored_artists: BTreeSet<String>,
 }
@@ -748,6 +749,8 @@ pub(super) struct ApplyPlan {
     pub(super) committed_ids: Vec<String>,
     #[serde(default)]
     pub(super) archive_batch: bool,
+    #[serde(default)]
+    pub(super) archive_remainder: bool,
     pub(super) options: PageOptions,
     pub(super) membership: ApplyMembership,
     pub(super) updates: Vec<HistoryUpdate>,
@@ -809,18 +812,17 @@ mod tests {
 
     #[test]
     fn review_action_wire_values_and_policy_are_closed() {
-        for (action, wire, requires_ids, sweeps_backlog) in [
-            (ReviewAction::Exclude, "exclude", true, false),
-            (ReviewAction::UndoExclude, "undo-exclude", true, false),
-            (ReviewAction::IgnoreAlbum, "ignore-album", false, false),
-            (ReviewAction::IgnoreArtist, "ignore-artist", false, true),
-            (ReviewAction::SkipAlbum, "skip-album", false, false),
-            (ReviewAction::Restore, "restore", false, true),
+        for (action, wire, sweeps_backlog) in [
+            (ReviewAction::ArchiveBatch, "archive-batch", false),
+            (ReviewAction::IgnoreAlbum, "ignore-album", false),
+            (ReviewAction::IgnoreArtist, "ignore-artist", true),
+            (ReviewAction::SkipAlbum, "skip-album", false),
+            (ReviewAction::UnarchiveBatch, "unarchive-batch", false),
+            (ReviewAction::Restore, "restore", true),
         ] {
             let json = format!("\"{wire}\"");
             assert_eq!(serde_json::from_str::<ReviewAction>(&json).unwrap(), action);
             assert_eq!(serde_json::to_string(&action).unwrap(), json);
-            assert_eq!(action.requires_ids(), requires_ids);
             assert_eq!(action.sweeps_backlog(), sweeps_backlog);
         }
         assert!(serde_json::from_str::<ReviewAction>("\"unknown\"").is_err());

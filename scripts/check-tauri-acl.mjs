@@ -50,6 +50,7 @@ const importerCommands = [
   "lastfm_import_queue",
   "lastfm_import_page",
   "lastfm_import_combine_batches",
+  "lastfm_import_rename_batch",
   "start_lastfm_import",
   "lastfm_import_review",
   "lastfm_import_options",

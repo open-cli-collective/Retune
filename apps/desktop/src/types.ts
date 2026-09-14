@@ -73,6 +73,7 @@ export type LastFmImportState = {
   totalScrobbles: number
   includedScrobbles: number
   processedScrobbles: number
+  matchedScrobbles: number
   defaults: LastFmImportDefaults
   remaining: number
   retryableError: { message: string; attempt: number; retryable: boolean } | null

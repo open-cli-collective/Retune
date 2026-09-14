@@ -20,6 +20,7 @@ the behavior you are changing:
 | Current responsiveness work | [Responsiveness plan](docs/plans/responsiveness-burndown.md) |
 | Staged Tauri performance experiments | [Experiment measurements](docs/performance/tauri-experiments/README.md) |
 | Responsiveness audit evidence | [Rust performance audit](docs/rust-slop-performance-audit.md), [Last.fm interaction audit](docs/lastfm-interaction-audit.md), [type-ahead audit](docs/typeahead-performance-audit.md) |
+| Classical matcher test corpus | [Classical album search corpus](docs/classical-fuzzy-matcher-corpus.md) |
 
 ## Invariants
 

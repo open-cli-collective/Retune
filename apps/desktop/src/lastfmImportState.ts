@@ -1,4 +1,5 @@
 export type ImportSort = 'plays' | 'artist' | 'batch' | 'lastPlayed'
+export type ImportRowSort = 'plays' | 'track' | 'lastPlayed' | 'source'
 export type ImportPhase = 'downloading' | 'aggregating' | 'review' | 'done' | 'suspended'
 export type CountMode = 'sum' | 'overwrite' | 'zero'
 export type ImportPickerKind = 'album' | 'track'
@@ -6,7 +7,7 @@ export type ImportConfidence = 'exact' | 'likely' | 'low' | null
 export type ImportMatchRelation = 'best-match' | 'same-songs' | 'superset' | null
 export type ImportNavigationTarget = 'queue' | 'source' | 'match'
 export type ReviewStatus = 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'
-export type QueueStatus = ReviewStatus | 'excluded' | 'failed'
+export type QueueStatus = ReviewStatus | 'failed'
 export type ImportApplyErrorCode = 'spotify-rate-limited' | 'spotify-quota-exhausted' | 'apply-failed'
 
 export type ImportApplyResult =
@@ -47,7 +48,7 @@ export type ImportShortcutContext = {
 
 export function canHandleImportShortcut(context: ImportShortcutContext): boolean {
   if (!context.navigationTarget || context.control || context.modal || context.altKey || context.ctrlKey || context.metaKey) return false
-  if (!['Tab', 'ArrowUp', 'ArrowDown', 'Enter', 'Escape', ' ', 'e', 'E', 'x', 'X', 's', 'S', 'a', 'A', '?'].includes(context.key)) return false
+  if (!['Tab', 'ArrowUp', 'ArrowDown', 'Enter', 'Escape', ' ', 'e', 'E', 's', 'S', 'a', 'A', '?'].includes(context.key)) return false
   return context.key === 'Tab' || context.key === '?' || !context.shiftKey
 }
 
@@ -66,7 +67,6 @@ export type ImportStrongMatchCandidate = {
 }
 
 export type ImportStrongMatchRow = {
-  excluded: boolean
   targetUri: string | null
   standaloneLowConfidence?: boolean
 }
@@ -81,7 +81,7 @@ export function normalizeImportMatch(value: string): string {
 }
 
 export function strongImportAlbumMatch(batchArtist: string, candidate: ImportStrongMatchCandidate, rows: ImportStrongMatchRow[]): ImportStrongMatch {
-  const included = rows.filter((row) => !row.excluded)
+  const included = rows
   const albumUris = new Set(candidate.trackUris)
   const mappedUris = included.map((row) => row.targetUri)
   if (!included.length || (candidate.relation !== 'best-match' && candidate.relation !== 'superset') || normalizeImportMatch(batchArtist) !== normalizeImportMatch(candidate.artist) || included.some((row) => !row.targetUri || !albumUris.has(row.targetUri) || row.standaloneLowConfidence)) return { strong: false, extraTrackCount: 0 }
@@ -101,6 +101,7 @@ export type ImportVariant = {
 
 export type ImportQueueItem = {
   page: number
+  name?: string
   artist: string
   album: string
   customBatch?: boolean
@@ -112,6 +113,7 @@ export type ImportQueueItem = {
   latest: number
   sourceCount: number
   remaining: boolean
+  archived?: boolean
   albumEntities: number
   trackEntities: number
   status?: QueueStatus | null
@@ -147,7 +149,11 @@ export function importQueueHighlightIndex(items: Pick<ImportQueueItem, 'page'>[]
 }
 
 export function activeImportQueue(items: ImportQueueItem[], pendingIgnores?: ReadonlySet<number>): ImportQueueItem[] {
-  return items.filter((item) => !pendingIgnores?.has(item.page) && (item.remaining || item.status === 'failed'))
+  return items.filter((item) => !item.archived && !pendingIgnores?.has(item.page) && (item.remaining || item.status === 'failed'))
+}
+
+export function archivedImportQueue(items: ImportQueueItem[]): ImportQueueItem[] {
+  return items.filter((item) => item.archived)
 }
 
 export function filterImportQueue(items: ImportQueueItem[], query: string): ImportQueueItem[] {
@@ -282,14 +288,23 @@ export function selectImportRows(
   return { ids: new Set(visibleIds.filter((visibleId) => selected.has(visibleId))), anchor: anchorIndex >= 0 && modifiers.shiftKey ? anchor : id }
 }
 
-export function stablePartitionImportRows<T>(rows: T[], requiredIds: Iterable<string>, id: (row: T) => string, rejectedIds: Iterable<string> = []): T[] {
+export function stablePartitionImportRows<T>(rows: T[], requiredIds: Iterable<string>, id: (row: T) => string): T[] {
   const required = new Set(requiredIds)
-  const rejected = new Set(rejectedIds)
   return [
-    ...rows.filter((row) => required.has(id(row)) && !rejected.has(id(row))),
-    ...rows.filter((row) => !required.has(id(row)) && !rejected.has(id(row))),
-    ...rows.filter((row) => rejected.has(id(row))),
+    ...rows.filter((row) => required.has(id(row))),
+    ...rows.filter((row) => !required.has(id(row))),
   ]
+}
+
+export function sortImportRows<T extends { source: Pick<ImportSourceRow, 'stableId' | 'track' | 'playCount' | 'latest'> }>(rows: T[], requiredIds: Iterable<string>, sort: ImportRowSort): T[] {
+  const ordered = rows.map((row, index) => ({ row, index })).sort((left, right) => {
+    const compared = sort === 'plays' ? right.row.source.playCount - left.row.source.playCount
+      : sort === 'lastPlayed' ? right.row.source.latest - left.row.source.latest
+        : sort === 'track' ? left.row.source.track.localeCompare(right.row.source.track, undefined, { numeric: true, sensitivity: 'base' })
+          : 0
+    return compared || left.index - right.index
+  }).map(({ row }) => row)
+  return stablePartitionImportRows(ordered, requiredIds, (row) => row.source.stableId)
 }
 
 export type CollectionAlbumProjection = { uri: string }
@@ -383,7 +398,7 @@ export function collectionPreviewCoverageCopy(coverage: { selected: boolean; mat
   return `${signed(coverage.marginalMatches)} marginal matches · ${signed(coverage.ambiguityChanges)} ambiguity change`
 }
 
-export type ImportDecision = { status: ReviewStatus; excluded: boolean }
+export type ImportDecision = { status: ReviewStatus }
 
 export type ReviewState = {
   rows: ImportSourceRow[]
@@ -410,28 +425,6 @@ export function mergeReviewBatchDraft(current: ReviewState, currentKey: ReviewBa
     genre: current.genre,
     rating: current.rating,
   }
-}
-
-const pending: ImportDecision = { status: 'pending', excluded: false }
-
-function withDecision(state: ReviewState, ids: string[], decision: Partial<ImportDecision>): ReviewState {
-  const decisions = { ...state.decisions }
-  for (const id of ids) decisions[id] = { ...(decisions[id] ?? pending), ...decision }
-  return { ...state, decisions }
-}
-
-function reviewable(state: ReviewState, id: string) {
-  const decision = state.decisions[id] ?? pending
-  return decision.status === 'pending' || decision.status === 'skipped'
-}
-
-export function excludeImportRows(state: ReviewState, ids: Iterable<string>, excluded = true): ReviewState {
-  const reviewableIds = [...new Set(ids)].filter((id) => reviewable(state, id))
-  return reviewableIds.length ? withDecision(state, reviewableIds, { excluded }) : state
-}
-
-export function excludedImportCount(state: ReviewState): number {
-  return state.rows.filter((row) => state.decisions[row.stableId]?.excluded).length
 }
 
 export function validImportIntent(importContent: boolean, includeHistoricalPlayCounts: boolean): boolean {
@@ -487,21 +480,22 @@ export function sortImportQueue(items: ImportQueueItem[], sort: ImportSort): Imp
 }
 
 export function nextRemainingImportQueue(items: ImportQueueItem[], current: ImportQueueItem | null, sort: ImportSort): ImportQueueItem | null {
-  // A completed or excluded batch may already be hidden; retain its position for advancement.
+  // A completed or ignored batch may already be hidden; retain its position for advancement.
   const anchored = current && !items.some((item) => item.page === current.page) ? [...items, current] : items
   const ordered = sortImportQueue(anchored, sort)
   const currentIndex = current ? ordered.findIndex((item) => item.page === current.page) : -1
   return ordered.slice(currentIndex + 1).find((item) => item.remaining) ?? ordered.slice(0, Math.max(0, currentIndex)).find((item) => item.remaining) ?? null
 }
 
-export function projectAcknowledgedImportApply(items: ImportQueueItem[], appliedPage: number, sort: ImportSort): { queue: ImportQueueItem[]; next: ImportQueueItem | null } {
-  const current = items.find((item) => item.page === appliedPage) ?? null
-  const queue = items.map((item) => item.page === appliedPage ? { ...item, remaining: false, status: 'done' as const, error: null } : item)
-  return { queue, next: nextRemainingImportQueue(queue, current, sort) }
+export function nextArchivedImportQueue(items: ImportQueueItem[], current: ImportQueueItem | null): ImportQueueItem | null {
+  const currentIndex = current ? items.findIndex((item) => item.page === current.page) : -1
+  return items[currentIndex + 1] ?? (currentIndex < 0 ? items[0] : null) ?? null
 }
 
-export function projectImportQueueExclusion(items: ImportQueueItem[], batchId: number, remainingPlayCount: number, allExcluded: boolean): ImportQueueItem[] {
-  return items.map((item) => item.page === batchId ? { ...item, remainingPlayCount, remaining: remainingPlayCount > 0, status: allExcluded ? 'excluded' : item.status === 'excluded' ? null : item.status } : item)
+export function projectAcknowledgedImportApply(items: ImportQueueItem[], appliedPage: number, sort: ImportSort, archived = false): { queue: ImportQueueItem[]; next: ImportQueueItem | null } {
+  const current = items.find((item) => item.page === appliedPage) ?? null
+  const queue = items.map((item) => item.page === appliedPage ? { ...item, remaining: false, archived, status: 'done' as const, error: null } : item)
+  return { queue, next: nextRemainingImportQueue(queue, current, sort) }
 }
 
 export type ImportQueueVisibleRange = { start: number; end: number; offsetTop: number; contentHeight: number }

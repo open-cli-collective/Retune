@@ -630,10 +630,7 @@ pub(super) fn exact_album_match_for_rows(
     let rows = rows
         .iter()
         .copied()
-        .filter(|row| {
-            let decision = default_decision(session, &row.stable_id);
-            is_actionable(session, &row.stable_id) && !decision.excluded
-        })
+        .filter(|row| is_actionable(session, &row.stable_id))
         .collect::<Vec<_>>();
     let Some(first) = rows.first() else {
         return false;
@@ -955,7 +952,6 @@ pub(super) fn historical_counts_for_targets(
         let decision = default_decision(session, &row.stable_id);
         let included = current_ids.contains(row.stable_id.as_str())
             || (decision.status == RowStatus::Done
-                && !decision.excluded
                 && source_batches
                     .get(row.stable_id.as_str())
                     .and_then(|batch_id| session.page_options.get(&batch_options_key(*batch_id)))

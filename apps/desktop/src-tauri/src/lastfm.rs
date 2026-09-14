@@ -292,6 +292,10 @@ impl Service {
         Ok(())
     }
 
+    pub(crate) fn is_hydrated(&self) -> bool {
+        self.hydration.load(Ordering::Acquire) == HYDRATION_READY
+    }
+
     #[cfg(test)]
     fn hydrate_for_test(mut service: Arc<Self>) -> Arc<Self> {
         let (session, pending, queue, accepted, owner, storage_problem) = load_persisted_lastfm(
@@ -1607,6 +1611,7 @@ mod tests {
             })
         };
         started.notified().await;
+        assert!(!service.is_hydrated());
         let state = service.state().await;
         assert!(!state.available);
         assert_eq!(
@@ -1620,6 +1625,7 @@ mod tests {
 
         release.send(()).unwrap();
         hydration.await.unwrap().unwrap();
+        assert!(service.is_hydrated());
         assert!(service.state().await.available);
     }
 

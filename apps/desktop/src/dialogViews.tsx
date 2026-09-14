@@ -8,7 +8,7 @@ import { libraryGateway } from './libraryGateway.ts'
 import { spotifyGateway } from './spotifyGateway.ts'
 import { openExternalDestination } from './ipc.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
-import { SourcesList } from './trackDecisionDialogs.tsx'
+import { RemovedTracksManager, SourcesList } from './trackDecisionDialogs.tsx'
 
 const streamingQualities = [
   ['Normal', 96],
@@ -272,7 +272,7 @@ function BugPreferences() {
   </>
 }
 
-export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSyncLastfm, onSave }: {
+export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSyncLastfm, onSave, onLibraryChanged = () => {} }: {
   settings: Settings
   lastfm: LastFmState
   lastfmImport: LastFmImportState
@@ -281,6 +281,7 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
   onLastfm: (state: LastFmState) => void
   onImport: () => void
   onSyncLastfm: () => void
+  onLibraryChanged?: () => void
   onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio' | 'bug'
@@ -299,6 +300,7 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
   const [lastfmScrobbling, setLastfmScrobbling] = useState(settings.lastfmScrobbling)
   const [lastfmBusy, setLastfmBusy] = useState(false)
   const [lastfmError, setLastfmError] = useState<string>()
+  const [removedTracksOpen, setRemovedTracksOpen] = useState(false)
   const tabs: [PreferenceTab, string, string][] = [
     ['appearance', '◑', 'Appearance'],
     ['library', '♫', 'Library'],
@@ -351,7 +353,7 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
           </div>
           </section>
         </>}
-        {tab === 'library' && <>
+        {tab === 'library' && (removedTracksOpen ? <RemovedTracksManager onBack={() => { setRemovedTracksOpen(false); setTab('library') }} onChanged={onLibraryChanged} /> : <>
           <section className="preference-group"><h3>Spotify account</h3><div className="preference-inset client-id-field">
             <label><span>Client ID:</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
             <small>From your Spotify Developer dashboard. Stored on this Mac only.</small>
@@ -389,7 +391,8 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
             </div>
             <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" onClick={(event) => { event.preventDefault(); void openExternalDestination({ kind: 'lastFm' }).catch((error) => setLastfmError(String(error))) }}>Last.fm</a>.</small>
           </div></section>
-        </>}
+          <section className="preference-group removed-tracks-preference"><h3>Removed tracks</h3><div className="preference-inset preference-recovery"><div><strong>Recover tracks removed from Retune</strong><small>Restore their metadata and play history without changing Spotify.</small></div><button type="button" onClick={() => setRemovedTracksOpen(true)}>Manage…</button></div></section>
+        </>)}
         {tab === 'audio' && <>
           <section className="preference-group"><h3>Streaming quality</h3><div className="preference-inset preference-row quality-options">
             {streamingQualities.map(([label, bitrate]) => <label className="preference-choice" key={label}><input type="radio" name="streaming-quality" checked={streamingBitrate === bitrate} onChange={() => setStreamingBitrate(bitrate)} /><span><strong>{label}</strong><small>{bitrate} kbps</small></span></label>)}

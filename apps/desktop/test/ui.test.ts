@@ -5,7 +5,7 @@ import { formatDiagnosticReport, reportWindow, type DiagnosticEntry } from '../s
 import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, PlayOutcome, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
-import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, excludedImportCount, excludeImportRows, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, projectImportQueueExclusion, resolveImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
+import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, resolveImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, sortImportRows, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
 import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
@@ -22,7 +22,7 @@ const importRows = (): ImportSourceRow[] => [
 
 const reviewState = (rows: ImportSourceRow[]): ReviewState => ({
   rows,
-  decisions: Object.fromEntries(rows.map((row) => [row.stableId, { status: 'pending' as const, excluded: false }])),
+  decisions: Object.fromEntries(rows.map((row) => [row.stableId, { status: 'pending' as const }])),
   importContent: true,
   includeHistoricalPlayCounts: true,
   wholeAlbum: false,
@@ -99,7 +99,7 @@ test('diagnostic reports include session context through the last problem only',
   assert.deepEqual(reportWindow([entry('INFO', 'healthy')]), [])
 })
 
-test('Last.fm rejection selection supports plain, Shift, Cmd, and Ctrl gestures', () => {
+test('Last.fm row selection supports plain, Shift, Cmd, and Ctrl gestures', () => {
   const visible = ['required', 'ordinary', 'other', 'rejected']
   let selection = selectImportRows(visible, [], null, 'ordinary', {})
   assert.deepEqual([...selection.ids], ['ordinary'])
@@ -112,16 +112,6 @@ test('Last.fm rejection selection supports plain, Shift, Cmd, and Ctrl gestures'
   assert.equal(selection.anchor, 'rejected')
   selection = selectImportRows(visible, selection.ids, selection.anchor, 'rejected', { ctrlKey: true })
   assert.deepEqual([...selection.ids], ['required', 'ordinary'])
-})
-
-test('Last.fm exclusion projection handles multiple IDs and stable rejected ordering', () => {
-  const rows = [...importRows(), { ...importRows()[0], stableId: 'c', track: 'Three' }]
-  const state = reviewState(rows)
-  const excluded = excludeImportRows(state, ['b', 'b', 'c'])
-  assert.equal(excluded.decisions.b.excluded, true)
-  assert.equal(excluded.decisions.c.excluded, true)
-  assert.deepEqual(stablePartitionImportRows(rows, ['b'], (row) => row.stableId, ['c']).map((row) => row.stableId), ['b', 'a', 'c'])
-  assert.equal(excludeImportRows(excluded, ['b'], false).decisions.b.excluded, false)
 })
 
 test('Last.fm fuzzy count modes and all queue sorts are deterministic', () => {
@@ -193,6 +183,9 @@ test('Last.fm acknowledged apply projects the next queue choice before authorita
   assert.equal(projection.queue[0].status, 'done')
   assert.deepEqual(projection.next, projection.queue[1])
   assert.deepEqual(activeImportQueue(projection.queue).map((item) => item.page), [2])
+
+  const archived = projectAcknowledgedImportApply(importQueue(), 1, 'batch', true)
+  assert.equal(archived.queue[0].archived, true)
 })
 
 test('Last.fm next batch retains a removed current batch as its sorted position', () => {
@@ -209,40 +202,28 @@ test('Last.fm next batch retains a removed current batch as its sorted position'
   }
 })
 
-test('Last.fm acknowledged exclusions project queue counts without reloading the queue', () => {
-  const partial = projectImportQueueExclusion(importQueue(), 1, 1, false)
-  assert.equal(partial[0].remainingPlayCount, 1)
-  assert.equal(partial[0].remaining, true)
-  const complete = projectImportQueueExclusion(partial, 1, 0, true)
-  assert.equal(complete[0].remaining, false)
-  assert.equal(complete[0].status, 'excluded')
-  const restored = projectImportQueueExclusion(complete, 1, 3, false)
-  assert.equal(restored[0].remaining, true)
-  assert.equal(restored[0].status, null)
-})
-
 test('Last.fm strong album match advisory accepts exact and supersets but rejects unsafe mappings', () => {
   const exact = { artist: 'The Artist', relation: 'best-match' as const, trackUris: ['spotify:track:one', 'spotify:track:two'] }
   assert.deepEqual(strongImportAlbumMatch('the-artist', exact, [
-    { excluded: false, targetUri: 'spotify:track:one' },
-    { excluded: false, targetUri: 'spotify:track:two' },
+    { targetUri: 'spotify:track:one' },
+    { targetUri: 'spotify:track:two' },
   ]), { strong: true, extraTrackCount: 0 })
   const superset = { artist: 'The Artist', relation: 'superset' as const, trackUris: [...exact.trackUris, 'spotify:track:bonus'] }
   assert.deepEqual(strongImportAlbumMatch('THE ARTIST', superset, [
-    { excluded: false, targetUri: 'spotify:track:one' },
-    { excluded: false, targetUri: 'spotify:track:two' },
+    { targetUri: 'spotify:track:one' },
+    { targetUri: 'spotify:track:two' },
   ]), { strong: true, extraTrackCount: 1 })
   assert.equal(strongImportAlbumMatch('The Artist', exact, [
-    { excluded: false, targetUri: 'spotify:track:one' },
-    { excluded: false, targetUri: 'spotify:track:one' },
+    { targetUri: 'spotify:track:one' },
+    { targetUri: 'spotify:track:one' },
   ]).strong, false)
   assert.equal(strongImportAlbumMatch('The Artist', exact, [
-    { excluded: false, targetUri: 'spotify:track:standalone', standaloneLowConfidence: true },
-    { excluded: true, targetUri: null },
+    { targetUri: 'spotify:track:standalone', standaloneLowConfidence: true },
+    { targetUri: null },
   ]).strong, false)
   assert.equal(strongImportAlbumMatch('The Other Artist', exact, [
-    { excluded: false, targetUri: 'spotify:track:one' },
-    { excluded: false, targetUri: 'spotify:track:two' },
+    { targetUri: 'spotify:track:one' },
+    { targetUri: 'spotify:track:two' },
   ]).strong, false)
 })
 
@@ -269,12 +250,22 @@ test('Last.fm visible rows keep required work first with stable source order', (
   assert.deepEqual(stablePartitionImportRows(rows, [], (row) => row.stableId).map((row) => row.stableId), ['a', 'b'])
 })
 
+test('Last.fm row sorts keep unmapped work first', () => {
+  const rows = importRows().map((source) => ({ source }))
+  assert.deepEqual(sortImportRows(rows, ['b'], 'plays').map((row) => row.source.stableId), ['b', 'a'])
+  assert.deepEqual(sortImportRows(rows, [], 'plays').map((row) => row.source.stableId), ['a', 'b'])
+  assert.deepEqual(sortImportRows(rows, [], 'lastPlayed').map((row) => row.source.stableId), ['b', 'a'])
+  assert.deepEqual(sortImportRows(rows, [], 'track').map((row) => row.source.stableId), ['a', 'b'])
+  assert.deepEqual(sortImportRows(rows, [], 'source').map((row) => row.source.stableId), ['a', 'b'])
+})
+
 test('Last.fm queue filter matches all scalar batch data across search terms', () => {
   const queue = [
-    { page: 1, artist: 'Linkin Park', album: 'Hybrid Theory', playCount: 724, importedPlayCount: 0, remainingPlayCount: 724, latest: 30, sourceCount: 14, remaining: true, albumEntities: 1, trackEntities: 0, status: 'failed' as const, error: 'Spotify quota' },
+    { page: 1, artist: 'Linkin Park', album: 'Hybrid Theory', name: 'Night at the Opera', playCount: 724, importedPlayCount: 0, remainingPlayCount: 724, latest: 30, sourceCount: 14, remaining: true, albumEntities: 1, trackEntities: 0, status: 'failed' as const, error: 'Spotify quota' },
     { page: 2, artist: 'Creed', album: 'Human Clay', playCount: 165, importedPlayCount: 0, remainingPlayCount: 165, latest: 20, sourceCount: 24, remaining: true, albumEntities: 1, trackEntities: 0 },
   ]
   assert.equal(filterImportQueue(queue, 'linkin theory')[0]?.page, 1)
+  assert.equal(filterImportQueue(queue, 'night opera')[0]?.page, 1)
   assert.equal(filterImportQueue(queue, 'QUOTA')[0]?.page, 1)
   assert.equal(filterImportQueue(queue, '165')[0]?.page, 2)
   assert.equal(filterImportQueue([{ ...queue[0], artist: 'Ashley Tisdale', album: 'Still into You' }], 'alesti').length, 0)
@@ -383,9 +374,6 @@ test('Last.fm content and history intents remain independent and require one cho
 test('Last.fm per-target fuzzy strategies and stale-free queue advancement are deterministic', () => {
   const countModes: Record<string, 'sum' | 'overwrite' | 'zero'> = { target: 'overwrite' }
   assert.equal(countModes.target, 'overwrite')
-  let state = reviewState(importRows())
-  state = excludeImportRows(state, ['a'])
-  assert.equal(excludedImportCount(state), 1)
   const done = { ...importQueue()[0], remaining: false, status: 'done' as const }
   assert.equal(nextRemainingImportQueue([done, importQueue()[1]], done, 'plays')?.artist, 'Alpha')
   assert.equal(isCurrentImportPageResponse(1, 2), false)
@@ -943,6 +931,8 @@ test('columns move before the header under the pointer', () => {
 
 test('column and browser resizing preserve usable minimums', () => {
   assert.equal(resizedColumnWidth(34, 100, 90), 28)
+  assert.equal(resizedColumnWidth(230, 100, 100, 1.15), 200)
+  assert.equal(resizedColumnWidth(230, 100, 111.5, 1.15), 210)
   assert.equal(resizedPaneHeight(200, 100, 600, 420, 1), 420)
   assert.equal(resizedPaneHeight(200, 100, -100, 420, 1), 90)
   assert.equal(resizedPaneHeight(200, 100, 300, 420, 2), 300)
@@ -966,7 +956,7 @@ test('artist album pages append without duplicate releases', () => {
 test('same-batch importer refresh preserves draft options while accepting authoritative rows', () => {
   const rows = importRows()
   const current = { ...reviewState(rows), genre: 'Focused edit', rating: 4 }
-  const incoming = { ...reviewState(rows), decisions: { a: { status: 'done' as const, excluded: false }, b: { status: 'pending' as const, excluded: false } } }
+  const incoming = { ...reviewState(rows), decisions: { a: { status: 'done' as const }, b: { status: 'pending' as const } } }
   const key = { batchId: 7, artist: 'Artist', album: 'Album' }
   const merged = mergeReviewBatchDraft(current, key, incoming, { ...key })
   assert.equal(merged.genre, 'Focused edit')

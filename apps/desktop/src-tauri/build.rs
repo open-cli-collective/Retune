@@ -64,6 +64,7 @@ const APP_COMMANDS: &[&str] = &[
     "lastfm_import_queue",
     "lastfm_import_page",
     "lastfm_import_combine_batches",
+    "lastfm_import_rename_batch",
     "start_lastfm_import",
     "sync_lastfm_plays",
     "lastfm_import_review",

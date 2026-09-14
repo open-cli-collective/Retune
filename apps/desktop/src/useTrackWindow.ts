@@ -25,7 +25,7 @@ export function useTrackWindow(count: number, rowHeight: number, focusedIndex: n
     const element = scroll.current
     if (!element || index < 0) return
     const top = index * rowHeight
-    const bottom = top + rowHeight + (element.firstElementChild as HTMLElement).offsetHeight
+    const bottom = top + rowHeight + (element.querySelector<HTMLElement>('.track-header')?.offsetHeight ?? 0)
     if (top < element.scrollTop) element.scrollTop = top
     else if (bottom > element.scrollTop + element.clientHeight) element.scrollTop = Math.max(0, bottom - (element.clientHeight || 600))
     readViewport()

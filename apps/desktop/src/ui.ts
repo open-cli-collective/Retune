@@ -97,8 +97,8 @@ export const staleSelectionFacet = (selection: Selection, facets: BrowseView['fa
   return null
 }
 
-export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number) =>
-  Math.max(28, Math.round(startWidth + clientX - startX))
+export const resizedColumnWidth = (startWidth: number, startX: number, clientX: number, scale = 1) =>
+  Math.max(28, Math.round((startWidth + clientX - startX) / scale))
 
 export const resizedPaneHeight = (startHeight: number, startY: number, clientY: number, maxHeight: number, zoom: number) =>
   Math.max(90, Math.min(maxHeight, Math.round(startHeight + (clientY - startY) / zoom)))

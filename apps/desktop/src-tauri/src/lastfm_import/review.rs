@@ -22,8 +22,8 @@ use super::{
     batch_is_collection_shaped, batch_options_key, batch_projection, batch_rows, best_candidate,
     derived_batch_projection, exact_album_match_for_rows, historical_counts_for_targets,
     is_converted_collection_batch, matched_track_uri, matched_track_uri_for_row,
-    normalize_catalog_text, reconciliation::source_album_key, requested_batch, review_batches,
-    review_batches_for_read, select_match_in_session, source_row_map, state_view,
+    normalize_catalog_text, reconciliation::source_album_key, requested_batch, resolved_batch_name,
+    review_batches, review_batches_for_read, select_match_in_session, source_row_map, state_view,
     LASTFM_MAPPINGS_VERSION, LASTFM_QUEUE_PAGE_LIMIT,
 };
 
@@ -174,14 +174,13 @@ pub(super) fn page_view(
     let mut count_rows = BTreeMap::<String, Vec<&SourceRow>>::new();
     for row in &rows {
         let decision = default_decision(session, &row.stable_id);
-        let participates = !decision.excluded
-            && match decision.status {
-                RowStatus::Done => true,
-                RowStatus::Pending | RowStatus::Skipped => {
-                    options.selected_track_ids.contains(&row.stable_id)
-                }
-                RowStatus::IgnoredAlbum | RowStatus::IgnoredArtist => false,
-            };
+        let participates = match decision.status {
+            RowStatus::Done => true,
+            RowStatus::Pending | RowStatus::Skipped => {
+                options.selected_track_ids.contains(&row.stable_id)
+            }
+            RowStatus::IgnoredAlbum | RowStatus::IgnoredArtist => false,
+        };
         if !participates {
             continue;
         }
@@ -227,9 +226,11 @@ pub(super) fn page_view(
     Some(ImportPageView {
         state: state_view(Some(session)),
         batch_id,
+        name: resolved_batch_name(batch, &projection),
         artist: artist.to_owned(),
         album: album.to_owned(),
         custom_batch: batch.custom,
+        archived: has_archived_review_work(session, &rows),
         collection_shaped,
         album_label_count: projection.album_labels.len(),
         page_number,
@@ -430,6 +431,40 @@ pub(super) fn update_options_in_session(
     Ok(session)
 }
 
+pub(super) fn rename_batch_in_session(
+    mut session: LastFmImportSessionV2,
+    batch_id: u32,
+    artist: &str,
+    album: &str,
+    name: &str,
+) -> Result<LastFmImportSessionV2, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Batch name cannot be empty.".into());
+    }
+    if name
+        .chars()
+        .any(|character| character == '\n' || character == '\r')
+    {
+        return Err("Batch name cannot contain line breaks.".into());
+    }
+    if name.chars().count() > 120 {
+        return Err("Batch name must be 120 characters or fewer.".into());
+    }
+    let Some(batch) = requested_batch(&session, batch_id, artist, album) else {
+        return Err("Unknown Last.fm import review batch.".into());
+    };
+    let Some(batch) = session
+        .batches
+        .iter_mut()
+        .find(|candidate| candidate.page == batch.page)
+    else {
+        return Err("Unknown Last.fm import review batch.".into());
+    };
+    batch.presentation_name = Some(name.to_owned());
+    Ok(session)
+}
+
 fn empty_track_match(row: &SourceRow) -> MatchResult {
     MatchResult {
         source_id: row.stable_id.clone(),
@@ -609,37 +644,6 @@ pub(super) fn set_count_mode_in_review(
     ))
 }
 
-pub(super) fn validate_review_action_ids(
-    action: ReviewAction,
-    ids: Option<&[String]>,
-) -> Result<Option<Vec<String>>, String> {
-    if !action.requires_ids() {
-        return Ok(None);
-    }
-    let ids = ids.ok_or_else(|| "A source row ID is required for this action.".to_string())?;
-    let mut deduped = Vec::with_capacity(ids.len());
-    let mut seen = BTreeSet::new();
-    for id in ids {
-        if seen.insert(id) {
-            deduped.push(id.clone());
-        }
-    }
-    if deduped.is_empty() {
-        return Err("A source row ID is required for this action.".into());
-    }
-    Ok(Some(deduped))
-}
-
-pub(super) fn validate_review_action_input(
-    action: ReviewAction,
-    ids: Option<&[String]>,
-) -> Result<(), String> {
-    if action.requires_ids() && ids.is_none_or(<[String]>::is_empty) {
-        return Err("A source row ID is required for this action.".into());
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_review_action(
     session: Option<LastFmImportSessionV2>,
@@ -647,12 +651,10 @@ pub(super) fn apply_review_action(
     username: &str,
     spotify_account_id: &str,
     batch_id: u32,
-    ids: Option<&[String]>,
     action: ReviewAction,
     artist: &str,
     album: &str,
 ) -> Result<(LastFmImportSessionV2, PersistedLastFmMappings), String> {
-    let ids = validate_review_action_ids(action, ids)?;
     let Some(mut session) = session else {
         return Err("No Last.fm import session is active.".into());
     };
@@ -679,34 +681,14 @@ pub(super) fn apply_review_action(
     {
         return Err("Album- and artist-wide ignore are unavailable for a custom batch.".into());
     }
+    let batch_ids = batch.source_ids.clone();
     let scoped_ids = batch_scope_source_ids(&session, &batch);
     let mapping_album_keys = source_album_keys_for_ids(&session, &scoped_ids);
-    let mapping_track_ids = ids.as_ref().map(|ids| {
-        ids.iter()
-            .map(|id| {
-                session
-                    .incremental_source_keys
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| id.clone())
-            })
-            .collect::<Vec<_>>()
-    });
     match action {
-        ReviewAction::Exclude | ReviewAction::UndoExclude => {
-            let ids = ids.as_ref().expect("exclude actions require row IDs");
-            if ids
-                .iter()
-                .any(|id| !batch.source_ids.iter().any(|source_id| source_id == id))
-            {
-                return Err("The source row does not belong to this review batch.".into());
-            }
-            if ids.iter().any(|id| !is_reviewable(&session, id)) {
-                return Err("The source row is not reviewable.".into());
-            }
-            for id in ids {
-                exclude_row(&mut session, id, action == ReviewAction::Exclude);
-            }
+        ReviewAction::ArchiveBatch => {
+            session
+                .archived_source_ids
+                .extend(batch_ids.iter().cloned());
         }
         ReviewAction::IgnoreAlbum => {
             for source_id in &scoped_ids {
@@ -715,7 +697,6 @@ pub(super) fn apply_review_action(
                         source_id.clone(),
                         RowDecision {
                             status: RowStatus::IgnoredAlbum,
-                            excluded: false,
                         },
                     );
                 }
@@ -729,21 +710,23 @@ pub(super) fn apply_review_action(
                         source_id.clone(),
                         RowDecision {
                             status: RowStatus::Skipped,
-                            excluded: false,
                         },
                     );
                 }
             }
         }
+        ReviewAction::UnarchiveBatch => {
+            for source_id in &batch_ids {
+                session.archived_source_ids.remove(source_id);
+            }
+        }
         ReviewAction::Restore => {
             for source_id in &scoped_ids {
                 let decision = default_decision(&session, source_id);
-                if !decision.excluded
-                    && matches!(
-                        decision.status,
-                        RowStatus::IgnoredAlbum | RowStatus::Skipped
-                    )
-                {
+                if matches!(
+                    decision.status,
+                    RowStatus::IgnoredAlbum | RowStatus::Skipped
+                ) {
                     session
                         .decisions
                         .insert(source_id.clone(), RowDecision::default());
@@ -752,7 +735,10 @@ pub(super) fn apply_review_action(
         }
     }
     update_review_phase(&mut session);
-    if action == ReviewAction::SkipAlbum {
+    if matches!(
+        action,
+        ReviewAction::ArchiveBatch | ReviewAction::SkipAlbum | ReviewAction::UnarchiveBatch
+    ) {
         return Ok((session, persisted));
     }
     if persisted
@@ -768,18 +754,7 @@ pub(super) fn apply_review_action(
     }
     let mut mappings = persisted.mappings;
     match action {
-        ReviewAction::Exclude => {
-            if let Some(ids) = mapping_track_ids.as_ref() {
-                mappings.excluded_tracks.extend(ids.iter().cloned());
-            }
-        }
-        ReviewAction::UndoExclude => {
-            if let Some(ids) = mapping_track_ids.as_ref() {
-                for id in ids {
-                    mappings.excluded_tracks.remove(id);
-                }
-            }
-        }
+        ReviewAction::ArchiveBatch | ReviewAction::UnarchiveBatch => unreachable!(),
         ReviewAction::IgnoreAlbum => mappings.ignored_albums.extend(mapping_album_keys),
         ReviewAction::Restore => {
             for key in mapping_album_keys {
@@ -940,6 +915,7 @@ pub(super) fn combine_review_batches(
         page: target_page,
         source_ids: ordered_source_ids,
         custom: true,
+        presentation_name: Some("Custom batch".into()),
         collection_shaped: Some(true),
         representative_artist: Some(representative_artist.clone()),
         representative_album: Some(String::new()),
@@ -1329,7 +1305,12 @@ pub(super) fn collection_match_view(
     let selected_tracks = collection_track_candidates(&selected, &membership);
     let eligible = rows
         .iter()
-        .filter(|row| !default_decision(session, &row.stable_id).excluded)
+        .filter(|row| {
+            !matches!(
+                default_decision(session, &row.stable_id).status,
+                RowStatus::IgnoredAlbum | RowStatus::IgnoredArtist
+            )
+        })
         .copied()
         .collect::<Vec<_>>();
     let base_statuses = eligible.iter().map(|row| {
@@ -1748,9 +1729,10 @@ pub(super) fn queue_item(
     let album = projection.representative_album.clone();
     let collection_shaped = batch_is_collection_shaped(session, batch, rows);
     let options = session.options_for_page_batch(batch, &artist, &album, rows);
+    let archived = has_archived_review_work(session, rows);
     let remaining = rows.iter().any(|row| {
         let decision = default_decision(session, &row.stable_id);
-        matches!(decision.status, RowStatus::Pending | RowStatus::Skipped) && !decision.excluded
+        !archived && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
     });
     let (imported_play_count, remaining_play_count) =
         rows.iter()
@@ -1758,7 +1740,7 @@ pub(super) fn queue_item(
                 let decision = default_decision(session, &row.stable_id);
                 match decision.status {
                     RowStatus::Done => (imported.saturating_add(row.play_count), remaining),
-                    RowStatus::Pending | RowStatus::Skipped if !decision.excluded => {
+                    RowStatus::Pending | RowStatus::Skipped if !archived => {
                         (imported, remaining.saturating_add(row.play_count))
                     }
                     _ => (imported, remaining),
@@ -1769,8 +1751,8 @@ pub(super) fn queue_item(
         .filter(|row| {
             let decision = default_decision(session, &row.stable_id);
             options.selected_track_ids.contains(&row.stable_id)
+                && !archived
                 && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
-                && !decision.excluded
         })
         .collect::<Vec<_>>();
     let mut album_entities = 0;
@@ -1823,6 +1805,7 @@ pub(super) fn queue_item(
     });
     Some(ImportQueueItem {
         page: batch.page,
+        name: resolved_batch_name(batch, &projection),
         artist,
         album,
         custom_batch: batch.custom,
@@ -1837,6 +1820,7 @@ pub(super) fn queue_item(
         latest: rows.iter().map(|row| row.latest).max().unwrap_or_default(),
         source_count: batch.source_ids.len(),
         remaining,
+        archived,
         album_entities,
         track_entities: track_uris.len() as u32,
         status: failed
@@ -1852,12 +1836,6 @@ pub(super) fn queue_status(
     session: &LastFmImportSessionV2,
     rows: &[&SourceRow],
 ) -> Option<QueueStatus> {
-    if rows
-        .iter()
-        .all(|row| default_decision(session, &row.stable_id).excluded)
-    {
-        return Some(QueueStatus::Excluded);
-    }
     let first = rows
         .first()
         .map(|row| default_decision(session, &row.stable_id).status)?;
@@ -1889,13 +1867,6 @@ pub(super) fn review_phase_allowed(phase: ImportPhase) -> bool {
     matches!(phase, ImportPhase::Review | ImportPhase::Done)
 }
 
-pub(super) fn exclude_row(session: &mut LastFmImportSessionV2, id: &str, excluded: bool) {
-    if is_reviewable(session, id) {
-        let decision = session.decisions.entry(id.to_owned()).or_default();
-        decision.excluded = excluded;
-    }
-}
-
 pub(super) fn is_reviewable(session: &LastFmImportSessionV2, id: &str) -> bool {
     matches!(
         default_decision(session, id).status,
@@ -1903,8 +1874,15 @@ pub(super) fn is_reviewable(session: &LastFmImportSessionV2, id: &str) -> bool {
     )
 }
 
+fn has_archived_review_work(session: &LastFmImportSessionV2, rows: &[&SourceRow]) -> bool {
+    rows.iter().any(|row| {
+        session.archived_source_ids.contains(&row.stable_id)
+            && is_reviewable(session, &row.stable_id)
+    })
+}
+
 pub(super) fn is_actionable(session: &LastFmImportSessionV2, id: &str) -> bool {
-    is_reviewable(session, id) && !default_decision(session, id).excluded
+    is_reviewable(session, id) && !session.archived_source_ids.contains(id)
 }
 
 pub(super) fn required_import_match_ids(
@@ -1987,7 +1965,6 @@ pub(crate) fn ignore_album(session: &mut LastFmImportSessionV2, artist: &str, al
                 id,
                 RowDecision {
                     status: RowStatus::IgnoredAlbum,
-                    excluded: false,
                 },
             );
         }
@@ -2006,7 +1983,6 @@ pub(crate) fn ignore_artist(session: &mut LastFmImportSessionV2, artist: &str) {
             id,
             RowDecision {
                 status: RowStatus::IgnoredArtist,
-                excluded: false,
             },
         );
     }
@@ -2021,7 +1997,6 @@ pub(crate) fn skip_album(session: &mut LastFmImportSessionV2, artist: &str, albu
                 id,
                 RowDecision {
                     status: RowStatus::Skipped,
-                    excluded: false,
                 },
             );
         }
@@ -2031,6 +2006,7 @@ pub(crate) fn skip_album(session: &mut LastFmImportSessionV2, artist: &str, albu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lastfm_import::model::ExternalScrobble;
 
     fn row(id: &str, artist: &str, album: &str) -> SourceRow {
         SourceRow {
@@ -2043,6 +2019,159 @@ mod tests {
             earliest: 1,
             latest: 1,
         }
+    }
+
+    #[test]
+    fn batch_rename_validation_rejects_empty_line_breaks_and_long_names() {
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.rows = vec![row("one", "Artist", "Album")];
+        session.batches = vec![ImportBatch {
+            page: 1,
+            source_ids: vec!["one".into()],
+            custom: false,
+            presentation_name: None,
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
+        }];
+
+        assert_eq!(
+            rename_batch_in_session(session.clone(), 1, "Artist", "Album", "  ").unwrap_err(),
+            "Batch name cannot be empty."
+        );
+        assert_eq!(
+            rename_batch_in_session(session.clone(), 1, "Artist", "Album", "A\nB").unwrap_err(),
+            "Batch name cannot contain line breaks."
+        );
+        assert_eq!(
+            rename_batch_in_session(session.clone(), 1, "Artist", "Album", &"a".repeat(121))
+                .unwrap_err(),
+            "Batch name must be 120 characters or fewer."
+        );
+        let renamed =
+            rename_batch_in_session(session, 1, "Artist", "Album", "  Renamed  ").unwrap();
+        assert_eq!(
+            renamed.batches[0].presentation_name.as_deref(),
+            Some("Renamed")
+        );
+    }
+
+    #[test]
+    fn archived_batch_is_persisted_excluded_from_work_and_reversible() {
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.phase = ImportPhase::Review;
+        session.rows = vec![
+            row("done", "Artist", "Album"),
+            row("pending", "Artist", "Album"),
+        ];
+        session.batches = vec![ImportBatch {
+            page: 1,
+            source_ids: vec!["done".into(), "pending".into()],
+            custom: false,
+            presentation_name: None,
+            collection_shaped: None,
+            representative_artist: None,
+            representative_album: None,
+            album_labels: Vec::new(),
+        }];
+        session.decisions.insert(
+            "done".into(),
+            RowDecision {
+                status: RowStatus::Done,
+            },
+        );
+        let persisted = PersistedLastFmMappings::default();
+        let (archived, mappings) = apply_review_action(
+            Some(session),
+            persisted.clone(),
+            "user",
+            "spotify",
+            1,
+            ReviewAction::ArchiveBatch,
+            "Artist",
+            "Album",
+        )
+        .unwrap();
+        assert_eq!(archived.remaining(), 0);
+        assert!(!is_actionable(&archived, "pending"));
+        assert_eq!(mappings, persisted);
+        let rows = archived.rows.iter().collect::<Vec<_>>();
+        let item = queue_item(&archived, &archived.batches[0], &rows, &[]).unwrap();
+        assert!(item.archived);
+        assert!(!item.remaining);
+        assert_eq!(item.imported_play_count, 1);
+        let mut completed = archived.clone();
+        completed.decisions.insert(
+            "pending".into(),
+            RowDecision {
+                status: RowStatus::Done,
+            },
+        );
+        let rows = completed.rows.iter().collect::<Vec<_>>();
+        assert!(
+            !queue_item(&completed, &completed.batches[0], &rows, &[])
+                .unwrap()
+                .archived
+        );
+        let archived: LastFmImportSessionV2 =
+            serde_json::from_value(serde_json::to_value(archived).unwrap()).unwrap();
+        let (restored, mappings) = apply_review_action(
+            Some(archived),
+            mappings,
+            "user",
+            "spotify",
+            1,
+            ReviewAction::UnarchiveBatch,
+            "Artist",
+            "Album",
+        )
+        .unwrap();
+        assert_eq!(restored.remaining(), 1);
+        assert!(is_actionable(&restored, "pending"));
+        assert_eq!(mappings, persisted);
+    }
+
+    #[test]
+    fn legacy_excluded_fields_leave_rows_actionable_and_unmapped_scrobbles_unresolved() {
+        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
+        session.rows = vec![row("one", "Artist", "Album")];
+        let mut legacy_session = serde_json::to_value(&session).unwrap();
+        legacy_session["decisions"]["one"] = serde_json::json!({
+            "status": "pending",
+            "excluded": true,
+        });
+        let session: LastFmImportSessionV2 = serde_json::from_value(legacy_session).unwrap();
+        assert!(is_actionable(&session, "one"));
+        let session_json = serde_json::to_value(&session).unwrap();
+        assert!(session_json["decisions"]["one"].get("excluded").is_none());
+
+        let event = ExternalScrobble {
+            artist: "Artist".into(),
+            album: "Album".into(),
+            track: "Song".into(),
+            timestamp: 1,
+            submitted: None,
+        };
+        let mut legacy_mappings = serde_json::to_value(PersistedLastFmMappings::default()).unwrap();
+        legacy_mappings["mappings"]["excludedTracks"] =
+            serde_json::json!([crate::lastfm_import::source::source_id(
+                &event.artist,
+                &event.album,
+                &event.track
+            )]);
+        let mappings: PersistedLastFmMappings = serde_json::from_value(legacy_mappings).unwrap();
+        let result = crate::lastfm_import::reconciliation::reconcile_incremental(
+            std::slice::from_ref(&event),
+            &[],
+            &mappings.mappings,
+            &BTreeSet::new(),
+            0,
+            2,
+        );
+        assert_eq!(result.unresolved, vec![event]);
+        let mappings_json = serde_json::to_value(mappings).unwrap();
+        assert!(mappings_json["mappings"].get("excludedTracks").is_none());
     }
 
     #[test]
@@ -2258,30 +2387,14 @@ mod tests {
         });
         ignore_artist(&mut session, "A");
         assert_eq!(session.remaining(), 1);
-        exclude_row(&mut session, "three", true);
-        assert!(session.decisions.values().any(|decision| decision.excluded));
-        ignore_album(&mut session, "B", "Album");
-        assert_eq!(session.remaining(), 0);
-    }
-
-    #[test]
-    fn excluded_rows_have_view_only_queue_status() {
-        let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
-        session.rows = vec![row("one", "A", "Album"), row("two", "A", "Album")];
-        for id in ["one", "two"] {
-            session.decisions.insert(
-                id.into(),
-                RowDecision {
-                    status: RowStatus::Pending,
-                    excluded: true,
-                },
-            );
-        }
-
-        assert_eq!(
-            queue_status(&session, &session.rows.iter().collect::<Vec<_>>()),
-            Some(QueueStatus::Excluded)
+        session.decisions.insert(
+            "three".into(),
+            RowDecision {
+                status: RowStatus::Skipped,
+            },
         );
+        assert_eq!(session.remaining(), 1);
+        ignore_album(&mut session, "B", "Album");
         assert_eq!(session.remaining(), 0);
     }
 
@@ -2349,21 +2462,25 @@ mod tests {
             Some(&options)
         );
 
-        let ids = vec!["one".to_owned(), "one".to_owned()];
         let (session, mappings) = apply_review_action(
             Some(session),
             PersistedLastFmMappings::default(),
             "user",
             "spotify",
             item.page,
-            Some(&ids),
-            ReviewAction::Exclude,
+            ReviewAction::IgnoreAlbum,
             &item.artist,
             &item.album,
         )
         .unwrap();
-        assert!(default_decision(&session, "one").excluded);
-        assert!(mappings.mappings.excluded_tracks.contains("one"));
+        assert_eq!(
+            default_decision(&session, "one").status,
+            RowStatus::IgnoredAlbum
+        );
+        assert!(mappings
+            .mappings
+            .ignored_albums
+            .contains(&source_album_key("A", "Album")));
         assert_eq!(mappings.lastfm_username.as_deref(), Some("user"));
         assert_eq!(mappings.spotify_account_id.as_deref(), Some("spotify"));
     }

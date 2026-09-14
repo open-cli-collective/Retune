@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { libraryGateway } from './libraryGateway.ts'
 import { spotifyGateway } from './spotifyGateway.ts'
 import type { DecisionTrack, LibrarySources, MergePlayCount, Track, TrackInfo, TrackMergeEdit, TrackMergePreview, SearchTrack } from './types.ts'
@@ -196,26 +196,29 @@ export function RemoveTrackDialog({ tracks, spotify, onClose, onChanged }: { tra
   </ModalDialog>
 }
 
-export function RemovedTracksDialog({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
+export function RemovedTracksManager({ onBack, onChanged }: { onBack: () => void; onChanged: () => void }) {
   const [tracks, setTracks] = useState<DecisionTrack[]>()
   const [busy, setBusy] = useState<string>()
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
-  useEffect(() => {
-    let active = true
-    libraryGateway.removedTracks().then((value) => { if (active) setTracks(value) }).catch((error) => { if (active) setError(String(error)) })
-    return () => { active = false }
+  const load = useCallback(async () => {
+    setTracks(undefined)
+    setError('')
+    try { setTracks(await libraryGateway.removedTracks()) }
+    catch (error) { setError(String(error)) }
   }, [])
+  useEffect(() => { void load() }, [load])
   const restore = async (uri: string) => {
     setBusy(uri); setError('')
     try { await libraryGateway.restoreTrack(uri); setTracks((tracks) => tracks?.filter((track) => track.uri !== uri)); onChanged() }
     catch (error) { setError(String(error)) }
     finally { setBusy(undefined) }
   }
-  return <ModalDialog className="get-info removed-tracks" labelledBy="removed-tracks-title" onCancel={busy ? undefined : onClose}>
-    <h2 id="removed-tracks-title">Removed tracks</h2><p>Restore entries with their metadata and history. Restoring here does not save anything in Spotify.</p>
+  const filtered = tracks?.filter((track) => `${track.name} ${track.art} ${track.alb}`.toLowerCase().includes(query.toLowerCase()))
+  return <section className="removed-tracks-manager" aria-labelledby="removed-tracks-title">
+    <header><button type="button" disabled={busy !== undefined} onClick={onBack}>‹ Library preferences</button><h3 id="removed-tracks-title">Removed tracks</h3></header>
+    <p>Restore entries with their metadata and history. Restoring here does not save anything in Spotify.</p>
     <input aria-label="Filter removed tracks" placeholder="Filter by track, artist or album" value={query} onChange={(event) => setQuery(event.target.value)} />
-    <div className="decision-body">{tracks ? tracks.length ? tracks.filter((track) => `${track.name} ${track.art} ${track.alb}`.toLowerCase().includes(query.toLowerCase())).map((track) => <div key={track.uri} className="removed-track"><span className="decision-track"><TrackSummary track={track} /></span><button type="button" disabled={busy !== undefined} onClick={() => void restore(track.uri)}>{busy === track.uri ? 'Restoring…' : 'Add to Retune'}</button></div>) : <p>No removed tracks.</p> : <p role="status">{error ? 'Could not load removed tracks.' : 'Loading removed tracks…'}</p>}{error && <p role="alert" className="decision-error">{error}</p>}</div>
-    <div className="modal-actions"><button type="button" disabled={busy !== undefined} onClick={onClose}>Done</button></div>
-  </ModalDialog>
+    <div className="decision-body">{tracks ? filtered?.length ? filtered.map((track) => <div key={track.uri} className="removed-track"><span className="decision-track"><TrackSummary track={track} /></span><button type="button" disabled={busy !== undefined} onClick={() => void restore(track.uri)}>{busy === track.uri ? 'Restoring…' : 'Add to Retune'}</button></div>) : <p>No removed tracks.</p> : <div role="status">{error ? <><p>Could not load removed tracks.</p><button type="button" disabled={busy !== undefined} onClick={() => void load()}>Try again</button></> : <p>Loading removed tracks…</p>}</div>}{error && tracks && <p role="alert" className="decision-error">{error}</p>}</div>
+  </section>
 }

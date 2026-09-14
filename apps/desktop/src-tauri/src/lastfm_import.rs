@@ -174,6 +174,7 @@ impl LastFmImportSessionV2 {
             rows: Vec::new(),
             matches: BTreeMap::new(),
             decisions: BTreeMap::new(),
+            archived_source_ids: BTreeSet::new(),
             page_options: BTreeMap::new(),
             count_modes: BTreeMap::new(),
             collection_album_matches: BTreeMap::new(),
@@ -192,8 +193,8 @@ impl LastFmImportSessionV2 {
                     .get(&row.stable_id)
                     .cloned()
                     .unwrap_or_default();
-                matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
-                    && !decision.excluded
+                !self.archived_source_ids.contains(&row.stable_id)
+                    && matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
             })
             .count()
     }
@@ -213,7 +214,7 @@ impl LastFmImportSessionV2 {
                                 default_decision(self, &row.stable_id).status,
                                 RowStatus::Pending | RowStatus::Skipped
                             )
-                            && !default_decision(self, &row.stable_id).excluded
+                            && !self.archived_source_ids.contains(&row.stable_id)
                     })
                     .map(|row| row.stable_id.clone())
                     .collect();
@@ -271,19 +272,18 @@ impl LastFmImportSessionV2 {
             .iter()
             .filter(|row| {
                 let decision = default_decision(self, &row.stable_id);
-                !decision.excluded
-                    && if decision.status == RowStatus::Done {
-                        options.selected_track_ids.contains(&row.stable_id)
-                    } else {
-                        is_actionable(self, &row.stable_id)
-                            && self
-                                .matches
-                                .get(&row.stable_id)
-                                .and_then(|result| {
-                                    matched_track_uri_for_row(result, row, collection_shaped)
-                                })
-                                .is_some()
-                    }
+                if decision.status == RowStatus::Done {
+                    options.selected_track_ids.contains(&row.stable_id)
+                } else {
+                    is_actionable(self, &row.stable_id)
+                        && self
+                            .matches
+                            .get(&row.stable_id)
+                            .and_then(|result| {
+                                matched_track_uri_for_row(result, row, collection_shaped)
+                            })
+                            .is_some()
+                }
             })
             .map(|row| row.stable_id.clone())
             .collect();
@@ -320,7 +320,7 @@ fn batch_options_key(batch_id: u32) -> String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct BatchProjection {
+pub(super) struct BatchProjection {
     collection_shaped: bool,
     representative_artist: String,
     representative_album: String,
@@ -381,6 +381,56 @@ fn batch_projection(batch: &ImportBatch, rows: &[&SourceRow]) -> BatchProjection
     }
 }
 
+pub(super) fn resolved_batch_name(batch: &ImportBatch, projection: &BatchProjection) -> String {
+    batch
+        .presentation_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if batch.custom {
+                "Custom batch".to_owned()
+            } else if projection.representative_album.is_empty() {
+                "Singles".to_owned()
+            } else {
+                projection.representative_album.clone()
+            }
+        })
+}
+
+pub(super) fn build_review_batches_preserving_names(
+    rows: &[SourceRow],
+    previous: &[ImportBatch],
+) -> Vec<ImportBatch> {
+    let previous_names = previous
+        .iter()
+        .filter_map(|batch| {
+            batch
+                .presentation_name
+                .as_ref()
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| {
+                    (
+                        batch.source_ids.iter().cloned().collect::<BTreeSet<_>>(),
+                        name.clone(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    build_review_batches(rows)
+        .into_iter()
+        .map(|mut batch| {
+            let source_ids = batch.source_ids.iter().cloned().collect::<BTreeSet<_>>();
+            batch.presentation_name = previous_names
+                .iter()
+                .find(|(previous_ids, _)| *previous_ids == source_ids)
+                .map(|(_, name)| name.clone());
+            batch
+        })
+        .collect()
+}
+
 fn batch_is_collection_shaped(
     session: &LastFmImportSessionV2,
     batch: &ImportBatch,
@@ -428,7 +478,10 @@ fn review_batches_for_read(session: &LastFmImportSessionV2) -> Cow<'_, [ImportBa
             .iter()
             .any(|batch| batch.page == 0 || batch.source_ids.is_empty())
     {
-        Cow::Owned(build_review_batches(&session.rows))
+        Cow::Owned(build_review_batches_preserving_names(
+            &session.rows,
+            &session.batches,
+        ))
     } else {
         Cow::Borrowed(&session.batches)
     }
@@ -809,6 +862,7 @@ fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
             .map(|session| session.included_scrobbles)
             .unwrap_or_default(),
         processed_scrobbles,
+        matched_scrobbles: session.map(matched_scrobbles).unwrap_or_default(),
         defaults: session
             .map(|session| session.defaults.clone())
             .unwrap_or_default(),
@@ -827,6 +881,15 @@ fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
     }
 }
 
+fn matched_scrobbles(session: &LastFmImportSessionV2) -> u64 {
+    session
+        .rows
+        .iter()
+        .filter(|row| default_decision(session, &row.stable_id).status == RowStatus::Done)
+        .map(|row| row.play_count)
+        .sum()
+}
+
 fn remaining_with_apply_queue(
     session: &LastFmImportSessionV2,
     apply_queue: &[ReviewApplyJob],
@@ -843,14 +906,15 @@ fn remaining_with_apply_queue(
         .rows
         .iter()
         .filter(|row| !archived.contains(&row.stable_id))
+        .filter(|row| !session.archived_source_ids.contains(&row.stable_id))
         .filter(|row| {
             let decision = default_decision(session, &row.stable_id);
-            matches!(decision.status, RowStatus::Pending | RowStatus::Skipped) && !decision.excluded
+            matches!(decision.status, RowStatus::Pending | RowStatus::Skipped)
         })
         .count()
 }
 
-fn suspended_state_view() -> ImportStateView {
+fn suspended_state_view(session: &LastFmImportSessionV2) -> ImportStateView {
     ImportStateView {
         phase: Some(ImportPhase::Suspended),
         username: None,
@@ -863,6 +927,7 @@ fn suspended_state_view() -> ImportStateView {
         total_scrobbles: 0,
         included_scrobbles: 0,
         processed_scrobbles: 0,
+        matched_scrobbles: matched_scrobbles(session),
         defaults: ImportDefaults::default(),
         remaining: 0,
         retryable_error: Some(RetryableError {
@@ -1066,12 +1131,10 @@ async fn select_best_matches_for_batch(
         .is_some_and(|session| batch_is_collection_shaped_for_id(&session, batch_id));
     let mut selected_album_uris = BTreeSet::new();
     for item in page.rows {
-        if item.decision.excluded
-            || !matches!(
-                item.decision.status,
-                RowStatus::Pending | RowStatus::Skipped
-            )
-        {
+        if !matches!(
+            item.decision.status,
+            RowStatus::Pending | RowStatus::Skipped
+        ) {
             continue;
         }
         let Some(result) = item.match_result else {

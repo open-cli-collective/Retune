@@ -7,11 +7,11 @@ export type CollectionAlbumCoverage = { uri: string; matched: number; uniqueCove
 export type CollectionAlbumPreviewCoverage = { uri: string; selected: boolean; matched: number; uniqueCoverage: number; marginalMatches: number; ambiguityChanges: number; trackStatuses: Array<{ uri: string; status: 'matched' | 'ambiguous' | 'unmatched' }> }
 export type CollectionMatchView = { cachedAlbums: AlbumCandidate[]; selectedAlbumUris: string[]; fullAlbumUris: string[]; wholeAlbumReady: boolean; coverage: { matched: number; ambiguous: number; unresolved: number; selectedAlbums: CollectionAlbumCoverage[]; previews: CollectionAlbumPreviewCoverage[] } }
 export type MatchResult = { sourceId: string; searchTerm: string; confidence: 'exact' | 'likely' | 'low' | null; selectedUri: string | null; candidates: AlbumCandidate[]; trackMatches: Record<string, string> }
-export type PageItem = { source: ImportSourceRow; decision: { status: 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist'; excluded: boolean }; matchResult: MatchResult | null }
+export type PageItem = { source: ImportSourceRow; decision: { status: 'pending' | 'done' | 'skipped' | 'ignored-album' | 'ignored-artist' }; matchResult: MatchResult | null }
 export type ImportPageOptions = { importContent: boolean; includeHistoricalPlayCounts: boolean; wholeAlbum: boolean; genre: string | null; rating: number | null; selectedTrackIds: string[] }
 export type LibraryMatchInfo = { inLibrary: boolean; albumInLibrary: boolean; genres: string[]; playCount: number | null; rating: number | null }
-export type PageView = { state: LastFmImportState; batchId: number; artist: string; album: string; customBatch?: boolean; collectionShaped?: boolean; albumLabelCount?: number; pageNumber: number; pageCount: number; rows: PageItem[]; options: ImportPageOptions; fuzzyGroups: Record<string, ImportSourceRow[]>; countModes: Record<string, CountMode>; resolvedCounts: Record<string, number>; lockedCountModes: string[]; collection: CollectionMatchView | null; libraryMatches?: Record<string, LibraryMatchInfo>; suggestedGenre?: string | null }
-export type ReviewAction = 'exclude' | 'undo-exclude' | 'skip-album' | 'restore' | 'ignore-album' | 'ignore-artist'
+export type PageView = { state: LastFmImportState; batchId: number; name?: string; artist: string; album: string; customBatch?: boolean; archived?: boolean; collectionShaped?: boolean; albumLabelCount?: number; pageNumber: number; pageCount: number; rows: PageItem[]; options: ImportPageOptions; fuzzyGroups: Record<string, ImportSourceRow[]>; countModes: Record<string, CountMode>; resolvedCounts: Record<string, number>; lockedCountModes: string[]; collection: CollectionMatchView | null; libraryMatches?: Record<string, LibraryMatchInfo>; suggestedGenre?: string | null }
+export type ReviewAction = 'archive-batch' | 'unarchive-batch' | 'skip-album' | 'restore' | 'ignore-album' | 'ignore-artist'
 
 type Batch = { batchId: number; artist: string; album: string }
 
@@ -31,9 +31,10 @@ export function createLastFmGateway(invoke: Invoker) {
     queue: (cursor: number, limit: number) => invoke<ImportQueuePage>('lastfm_import_queue', { cursor, limit }),
     page: ({ batchId, artist, album }: Batch) => invoke<PageView | null>('lastfm_import_page', { batchId, artist, album }),
     combineBatches: (batchIds: number[]) => invoke<PageView | null>('lastfm_import_combine_batches', { batchIds }),
-    review: ({ batchId, action, artist, album, ids }: Batch & { action: ReviewAction; ids?: string[] }) => invoke<LastFmImportState>('lastfm_import_review', { batchId, ...(ids === undefined ? {} : { ids }), action, artist, album }),
+    renameBatch: ({ batchId, artist, album }: Batch, name: string) => invoke<void>('lastfm_import_rename_batch', { batchId, artist, album, name }),
+    review: ({ batchId, action, artist, album }: Batch & { action: ReviewAction }) => invoke<LastFmImportState>('lastfm_import_review', { batchId, action, artist, album }),
     saveOptions: ({ batchId, artist, album }: Batch, options: ImportPageOptions) => invoke<void>('lastfm_import_options', { batchId, artist, album, options }),
-    apply: ({ batchId, artist, album }: Batch, selectedIds: string[], archiveBatch: boolean, options: ImportPageOptions) => invoke<void>('lastfm_import_apply', { batchId, artist, album, selectedIds, archiveBatch, options }),
+    apply: ({ batchId, artist, album }: Batch, selectedIds: string[], archiveBatch: boolean, archiveRemainder: boolean, options: ImportPageOptions) => invoke<void>('lastfm_import_apply', { batchId, artist, album, selectedIds, archiveBatch, archiveRemainder, options }),
     retryApply: (batchId: number) => invoke<void>('lastfm_import_retry_apply', { batchId }),
     countMode: (targetUri: string, mode: CountMode) => invoke<void>('lastfm_import_count_mode', { targetUri, mode }),
     activateCollection: ({ batchId, artist, album }: Batch) => invoke<PageView | null>('lastfm_import_activate_collection', { batchId, artist, album }),

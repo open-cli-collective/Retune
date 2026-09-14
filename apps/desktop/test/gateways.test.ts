@@ -184,10 +184,10 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
   await lastfm.queue(100, 25)
   await lastfm.page(batch)
   await lastfm.combineBatches([7, 8])
+  await lastfm.renameBatch(batch, 'Renamed batch')
   await lastfm.review({ ...batch, action: 'skip-album' })
-  await lastfm.review({ ...batch, action: 'exclude', ids: ['source-a', 'source-b'] })
   await lastfm.saveOptions(batch, options)
-  await lastfm.apply(batch, ['source-a'], true, options)
+  await lastfm.apply(batch, ['source-a'], true, false, options)
   await lastfm.retryApply(7)
   await lastfm.countMode('spotify:track:one', 'overwrite')
   await lastfm.activateCollection(batch)
@@ -216,10 +216,10 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
     ['lastfm_import_queue', { cursor: 100, limit: 25 }],
     ['lastfm_import_page', batch],
     ['lastfm_import_combine_batches', { batchIds: [7, 8] }],
+    ['lastfm_import_rename_batch', { ...batch, name: 'Renamed batch' }],
     ['lastfm_import_review', { ...batch, action: 'skip-album' }],
-    ['lastfm_import_review', { ...batch, ids: ['source-a', 'source-b'], action: 'exclude' }],
     ['lastfm_import_options', { ...batch, options }],
-    ['lastfm_import_apply', { ...batch, selectedIds: ['source-a'], archiveBatch: true, options }],
+    ['lastfm_import_apply', { ...batch, selectedIds: ['source-a'], archiveBatch: true, archiveRemainder: false, options }],
     ['lastfm_import_retry_apply', { batchId: 7 }],
     ['lastfm_import_count_mode', { targetUri: 'spotify:track:one', mode: 'overwrite' }],
     ['lastfm_import_activate_collection', batch],

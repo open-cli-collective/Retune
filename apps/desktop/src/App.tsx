@@ -18,7 +18,7 @@ import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
 import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
-import { RemovedTracksDialog, RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
+import { RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 
@@ -148,7 +148,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     const current = playingRef.current
     if (current?.uri === track.uri && !current.external) toggle()
     else start(SYNTHETIC_BASE, [{
-      id: SYNTHETIC_BASE, uri: track.uri, name: track.name, art: track.artist, alb: track.album, durationSecs: 0, enabled: true,
+      id: SYNTHETIC_BASE, uri: track.uri, name: track.name, art: track.artist, alb: track.album, durationSecs: track.durationSecs, enabled: true,
     }])
   }, [start, toggle])
 
@@ -194,7 +194,7 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const [artworkOpen, setArtworkOpen] = useState(false)
-  const [trackDecision, setTrackDecision] = useState<{ kind: 'merge'; ids: number[] } | { kind: 'remove'; tracks: Pick<Track, 'id' | 'uri' | 'name'>[]; spotify: boolean } | { kind: 'removed' }>()
+  const [trackDecision, setTrackDecision] = useState<{ kind: 'merge'; ids: number[] } | { kind: 'remove'; tracks: Pick<Track, 'id' | 'uri' | 'name'>[]; spotify: boolean }>()
   const [playingMenu, setPlayingMenu] = useState<{ x: number; y: number; uri: string; name: string; trackId?: number }>()
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
@@ -781,7 +781,6 @@ function App() {
                 />
               )}
               {state.notice && <div className="startup-notice"><span>{state.notice}</span><button aria-label="Dismiss notice" onClick={() => dispatch({ type: 'notice' })}>×</button></div>}
-              <div className="library-tools"><button type="button" onClick={() => setTrackDecision({ kind: 'removed' })}>Removed tracks…</button></div>
               <TrackList
                 tracks={displayedTracks}
                 label={labels[state.source]}
@@ -837,7 +836,7 @@ function App() {
             </>
           )}
           {state.error && <div className="error-banner">{state.error}</div>}
-          <StatusBar view={view} unit={labels[state.source].item} browsePending={state.browsePending} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} lastfmRemaining={Math.max(state.lastfmImport.remaining, state.lastfmImport.pendingReview)} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
+          <StatusBar view={view} unit={labels[state.source].item} browsePending={state.browsePending} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={closeInfo} onSaved={() => {
@@ -850,7 +849,6 @@ function App() {
         dispatch({ type: 'selection', ids: new Set(id === undefined ? [] : [id]) })
       }} />}
       {trackDecision?.kind === 'remove' && <RemoveTrackDialog tracks={trackDecision.tracks} spotify={trackDecision.spotify} onClose={() => setTrackDecision(undefined)} onChanged={() => { dispatch({ type: 'refresh' }); dispatch({ type: 'selection', ids: new Set() }) }} />}
-      {trackDecision?.kind === 'removed' && <RemovedTracksDialog onClose={() => setTrackDecision(undefined)} onChanged={() => dispatch({ type: 'refresh' })} />}
       {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} connectionHydrated={state.connectionHydrated} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
         .then(spotifyGateway.connect)
         .catch(fail)} onSync={(clientId) => saveSetupClientId(clientId)
@@ -859,7 +857,7 @@ function App() {
           return spotifyGateway.sync()
         })
         .catch(fail)} />}
-      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={(zoom) => dispatch({ type: 'settings', settings: { zoom } })} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onSave={({ browserPanes, ...settings }) => {
+      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={(zoom) => dispatch({ type: 'settings', settings: { zoom } })} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onLibraryChanged={() => dispatch({ type: 'refresh' })} onSave={({ browserPanes, ...settings }) => {
         const patch = { ...settings, browserPanes, zoom: state.settings.zoom }
         dispatch({ type: 'settings', settings })
         dispatch({ type: 'browserPanes', browserPanes })
@@ -964,7 +962,7 @@ export function TransportBar({ playing, progress, track, query, queryReset, scop
     alb: playing.alb ?? '',
     durationSecs: playing.durationSecs ?? 0,
   } : track
-  const duration = shown?.durationSecs ?? 0
+  const duration = playing?.durationSecs || shown?.durationSecs || 0
   const uri = playing?.external ? playing.uri : track?.uri
   const artwork = useArtwork(uri, 128)
   return <header className="transport">
@@ -1218,7 +1216,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   const suppressTrackClick = useRef(false)
   const headerDragged = useRef(false)
   const columnDrag = useRef<{ column: ColumnKey; pointerId: number; startX: number; element: HTMLButtonElement } | undefined>(undefined)
-  const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number } | undefined>(undefined)
+  const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number; scale: number } | undefined>(undefined)
   onErrorRef.current = onError
   const tracks = currentPlaylistRows(trackState, playlist.id)
   const canChangePlaylist = playlist.owned && playlistRowsReady(trackState, playlist.id) && tracks.length === playlist.trackCount
@@ -1292,17 +1290,19 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     event.stopPropagation()
     headerDragged.current = true
     event.currentTarget.setPointerCapture(event.pointerId)
-    resize.current = { column, pointerId: event.pointerId, startX: event.clientX, startWidth: event.currentTarget.parentElement?.getBoundingClientRect().width ?? 60 }
+    const element = event.currentTarget.parentElement
+    const startWidth = element?.getBoundingClientRect().width ?? 60
+    resize.current = { column, pointerId: event.pointerId, startX: event.clientX, startWidth, scale: element?.offsetWidth ? startWidth / element.offsetWidth : 1 }
   }
   const moveResize = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = resize.current
     if (!active || active.pointerId !== event.pointerId) return
-    setLiveWidths((widths) => ({ ...widths, [active.column]: resizedColumnWidth(active.startWidth, active.startX, event.clientX) }))
+    setLiveWidths((widths) => ({ ...widths, [active.column]: resizedColumnWidth(active.startWidth, active.startX, event.clientX, active.scale) }))
   }
   const endResize = (event: React.PointerEvent<HTMLSpanElement>) => {
     const active = resize.current
     if (!active || active.pointerId !== event.pointerId) return
-    const width = resizedColumnWidth(active.startWidth, active.startX, event.clientX)
+    const width = resizedColumnWidth(active.startWidth, active.startX, event.clientX, active.scale)
     resize.current = undefined
     onColumnWidths({ ...columnWidths, [active.column]: width })
   }
@@ -1404,7 +1404,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
       setSelected(new Set())
       setSelectionAnchor(undefined)
     }}>
-      <div className="playlist-track-header track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }) }}>
+      <div className="playlist-track-table"><div className="playlist-track-header track-header" style={{ gridTemplateColumns: columns }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }) }}>
         <button type="button" aria-label="Restore Spotify playlist order" title="Spotify order · click to restore" className={sortColumn === null ? 'active' : ''} onClick={() => { setSortColumn(null); setSortDesc(false) }}>#</button>
         {visibleColumns.map((column) => <button type="button" key={column} data-column={column} className={COLUMN_SPECS[column].numeric ? 'track-number' : ''} onPointerDown={(event) => {
           if (event.button !== 0) return
@@ -1511,7 +1511,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           setMenu({ x: event.clientX, y: event.clientY, upstreamIndex })
         }}
       ><span className="track-number">{upstreamIndex + 1}</span>{visibleColumns.map((column) => <TrackCell key={column} track={track} column={column} facetTitle={headings.genre} playing={isCurrentTrack(playing, queue[rowIndex]) ? playing?.isPlaying ? 'playing' : 'paused' : false} selected={selected.has(upstreamIndex)} onRate={track.id === null ? undefined : onRate.bind(null, track.id)} />)}</div>
-      })}</div>
+      })}</div></div>
       {canReorder && <div className={`playlist-end-drop ${insertBefore === tracks.length ? 'insert-before' : ''}`} />}
     </div>
     {menu && (menu.upstreamIndex === undefined
@@ -1590,49 +1590,52 @@ function statusTimestamp(value: number | null) {
   return new Date(value * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
-function statusCountdown(deadline: number, now: number) {
-  let seconds = Math.max(0, deadline - now)
+function statusDuration(totalSeconds: number) {
+  let seconds = Math.max(0, totalSeconds)
+  const weeks = Math.floor(seconds / 604_800)
+  seconds %= 604_800
   const days = Math.floor(seconds / 86_400)
   seconds %= 86_400
   const hours = Math.floor(seconds / 3_600)
   seconds %= 3_600
   const minutes = Math.floor(seconds / 60)
-  seconds %= 60
-  if (days > 0) return `${days}d ${hours}h`
-  if (hours > 0) return `${hours}h ${minutes}m`
-  if (minutes > 0) return `${minutes}m ${seconds}s`
-  return `${seconds}s`
+  const parts: string[] = []
+  if (weeks) parts.push(`${weeks}w`)
+  if (days) parts.push(`${days}d`)
+  if (hours) parts.push(`${hours}h`)
+  if (minutes) parts.push(`${minutes}m`)
+  return parts.slice(0, 3).join(' ') || '<1m'
 }
 
-export function StatusBar({ view, unit, browsePending, syncPhase, syncProgress, importStatus, spotifySyncStatus, lastfmImport, lastfmRemaining, onSpotifySync, onLastfmImport, empty }: { view: BrowseView | null; unit: string; browsePending?: boolean; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; spotifySyncStatus: SpotifySyncStatus; lastfmImport: LastFmImportState; lastfmRemaining: number; onSpotifySync: () => void; onLastfmImport: () => void; empty: boolean }) {
+export function StatusBar({ view, unit, browsePending, syncPhase, syncProgress, importStatus, spotifySyncStatus, lastfmImport, onSpotifySync, onLastfmImport, empty }: { view: BrowseView | null; unit: string; browsePending?: boolean; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; spotifySyncStatus: SpotifySyncStatus; lastfmImport: LastFmImportState; onSpotifySync: () => void; onLastfmImport: () => void; empty: boolean }) {
   const total = view?.counts.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const count = view?.counts.tracks ?? 0
   const sourceWork = lastfmImport.phase === 'downloading' || lastfmImport.phase === 'aggregating'
+  const lastfmLoading = lastfmImport.syncProblem === 'Retune is still loading Last.fm import state.'
   const progress = importDownloadProgressLabel(lastfmImport.processedScrobbles, lastfmImport.totalScrobbles, importDownloadPercent(lastfmImport.downloadedPages, lastfmImport.totalPages))
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000))
   useEffect(() => {
-    if (!spotifySyncStatus.nextSync && !spotifySyncStatus.cooldown) return
+    if (!spotifySyncStatus.lastFullSync && !spotifySyncStatus.nextSync && !spotifySyncStatus.cooldown) return
     const timer = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1_000)
     return () => window.clearInterval(timer)
-  }, [spotifySyncStatus.cooldown, spotifySyncStatus.nextSync])
+  }, [spotifySyncStatus.cooldown, spotifySyncStatus.lastFullSync, spotifySyncStatus.nextSync])
 
-  const librarySummary = importStatus ?? (empty ? 'No library — set up to begin' : `${count} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)
+  const librarySummary = importStatus ?? (browsePending ? 'Filtering library…' : empty ? 'No library — set up to begin' : `${count.toLocaleString()} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)
   const spotifySegment = spotifySyncStatus.running
     ? <span className="sync-status status-spotify"><span>⟳ {syncPhase ?? 'Syncing from Spotify…'}</span>{syncProgress && <><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></>}</span>
     : spotifySyncStatus.cooldown
-      ? <span className="status-spotify status-cooldown">Spotify paused until {statusTimestamp(spotifySyncStatus.cooldown.deadline)} · {statusCountdown(spotifySyncStatus.cooldown.deadline, now)} remaining</span>
+      ? <span className="status-spotify status-cooldown">Spotify paused until {statusTimestamp(spotifySyncStatus.cooldown.deadline)} · {statusDuration(spotifySyncStatus.cooldown.deadline - now)} remaining</span>
       : spotifySyncStatus.connected
-        ? <button type="button" className="status-sync-link status-spotify" onClick={onSpotifySync} title="Sync Spotify now">Spotify · last full sync {statusTimestamp(spotifySyncStatus.lastFullSync)} · next {spotifySyncStatus.nextSync ? `${statusTimestamp(spotifySyncStatus.nextSync)} (${statusCountdown(spotifySyncStatus.nextSync, now)})` : 'not scheduled'}</button>
-        : <span className="status-spotify">Spotify disconnected · {librarySummary}</span>
+        ? <span className="status-spotify">Last sync: {spotifySyncStatus.lastFullSync ? statusDuration(now - spotifySyncStatus.lastFullSync) : 'never'} · Next sync: {spotifySyncStatus.nextSync ? statusDuration(spotifySyncStatus.nextSync - now) : 'not scheduled'} · <button type="button" className="status-sync-link" onClick={onSpotifySync}>Sync now</button></span>
+        : <span className="status-spotify">Spotify disconnected</span>
   const lastfmSegment = sourceWork
-    ? <button type="button" className="status-import-link" onClick={onLastfmImport}>{importStatusText(lastfmImport.phase, lastfmImport.username)} · {progress}</button>
-    : lastfmImport.syncing ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⟳ Syncing Last.fm plays…</button>
-      : lastfmImport.syncProblem ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Last.fm sync needs attention</button>
-        : lastfmRemaining > 0 ? <button type="button" className="status-import-link" onClick={onLastfmImport}>⚠ Finish importing from Last.fm — {lastfmRemaining} left</button>
-          : null
-  return <footer className="status-bar">{browsePending && <><span role="status">Filtering library…</span><span className="status-separator" aria-hidden="true">·</span></>}{spotifySegment}{lastfmSegment && <><span className="status-separator" aria-hidden="true">·</span>{lastfmSegment}</>}</footer>
+    ? <span className="status-lastfm">{importStatusText(lastfmImport.phase, lastfmImport.username)} · {progress}</span>
+    : lastfmImport.syncing ? <span className="status-lastfm">⟳ Syncing Last.fm plays…</span>
+      : lastfmLoading ? <span className="status-lastfm">⟳ Loading Last.fm…</span>
+      : <span className="status-lastfm">{lastfmImport.syncProblem ? '⚠' : '♪'} {(lastfmImport.matchedScrobbles ?? 0).toLocaleString()} plays <button type="button" className="status-import-link" onClick={onLastfmImport}>matched</button> from Last.fm</span>
+  return <footer className="status-bar">{spotifySegment}<span className="status-library" role={browsePending ? 'status' : undefined}>{librarySummary}</span>{lastfmSegment}</footer>
 }
 
 export default App

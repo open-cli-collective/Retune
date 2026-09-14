@@ -55,10 +55,9 @@ pub(super) fn source_album_key(artist: &str, album: &str) -> String {
 
 fn mapped_target(event: &ExternalScrobble, mappings: &LastFmMappings) -> Option<Option<String>> {
     let track_key = source_id(&event.artist, &event.album, &event.track);
-    if mappings.excluded_tracks.contains(&track_key)
-        || mappings
-            .ignored_albums
-            .contains(&source_album_key(&event.artist, &event.album))
+    if mappings
+        .ignored_albums
+        .contains(&source_album_key(&event.artist, &event.album))
         || mappings
             .ignored_artists
             .contains(&normalize_for_match(&event.artist))

@@ -322,10 +322,32 @@ pub(crate) async fn lastfm_import_combine_batches(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn lastfm_import_rename_batch(
+    app: tauri::AppHandle,
+    batch_id: u32,
+    artist: String,
+    album: String,
+    name: String,
+) -> Result<(), String> {
+    let state = app.state::<crate::AppState>();
+    use_cases(&state)
+        .rename_batch(
+            ReviewBatchKey {
+                batch_id,
+                artist,
+                album,
+            },
+            &name,
+        )
+        .await?;
+    emit_import_invalidated(&app).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn lastfm_import_review(
     app: tauri::AppHandle,
     batch_id: u32,
-    ids: Option<Vec<String>>,
     action: ReviewAction,
     artist: String,
     album: String,
@@ -338,7 +360,6 @@ pub(crate) async fn lastfm_import_review(
                 artist,
                 album,
             },
-            ids.as_deref(),
             action,
         )
         .await?;
@@ -556,6 +577,7 @@ pub(crate) async fn lastfm_import_activate_collection(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn lastfm_import_apply(
     app: tauri::AppHandle,
     batch_id: u32,
@@ -563,6 +585,7 @@ pub(crate) async fn lastfm_import_apply(
     album: String,
     selected_ids: Vec<String>,
     archive_batch: bool,
+    archive_remainder: bool,
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
@@ -577,6 +600,7 @@ pub(crate) async fn lastfm_import_apply(
             },
             &selected_ids,
             archive_batch,
+            archive_remainder,
             options,
             || {
                 start_apply_worker(
