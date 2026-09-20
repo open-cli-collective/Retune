@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- macOS 11+ arm64, Windows 10/11 x64/ARM64 with WebView2 105+, or Ubuntu
+- macOS 15+ arm64 (the macOS versions Apple currently supports), Windows 10/11 x64/ARM64 with WebView2 105+, or Ubuntu
   22.04 amd64/arm64 with WebKitGTK 4.1
 - Rust stable, Node.js 22, and npm
 - Xcode command-line build tools on macOS

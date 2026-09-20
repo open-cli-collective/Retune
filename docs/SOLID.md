@@ -831,8 +831,8 @@ Evidence:
   frontend test nor lint.
 - apps/desktop/package.json:6-11 already defines both scripts.
 - Current lint has seven exhaustive-deps warnings listed in the verification
-  section. App.tsx:367 can retain a simulated tick interval across a backend
-  mode change because simulated is missing.
+  section. App playback state now comes from native player events, so the
+  frontend has no synthetic timer to drift across backend changes.
 - A strict TypeScript app probe passes with no production edits, while
   tsconfig.app.json:2-23 does not enable strict.
 
@@ -849,7 +849,7 @@ Done when:
 
 - CI fails for a broken frontend test or hook warning.
 - Local documented checks and CI commands agree.
-- The simulated timer cleans up when simulated mode changes.
+- Playback controls and elapsed position come only from the native controller.
 
 ### [x] SOLID-018 — Replace test-shaped code with executable behavior proof
 

@@ -6,7 +6,7 @@ import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, PlayOutcome, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
 import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, resolveImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, sortImportRows, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
-import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
@@ -699,8 +699,8 @@ test('Spotify search pending pages are not reused after returning to the same qu
 
 test('pending browse retains only compatible rows and facet candidates', () => {
   const broadQueue: PlaybackTrack[] = [
-    { id: 1, uri: 'fixture:track:1', name: 'Welcome', art: 'Artist', alb: 'Broad Album', durationSecs: 180, enabled: true },
-    { id: 2, uri: 'fixture:track:2', name: 'Americana', art: 'Artist', alb: 'Broad Album', durationSecs: 200, enabled: true },
+    { id: 1, uri: 'spotify:track:1', name: 'Welcome', art: 'Artist', alb: 'Broad Album', durationSecs: 180, enabled: true },
+    { id: 2, uri: 'file:///music/americana.mp3', name: 'Americana', art: 'Artist', alb: 'Broad Album', durationSecs: 200, enabled: true },
   ]
   const baseSelection = {}
   const resolvedKey = browseRequestKey('music', baseSelection, '', 'library')
@@ -770,7 +770,12 @@ test('navigation transitions preserve the active playback queue and origin', () 
     { type: 'spotifyNavigate', entry: { kind: 'artist', id: 'artist-a' } },
     { type: 'playlist' },
   ]
-  let state = reducer(initialState, { type: 'play', id: 2, queue, origin })
+  let state = reducer(initialState, {
+    type: 'playerState',
+    player: { trackId: 2, uri: 'spotify:track:two', elapsed: 0, isPlaying: true, external: false, name: null, art: null, alb: null, durationSecs: 180, shuffle: false },
+    queue,
+    origin,
+  })
 
   for (const transition of transitions) {
     state = reducer(state, transition)
@@ -1051,14 +1056,14 @@ test('clearing a track rating reveals its inherited album rating', () => {
 })
 
 test('ordinary queues skip exclusions but an explicit start still plays one', () => {
-  const tracks = [
-    { id: 1, enabled: true },
-    { id: 2, enabled: false },
-    { id: 3, enabled: true },
-  ] as never
-  assert.deepEqual(playbackQueue(tracks).map((track) => track.id), [1, 3])
+  const tracks: PlaybackTrack[] = [
+    { id: 1, uri: 'spotify:track:one', name: 'One', art: 'Artist', alb: 'Album', durationSecs: 1, enabled: true },
+    { id: 2, uri: 'fixture:track:two', name: 'Two', art: 'Artist', alb: 'Album', durationSecs: 1, enabled: true },
+    { id: 3, uri: 'file:///three.mp3', name: 'Three', art: 'Artist', alb: 'Album', durationSecs: 1, enabled: false },
+  ]
+  assert.deepEqual(playbackQueue(tracks).map((track) => track.id), [1])
   assert.deepEqual(playbackQueue(tracks.map((track) => ({ ...track, enabled: false }))).map((track) => track.id), [])
-  assert.deepEqual(playbackQueue(tracks, 2).map((track) => track.id), [1, 2, 3])
+  assert.deepEqual(playbackQueue(tracks, 3).map((track) => track.id), [1, 3])
 })
 
 test('playlist highlights require both the synthetic id and Spotify URI', () => {
@@ -1127,18 +1132,6 @@ test('only the latest play intent can populate playback authorization and retry 
   assert.deepEqual(pending, { id: SYNTHETIC_BASE, tracks: tracksB, origin: 'B' })
   assert.equal(pendingPlaybackTarget({ reason: 'missing', message: 'Stale native event.', targetTrackId: SYNTHETIC_BASE, targetTrackUri: 'spotify:track:a' }, tracksB), null)
   assert.equal(pendingPlaybackTarget({ reason: 'missing', message: 'Current native event.', targetTrackId: SYNTHETIC_BASE, targetTrackUri: 'spotify:track:b' }, tracksB), SYNTHETIC_BASE)
-})
-
-test('simulated playback ticks stop when playback pauses or switches to a live backend', () => {
-  const tracks: PlaybackTrack[] = [
-    { id: 1, uri: 'fixture:one', name: 'One', art: 'Artist', alb: 'Album', durationSecs: 180, enabled: true },
-    { id: 2, uri: 'fixture:two', name: 'Two', art: 'Artist', alb: 'Album', durationSecs: 240, enabled: true },
-  ]
-  assert.deepEqual(simulatedPlaybackTick(true, true, 1, tracks), { duration: 180, nextId: 2 })
-  assert.equal(simulatedPlaybackTick(true, false, 1, tracks), null)
-  assert.equal(simulatedPlaybackTick(false, true, 1, tracks), null)
-  assert.equal(simulatedPlaybackTick(undefined, true, 1, tracks), null)
-  assert.equal(simulatedPlaybackTick(true, true, 3, tracks), null)
 })
 
 test('track and disc sorts keep multi-disc albums in playback order', () => {

@@ -5,8 +5,15 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+#[cfg(all(test, unix))]
+use std::cell::Cell;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static FAIL_NEXT_PARENT_SYNC: Cell<bool> = const { Cell::new(false) };
+}
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chacha20poly1305::{
@@ -171,6 +178,7 @@ impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
 
     fn save(&self, tokens: &Tokens) -> Result<()> {
         let mut cache = self.cache.lock().map_err(token_error)?;
+        *cache = None;
         self.inner.save(tokens)?;
         *cache = Some(Some(tokens.clone()));
         Ok(())
@@ -178,6 +186,7 @@ impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
 
     fn clear(&self) -> Result<()> {
         let mut cache = self.cache.lock().map_err(token_error)?;
+        *cache = None;
         self.inner.clear()?;
         *cache = Some(None);
         Ok(())
@@ -185,8 +194,8 @@ impl<S: TokenStore> TokenStore for CachedTokenStore<S> {
 
     fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
         let mut cache = self.cache.lock().map_err(token_error)?;
+        *cache = None;
         if !self.inner.replace_if_current(expected, tokens)? {
-            *cache = None;
             return Ok(false);
         }
         *cache = Some(Some(tokens.clone()));
@@ -303,8 +312,14 @@ impl EncryptedFsTokenStore {
 
     fn clear_file(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(()) => sync_parent(&self.path).map_err(token_error),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match sync_parent(&self.path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(token_error(error)),
+                }
+            }
             Err(error) => Err(token_error(error)),
         }
     }
@@ -350,12 +365,40 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)
+        fs::rename(&temporary, path)?;
+        sync_parent(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result.map_err(token_error)
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(all(test, unix))]
+    if FAIL_NEXT_PARENT_SYNC.with(|next| next.replace(false)) {
+        return Err(std::io::Error::other(
+            "injected parent-directory sync failure",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "token file path has no parent",
+        )
+    })?;
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+fn fail_next_parent_sync() {
+    FAIL_NEXT_PARENT_SYNC.with(|next| next.set(true));
 }
 
 fn token_error(error: impl std::fmt::Display) -> Error {
@@ -422,6 +465,9 @@ mod tests {
         saves: AtomicUsize,
         clears: AtomicUsize,
         fail_save: AtomicBool,
+        fail_save_after_write: AtomicBool,
+        fail_clear_after_write: AtomicBool,
+        fail_replace_after_write: AtomicBool,
     }
 
     impl TokenStore for CountingStore {
@@ -436,12 +482,18 @@ mod tests {
                 return Err(Error::TokenStore("save failed".into()));
             }
             *self.tokens.lock().unwrap() = Some(tokens.clone());
+            if self.fail_save_after_write.load(Ordering::Relaxed) {
+                return Err(Error::TokenStore("save failed after write".into()));
+            }
             Ok(())
         }
 
         fn clear(&self) -> Result<()> {
             self.clears.fetch_add(1, Ordering::Relaxed);
             *self.tokens.lock().unwrap() = None;
+            if self.fail_clear_after_write.load(Ordering::Relaxed) {
+                return Err(Error::TokenStore("clear failed after write".into()));
+            }
             Ok(())
         }
 
@@ -451,6 +503,9 @@ mod tests {
                 return Ok(false);
             }
             *current = Some(tokens.clone());
+            if self.fail_replace_after_write.load(Ordering::Relaxed) {
+                return Err(Error::TokenStore("replace failed after write".into()));
+            }
             Ok(true)
         }
     }
@@ -563,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_save_keeps_cached_tokens() {
+    fn failed_save_invalidates_cached_tokens() {
         let inner = Arc::new(CountingStore {
             tokens: Mutex::new(Some(tokens("initial"))),
             ..Default::default()
@@ -574,8 +629,40 @@ mod tests {
 
         assert!(store.save(&tokens("failed")).is_err());
         assert_eq!(store.load().unwrap(), Some(tokens("initial")));
-        assert_eq!(inner.loads.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.loads.load(Ordering::Relaxed), 2);
         assert_eq!(inner.saves.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn backing_errors_after_save_clear_and_replace_invalidate_the_cache() {
+        let inner = Arc::new(CountingStore {
+            tokens: Mutex::new(Some(tokens("initial"))),
+            ..Default::default()
+        });
+        let store = CachedTokenStore::new(Arc::clone(&inner));
+        let initial = tokens("initial");
+        assert_eq!(store.load().unwrap(), Some(initial.clone()));
+
+        inner.fail_save_after_write.store(true, Ordering::Relaxed);
+        assert!(store.save(&tokens("saved")).is_err());
+        assert_eq!(store.load().unwrap(), Some(tokens("saved")));
+
+        inner.fail_clear_after_write.store(true, Ordering::Relaxed);
+        assert!(store.clear().is_err());
+        assert_eq!(store.load().unwrap(), None);
+
+        inner.fail_save_after_write.store(false, Ordering::Relaxed);
+        inner.fail_clear_after_write.store(false, Ordering::Relaxed);
+        store.save(&initial).unwrap();
+        inner
+            .fail_replace_after_write
+            .store(true, Ordering::Relaxed);
+        assert!(
+            store
+                .replace_if_current(&initial, &tokens("replaced"))
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap(), Some(tokens("replaced")));
     }
 
     #[test]
@@ -792,6 +879,35 @@ mod tests {
         assert_ne!(first, second);
         #[cfg(unix)]
         assert_ne!(first_inode, fs::metadata(path).unwrap().ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_store_reports_parent_sync_failure_after_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = encrypted_store(dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
+        store.save(&tokens("before")).unwrap();
+
+        fail_next_parent_sync();
+        assert!(store.save(&tokens("after")).is_err());
+        assert_eq!(store.load().unwrap(), Some(tokens("after")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_store_retries_directory_sync_after_unlink_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = encrypted_store(dir.path(), [7; 32], Arc::new(AtomicUsize::new(0)));
+        store.save(&tokens("before")).unwrap();
+
+        fail_next_parent_sync();
+        assert!(store.clear().is_err());
+        assert!(!dir.path().join("tokens.enc").exists());
+
+        fail_next_parent_sync();
+        assert!(store.clear().is_err());
+        assert!(!dir.path().join("tokens.enc").exists());
+        assert!(store.clear().is_ok());
     }
 
     #[test]

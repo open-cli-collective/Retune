@@ -2,9 +2,12 @@
 
 Retune supports these native packages:
 
+Retune follows the macOS releases Apple currently supports; macOS 15 is the
+current floor.
+
 | Platform | Supported architecture | Minimum runtime |
 | --- | --- | --- |
-| macOS | Apple Silicon | macOS 11 |
+| macOS | Apple Silicon | macOS 15+ (Apple-supported releases) |
 | Windows 10/11 | x64, ARM64 | WebView2 105 (the installer updates older runtimes) |
 | Ubuntu 22.04 | amd64, arm64 | Distribution WebKitGTK 4.1 |
 | Compatible Debian/Ubuntu systems | amd64, arm64 | WebKitGTK 4.1 |

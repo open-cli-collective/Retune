@@ -1,23 +1,23 @@
+use super::service::ImportOwnerPhase;
 use super::*;
 
 #[cfg(test)]
-pub(super) async fn automatic_collection_album_seed<T, S>(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn automatic_collection_album_seed<T>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     artist: &str,
     album: &str,
     rows: &[SourceRow],
 ) -> Result<(Vec<CollectionAlbumCandidate>, Option<String>), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     automatic_collection_album_seed_with_source(provider, artist, album, rows)
         .await
         .map(|(candidates, selected_uri, _)| (candidates, selected_uri))
 }
 
-pub(super) async fn automatic_collection_album_seed_with_source<T, S>(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn automatic_collection_album_seed_with_source<T>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     artist: &str,
     album: &str,
     rows: &[SourceRow],
@@ -31,7 +31,6 @@ pub(super) async fn automatic_collection_album_seed_with_source<T, S>(
 >
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let source_track_names = rows.iter().map(|row| row.track.clone()).collect::<Vec<_>>();
     let (mut candidates, source) = album_candidates_with_source(
@@ -56,8 +55,8 @@ where
 }
 
 #[cfg(test)]
-pub(super) async fn match_batch<T, S>(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn match_batch<T>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     artist: &str,
     album: &str,
     collection_shaped: bool,
@@ -65,15 +64,14 @@ pub(super) async fn match_batch<T, S>(
 ) -> Result<Vec<MatchResult>, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     match_batch_with_source(provider, artist, album, collection_shaped, rows)
         .await
         .map(|(matches, _)| matches)
 }
 
-pub(super) async fn match_batch_with_source<T, S>(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn match_batch_with_source<T>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     artist: &str,
     album: &str,
     collection_shaped: bool,
@@ -81,7 +79,6 @@ pub(super) async fn match_batch_with_source<T, S>(
 ) -> Result<(Vec<MatchResult>, retune_spotify::client::SearchSource), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     if album.is_empty() || collection_shaped {
         return Ok((Vec::new(), retune_spotify::client::SearchSource::Cache));
@@ -114,23 +111,22 @@ where
     ))
 }
 
-pub(super) async fn current_matching_account<T, S>(
+pub(super) async fn current_matching_account<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     membership_guard: &crate::spotify_membership::SpotifyMembershipGuard,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     require_provider: bool,
 ) -> Result<
     (
         AccountBinding,
-        Option<Arc<retune_spotify::client::SpotifyClient<T, S>>>,
+        Option<Arc<retune_spotify::client::SpotifyClient<T>>>,
     ),
     String,
 >
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let current = current_account_binding(
         service,
@@ -152,14 +148,14 @@ where
     Ok(current)
 }
 
-pub(super) fn session_account_matches(
-    session: &LastFmImportSessionV2,
+pub(super) fn owner_account_matches(
+    owner: &ImportOwnerPhase,
     username: &str,
     spotify_account_id: &str,
     require_spotify_binding: bool,
 ) -> bool {
-    session.lastfm_username == username
-        && session
+    owner.lastfm_username == username
+        && owner
             .spotify_account_id
             .as_deref()
             .map_or(!require_spotify_binding, |bound| {
@@ -203,18 +199,17 @@ pub(super) fn cached_spotify_identity_matches(
 }
 
 #[cfg(test)]
-pub(super) async fn lazy_match_page_with_search<T, S, F, FFut>(
+pub(super) async fn lazy_match_page_with_search<T, F, FFut>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     key: &ReviewBatchKey,
     search: F,
 ) -> Result<Option<ImportPageView>, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
     F: FnOnce(Vec<SourceRow>) -> FFut,
     FFut: Future<Output = Result<Vec<MatchResult>, String>>,
 {
@@ -235,30 +230,29 @@ where
     .map(|(page, _)| page)
 }
 
-pub(super) async fn lazy_match_page_with_search_source<T, S, F, FFut>(
+pub(super) async fn lazy_match_page_with_search_source<T, F, FFut>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     key: &ReviewBatchKey,
     search: F,
 ) -> Result<(Option<ImportPageView>, retune_spotify::client::SearchSource), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
     F: FnOnce(Vec<SourceRow>) -> FFut,
     FFut: Future<Output = Result<(Vec<MatchResult>, retune_spotify::client::SearchSource), String>>,
 {
     let batch_id = key.batch_id;
     let artist = key.artist.as_str();
     let album = key.album.as_str();
-    let Some(page) = service.page(batch_id, artist, album).await else {
+    let Some(page) = service.page_for_work(batch_id, artist, album).await? else {
         return Ok((None, retune_spotify::client::SearchSource::Cache));
     };
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
         let membership_guard = spotify_membership.lock().await;
@@ -276,12 +270,12 @@ where
 
     // ponytail: one importer-wide lock; use per-batch locks only if throughput requires it.
     let _match_guard = service.lazy_match_lock.lock().await;
-    let Some(page) = service.page(batch_id, artist, album).await else {
+    let Some(page) = service.page_for_work(batch_id, artist, album).await? else {
         return Ok((None, retune_spotify::client::SearchSource::Cache));
     };
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
         let membership_guard = spotify_membership.lock().await;
@@ -331,8 +325,8 @@ where
     let (results, source) = search(rows).await?;
     let results = if album.is_empty() {
         let current_session = service
-            .snapshot()
-            .await
+            .snapshot_for_work()
+            .await?
             .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
         results
             .into_iter()
@@ -383,23 +377,25 @@ where
             Some(default_count_mode),
         )
         .await?;
-    Ok((service.page(batch_id, artist, album).await, source))
+    Ok((
+        service.page_for_work(batch_id, artist, album).await?,
+        source,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn lazy_seed_collection_page<T, S>(
+pub(super) async fn lazy_seed_collection_page<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
     cooldown_store: &crate::store::FsCooldownStore,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     key: &ReviewBatchKey,
 ) -> Result<(Option<ImportPageView>, bool), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let batch_id = key.batch_id;
     let artist = key.artist.as_str();
@@ -407,8 +403,8 @@ where
     // ponytail: one importer-wide lock; use per-batch locks only if throughput requires it.
     let _match_guard = service.lazy_match_lock.lock().await;
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let Some(rows) = collection_album_seed_rows(&session, batch_id, artist, album) else {
         let membership_guard = spotify_membership.lock().await;
@@ -421,7 +417,7 @@ where
             false,
         )
         .await?;
-        return Ok((service.page(batch_id, artist, album).await, false));
+        return Ok((service.page_for_work(batch_id, artist, album).await?, false));
     };
     let (initial_account, resolved_provider) = {
         let membership_guard = spotify_membership.lock().await;
@@ -484,35 +480,38 @@ where
         )
         .await?;
     Ok((
-        service.page(batch_id, artist, album).await,
+        service.page_for_work(batch_id, artist, album).await?,
         source == retune_spotify::client::SearchSource::Network,
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn lazy_match_page<T, S>(
+pub(super) async fn lazy_match_page<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
     cooldown_store: &crate::store::FsCooldownStore,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     key: ReviewBatchKey,
 ) -> Result<(Option<ImportPageView>, bool, bool), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let batch_id = key.batch_id;
     let artist = key.artist.as_str();
     let album = key.album.as_str();
-    if service.page(batch_id, artist, album).await.is_none() {
+    if service
+        .page_for_work(batch_id, artist, album)
+        .await?
+        .is_none()
+    {
         return Ok((None, false, false));
     }
     let initial_session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     if collection_album_seed_rows(&initial_session, batch_id, artist, album).is_some() {
         let (page, network_search) = lazy_seed_collection_page(
@@ -531,8 +530,8 @@ where
     }
     let initial_collection_shaped = batch_is_collection_shaped_for_id(&initial_session, batch_id);
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     if batch_match_plan(&session, Some((batch_id, artist, album))).is_empty() {
         if cached_spotify_binding_is_current(service, lastfm, spotify_membership).await?
@@ -564,9 +563,17 @@ where
                     .rerank_collection_batch(batch_id, &membership, &mappings)
                     .await?;
             }
-            return Ok((service.page(batch_id, artist, album).await, false, false));
+            return Ok((
+                service.page_for_work(batch_id, artist, album).await?,
+                false,
+                false,
+            ));
         }
-        return Ok((service.page(batch_id, artist, album).await, false, false));
+        return Ok((
+            service.page_for_work(batch_id, artist, album).await?,
+            false,
+            false,
+        ));
     }
     let (page, source) = lazy_match_page_with_search_source(
         service,

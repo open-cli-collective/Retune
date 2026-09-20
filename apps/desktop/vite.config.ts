@@ -10,6 +10,6 @@ export default defineConfig({
     strictPort: true,
   },
   build: {
-    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
+    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : process.env.TAURI_ENV_PLATFORM === 'macos' ? 'safari18' : 'safari13',
   },
 })

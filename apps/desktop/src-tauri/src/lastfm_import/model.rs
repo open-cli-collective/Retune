@@ -535,7 +535,7 @@ pub(crate) struct ImportPageView {
     pub page_count: usize,
     pub rows: Vec<ImportPageItem>,
     pub options: PageOptions,
-    pub fuzzy_groups: BTreeMap<String, Vec<SourceRow>>,
+    pub fuzzy_groups: BTreeMap<String, Vec<String>>,
     pub count_modes: BTreeMap<String, CountMode>,
     pub resolved_counts: BTreeMap<String, u64>,
     pub locked_count_modes: BTreeSet<String>,

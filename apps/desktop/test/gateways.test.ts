@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { createAppGateway } from '../src/appGateway.ts'
-import { createLibraryGateway, libraryEvents } from '../src/libraryGateway.ts'
-import { createLastFmGateway, lastfmEvents, type ImportPageOptions } from '../src/lastfmGateway.ts'
-import { createPlaybackGateway, playbackEvents } from '../src/playbackGateway.ts'
-import { createSpotifyGateway, spotifyEvents } from '../src/spotifyGateway.ts'
+import { createLibraryGateway } from '../src/libraryGateway.ts'
+import { createLastFmGateway, type ImportPageOptions } from '../src/lastfmGateway.ts'
+import { createPlaybackGateway } from '../src/playbackGateway.ts'
+import { createSpotifyGateway } from '../src/spotifyGateway.ts'
 import { createMainEventSubscription, dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeThenSnapshot, subscriptionsThenSnapshot, type Invoker, type MainEvent } from '../src/ipc.ts'
 import type { SettingsPatch } from '../src/types.ts'
 
@@ -71,6 +71,69 @@ test('invalidation snapshot ignores stale hydration after an event', async () =>
   await subscription
   await Promise.resolve()
   assert.deepEqual(installed, ['current'])
+})
+
+test('invalidation arriving while registration resolves still installs the initial snapshot', async () => {
+  let invalidate!: () => void
+  let resolveSubscription!: (unlisten: () => void) => void
+  const resolvers: Array<(value: string) => void> = []
+  const installed: string[] = []
+  const subscription = subscribeInvalidationThenSnapshot(
+    (handler) => {
+      invalidate = handler
+      return new Promise((resolve) => { resolveSubscription = resolve })
+    },
+    () => new Promise<string>((resolve) => resolvers.push(resolve)),
+    (value) => installed.push(value),
+    () => true,
+  )
+  invalidate()
+  resolveSubscription(() => {})
+  await Promise.resolve()
+  resolvers[1]('current')
+  resolvers[0]('stale')
+  await subscription
+  assert.deepEqual(installed, ['current'])
+})
+
+test('invalidation snapshot reports event failures and ignores them after cleanup', async () => {
+  let invalidate!: () => void
+  const resolvers: Array<(value: string) => void> = []
+  const rejecters: Array<(reason: unknown) => void> = []
+  let unlistened = false
+  const errors: unknown[] = []
+  const subscription = subscribeInvalidationThenSnapshot(
+    async (handler) => { invalidate = handler; return () => { unlistened = true } },
+    () => new Promise<string>((resolve, reject) => { resolvers.push(resolve); rejecters.push(reject) }),
+    () => assert.fail('failed snapshot must not install'),
+    () => true,
+    (error) => errors.push(error),
+  )
+  await Promise.resolve()
+  invalidate()
+  rejecters[1](new Error('event failed'))
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(errors.length, 1)
+  resolvers[0]('initial')
+  const stop = await subscription
+  stop()
+  assert.equal(unlistened, true)
+  invalidate()
+  await Promise.resolve()
+  assert.equal(errors.length, 1)
+  assert.equal(rejecters.length, 2)
+})
+
+test('invalidation snapshot unregisters when initial hydration fails', async () => {
+  let unlistened = false
+  await assert.rejects(subscribeInvalidationThenSnapshot(
+    async () => () => { unlistened = true },
+    async () => { throw new Error('initial snapshot failed') },
+    () => assert.fail('failed hydration must not install'),
+    () => true,
+  ), /initial snapshot failed/)
+  assert.equal(unlistened, true)
 })
 
 test('main event dispatch is exhaustive over the tagged contract', () => {
@@ -168,6 +231,30 @@ test('all importer listeners are installed before hydration starts', async () =>
   assert.equal(completionSeen, true)
   resolveHydration()
   await installed
+})
+
+test('partial listener registration cleans up every listener that succeeded', async () => {
+  let firstStop = false
+  const installed = subscriptionsThenSnapshot(
+    [
+      Promise.resolve(() => { firstStop = true }),
+      Promise.reject(new Error('registration failed')),
+    ],
+    async () => assert.fail('hydration must not start after registration failure'),
+    () => true,
+  )
+  await assert.rejects(installed, /registration failed/)
+  assert.equal(firstStop, true)
+})
+
+test('listener registration cleans up when hydration fails', async () => {
+  let stopped = false
+  await assert.rejects(subscriptionsThenSnapshot(
+    [Promise.resolve(() => { stopped = true })],
+    async () => { throw new Error('hydration failed') },
+    () => true,
+  ), /hydration failed/)
+  assert.equal(stopped, true)
 })
 
 test('Last.fm gateway preserves every command name and camel-case argument', async () => {
@@ -272,14 +359,6 @@ test('app gateway preserves shell command names and argument shapes', async () =
   ])
 })
 
-test('Last.fm gateway owns the consumed event names', () => {
-  assert.deepEqual(lastfmEvents, {
-    playback: 'lastfm-import-playback',
-    changed: 'lastfm-import-changed',
-    applyFinished: 'lastfm-import-apply-finished',
-  })
-})
-
 test('library gateway preserves command names and argument shapes', async () => {
   const calls: Array<[string, Record<string, unknown> | undefined]> = []
   const invoke: Invoker = async <T>(command: string, args?: Record<string, unknown>) => {
@@ -325,15 +404,6 @@ test('library gateway preserves command names and argument shapes', async () => 
   ])
 })
 
-test('library gateway owns the consumed event names', () => {
-  assert.deepEqual(libraryEvents, {
-    changed: 'library-changed',
-    localImportStarted: 'local-import-started',
-    localImportFailed: 'local-import-failed',
-    localDragChanged: 'local-drag-changed',
-  })
-})
-
 test('playback gateway preserves every command name and argument shape', async () => {
   const calls: Array<[string, Record<string, unknown> | undefined]> = []
   const invoke: Invoker = async <T>(command: string, args?: Record<string, unknown>) => {
@@ -362,12 +432,6 @@ test('playback gateway preserves every command name and argument shape', async (
     ['set_repeat', { mode: 'one' }],
     ['set_shuffle', { shuffle: true }],
   ])
-})
-
-test('playback gateway owns the consumed event names', () => {
-  assert.deepEqual(playbackEvents, {
-    action: 'player-action',
-  })
 })
 
 test('Spotify gateway preserves every command name and camel-case argument', async () => {
@@ -438,14 +502,4 @@ test('Spotify gateway preserves every command name and camel-case argument', asy
     ['playlist_remove', { id: 'playlist-id', indices: [1, 4] }],
     ['open_spotify_playlist', { id: 'playlist-id', target: 'web' }],
   ])
-})
-
-test('Spotify gateway owns the consumed lifecycle event names', () => {
-  assert.deepEqual(spotifyEvents, {
-    connectionChanged: 'connection-changed',
-    syncProgress: 'sync-progress',
-    syncProgressCount: 'sync-progress-count',
-    syncStatusChanged: 'spotify-sync-status-changed',
-    playlistsChanged: 'playlists-changed',
-  })
 })

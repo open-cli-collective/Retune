@@ -266,13 +266,21 @@ async fn run_sync_loop(
 
 async fn record_failed_sync_schedule(app: &tauri::AppHandle) -> Option<u64> {
     let state = app.state::<AppState>();
-    let connected = match stored_connection_state(&state.token_store) {
-        Ok(connection) => connection.connected,
-        Err(error) => {
-            log::warn!("Could not inspect Spotify connection after sync failure: {error}");
-            false
-        }
-    };
+    let token_store = Arc::clone(&state.token_store);
+    let connected =
+        match tauri::async_runtime::spawn_blocking(move || stored_connection_state(&token_store))
+            .await
+        {
+            Ok(Ok(connection)) => connection.connected,
+            Ok(Err(error)) => {
+                log::warn!("Could not inspect Spotify connection after sync failure: {error}");
+                false
+            }
+            Err(error) => {
+                log::warn!("Could not inspect Spotify connection after sync failure: {error}");
+                false
+            }
+        };
     if !connected {
         return None;
     }
@@ -357,8 +365,7 @@ pub(super) fn spotify_sync_status_snapshot(
 }
 
 pub(super) fn emit_spotify_sync_status(app: &tauri::AppHandle) -> Result<(), String> {
-    let status = spotify_sync_status_snapshot(app)?;
-    emit_main(app, "spotify-sync-status-changed", status).map_err(|error| error.to_string())
+    emit_main(app, "spotify-sync-status-changed", ()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -386,7 +393,9 @@ pub(super) async fn spotify_sync_status(
             })
             .await?;
     }
-    spotify_sync_status_snapshot(&app)
+    tauri::async_runtime::spawn_blocking(move || spotify_sync_status_snapshot(&app))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 struct SyncCompletion {
@@ -542,7 +551,6 @@ async fn sync_spotify_inner(app: &tauri::AppHandle) -> Result<SyncCompletion, St
         membership: &state.spotify_membership,
         library: &state.library,
         settings: &state.settings,
-        token_store: &state.token_store,
         cooldown_store: &state.cooldown_store,
         artist_genres_store: &state.artist_genres_store,
         lastfm_import: &state.lastfm_import,
@@ -648,7 +656,6 @@ struct SpotifySyncApplication<'a> {
     membership: &'a crate::spotify_membership::SpotifyMembership,
     library: &'a crate::library_state::LibraryState,
     settings: &'a crate::store::SettingsState,
-    token_store: &'a crate::SharedTokenStore,
     cooldown_store: &'a FsCooldownStore,
     artist_genres_store: &'a crate::store::FsArtistGenresStore,
     lastfm_import: &'a crate::lastfm_import::Service,
@@ -677,7 +684,12 @@ impl SpotifySyncApplication<'_> {
     ) -> Result<SpotifySyncResult, String> {
         let session_revision = self.session.revision();
         let baseline_membership = self.membership.snapshot();
-        if !stored_connection_state(self.token_store)?.connected {
+        if !provider
+            .load_tokens()
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
             return Err("Connect to Spotify before syncing.".into());
         }
         let profile = provider
@@ -696,10 +708,15 @@ impl SpotifySyncApplication<'_> {
         let first_sync = !self.settings.snapshot().spotify_sync_completed;
         let outcome = sync::snapshot(&sync_provider, progress, on_batch).await?;
         let session_commit = self.session.commit_revision(session_revision).await?;
-        if !stored_connection_state(self.token_store)?.connected {
+        if !provider
+            .load_tokens()
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
             return Err("The Spotify connection changed during sync. Try again.".into());
         }
-        remember_playback_profile_id(self.token_store, &profile.id)?;
+        remember_playback_profile_id(provider, &profile.id).await?;
         let membership = self.membership.lock().await;
         self.lastfm_import
             .migrate_spotify_account_id(&profile.id, &account_id)
@@ -818,22 +835,25 @@ async fn commit_sync_state(
             },
         );
         let commit_dir = app_data_dir.clone();
-        if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
-            #[cfg(test)]
-            if let Some((boundary, hook)) = commit_hook {
-                return crate::spotify_sync_commit::Store::pausing_before(
-                    &commit_dir,
-                    boundary,
-                    hook,
-                )
-                .commit(&journal);
-            }
-            crate::spotify_sync_commit::Store::new(&commit_dir).commit(&journal)
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        {
-            if app_data_dir.join("spotify-sync-journal.json").exists() {
+        let (commit_result, journal_needs_recovery) =
+            tauri::async_runtime::spawn_blocking(move || {
+                #[cfg(test)]
+                let store = if let Some((boundary, hook)) = commit_hook {
+                    crate::spotify_sync_commit::Store::pausing_before(&commit_dir, boundary, hook)
+                } else {
+                    crate::spotify_sync_commit::Store::new(&commit_dir)
+                };
+                #[cfg(not(test))]
+                let store = crate::spotify_sync_commit::Store::new(&commit_dir);
+                let result = store.commit(&journal);
+                let needs_recovery =
+                    result.is_err() && store.needs_recovery_after_error(&journal).unwrap_or(true);
+                (result, needs_recovery)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = commit_result {
+            if journal_needs_recovery {
                 restore_mutations.mark_recovery_required();
             }
             return Err(error);
@@ -980,8 +1000,8 @@ pub(super) fn mark_track_membership(
     }
 }
 
-pub(super) async fn artist_albums_outcome<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
+pub(super) async fn artist_albums_outcome<T: Transport>(
+    provider: &SpotifyClient<T>,
     cooldown_store: &FsCooldownStore,
     artist_id: &str,
     offset: u32,
@@ -1226,12 +1246,13 @@ fn web_oauth_tokens(access: String, refresh: String, expires_at: u64, scopes: St
     }
 }
 
-fn remember_playback_profile_id(
-    token_store: &impl TokenStore,
+async fn remember_playback_profile_id<T: Transport>(
+    client: &SpotifyClient<T>,
     profile_id: &str,
 ) -> Result<(), String> {
-    let mut expected = token_store
-        .load()
+    let mut expected = client
+        .load_tokens()
+        .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Connect to Spotify before syncing.".to_string())?;
     loop {
@@ -1247,14 +1268,16 @@ fn remember_playback_profile_id(
             username: profile_id.to_owned(),
             auth_data: vec![],
         });
-        if token_store
-            .replace_if_current(&expected, &replacement)
+        if client
+            .replace_tokens_if_current(&expected, &replacement)
+            .await
             .map_err(|error| error.to_string())?
         {
             return Ok(());
         }
-        expected = token_store
-            .load()
+        expected = client
+            .load_tokens()
+            .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "The Spotify connection changed during sync. Try again.".to_string())?;
     }
@@ -1362,9 +1385,9 @@ pub(super) async fn connect_spotify(app: tauri::AppHandle) -> Result<(), String>
 pub(super) async fn authorize_spotify_playback(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
-    let expected_tokens = state
-        .token_store
-        .load()
+    let expected_tokens = provider
+        .load_tokens()
+        .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Connect to Spotify before authorizing playback.".to_string())?;
     let attempt = state
@@ -1445,16 +1468,16 @@ pub(super) async fn authorize_spotify_playback(app: tauri::AppHandle) -> Result<
         playback_credentials(&web_account_id, playback_username, playback_auth_data)?;
     let _commit = attempt.commit(&expected_tokens.access).await?;
     let _membership_guard = state.spotify_membership.lock().await;
-    let mut tokens = state
-        .token_store
-        .load()
+    let mut tokens = provider
+        .load_tokens()
+        .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Connect to Spotify before authorizing playback.".to_string())?;
     let expected = tokens.clone();
     tokens.playback_credentials = Some(playback_credentials);
-    if !state
-        .token_store
-        .replace_if_current(&expected, &tokens)
+    if !provider
+        .replace_tokens_if_current(&expected, &tokens)
+        .await
         .map_err(|error| error.to_string())?
     {
         return Err(
@@ -1530,7 +1553,7 @@ pub(super) async fn track_artwork(
     );
     resolve_track_artwork(
         provider.as_deref(),
-        &state.artwork_cache,
+        &state.local_artwork_cache,
         local_path,
         &uri,
         min_width.unwrap_or(64).clamp(1, 2048),
@@ -1571,10 +1594,15 @@ pub(super) async fn spotify_search(
             },
         });
     }
-    if !stored_connection_state(&state.token_store)?.connected {
+    let provider = provider_from(&state)?;
+    if !provider
+        .load_tokens()
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
         return Err("Connect to Spotify to search.".into());
     }
-    let provider = provider_from(&state)?;
     let response = provider::search_with_source(provider.as_ref(), query.trim(), offset).await?;
     if response.source == SearchSource::Network {
         state
@@ -1912,8 +1940,8 @@ mod tests {
 
     use retune_core::model::{AlbumKey, EffectiveRating, Library, NewTrack, Rating, SourceId};
     use retune_spotify::{
-        client::{Album, Image, Page, SimplifiedArtist, Track},
-        tokens::{InMemoryTokenStore, TokenStore},
+        client::{Album, FakeTransport, Image, Page, SimplifiedArtist, SpotifyClient, Track},
+        tokens::InMemoryTokenStore,
     };
 
     use super::{
@@ -2162,18 +2190,27 @@ mod tests {
         assert!(error.contains("different Spotify account"));
     }
 
-    #[test]
-    fn sync_retains_profile_id_for_playback_authorization() {
+    #[tokio::test]
+    async fn sync_retains_profile_id_for_playback_authorization() {
         let store = InMemoryTokenStore::new(Some(web_oauth_tokens(
             "access".into(),
             "refresh".into(),
             10,
             "scope".into(),
         )));
+        let client = SpotifyClient::new("client", FakeTransport::default(), store);
 
-        remember_playback_profile_id(&store, "web-user").unwrap();
+        remember_playback_profile_id(&client, "web-user")
+            .await
+            .unwrap();
 
-        let cached = store.load().unwrap().unwrap().playback_credentials.unwrap();
+        let cached = client
+            .token_store()
+            .load()
+            .unwrap()
+            .unwrap()
+            .playback_credentials
+            .unwrap();
         assert_eq!(cached.username, "web-user");
         assert!(cached.auth_data.is_empty());
     }

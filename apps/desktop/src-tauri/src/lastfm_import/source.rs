@@ -366,9 +366,9 @@ where
                     }
                     SourcePageFetchResult::Retryable(message) => {
                         let attempt = service
-                            .snapshot()
-                            .await
-                            .and_then(|session| session.retryable_error)
+                            .snapshot_for_work()
+                            .await?
+                            .and_then(|snapshot| snapshot.session.retryable_error)
                             .filter(|error| error.retryable)
                             .map(|error| error.attempt.saturating_add(1))
                             .unwrap_or(1);
@@ -445,6 +445,7 @@ pub(super) async fn fetch_source_page(
     }
 }
 
+#[cfg(test)]
 pub(super) fn startup_resume_plan(
     session: Option<&LastFmImportSessionV2>,
 ) -> Option<(String, u64)> {
@@ -458,6 +459,7 @@ pub(super) fn startup_resume_plan(
         .map(|session| (session.lastfm_username.clone(), session.history_to))
 }
 
+#[cfg(test)]
 pub(super) fn startup_lastfm_identity_matches(
     session: &LastFmImportSessionV2,
     live_username: Option<&str>,
@@ -478,12 +480,13 @@ pub(super) async fn run_import<F, Fut>(
     let generation = lastfm.import_generation();
     let result = async {
         loop {
-            let Some(session) = service.snapshot().await else {
+            let Some(snapshot) = service.snapshot_for_work().await? else {
                 break;
             };
+            let session = &snapshot.session;
             match session.phase {
                 ImportPhase::Downloading => {
-                    match source_runner_step(&session) {
+                    match source_runner_step(session) {
                         SourceRunnerStep::Probe => {
                             let payload = fetch_import_page_with_retry(
                                 &lastfm,
@@ -617,9 +620,9 @@ async fn fetch_import_page_with_retry(
             }
             Err(error) if error.retryable => {
                 let attempt = service
-                    .snapshot()
-                    .await
-                    .and_then(|session| session.retryable_error)
+                    .snapshot_for_work()
+                    .await?
+                    .and_then(|snapshot| snapshot.session.retryable_error)
                     .map(|error| error.attempt.saturating_add(1))
                     .unwrap_or(1);
                 service

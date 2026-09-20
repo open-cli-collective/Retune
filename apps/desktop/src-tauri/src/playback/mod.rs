@@ -21,7 +21,7 @@ use retune_spotify::client::{HttpTransport, SpotifyClient};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-type LiveClient = SpotifyClient<HttpTransport, crate::SharedTokenStore>;
+type LiveClient = SpotifyClient<HttpTransport>;
 type ProviderResolver = dyn Fn() -> Result<Arc<LiveClient>, String> + Send + Sync;
 type EffectSink = dyn Fn(PlaybackEffect) + Send + Sync;
 

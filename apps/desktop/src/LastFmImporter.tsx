@@ -803,7 +803,7 @@ function ImportPage({ playback, page, onApply, failed, showQueries, onRefresh, o
     if (uri) selectedCollectionTrackUris.add(uri)
   }
   const orderedRows = sortImportRows(projectedRows, requiredMatchIds, rowSort)
-  const mergeMembers = new Map(Object.entries(page.fuzzyGroups).map(([target, rows]) => [target, new Set(rows.map((row) => row.stableId))]))
+  const mergeMembers = new Map(Object.entries(page.fuzzyGroups).map(([target, ids]) => [target, new Set(ids)]))
   const mergeGroups = new Map<string, PageItem[]>()
   for (const item of orderedRows) {
     const target = matchedTrack(item)?.uri
@@ -1076,12 +1076,12 @@ export default function LastFmImporter() {
   useEffect(() => {
     let active = true
     const subscription = subscribeThenSnapshot(
-      (install) => listen<ImporterPlayback>(lastfmEvents.playback, ({ payload }) => install(payload)),
+      (install) => listen<ImporterPlayback>(lastfmEvents.playback, ({ payload }) => { if (active) install(payload) }),
       lastfmGateway.playback,
       setPlayback,
       () => active,
     ).catch((reason) => { if (active) reportError(reason) })
-    return () => { active = false; void subscription.then((stop) => stop?.()) }
+    return () => { active = false; void subscription.then((stop) => stop?.()).catch(() => {}) }
   }, [reportError])
   const refreshGeneration = useRef(0)
   const pageRequestGeneration = useRef(0)
@@ -1257,27 +1257,35 @@ export default function LastFmImporter() {
   }
   useEffect(() => {
     let active = true
-    const subscription = listen<ImportStateView>(lastfmEvents.changed, () => { if (shouldRefreshImportEvent(acceptAllRunning.current, queueMutationRunning.current || pendingIgnores.current.size > 0 || pendingArchives.current.size > 0)) void refresh() })
+    const refreshSafely = (request: () => Promise<unknown>) => {
+      void request().catch((reason) => { if (active) reportError(reason) })
+    }
+    const subscription = listen<ImportStateView>(lastfmEvents.changed, () => {
+      if (!active || !shouldRefreshImportEvent(acceptAllRunning.current, queueMutationRunning.current || pendingIgnores.current.size > 0 || pendingArchives.current.size > 0)) return
+      refreshSafely(refresh)
+    })
     const completions = listen<unknown>(lastfmEvents.applyFinished, (event) => {
+      if (!active) return
       const result = parseImportApplyResult(event.payload)
       if (!result) {
         setError({ message: invalidApplyResultMessage, code: 'apply-failed', retryAt: null })
-        void refreshQueueOnly()
+        refreshSafely(refreshQueueOnly)
       } else if (result.status === 'failed') {
         setError(result)
-        if (result.batchId === selectedPageRef.current) void refresh()
-        else void refreshQueueOnly()
+        if (result.batchId === selectedPageRef.current) refreshSafely(refresh)
+        else refreshSafely(refreshQueueOnly)
       } else if (!advancingApply.current && result.batchId === selectedPageRef.current) {
         setError(null)
-        void refresh()
+        refreshSafely(refresh)
       }
     })
     const installed = subscriptionsThenSnapshot([subscription, completions], refresh, () => active)
+    void installed.catch((reason) => { if (active) reportError(reason) })
     return () => {
       active = false
-      void installed.then((stop) => stop())
+      void installed.then((stop) => stop()).catch(() => {})
     }
-  }, [refresh, refreshQueueOnly])
+  }, [refresh, refreshQueueOnly, reportError])
   useEffect(() => { setPage((current) => pageWithQueuePosition(current, filteredQueue)) }, [filteredQueue])
   useEffect(() => {
     if (!page || pageLoading || selected?.page !== page.batchId) return
@@ -1300,17 +1308,17 @@ export default function LastFmImporter() {
     apply('system')
     media.addEventListener('change', onMediaChange)
     const subscription = subscribeThenSnapshot(
-      (install) => listen<Appearance>('appearance-changed', ({ payload }) => install(payload)),
+      (install) => listen<Appearance>('appearance-changed', ({ payload }) => { if (active) install(payload) }),
       appGateway.appearance,
       (appearance) => apply(appearance.theme),
       () => active,
-    )
+    ).catch((reason) => { if (active) reportError(reason) })
     return () => {
       active = false
       media.removeEventListener('change', onMediaChange)
-      void subscription.then((stop) => stop())
+      void subscription.then((stop) => stop?.()).catch(() => {})
     }
-  }, [])
+  }, [reportError])
   const start = async () => {
     if (!validImportIntent(pendingDefaults.importContent, pendingDefaults.includeHistoricalPlayCounts)) return
     setBusy(true); setError(null)

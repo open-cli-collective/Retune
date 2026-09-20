@@ -160,7 +160,11 @@ where
             .service
             .combine_batches(&owner.lastfm_username, spotify_account_id, batch_ids)
             .await?;
-        Ok(self.with_library_metadata(self.service.page(batch_id, &artist, &album).await))
+        Ok(self.with_library_metadata(
+            self.service
+                .page_for_work(batch_id, &artist, &album)
+                .await?,
+        ))
     }
 
     pub(super) async fn rename_batch(&self, key: ReviewBatchKey, name: &str) -> Result<(), String> {
@@ -584,10 +588,10 @@ where
         drop(membership);
         let session_id = self
             .service
-            .snapshot()
+            .owner_phase()
             .await
-            .ok_or_else(|| "No Last.fm import session is active.".to_string())?
-            .cache_id;
+            .map(|owner| owner.cache_id)
+            .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
         let view = self
             .service
             .retry_failed_apply(

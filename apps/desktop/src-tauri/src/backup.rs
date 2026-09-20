@@ -541,47 +541,81 @@ pub(super) fn commit_restore(
         playlists: imported_playlists.is_some(),
     };
     let restore_store = restore::RestoreStore::new(app_data_dir);
-    restore_store
-        .begin(&journal)
-        .map_err(|error| error.to_string())?;
-
-    let primary = (|| {
-        library_restore.replace(imported)?;
-        if let Some(settings) = after_settings.as_ref() {
-            settings_restore.replace(settings.clone())?;
-        }
-        if let Some(playlists) = imported_playlists.as_ref() {
-            playlist_restore.replace(playlists.clone())?;
-        }
-        if let Some(mappings) = after_mappings.as_ref() {
-            mappings_restore.replace(mappings.clone())?;
-        }
-        restore_store
-            .complete(&journal)
-            .map_err(|error| error.to_string())
-    })();
+    let primary = match restore_store.begin(&journal) {
+        Ok(()) => (|| {
+            library_restore.replace(imported)?;
+            if let Some(settings) = after_settings.as_ref() {
+                settings_restore.replace(settings.clone())?;
+            }
+            if let Some(playlists) = imported_playlists.as_ref() {
+                playlist_restore.replace(playlists.clone())?;
+            }
+            if let Some(mappings) = after_mappings.as_ref() {
+                mappings_restore.replace(mappings.clone())?;
+            }
+            restore_store
+                .complete(&journal)
+                .map_err(|error| error.to_string())
+        })(),
+        Err(begin_error) => match restore_store.recover_exact(&journal) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                drop(mappings_restore);
+                drop(playlist_restore);
+                drop(settings_restore);
+                drop(library_restore);
+                return Err(begin_error.to_string());
+            }
+            Err(recovery_error) => {
+                restore_mutations.mark_recovery_required();
+                drop(mappings_restore);
+                drop(playlist_restore);
+                drop(settings_restore);
+                drop(library_restore);
+                return Err(format!(
+                    "Restore journal could not be started ({begin_error}) and immediate recovery failed ({recovery_error}). Restart Retune to recover before making more changes."
+                ));
+            }
+        },
+    };
     if let Err(primary_error) = primary {
-        if let Err(recovery_error) = restore_store.recover() {
-            restore_mutations.mark_recovery_required();
-            drop(mappings_restore);
-            drop(playlist_restore);
-            drop(settings_restore);
-            drop(library_restore);
-            return Err(format!(
-                "Restore failed ({primary_error}) and immediate recovery failed ({recovery_error}). Restart Retune to recover before making more changes."
-            ));
+        match restore_store.recover_exact(&journal) {
+            Ok(true) => {
+                log::warn!(
+                    "Restore write failed but was rolled forward immediately: {primary_error}"
+                );
+            }
+            Ok(false) => {
+                restore_mutations.mark_recovery_required();
+                drop(mappings_restore);
+                drop(playlist_restore);
+                drop(settings_restore);
+                drop(library_restore);
+                return Err(format!(
+                    "Restore failed ({primary_error}) and its journal could not be matched for immediate recovery. Restart Retune to recover before making more changes."
+                ));
+            }
+            Err(recovery_error) => {
+                restore_mutations.mark_recovery_required();
+                drop(mappings_restore);
+                drop(playlist_restore);
+                drop(settings_restore);
+                drop(library_restore);
+                return Err(format!(
+                    "Restore failed ({primary_error}) and immediate recovery failed ({recovery_error}). Restart Retune to recover before making more changes."
+                ));
+            }
         }
-        log::warn!("Restore write failed but was rolled forward immediately: {primary_error}");
-        library_restore.install_recovered(journal.library.after.clone());
-        if let Some(change) = &journal.settings {
-            settings_restore.install_recovered(change.after.clone());
-        }
-        if let Some(change) = &journal.playlists {
-            playlist_restore.install_recovered(change.after.clone());
-        }
-        if let Some(change) = &journal.lastfm_mappings {
-            mappings_restore.install_recovered(change.after.clone());
-        }
+    }
+    library_restore.install_recovered(journal.library.after.clone());
+    if let Some(change) = &journal.settings {
+        settings_restore.install_recovered(change.after.clone());
+    }
+    if let Some(change) = &journal.playlists {
+        playlist_restore.install_recovered(change.after.clone());
+    }
+    if let Some(change) = &journal.lastfm_mappings {
+        mappings_restore.install_recovered(change.after.clone());
     }
     drop(mappings_restore);
     drop(playlist_restore);

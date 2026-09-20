@@ -106,8 +106,10 @@ export const resizedPaneHeight = (startHeight: number, startY: number, clientY: 
 export const clearedTrackRating = (inherited: number | null) =>
   inherited === null ? null : { stars: inherited, explicit: false }
 
+const nativePlaybackUri = (uri: string) => uri.startsWith('file:') || uri.startsWith('spotify:')
+
 export const playbackQueue = (tracks: readonly PlaybackTrack[], requestedId?: number) =>
-  tracks.filter((track) => track.enabled || track.id === requestedId)
+  tracks.filter((track) => (track.enabled || track.id === requestedId) && nativePlaybackUri(track.uri))
 
 export const playbackStartAction = (uri: string | undefined, connected: boolean) =>
   uri?.startsWith('spotify:') && !connected ? 'connect' as const : 'play' as const
@@ -120,20 +122,6 @@ export const pendingPlaybackTarget = (prompt: PlaybackAuthorizationPrompt, track
 
 export const playbackRetryReady = (connected: boolean, playbackAuthorized: boolean, awaitingAuthorization: boolean) =>
   connected && (!awaitingAuthorization || playbackAuthorized)
-
-export const simulatedPlaybackTick = (
-  simulated: boolean | undefined,
-  isPlaying: boolean | undefined,
-  trackId: number | null | undefined,
-  tracks: readonly PlaybackTrack[],
-) => {
-  if (!simulated || !isPlaying) return null
-  const currentIndex = tracks.findIndex((track) => track.id === trackId)
-  if (currentIndex < 0) return null
-  const current = tracks[currentIndex]
-  const next = tracks[(currentIndex + 1) % tracks.length]
-  return { duration: current.durationSecs, nextId: next.id }
-}
 
 export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
   ? { type: 'playlist' as const, id: origin.id }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use retune_core::model::Library;
-use retune_spotify::tokens::{TokenStore, Tokens};
+use retune_spotify::tokens::Tokens;
 use serde::Serialize;
 use tauri::Manager;
 
@@ -126,15 +126,9 @@ pub(super) async fn playlist_unfollow(app: tauri::AppHandle, id: String) -> Resu
     let (mut operation, mut cache) = state.playlists.begin_mutation().await?;
     operation.remote_started();
     if let Err(error) = playlists::unfollow(client.as_ref(), &mut cache, &id).await {
-        return Err(reconcile_playlist_mutation(
-            &app,
-            &state,
-            client.as_ref(),
-            operation,
-            &cache,
-            error,
-        )
-        .await);
+        return Err(
+            reconcile_playlist_mutation(&app, client.as_ref(), operation, &cache, error).await,
+        );
     }
     operation.remote_resolved();
     save_playlists(&app, operation, cache, true).await
@@ -379,7 +373,7 @@ pub(super) async fn sync_playlists(
     let synced = match sync_result {
         Ok(synced) => synced,
         Err(error) => {
-            let tokens = state.token_store.load().ok().flatten();
+            let tokens = client.load_tokens().await.ok().flatten();
             if let Some(error) = dispatch_playlist_error(
                 &state.playlist_reauth_notified,
                 error,
@@ -394,24 +388,26 @@ pub(super) async fn sync_playlists(
     save_playlists(app, operation, synced, false).await
 }
 
-fn playlist_error(state: &AppState, error: retune_spotify::Error) -> String {
-    let tokens = state.token_store.load().ok().flatten();
+async fn playlist_error<T: retune_spotify::client::Transport>(
+    client: &retune_spotify::client::SpotifyClient<T>,
+    error: retune_spotify::Error,
+) -> String {
+    let tokens = client.load_tokens().await.ok().flatten();
     match playlists::classify_error(error, tokens.as_ref()) {
         playlists::PlaylistFailure::ReconnectRequired => playlists::RECONNECT_HINT.into(),
         playlists::PlaylistFailure::Spotify(error) => error.to_string(),
     }
 }
 
-async fn reconcile_playlist_mutation<T: retune_spotify::client::Transport, S: TokenStore>(
+async fn reconcile_playlist_mutation<T: retune_spotify::client::Transport>(
     app: &tauri::AppHandle,
-    state: &AppState,
-    client: &retune_spotify::client::SpotifyClient<T, S>,
+    client: &retune_spotify::client::SpotifyClient<T>,
     mut operation: crate::playlist_state::PlaylistOperation,
     cache: &playlists::PlaylistCache,
     error: retune_spotify::Error,
 ) -> String {
     let ambiguous = matches!(&error, retune_spotify::Error::AmbiguousMutation { .. });
-    let message = playlist_error(state, error);
+    let message = playlist_error(client, error).await;
     if ambiguous {
         match playlists::sync(client, cache).await {
             Ok(reconciled) => {
@@ -456,8 +452,7 @@ async fn playlist_add_inner(
                 "Only your playlists can be changed.".into()
             }
             playlists::PlaylistAddError::Spotify(error) => {
-                reconcile_playlist_mutation(app, &state, client.as_ref(), operation, &cache, error)
-                    .await
+                reconcile_playlist_mutation(app, client.as_ref(), operation, &cache, error).await
             }
         });
     }
@@ -511,15 +506,9 @@ pub(super) async fn playlist_create(
     let client = provider_from(&state)?;
     operation.remote_started();
     if let Err(error) = playlists::create(client.as_ref(), &mut cache, name).await {
-        return Err(reconcile_playlist_mutation(
-            &app,
-            &state,
-            client.as_ref(),
-            operation,
-            &cache,
-            error,
-        )
-        .await);
+        return Err(
+            reconcile_playlist_mutation(&app, client.as_ref(), operation, &cache, error).await,
+        );
     }
     operation.remote_resolved();
     let created = playlist_list_views(&cache, &[])
@@ -578,12 +567,12 @@ pub(super) async fn playlist_reorder(
         range_length,
     )
     .await;
-    finish_playlist_mutation(&app, &state, operation, cache, result).await
+    finish_playlist_mutation(&app, client.as_ref(), operation, cache, result).await
 }
 
-async fn finish_playlist_mutation(
+async fn finish_playlist_mutation<T: retune_spotify::client::Transport>(
     app: &tauri::AppHandle,
-    state: &AppState,
+    client: &retune_spotify::client::SpotifyClient<T>,
     mut operation: crate::playlist_state::PlaylistOperation,
     cache: playlists::PlaylistCache,
     result: Result<(), playlists::PlaylistMutationError>,
@@ -600,7 +589,7 @@ async fn finish_playlist_mutation(
         }
         Err(playlists::PlaylistMutationError::Spotify(error)) => {
             operation.remote_resolved();
-            Err(playlist_error(state, error))
+            Err(playlist_error(client, error).await)
         }
         Err(playlists::PlaylistMutationError::Other(error)) => {
             operation.remote_resolved();
@@ -622,5 +611,5 @@ pub(super) async fn playlist_remove(
     let (mut operation, mut cache) = state.playlists.begin_mutation().await?;
     operation.remote_started();
     let result = playlists::remove(client.as_ref(), &mut cache, &id, &indices).await;
-    finish_playlist_mutation(&app, &state, operation, cache, result).await
+    finish_playlist_mutation(&app, client.as_ref(), operation, cache, result).await
 }

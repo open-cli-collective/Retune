@@ -201,8 +201,7 @@ export type PlayerState = {
   shuffle: boolean
 }
 
-// `simulated` marks fixture tracks whose URIs must never reach a real backend.
-export type Playing = PlayerState & { queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin; simulated?: boolean }
+export type Playing = PlayerState & { queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
 
 export type BrowseView = {
   facets: { cats: string[]; arts: string[]; albs: string[] }

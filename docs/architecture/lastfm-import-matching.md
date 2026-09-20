@@ -50,6 +50,20 @@ shutdown advance the lifecycle generation, wake sleepers, and prevent the old
 generation from issuing another request. Closing the importer window does not
 cancel checkpointed work.
 
+When the importer window closes and no session lease, runner, or queued writer is
+active, `Service` parks the large in-memory session while keeping its durable
+session file and raw-page cache. Status reads use a compact cached view. Any UI
+or background operation that needs session data reloads it under the serialized
+persistence gate and checks its cache ID, Last.fm username, Spotify account, and
+phase before installing it. A missing or changed file returns an error and keeps
+the cached owner visible; it is not treated as an absent session. Active work
+and pending writes keep the session resident, and the writer tail retries
+parking after it finishes. Retune drops the session outside its locks on a
+blocking worker, releasing its ownership of that payload on every platform.
+The allocator may keep those freed pages for reuse, so this does not guarantee a
+lower process footprint or reclaim live WebView/graphics data. Retune does not
+call forced allocator APIs or run a periodic garbage collector.
+
 The matching boundary preserves these invariants:
 
 - Spotify requests use the shared client, request gate, cooldowns, and
@@ -379,9 +393,10 @@ its mode. Completed source rows from other batches participate when they map to
 the same target.
 
 In the `ImportPageView` projection, `fuzzyGroups` remains scoped to the
-current batch for source disclosure, while `resolvedCounts` is the
-authoritative target-wide result including eligible completed rows, resolved
-with the selected count mode. Count projection determines collection shape once
+current batch and carries only stable source IDs already present in `rows`, so
+source details cross IPC once. `resolvedCounts` is the authoritative target-wide
+result including eligible completed rows, resolved with the selected count mode.
+Count projection determines collection shape once
 per batch per request, reusing that result across completed source rows; it does
 not rebuild the full review queue for every historical row. The review UI collapses contributing rows into one entry per target and review
 state, with an expanded count flow. Its selection and track-picker actions

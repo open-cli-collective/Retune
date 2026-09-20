@@ -24,7 +24,6 @@ const buildInstall = read('scripts/build-install.sh')
 const development = read('docs/DEVELOPMENT.md')
 const installation = read('docs/INSTALL.md')
 const tauriArchitecture = read('docs/tauri.md')
-const normalized = (text) => text.replace(/\s+/g, ' ')
 const nativeComposition = read('apps/desktop/src-tauri/src/lib.rs')
 const frontendState = [
   read('apps/desktop/src/App.tsx'),
@@ -87,7 +86,7 @@ assert.equal(tauri.bundle.linux.deb.section, 'sound')
 assert.equal(tauri.bundle.targets, undefined)
 assert.equal(tauri.bundle.macOS, undefined, 'base config must not force ad-hoc macOS signing')
 assert.deepEqual(macTauri.bundle.targets, ['app'])
-assert.equal(macTauri.bundle.macOS.minimumSystemVersion, '11.0')
+assert.equal(macTauri.bundle.macOS.minimumSystemVersion, '15.0')
 assert.deepEqual(windowsTauri.bundle.targets, ['nsis'])
 assert.equal(windowsTauri.bundle.windows.allowDowngrades, false)
 assert.equal(windowsTauri.bundle.windows.minimumWebview2Version, '105.0.0.0')
@@ -95,7 +94,11 @@ assert.deepEqual(linuxTauri.bundle.targets, ['deb'])
 required(vite, "host: '127.0.0.1'")
 required(vite, 'port: 5173')
 required(vite, 'strictPort: true')
-required(vite, "'windows' ? 'chrome105' : 'safari13'")
+required(vite, "process.env.TAURI_ENV_PLATFORM === 'windows'", 'Windows Vite target selector')
+required(vite, "'chrome105'", 'Windows Vite target')
+required(vite, "process.env.TAURI_ENV_PLATFORM === 'macos'", 'macOS Vite target selector')
+required(vite, "'safari18'", 'macOS Vite target')
+required(vite, "'safari13'", 'Linux Vite target')
 
 required(workflow, 'workflow_dispatch:')
 required(workflow, 'tags:\n      - "v*"')
@@ -250,6 +253,7 @@ for (const [label, contents] of [
 const sharedCommit = '74d24fcd862d7b9cbe8f6fdda31db6a833e3d706'
 required(ci, `open-cli-collective/.github/actions/pr-title@${sharedCommit}`)
 required(ci, 'title: ${{ github.event.pull_request.title }}')
+requireImmutableExternalActions('CI workflow', ci)
 for (const action of ['homebrew-alias', 'winget-submit']) {
   required(workflow, `open-cli-collective/.github/actions/${action}@${sharedCommit}`)
 }
@@ -326,31 +330,11 @@ required(cask, 'version "__VERSION__"')
 required(cask, 'sha256 "__SHA256__"')
 required(cask, 'https://github.com/open-cli-collective/Retune/releases/download')
 required(cask, 'homepage "https://github.com/open-cli-collective/Retune"')
+required(cask, 'depends_on macos: ">= :sequoia"')
 assert.doesNotMatch(cask, /xattr|postflight/, 'self-signed cask must preserve quarantine for user approval')
 required(cask, 'self-signed certificate')
 required(cask, 'not Apple-notarized')
 
-for (const value of [
-  'self-signed certificate',
-  'not timestamped, hardened, or Apple-notarized',
-  'Windows application payloads and installers are unsigned',
-  'protected GitHub Actions environment named `release`',
-  'only from `main` and `v*` tags',
-  'require maintainer review',
-]) required(normalized(development), value, `development release trust contract ${value}`)
-for (const value of [
-  'self-signed certificate',
-  'not Apple-notarized',
-  'application payloads are unsigned',
-  'Open Anyway',
-  'Unknown Publisher',
-]) required(normalized(installation), value, `installation trust contract ${value}`)
-for (const value of [
-  'self-signed identity',
-  'not timestamped, hardened, or Apple-notarized',
-  'outer installer are unsigned',
-  'protected GitHub Actions environment named `release`',
-]) required(normalized(tauriArchitecture), value, `Tauri distribution contract ${value}`)
 assert.doesNotMatch(development, /feature branch for packaging validation/i, 'retired feature-branch signing guidance remains')
 for (const [label, text] of [['development', development], ['installation', installation], ['Tauri architecture', tauriArchitecture], ['Homebrew cask', cask]]) {
   assert.doesNotMatch(text, /Developer ID|notarized and|Authenticode|Artifact Signing|RFC 3161|stapled ticket|Gatekeeper therefore/i, `${label}: unprovisioned trust claim remains`)

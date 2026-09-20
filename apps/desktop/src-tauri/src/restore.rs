@@ -1,7 +1,6 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+#[cfg(test)]
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use retune_core::model::Library;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,7 @@ use crate::{
     lastfm_import::{
         load_mappings_for_recovery, save_mappings_for_recovery, PersistedLastFmMappings,
     },
-    persistence::{atomic_write, read_limited},
+    persistence::{atomic_write, durable_remove, read_limited},
     playlists::PlaylistCache,
     store::{FsOverlayStore, FsPlaylistStore, FsSettingsStore, OverlayStore, Settings},
 };
@@ -121,13 +120,31 @@ impl RestoreStore {
     }
 
     pub(crate) fn cleanup(&self) -> Result<(), RestoreError> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(RestoreError::Persistence(format!(
+        durable_remove(&self.path).map_err(|error| {
+            RestoreError::Persistence(format!(
                 "Could not remove completed restore journal: {error}"
-            ))),
+            ))
+        })
+    }
+
+    pub(crate) fn recover_exact(&self, expected: &RestoreJournal) -> Result<bool, RestoreError> {
+        let Some(actual) = self.load()? else {
+            return Ok(false);
+        };
+        if actual == *expected {
+            self.recover()?;
+            return Ok(true);
         }
+        let mut complete = expected.clone();
+        complete.phase = Phase::Complete;
+        if actual == complete {
+            self.recover()?;
+            return Ok(true);
+        }
+        if actual.phase == Phase::Complete {
+            return Ok(false);
+        }
+        Err(RestoreError::Conflict("restore journal"))
     }
 
     fn save(&self, journal: &RestoreJournal) -> Result<(), RestoreError> {
@@ -159,6 +176,7 @@ impl RestoreStore {
             return Ok(());
         };
         if journal.phase == Phase::Complete {
+            self.save(&journal)?;
             if let Err(error) = self.cleanup() {
                 log::warn!("{error}");
             }
@@ -442,6 +460,25 @@ mod tests {
             Some(library.before)
         );
         assert!(!dir.path().join(RESTORE_JOURNAL_FILE).exists());
+    }
+
+    #[test]
+    fn matching_complete_journal_reflushes_after_parent_sync_failure() {
+        let dir = tempdir().unwrap();
+        let journal = RestoreJournal::applying(libraries(), None, None, None);
+        let store = RestoreStore::new(dir.path());
+        let path = dir.path().join(RESTORE_JOURNAL_FILE);
+        store.complete(&journal).unwrap();
+
+        crate::persistence::fail_next_atomic_write(
+            &path,
+            crate::persistence::FailureStage::ParentSync,
+        );
+        assert!(store.recover_exact(&journal).is_err());
+        assert!(path.exists());
+
+        assert!(store.recover_exact(&journal).unwrap());
+        assert!(!path.exists());
     }
 
     #[test]

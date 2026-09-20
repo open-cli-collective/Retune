@@ -1,17 +1,21 @@
 use super::*;
 
-pub struct SpotifyClient<T, S> {
+pub struct SpotifyClient<T> {
     pub(super) client_id: String,
     pub(super) transport: T,
-    pub(super) tokens: S,
+    pub(super) tokens: Arc<dyn TokenStore>,
     pub(super) catalog: Arc<Mutex<SpotifyCatalog>>,
     pub(super) request_counts: Mutex<BTreeMap<String, u64>>,
     pub(super) refresh_lock: AsyncMutex<()>,
     pub(super) request_not_before: AsyncMutex<Option<Instant>>,
 }
 
-impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
-    pub fn new(client_id: impl Into<String>, transport: T, tokens: S) -> Self {
+impl<T: Transport> SpotifyClient<T> {
+    pub fn new(
+        client_id: impl Into<String>,
+        transport: T,
+        tokens: impl TokenStore + 'static,
+    ) -> Self {
         Self::new_with_catalog(
             client_id,
             transport,
@@ -23,13 +27,13 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     pub fn new_with_catalog(
         client_id: impl Into<String>,
         transport: T,
-        tokens: S,
+        tokens: impl TokenStore + 'static,
         catalog: Arc<Mutex<SpotifyCatalog>>,
     ) -> Self {
         Self {
             client_id: client_id.into(),
             transport,
-            tokens,
+            tokens: Arc::new(tokens),
             catalog,
             request_counts: Mutex::default(),
             refresh_lock: AsyncMutex::new(()),
@@ -45,8 +49,8 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         &self.transport
     }
 
-    pub fn token_store(&self) -> &S {
-        &self.tokens
+    pub fn token_store(&self) -> &dyn TokenStore {
+        self.tokens.as_ref()
     }
 
     pub fn reset_request_counts(&self) {
@@ -64,11 +68,34 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
     }
 
     pub async fn access_token(&self) -> Result<String> {
-        let stored = self.tokens.load()?.ok_or(Error::MissingToken)?;
+        let stored = self.load_tokens().await?.ok_or(Error::MissingToken)?;
         if token_expired(stored.expires_at, unix_now()) {
             self.refresh_token(&stored.access).await?;
         }
-        Ok(self.tokens.load()?.ok_or(Error::MissingToken)?.access)
+        Ok(self.load_tokens().await?.ok_or(Error::MissingToken)?.access)
+    }
+
+    /// Load tokens without blocking the async runtime.
+    pub async fn load_tokens(&self) -> Result<Option<Tokens>> {
+        let store = Arc::clone(&self.tokens);
+        tokio::task::spawn_blocking(move || store.load())
+            .await
+            .map_err(|error| Error::TokenStore(format!("token store task failed: {error}")))?
+    }
+
+    /// Replace tokens if the complete record is still `expected` without
+    /// blocking the async runtime.
+    pub async fn replace_tokens_if_current(
+        &self,
+        expected: &Tokens,
+        replacement: &Tokens,
+    ) -> Result<bool> {
+        let store = Arc::clone(&self.tokens);
+        let expected = expected.clone();
+        let replacement = replacement.clone();
+        tokio::task::spawn_blocking(move || store.replace_if_current(&expected, &replacement))
+            .await
+            .map_err(|error| Error::TokenStore(format!("token store task failed: {error}")))?
     }
 
     pub(super) async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
@@ -100,7 +127,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
         let mut rate_retries = 0;
         let mut server_retries = 0;
         loop {
-            let access = self.tokens.load()?.ok_or(Error::MissingToken)?.access;
+            let access = self.load_tokens().await?.ok_or(Error::MissingToken)?.access;
             let response = match self
                 .send_api_request(method, path, body.clone(), &access)
                 .await
@@ -230,7 +257,7 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
 
     async fn refresh_token(&self, stale_access: &str) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
-        let stored = self.tokens.load()?.ok_or(Error::MissingToken)?;
+        let stored = self.load_tokens().await?.ok_or(Error::MissingToken)?;
         if stored.access != stale_access {
             return Ok(());
         }
@@ -251,11 +278,14 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
                 scopes: expected.scopes.clone(),
                 playback_credentials: expected.playback_credentials.clone(),
             };
-            if self.tokens.replace_if_current(&expected, &replacement)? {
+            if self
+                .replace_tokens_if_current(&expected, &replacement)
+                .await?
+            {
                 log::info!("Refreshed Spotify access token");
                 break;
             }
-            let Some(current) = self.tokens.load()? else {
+            let Some(current) = self.load_tokens().await? else {
                 log::info!("Discarded stale Spotify token refresh after disconnect");
                 break;
             };
