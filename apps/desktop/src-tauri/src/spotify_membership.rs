@@ -972,7 +972,8 @@ mod tests {
 
         let gate = state.spotify_membership.lock().await;
         let library_path = directory.path().join("library.json");
-        std::fs::create_dir(&library_path).unwrap();
+        let hook = crate::store::SaveHook::new(true);
+        state.library.arm_save(Arc::clone(&hook));
         let blocked = tokio::spawn({
             let state = Arc::clone(&state);
             let client = Arc::clone(&client);
@@ -1001,6 +1002,11 @@ mod tests {
             .is_err()
         );
         drop(gate);
+        while !hook.is_reached() {
+            tokio::task::yield_now().await;
+        }
+        hook.wait_until_reached();
+        hook.release();
 
         assert!(blocked.await.unwrap().is_err());
         assert!(state
@@ -1014,10 +1020,9 @@ mod tests {
             .saved_tracks
             .contains_key("spotify:track:one"));
         assert!(state.library.lock().unwrap().tracks().is_empty());
-        assert!(!library_path.is_file());
+        assert!(!library_path.exists());
         assert_eq!(client.transport().requests().len(), 1);
 
-        std::fs::remove_dir(&library_path).unwrap();
         let library_owner = state.library.owner();
         let ids = save_tracks(
             client.as_ref(),
