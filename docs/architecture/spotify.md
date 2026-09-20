@@ -34,6 +34,11 @@ public `client` facade keeps transport, request policy, wire models, and endpoin
 implementations in separate source modules behind that single client and its
 existing `Transport` seam.
 
+`TokenStore` remains a synchronous boundary because native credential and file
+stores may block. The client's asynchronous token loads and compare-and-replace
+operations run on Tokio's blocking pool, so Web API requests and playback
+commands do not hold the async executor during credential I/O.
+
 PKCE code exchange and refresh share the configured low-level HTTP transport and
 one form builder/response parser, but remain outside the Web API request gate,
 cooldown, and request counts. The
@@ -115,9 +120,10 @@ quota records coalesce to the latest global deadline on load. Every cooldown
 surface reads the effective persisted deadline. A successful network-backed search
 clears only the global quota record; a persistent catalog hit does not. Transient
 endpoint-family rate limits remain until their own deadline. The desktop exposes a
-small `SpotifySyncStatus` snapshot and `spotify-sync-status-changed` event with
-connection, running, last-full-sync, effective-next-sync, and cooldown state so
-the UI can compose Spotify and Last.fm work without duplicating policy.
+small `SpotifySyncStatus` snapshot and `spotify-sync-status-changed` invalidation
+event. The event carries no status payload; the UI fetches the snapshot after an
+invalidation so status reads use one authoritative path without duplicating
+policy.
 
 ## Sync and caching
 

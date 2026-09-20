@@ -31,6 +31,8 @@ pub(crate) use listening::{AcceptedScrobbleReceipt, ScrobbleMetadata};
 use store::*;
 
 const AUTH_URL: &str = "https://www.last.fm/api/auth";
+const STORAGE_PROBLEM: &str =
+    "Last.fm is unavailable because local persistence could not be trusted. Restart Retune to recover.";
 pub(crate) const CREDENTIAL_SERVICE: &str = "com.rianjs.retune";
 pub(crate) const SESSION_ACCOUNT: &str = "lastfm-session";
 const RETRY_DELAYS: &[Duration] = &[
@@ -152,6 +154,7 @@ fn load_persisted_lastfm(
     let (ledger, migrated) = match queue_store.load_ledger_with_migration() {
         Ok(result) => result,
         Err(error) => {
+            storage_problem = true;
             log::error!(
                 "Last.fm local persistence failed; queued scrobbles may be unavailable: {error}"
             );
@@ -357,6 +360,13 @@ impl Service {
         self.persist_ledger(queue, accepted, owner).await
     }
 
+    async fn record_storage_result<T>(&self, result: Result<T, String>) -> Result<T, String> {
+        if result.is_err() {
+            self.runtime.lock().await.storage_problem = true;
+        }
+        result
+    }
+
     async fn persist_ledger(
         &self,
         pending: VecDeque<Scrobble>,
@@ -364,7 +374,7 @@ impl Service {
         owner: Option<String>,
     ) -> Result<(), String> {
         let store = self.queue_store.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        let result = tauri::async_runtime::spawn_blocking(move || {
             store.save_ledger(&ScrobbleLedgerV2 {
                 version: SCROBBLE_LEDGER_VERSION,
                 pending,
@@ -373,42 +383,54 @@ impl Service {
             })
         })
         .await
-        .map_err(|_| "Last.fm queue persistence task stopped.".to_string())?
+        .map_err(|error| format!("Last.fm queue persistence task stopped: {error}"))
+        .and_then(|result| result);
+        self.record_storage_result(result).await
     }
 
     async fn load_pending(&self) -> Result<Option<String>, String> {
         let store = self.pending_store.clone();
-        tauri::async_runtime::spawn_blocking(move || store.load())
+        let result = tauri::async_runtime::spawn_blocking(move || store.load())
             .await
-            .map_err(|_| "Last.fm pending-token task stopped.".to_string())?
+            .map_err(|error| format!("Last.fm pending-token task stopped: {error}"))
+            .and_then(|result| result);
+        self.record_storage_result(result).await
     }
 
     async fn save_pending(&self, token: String) -> Result<(), String> {
         let store = self.pending_store.clone();
-        tauri::async_runtime::spawn_blocking(move || store.save(&token))
+        let result = tauri::async_runtime::spawn_blocking(move || store.save(&token))
             .await
-            .map_err(|_| "Last.fm pending-token task stopped.".to_string())?
+            .map_err(|error| format!("Last.fm pending-token task stopped: {error}"))
+            .and_then(|result| result);
+        self.record_storage_result(result).await
     }
 
     async fn clear_pending(&self) -> Result<(), String> {
         let store = self.pending_store.clone();
-        tauri::async_runtime::spawn_blocking(move || store.clear())
+        let result = tauri::async_runtime::spawn_blocking(move || store.clear())
             .await
-            .map_err(|_| "Last.fm pending-token task stopped.".to_string())?
+            .map_err(|error| format!("Last.fm pending-token task stopped: {error}"))
+            .and_then(|result| result);
+        self.record_storage_result(result).await
     }
 
     async fn save_session(&self, session: LastFmSession) -> Result<(), String> {
         let store = Arc::clone(&self.session_store);
-        tauri::async_runtime::spawn_blocking(move || store.save(&session))
+        let result = tauri::async_runtime::spawn_blocking(move || store.save(&session))
             .await
-            .map_err(|_| "Last.fm session-store task stopped.".to_string())?
+            .map_err(|error| format!("Last.fm session-store task stopped: {error}"))
+            .and_then(|result| result);
+        self.record_storage_result(result).await
     }
 
     async fn clear_session(&self) -> Result<(), String> {
         let store = Arc::clone(&self.session_store);
-        tauri::async_runtime::spawn_blocking(move || store.clear())
+        let result = tauri::async_runtime::spawn_blocking(move || store.clear())
             .await
-            .map_err(|_| "Last.fm session-store task stopped.".to_string())?
+            .map_err(|error| format!("Last.fm session-store task stopped: {error}"))
+            .and_then(|result| result);
+        self.record_storage_result(result).await
     }
 
     pub(crate) async fn state(&self) -> LastFmState {
@@ -429,13 +451,7 @@ impl Service {
                 Some("Last.fm is unavailable in this build because its app credentials are not configured.".into()),
             )
         } else if runtime.storage_problem {
-            (
-                false,
-                Some(
-                    "Last.fm is unavailable because secure credential storage could not be opened."
-                        .into(),
-                ),
-            )
+            (false, Some(STORAGE_PROBLEM.into()))
         } else if runtime.build_problem {
             (
                 false,
@@ -475,6 +491,14 @@ impl Service {
         self.accepted_receipts.lock().await.clone()
     }
 
+    async fn ensure_storage_available(&self) -> Result<(), String> {
+        if self.runtime.lock().await.storage_problem {
+            Err(STORAGE_PROBLEM.into())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) async fn reconciliation_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.reconciliation_io.lock().await
     }
@@ -488,6 +512,7 @@ impl Service {
             return Ok(());
         }
         let _queue_io = self.queue_io.lock().await;
+        self.ensure_storage_available().await?;
         let original = self.accepted_receipts.lock().await.clone();
         let mut next = original.clone();
         for receipt in consumed {
@@ -532,6 +557,7 @@ impl Service {
     {
         self.ensure_available().await?;
         let _credential_io = self.credential_io.lock().await;
+        self.ensure_storage_available().await?;
         let owns_import = self
             .runtime
             .lock()
@@ -648,6 +674,7 @@ impl Service {
             .filter(|token| !token.is_empty())
             .ok_or_else(|| "Last.fm did not return an authorization token.".to_string())?;
         let _credential_io = self.credential_io.lock().await;
+        self.ensure_storage_available().await?;
         self.save_pending(token.clone()).await?;
         {
             let mut runtime = self.runtime.lock().await;
@@ -708,6 +735,7 @@ impl Service {
         let service = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             let _credential_io = service.credential_io.lock().await;
+            service.ensure_storage_available().await?;
             let previous_username = service
                 .runtime
                 .lock()
@@ -765,6 +793,7 @@ impl Service {
         let _credential_io = self.credential_io.lock().await;
         let _reconciliation_io = self.reconciliation_guard().await;
         let _queue_io = self.queue_io.lock().await;
+        self.ensure_storage_available().await?;
         let (previous_queue, previous_owner, revision) = {
             let mut runtime = self.runtime.lock().await;
             let previous_queue = runtime.queue.clone();
@@ -1184,6 +1213,9 @@ impl Service {
                 let _queue_io = self.queue_io.lock().await;
                 let (original, queue, removed, revision, owner) = {
                     let mut runtime = self.runtime.lock().await;
+                    if runtime.storage_problem {
+                        return FlushOutcome::Stop;
+                    }
                     if !queue_starts_with(&runtime.queue, &batch)
                         || runtime.session.as_ref() != Some(&session)
                     {
@@ -1264,6 +1296,9 @@ impl Service {
                 let _queue_io = self.queue_io.lock().await;
                 let (original, queue, removed, revision) = {
                     let mut runtime = self.runtime.lock().await;
+                    if runtime.storage_problem {
+                        return FlushOutcome::Stop;
+                    }
                     if !queue_starts_with(&runtime.queue, &batch)
                         || runtime.session.as_ref() != Some(&session)
                     {
@@ -1320,6 +1355,9 @@ impl Service {
 
     async fn invalidate_session_owned(&self, expected: LastFmSession) -> bool {
         let _credential_io = self.credential_io.lock().await;
+        if self.ensure_storage_available().await.is_err() {
+            return false;
+        }
         let current = self.runtime.lock().await.session.clone();
         if current.as_ref() != Some(&expected) {
             return false;
@@ -1381,6 +1419,7 @@ impl Service {
     async fn reconcile_queue_owner(&self, username: &str) -> Result<(), String> {
         let _reconciliation_io = self.reconciliation_guard().await;
         let _queue_io = self.queue_io.lock().await;
+        self.ensure_storage_available().await?;
         let (revision, queue_owned) = {
             let runtime = self.runtime.lock().await;
             (

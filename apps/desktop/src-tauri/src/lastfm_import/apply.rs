@@ -655,7 +655,7 @@ impl Service {
     }
 
     pub(super) fn claim_apply_runner(&self) -> Option<super::RunnerGuard> {
-        super::RunnerGuard::claim(&self.apply_running)
+        super::RunnerGuard::claim(&self.apply_running, &self.self_weak)
     }
 }
 
@@ -668,7 +668,7 @@ pub(super) async fn apply_page(
     archive_remainder: bool,
     options: PageOptions,
 ) -> Result<ImportStateView, String> {
-    let (session, sync) = service.snapshot_with_sync().await;
+    let (session, sync) = service.snapshot_with_sync_for_work().await?;
     let Some(session) = session else {
         return Err("No Last.fm import session is active.".into());
     };
@@ -894,15 +894,12 @@ fn cached_collection_tracks_for_apply(
 
 pub(super) type ApplyEffectFuture = Pin<Box<dyn Future<Output = Result<(), ApplyFailure>> + Send>>;
 
-pub(super) async fn run_apply_upstream_effect<
-    T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
->(
+pub(super) async fn run_apply_upstream_effect<T: retune_spotify::client::Transport>(
     service: &Service,
     membership: &mut crate::spotify_membership::SpotifyMembershipGuard,
     library_owner: &crate::library_state::LibraryOwner,
     cooldown_store: &crate::store::FsCooldownStore,
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+    provider: &retune_spotify::client::SpotifyClient<T>,
     plan: &ApplyPlan,
     added_at: u64,
 ) -> Result<(), ApplyFailure> {
@@ -926,10 +923,12 @@ pub(super) async fn run_apply_upstream_effect<
         }
         ApplyMembership::Tracks(uris) => {
             let cached_tracks = service
-                .snapshot()
-                .await
+                .snapshot_for_work()
+                .await?
                 .as_ref()
-                .map(|session| cached_collection_tracks_for_apply(session, plan, added_at))
+                .map(|snapshot| {
+                    cached_collection_tracks_for_apply(&snapshot.session, plan, added_at)
+                })
                 .unwrap_or_default();
             crate::spotify_membership::save_tracks_locked(
                 provider,
@@ -963,10 +962,12 @@ pub(super) async fn run_apply_upstream_effect<
             }
             if !tracks.is_empty() {
                 let cached_tracks = service
-                    .snapshot()
-                    .await
+                    .snapshot_for_work()
+                    .await?
                     .as_ref()
-                    .map(|session| cached_collection_tracks_for_apply(session, plan, added_at))
+                    .map(|snapshot| {
+                        cached_collection_tracks_for_apply(&snapshot.session, plan, added_at)
+                    })
                     .unwrap_or_default();
                 crate::spotify_membership::save_tracks_locked(
                     provider,

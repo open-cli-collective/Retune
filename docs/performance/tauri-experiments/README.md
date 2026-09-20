@@ -263,6 +263,41 @@ native IPC, memory, account-bound interaction, and steady-refresh benefit remain
 **UNVERIFIED**. Start the existing performance Vite server and open
 `/performance/importer.html?window=lastfm-importer&queueFixture=1` to reproduce.
 
+## Last.fm review-payload parking
+
+Measured 2026-09-20.
+
+The ignored macOS release test loads a private copy of a real Last.fm session
+into test-owned temporary app data, then closes and reloads the review payload
+three times. It uses no credentials or network and measures only the isolated
+Rust test process, not the installed app, WebView, or graphics allocations.
+Reproduce with a private copy of `lastfm-import.json`:
+
+```sh
+rtk proxy env RETUNE_LASTFM_MEMORY_FIXTURE=/path/to/private-copy.json cargo test --quiet --release -p retune-desktop --lib lastfm_import::integration_tests::memory_experiment::real_session_park_reload_memory_experiment -- --ignored --exact --test-threads=1 --nocapture
+```
+
+The final ownership-only run measured `phys_footprint` with `/usr/bin/footprint`;
+the immediate sample was 31–33 ms after payload cleanup completed and the
+settled sample was about 250 ms after payload cleanup completed. The test loaded
+245,941 scrobbles, with 28,328 remaining; summary counts stayed stable across
+each cycle.
+
+| Stage | Cycle 1 | Cycle 2 | Cycle 3 |
+| --- | ---: | ---: | ---: |
+| Park / reload time | 42 / 254 ms | 38 / 254 ms | 35 / 246 ms |
+| Parked footprint, immediate (bytes) | 74,072,712 | 55,394,952 | 145,130,216 |
+| Parked footprint, settled (bytes) | 74,072,712 | 55,394,952 | 145,130,216 |
+| Reopened footprint (bytes) | 163,906,280 | 145,097,448 | 150,766,336 |
+
+The initial resident footprint was 285,770,448 bytes; peak footprint was
+286,098,152 bytes. A preceding diagnostic run with the native allocator trim
+reported zero bytes released in all three cycles, and its immediate and settled
+footprints matched. The ownership-only readings were comparable after removing
+that helper, while the third cycle still showed no parked-footprint reduction.
+Treat these as observations from one isolated importer process, not a guaranteed
+memory saving or a measurement of the full desktop app.
+
 ## Combined validation and current assessment
 
 All seven discrete experiments have before/after measurements in this directory.

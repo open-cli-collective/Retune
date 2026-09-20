@@ -96,21 +96,40 @@ export async function subscribeInvalidationThenSnapshot<T>(
   snapshot: () => Promise<T>,
   install: (value: T) => void,
   active: () => boolean,
+  onError: (error: unknown) => void = () => {},
 ) {
   let generation = 0
-  let invalidated = false
-  const unlisten = await subscribe(() => {
-    invalidated = true
+  let stopped = false
+  let unlisten: (() => void) | undefined
+  const requestSnapshot = () => {
+    if (stopped || !active()) return
     const request = ++generation
     void snapshot().then((value) => {
-      if (active() && request === generation) install(value)
+      if (!stopped && active() && request === generation) install(value)
+    }).catch((error) => {
+      if (!stopped && active() && request === generation) onError(error)
     })
-  })
-  if (!active()) return unlisten
+  }
+  unlisten = await subscribe(requestSnapshot)
+  const stop = () => {
+    if (stopped) return
+    stopped = true
+    generation++
+    unlisten?.()
+  }
+  if (!active()) {
+    stop()
+    return stop
+  }
   const request = ++generation
-  const value = await snapshot()
-  if (active() && !invalidated && request === generation) install(value)
-  return unlisten
+  try {
+    const value = await snapshot()
+    if (!stopped && active() && request === generation) install(value)
+  } catch (error) {
+    stop()
+    throw error
+  }
+  return stop
 }
 
 export async function subscriptionsThenSnapshot(
@@ -118,9 +137,25 @@ export async function subscriptionsThenSnapshot(
   snapshot: () => Promise<unknown>,
   active: () => boolean,
 ) {
-  const unlistens = await Promise.all(subscriptions)
-  if (active()) await snapshot()
-  return () => { for (const unlisten of unlistens) unlisten() }
+  const results = await Promise.allSettled(subscriptions)
+  const unlistens = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+  const stop = () => { for (const unlisten of unlistens) unlisten() }
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failure) {
+    stop()
+    throw failure.reason
+  }
+  if (!active()) {
+    stop()
+    return stop
+  }
+  try {
+    await snapshot()
+  } catch (error) {
+    stop()
+    throw error
+  }
+  return stop
 }
 
 export type ExternalDestination = { kind: 'lastFm' } | { kind: 'spotifyAlbum'; id: string }

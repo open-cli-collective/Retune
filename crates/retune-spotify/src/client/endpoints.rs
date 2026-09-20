@@ -1,6 +1,6 @@
 use super::*;
 
-impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
+impl<T: Transport> SpotifyClient<T> {
     pub async fn saved_tracks(&self, offset: u32, limit: u32) -> Result<Page<SavedTrack>> {
         let page: Page<SavedTrack> = self.get(&paged("/me/tracks", offset, limit)).await?;
         let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
@@ -49,12 +49,8 @@ impl<T: Transport, S: TokenStore> SpotifyClient<T, S> {
 
     pub async fn unfollow_playlist(&self, playlist_id: &str) -> Result<()> {
         let playlist_id = spotify_path_id(playlist_id, "playlist")?;
-        self.empty(
-            Method::Delete,
-            &format!("/playlists/{playlist_id}/followers"),
-            Vec::new(),
-        )
-        .await
+        self.remove_from_library(&[format!("spotify:playlist:{playlist_id}")])
+            .await
     }
 
     pub async fn playlist_tracks(

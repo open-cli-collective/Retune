@@ -5,10 +5,16 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+static FAIL_ATOMIC_WRITES: Mutex<Vec<(PathBuf, FailureStage, usize)>> = Mutex::new(Vec::new());
 
 #[cfg(windows)]
 static ATOMIC_REPLACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -57,7 +63,7 @@ fn atomic_write_inner(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "store path has no parent"))?;
     fs::create_dir_all(parent)?;
     #[cfg(test)]
-    fail_at(hooks, FailureStage::Create)?;
+    fail_at(path, hooks, FailureStage::Create)?;
     let (temporary, mut file) = create_temporary(path, mode)?;
     #[cfg(test)]
     if let Some(created) = hooks.and_then(|hooks| hooks.created) {
@@ -65,15 +71,18 @@ fn atomic_write_inner(
     }
     let result = (|| {
         #[cfg(test)]
-        fail_at(hooks, FailureStage::Write)?;
+        fail_at(path, hooks, FailureStage::Write)?;
         file.write_all(bytes)?;
         #[cfg(test)]
-        fail_at(hooks, FailureStage::Sync)?;
+        fail_at(path, hooks, FailureStage::Sync)?;
         file.sync_all()?;
         drop(file);
         #[cfg(test)]
-        fail_at(hooks, FailureStage::Rename)?;
+        fail_at(path, hooks, FailureStage::Rename)?;
         replace(&temporary, path)?;
+        #[cfg(test)]
+        fail_at(path, hooks, FailureStage::ParentSync)?;
+        sync_parent(path)?;
         Ok(())
     })();
     if result.is_err() {
@@ -89,6 +98,7 @@ pub(crate) enum FailureStage {
     Write,
     Sync,
     Rename,
+    ParentSync,
 }
 
 #[cfg(test)]
@@ -109,6 +119,58 @@ pub(crate) fn atomic_write_with_failure(
     )
 }
 
+/// Flush the directory entry containing `path` after a rename or unlink.
+///
+/// Unix filesystems need this second barrier to make the replacement or
+/// removal durable. Windows replacement already uses MOVEFILE_WRITE_THROUGH,
+/// and directory handles are not opened here on non-Unix platforms.
+pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "store path has no parent")
+        })?;
+        File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_atomic_write(path: &Path, failure: FailureStage) {
+    fail_atomic_writes(path, failure, 1);
+}
+
+#[cfg(test)]
+pub(crate) fn fail_atomic_writes(path: &Path, failure: FailureStage, count: usize) {
+    if count != 0 {
+        FAIL_ATOMIC_WRITES
+            .lock()
+            .unwrap()
+            .push((path.to_owned(), failure, count));
+    }
+}
+
+/// Remove a file and flush its containing directory.
+///
+/// An already absent file still needs the directory barrier: this is the
+/// retry path after an unlink succeeded but its first barrier failed. If the
+/// directory itself is gone, there is no deletion left to make durable.
+pub(crate) fn durable_remove(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match sync_parent(path) {
+            Ok(()) => Ok(()),
+            Err(sync_error) if sync_error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(sync_error) => Err(sync_error),
+        },
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 struct TestHooks<'a> {
     failure: Option<FailureStage>,
@@ -116,11 +178,24 @@ struct TestHooks<'a> {
 }
 
 #[cfg(test)]
-fn fail_at(hooks: Option<&TestHooks<'_>>, stage: FailureStage) -> io::Result<()> {
+fn fail_at(path: &Path, hooks: Option<&TestHooks<'_>>, stage: FailureStage) -> io::Result<()> {
     if hooks.and_then(|hooks| hooks.failure) == Some(stage) {
         Err(io::Error::other("injected atomic-write failure"))
     } else {
-        Ok(())
+        let mut failures = FAIL_ATOMIC_WRITES.lock().unwrap();
+        let Some(index) = failures
+            .iter()
+            .position(|(expected_path, expected_stage, remaining)| {
+                expected_path == path && *expected_stage == stage && *remaining != 0
+            })
+        else {
+            return Ok(());
+        };
+        failures[index].2 -= 1;
+        if failures[index].2 == 0 {
+            failures.remove(index);
+        }
+        Err(io::Error::other("injected atomic-write failure"))
     }
 }
 
@@ -272,6 +347,38 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), b"previous");
             assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
         }
+    }
+
+    #[test]
+    fn parent_sync_failure_reports_error_after_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        fs::write(&path, b"previous").unwrap();
+
+        assert!(atomic_write_inner(
+            &path,
+            b"replacement",
+            None,
+            Some(&TestHooks {
+                failure: Some(FailureStage::ParentSync),
+                created: None,
+            }),
+        )
+        .is_err());
+
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn durable_remove_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.json");
+        fs::write(&path, b"journal").unwrap();
+
+        durable_remove(&path).unwrap();
+        durable_remove(&path).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

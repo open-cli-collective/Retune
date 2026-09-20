@@ -133,8 +133,12 @@ impl LibraryState {
         self.restore_mutations.ensure_allowed()?;
         let mut next = self.current.lock().expect("library mutex poisoned").clone();
         let value = mutation(&mut next)?;
-        self.store.save(&next).map_err(|error| error.to_string())?;
-        *self.current.lock().expect("library mutex poisoned") = next;
+        save_library_candidate(
+            self.store.as_ref(),
+            &self.current,
+            next,
+            &self.restore_mutations,
+        )?;
         drop(write_gate);
         Ok(value)
     }
@@ -153,8 +157,7 @@ impl LibraryState {
             tauri::async_runtime::spawn_blocking(move || {
                 let _write_gate = write_gate.lock().expect("library write gate poisoned");
                 restore_mutations.ensure_allowed()?;
-                store.save(&next).map_err(|error| error.to_string())?;
-                *current.lock().expect("library mutex poisoned") = next;
+                save_library_candidate(store.as_ref(), &current, next, &restore_mutations)?;
                 Ok::<_, String>((transaction, owner))
             })
             .await
@@ -216,8 +219,12 @@ impl LibraryOwner {
         if *self.library.lock().expect("library mutex poisoned") == next {
             return Ok(value);
         }
-        self.store.save(&next).map_err(|error| error.to_string())?;
-        *self.library.lock().expect("library mutex poisoned") = next;
+        save_library_candidate(
+            self.store.as_ref(),
+            &self.library,
+            next,
+            &self.restore_mutations,
+        )?;
         drop(write_gate);
         Ok(value)
     }
@@ -251,8 +258,7 @@ impl LibraryOwner {
                 if *library.lock().expect("library mutex poisoned") == next {
                     return Ok((value, owner));
                 }
-                store.save(&next).map_err(|error| error.to_string())?;
-                *library.lock().expect("library mutex poisoned") = next;
+                save_library_candidate(store.as_ref(), &library, next, &restore_mutations)?;
                 Ok::<_, String>((value, owner))
             })
             .await
@@ -273,12 +279,12 @@ impl LibraryRestore<'_> {
     }
 
     pub(crate) fn replace(&self, next: Library) -> Result<(), String> {
-        self.state
-            .store
-            .save(&next)
-            .map_err(|error| error.to_string())?;
-        *self.state.current.lock().expect("library mutex poisoned") = next;
-        Ok(())
+        save_library_candidate(
+            self.state.store.as_ref(),
+            &self.state.current,
+            next,
+            &self.state.restore_mutations,
+        )
     }
 
     pub(crate) fn install_recovered(&self, next: Library) {
@@ -319,15 +325,40 @@ fn wait_for_transaction(state: &LibraryTransactionState) -> Result<MutexGuard<'_
     Ok(active)
 }
 
-#[cfg(test)]
-pub(crate) fn commit_library_candidate(
+fn save_library_candidate(
     store: &impl OverlayStore,
-    current: &mut Library,
+    current: &Mutex<Library>,
     next: Library,
+    restore_mutations: &RestoreMutationState,
 ) -> Result<(), String> {
-    store.save(&next).map_err(|error| error.to_string())?;
-    *current = next;
-    Ok(())
+    let existed_before = match store.exists() {
+        Ok(existed) => existed,
+        Err(error) => {
+            restore_mutations.mark_recovery_required();
+            return Err(error.to_string());
+        }
+    };
+    match store.save(&next) {
+        Ok(()) => {
+            *current.lock().expect("library mutex poisoned") = next;
+            Ok(())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let before = current.lock().expect("library mutex poisoned").clone();
+            match store.load() {
+                Ok(Some(actual)) if actual == next => {
+                    *current.lock().expect("library mutex poisoned") = actual;
+                }
+                Ok(Some(actual)) if actual == before => {}
+                Ok(None) if !existed_before => {}
+                Err(crate::store::StoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::IsADirectory => {}
+                _ => restore_mutations.mark_recovery_required(),
+            }
+            Err(message)
+        }
+    }
 }
 
 pub(crate) fn record_play_with(
@@ -346,8 +377,7 @@ pub(crate) fn record_play_with(
     if !next.record_play(uri, played_at) {
         return Ok(false);
     }
-    store.save(&next).map_err(|error| error.to_string())?;
-    *library.lock().expect("library mutex poisoned") = next;
+    save_library_candidate(store, library, next, restore_mutations)?;
     Ok(true)
 }
 
@@ -373,6 +403,54 @@ mod tests {
             .load()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn failed_owner_save_does_not_swap_live_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = LibraryState::new(Library::new(), FsOverlayStore::new(directory.path()));
+        let hook = crate::store::SaveHook::new(true);
+        state.arm_save(Arc::clone(&hook));
+        let owner = state.owner();
+        let worker = std::thread::spawn(move || {
+            owner.mutate(|library| {
+                library.add(NewTrack {
+                    uri: "file:///rejected.mp3".into(),
+                    ..NewTrack::default()
+                });
+                Ok(())
+            })
+        });
+        hook.wait_until_reached();
+        hook.release();
+
+        assert!(worker.join().unwrap().is_err());
+        assert!(state.snapshot().tracks().is_empty());
+    }
+
+    #[test]
+    fn owner_reconciles_after_parent_sync_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsOverlayStore::new(directory.path());
+        let state = LibraryState::new(Library::new(), store.clone());
+        let path = directory.path().join("library.json");
+        crate::persistence::fail_next_atomic_write(
+            &path,
+            crate::persistence::FailureStage::ParentSync,
+        );
+
+        let error = state
+            .mutate(|library| {
+                library.add(NewTrack {
+                    uri: "file:///replacement.mp3".into(),
+                    ..NewTrack::default()
+                });
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.contains("injected atomic-write failure"));
+        assert_eq!(state.snapshot().tracks().len(), 1);
+        assert_eq!(store.load().unwrap(), Some(state.snapshot()));
     }
 
     #[tokio::test(flavor = "current_thread")]

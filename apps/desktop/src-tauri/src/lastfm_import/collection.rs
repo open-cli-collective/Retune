@@ -1,11 +1,8 @@
 use super::*;
 
 #[cfg(test)]
-pub(super) async fn album_candidates<
-    T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
->(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn album_candidates<T: retune_spotify::client::Transport>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     query: &str,
     source_album: Option<&str>,
     source_artist: Option<&str>,
@@ -22,11 +19,8 @@ pub(super) async fn album_candidates<
     .map(|(candidates, _)| candidates)
 }
 
-pub(super) async fn album_candidates_with_source<
-    T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
->(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn album_candidates_with_source<T: retune_spotify::client::Transport>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     query: &str,
     source_album: Option<&str>,
     source_artist: Option<&str>,
@@ -65,13 +59,12 @@ pub(super) async fn album_candidates_with_source<
     Ok((candidates, source))
 }
 
-pub(super) async fn fetch_complete_collection_album<T, S>(
-    provider: &retune_spotify::client::SpotifyClient<T, S>,
+pub(super) async fn fetch_complete_collection_album<T>(
+    provider: &retune_spotify::client::SpotifyClient<T>,
     uri: &str,
 ) -> Result<retune_spotify::client::Album, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let album = provider
         .album(crate::provider::spotify_id(uri, "album")?)
@@ -104,11 +97,11 @@ pub(super) struct ReviewBatchKey {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn current_account_binding<T, S>(
+pub(super) async fn current_account_binding<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     membership_guard: &crate::spotify_membership::SpotifyMembershipGuard,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     require_provider: bool,
     require_spotify_binding: bool,
@@ -116,13 +109,12 @@ pub(super) async fn current_account_binding<T, S>(
 ) -> Result<
     (
         AccountBinding,
-        Option<Arc<retune_spotify::client::SpotifyClient<T, S>>>,
+        Option<Arc<retune_spotify::client::SpotifyClient<T>>>,
     ),
     String,
 >
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     if !connection_state()? {
         return Err("Connect Spotify before importing its library.".into());
@@ -152,11 +144,11 @@ where
             })?
             .to_owned()
     };
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return Err("No Last.fm import session is active.".into());
     };
-    if !session_account_matches(
-        &session,
+    if !owner_account_matches(
+        &owner,
         &lastfm_username,
         &spotify_account_id,
         require_spotify_binding,
@@ -167,7 +159,7 @@ where
                 .into(),
         );
     }
-    if session.phase == ImportPhase::Suspended && !allow_suspended {
+    if owner.phase == ImportPhase::Suspended && !allow_suspended {
         return Err("The Last.fm import is suspended for account safety.".into());
     }
     Ok((
@@ -180,19 +172,18 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn review_import<T, S>(
+pub(super) async fn review_import<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     key: ReviewBatchKey,
     action: ReviewAction,
 ) -> Result<ImportStateView, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let membership_guard = spotify_membership.lock().await;
@@ -231,18 +222,17 @@ where
     current_import_view(service, lastfm).await
 }
 
-pub(super) async fn update_import_options<T, S>(
+pub(super) async fn update_import_options<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     key: ReviewBatchKey,
     options: PageOptions,
 ) -> Result<ImportStateView, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let membership_guard = spotify_membership.lock().await;
@@ -272,18 +262,17 @@ where
     current_import_view(service, lastfm).await
 }
 
-pub(super) async fn update_import_count_mode<T, S>(
+pub(super) async fn update_import_count_mode<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     target_uri: &str,
     mode: CountMode,
 ) -> Result<ImportStateView, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let membership_guard = spotify_membership.lock().await;
@@ -311,17 +300,16 @@ where
     current_import_view(service, lastfm).await
 }
 
-pub(super) async fn update_import_search_terms<T, S>(
+pub(super) async fn update_import_search_terms<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     show: bool,
 ) -> Result<ImportStateView, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let membership_guard = spotify_membership.lock().await;
     let binding = current_account_binding(
@@ -343,18 +331,17 @@ where
     current_import_view(service, lastfm).await
 }
 
-pub(super) async fn select_import_matches<T, S>(
+pub(super) async fn select_import_matches<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     batch_id: u32,
     selections: &[(String, String)],
 ) -> Result<(Option<ImportPageView>, ImportStateView), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let membership_guard = spotify_membership.lock().await;
@@ -378,7 +365,7 @@ where
             selections,
         )
         .await?;
-    let page = service.page(batch_id, &artist, &album).await;
+    let page = service.page_for_work(batch_id, &artist, &album).await?;
     drop(membership_guard);
     let view = current_import_view(service, lastfm).await?;
     Ok((page, view))
@@ -433,12 +420,12 @@ pub(super) fn spotify_share_uri(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn load_collection_album_candidate<T, S>(
+pub(super) async fn load_collection_album_candidate<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     batch_id: u32,
     artist: &str,
@@ -446,7 +433,6 @@ pub(super) async fn load_collection_album_candidate<T, S>(
 ) -> Result<(AccountBinding, Option<CollectionAlbumCandidate>), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let (initial, resolved_provider) = {
         let guard = spotify_membership.lock().await;
@@ -462,8 +448,8 @@ where
         )
         .await?;
         let session = service
-            .snapshot()
-            .await
+            .snapshot_for_work()
+            .await?
             .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
         requested_collection_batch(&session, batch_id, artist)?;
         if session
@@ -504,8 +490,8 @@ where
         return Err("The connected Spotify account changed while loading the album; the import is suspended for safety.".into());
     }
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     requested_collection_batch(&session, batch_id, artist)?;
     let candidate = collection_album_candidate(
@@ -517,12 +503,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn search_collection_albums_with_source<T, S>(
+pub(super) async fn search_collection_albums_with_source<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     batch_id: u32,
     artist: &str,
@@ -536,7 +522,6 @@ pub(super) async fn search_collection_albums_with_source<T, S>(
 >
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let query = query.trim();
@@ -559,8 +544,8 @@ where
         )
         .await?;
         let session = service
-            .snapshot()
-            .await
+            .snapshot_for_work()
+            .await?
             .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
         requested_collection_batch(&session, batch_id, artist)?;
         drop(guard);
@@ -600,8 +585,8 @@ where
         return Err("The connected Spotify account changed while searching; the import is suspended for safety.".into());
     }
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     requested_collection_batch(&session, batch_id, artist)?;
     let membership = collection_membership_from(library, spotify_membership);
@@ -620,12 +605,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn preview_or_add_collection_album<T, S>(
+pub(super) async fn preview_or_add_collection_album<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     batch_id: u32,
     artist: &str,
@@ -634,7 +619,6 @@ pub(super) async fn preview_or_add_collection_album<T, S>(
 ) -> Result<(Option<ImportPageView>, ImportStateView), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     if !valid_collection_album_uri(uri) {
         return Err("Choose a valid Spotify album URI.".into());
@@ -703,23 +687,25 @@ where
             .await?;
     }
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let (_, actual_album) = requested_collection_batch_with_album(&session, batch_id, artist)?;
-    let page = service.page(batch_id, artist, &actual_album).await;
+    let page = service
+        .page_for_work(batch_id, artist, &actual_album)
+        .await?;
     let view = service.state().await;
     drop(guard);
     Ok((page, view))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn remove_collection_album<T, S>(
+pub(super) async fn remove_collection_album<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     batch_id: u32,
     artist: &str,
@@ -727,7 +713,6 @@ pub(super) async fn remove_collection_album<T, S>(
 ) -> Result<(Option<ImportPageView>, ImportStateView), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     if !valid_collection_album_uri(uri) {
         return Err("Choose a valid Spotify album URI.".into());
@@ -762,22 +747,24 @@ where
         )
         .await?;
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let (_, actual_album) = requested_collection_batch_with_album(&session, batch_id, artist)?;
-    let page = service.page(batch_id, artist, &actual_album).await;
+    let page = service
+        .page_for_work(batch_id, artist, &actual_album)
+        .await?;
     let view = service.state().await;
     drop(guard);
     Ok((page, view))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn set_collection_album_import<T, S>(
+pub(super) async fn set_collection_album_import<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     batch_id: u32,
     artist: &str,
@@ -786,7 +773,6 @@ pub(super) async fn set_collection_album_import<T, S>(
 ) -> Result<(Option<ImportPageView>, ImportStateView), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     if !valid_collection_album_uri(uri) {
         return Err("Choose a valid Spotify album URI.".into());
@@ -816,28 +802,29 @@ where
         )
         .await?;
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let (_, actual_album) = requested_collection_batch_with_album(&session, batch_id, artist)?;
-    let page = service.page(batch_id, artist, &actual_album).await;
+    let page = service
+        .page_for_work(batch_id, artist, &actual_album)
+        .await?;
     let view = service.state().await;
     drop(guard);
     Ok((page, view))
 }
 
-pub(super) async fn activate_collection<T, S>(
+pub(super) async fn activate_collection<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     key: ReviewBatchKey,
 ) -> Result<(Option<ImportPageView>, ImportStateView), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let guard = spotify_membership.lock().await;
@@ -868,19 +855,21 @@ where
             &mappings,
         )
         .await?;
-    let page = service.page(key.batch_id, &key.artist, &actual_album).await;
+    let page = service
+        .page_for_work(key.batch_id, &key.artist, &actual_album)
+        .await?;
     drop(guard);
     let view = current_import_view(service, lastfm).await?;
     Ok((page, view))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn change_import_track_with_source<T, S>(
+pub(super) async fn change_import_track_with_source<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
     library: &crate::library_state::LibraryState,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     batch_id: u32,
     id: &str,
@@ -894,7 +883,6 @@ pub(super) async fn change_import_track_with_source<T, S>(
 >
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let (membership, resolved_provider) = {
@@ -918,8 +906,8 @@ where
         )
     };
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let row = session
         .rows
@@ -1025,23 +1013,23 @@ where
         )
         .await?;
     let page = service
-        .page(
+        .page_for_work(
             batch_id,
             &projection.representative_artist,
             &projection.representative_album,
         )
-        .await;
+        .await?;
     drop(guard);
     let view = current_import_view(service, lastfm).await?;
     Ok(((page, view), source))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn change_import_album_with_source<T, S>(
+pub(super) async fn change_import_album_with_source<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: &impl Fn() -> Result<bool, String>,
     batch_id: u32,
     id: &str,
@@ -1049,7 +1037,6 @@ pub(super) async fn change_import_album_with_source<T, S>(
 ) -> Result<(ImportStateView, retune_spotify::client::SearchSource), String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     ensure_review_mutable(service).await?;
     let resolved_provider = {
@@ -1069,8 +1056,8 @@ where
         resolved_provider.expect("required provider is resolved")
     };
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let row = session
         .rows

@@ -90,7 +90,7 @@ fn spotify_path_id<'a>(id: &'a str, kind: &str) -> Result<&'a str> {
 pub fn fake_client(
     responses: impl IntoIterator<Item = Response>,
     scopes: &str,
-) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
+) -> SpotifyClient<FakeTransport> {
     SpotifyClient::new(
         "client",
         FakeTransport::new(responses),
@@ -108,10 +108,11 @@ pub fn fake_client(
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     use super::*;
     use crate::auth::TOKEN_URL;
-    use crate::tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials};
+    use crate::tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials, TokenStore};
     use tokio::sync::Barrier;
 
     struct OverlapTransport {
@@ -176,6 +177,87 @@ mod tests {
                         "expires_in": 3600
                     }),
                 ))
+            })
+        }
+    }
+
+    struct ThreadCheckingStore {
+        inner: Arc<InMemoryTokenStore>,
+        executor: thread::ThreadId,
+    }
+
+    impl TokenStore for ThreadCheckingStore {
+        fn load(&self) -> Result<Option<Tokens>> {
+            assert_ne!(
+                thread::current().id(),
+                self.executor,
+                "token load ran on the async executor"
+            );
+            self.inner.load()
+        }
+
+        fn save(&self, tokens: &Tokens) -> Result<()> {
+            assert_ne!(
+                thread::current().id(),
+                self.executor,
+                "token save ran on the async executor"
+            );
+            self.inner.save(tokens)
+        }
+
+        fn clear(&self) -> Result<()> {
+            assert_ne!(
+                thread::current().id(),
+                self.executor,
+                "token clear ran on the async executor"
+            );
+            self.inner.clear()
+        }
+
+        fn replace_if_current(&self, expected: &Tokens, tokens: &Tokens) -> Result<bool> {
+            assert_ne!(
+                thread::current().id(),
+                self.executor,
+                "token compare-and-replace ran on the async executor"
+            );
+            self.inner.replace_if_current(expected, tokens)
+        }
+    }
+
+    #[derive(Default)]
+    struct BearerAwareTransport {
+        requests: Mutex<Vec<Request>>,
+    }
+
+    impl BearerAwareTransport {
+        fn requests(&self) -> Vec<Request> {
+            self.requests.lock().expect("fake mutex poisoned").clone()
+        }
+    }
+
+    impl Transport for BearerAwareTransport {
+        fn send(&self, request: Request) -> SendFuture<'_> {
+            let response = if request.url == TOKEN_URL {
+                Response::json(
+                    200,
+                    serde_json::json!({"access_token": "new", "expires_in": 3600}),
+                )
+            } else if request
+                .headers
+                .get("authorization")
+                .is_some_and(|value| value == "Bearer old")
+            {
+                Response::json(401, serde_json::json!({"error": "expired"}))
+            } else {
+                Response::json(200, serde_json::json!({"items": [], "next": null}))
+            };
+            Box::pin(async move {
+                self.requests
+                    .lock()
+                    .map_err(|error| Error::Transport(error.to_string()))?
+                    .push(request);
+                tokio::task::yield_now().await;
+                Ok(response)
             })
         }
     }
@@ -539,6 +621,32 @@ mod tests {
         );
         assert!(client.request_counts().is_empty());
         assert_eq!(*client.request_not_before.lock().await, Some(cooldown));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn access_token_refresh_runs_token_store_io_off_executor() {
+        let stored = Tokens {
+            access: "access".into(),
+            refresh: "refresh".into(),
+            expires_at: 0,
+            scopes: "streaming".into(),
+            playback_credentials: None,
+        };
+        let inner = Arc::new(InMemoryTokenStore::new(Some(stored)));
+        let client = SpotifyClient::new(
+            "client",
+            FakeTransport::new([Response::json(
+                200,
+                serde_json::json!({"access_token": "refreshed", "expires_in": 3600}),
+            )]),
+            ThreadCheckingStore {
+                inner: Arc::clone(&inner),
+                executor: thread::current().id(),
+            },
+        );
+
+        assert_eq!(client.access_token().await.unwrap(), "refreshed");
+        assert_eq!(inner.load().unwrap().unwrap().access, "refreshed");
     }
 
     #[tokio::test]
@@ -1522,7 +1630,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playlist_unfollow_sends_exact_delete() {
+    async fn playlist_unfollow_removes_playlist_from_library() {
         let client = SpotifyClient::new(
             "client",
             FakeTransport::new([Response::json(200, serde_json::Value::Null)]),
@@ -1534,11 +1642,13 @@ mod tests {
         let requests = client.transport().requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, Method::Delete);
-        assert_eq!(
-            requests[0].url,
-            format!("{API_BASE}/playlists/playlist/followers")
-        );
+        let url = url::Url::parse(&requests[0].url).unwrap();
+        assert_eq!(url.path(), "/v1/me/library");
         assert!(requests[0].body.is_empty());
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            [("uris".into(), "spotify:playlist:playlist".into())]
+        );
     }
 
     #[tokio::test]
@@ -1690,15 +1800,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_unauthorized_requests_refresh_once() {
-        let transport = FakeTransport::new([
-            Response::json(401, serde_json::json!({"error": "expired"})),
-            Response::json(
-                200,
-                serde_json::json!({"access_token": "new", "expires_in": 3600}),
-            ),
-            Response::json(200, serde_json::json!({"items": [], "next": null})),
-            Response::json(200, serde_json::json!({"items": [], "next": null})),
-        ]);
+        let transport = BearerAwareTransport::default();
         let client = SpotifyClient::new("client", transport, tokens());
         let (left, right) = tokio::join!(client.saved_tracks(0, 1), client.saved_tracks(1, 1));
         left.unwrap();

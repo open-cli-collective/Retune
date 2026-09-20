@@ -1,9 +1,6 @@
 use std::sync::{Arc, Once};
 
-use retune_spotify::{
-    client::{Device, PlayerState, SpotifyClient, Transport},
-    tokens::TokenStore,
-};
+use retune_spotify::client::{Device, PlayerState, SpotifyClient, Transport};
 use tokio::sync::mpsc;
 
 use super::{LiveClient, NeutralEvent, NeutralState, RepeatMode, Snapshot, SnapshotTrack};
@@ -146,9 +143,9 @@ impl ConnectBackend {
         Ok(())
     }
 
-    async fn begin<T: Transport, S: TokenStore>(
+    async fn begin<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         snapshot: Snapshot,
         repeat: RepeatMode,
     ) -> Result<Option<(NeutralState, u64)>, String> {
@@ -207,26 +204,26 @@ impl ConnectBackend {
         Ok(Some((event, generation)))
     }
 
-    async fn toggle_pause<T: Transport, S: TokenStore>(
+    async fn toggle_pause<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
     ) -> Result<NeutralState, String> {
         self.set_context_playing(client, None)
             .await?
             .ok_or_else(|| "Nothing to toggle".into())
     }
 
-    async fn set_playing_state<T: Transport, S: TokenStore>(
+    async fn set_playing_state<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         playing: bool,
     ) -> Result<Option<NeutralState>, String> {
         self.set_context_playing(client, Some(playing)).await
     }
 
-    async fn set_context_playing<T: Transport, S: TokenStore>(
+    async fn set_context_playing<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         requested: Option<bool>,
     ) -> Result<Option<NeutralState>, String> {
         let (revision, generation, device_id, playing) = {
@@ -269,9 +266,9 @@ impl ConnectBackend {
         )))
     }
 
-    async fn seek_state<T: Transport, S: TokenStore>(
+    async fn seek_state<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         seconds: u64,
     ) -> Result<Option<NeutralState>, String> {
         let (revision, generation, device_id, seconds) = {
@@ -309,9 +306,9 @@ impl ConnectBackend {
         )))
     }
 
-    async fn step_state<T: Transport, S: TokenStore>(
+    async fn step_state<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         direction: i8,
     ) -> Result<Option<NeutralState>, String> {
         let (revision, generation, device_id, snapshot, next) = {
@@ -372,9 +369,9 @@ impl ConnectBackend {
         )))
     }
 
-    pub(super) async fn set_volume<T: Transport, S: TokenStore>(
+    pub(super) async fn set_volume<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         volume: u8,
     ) -> Result<(), String> {
         let (revision, device_id) = {
@@ -395,9 +392,9 @@ impl ConnectBackend {
             .map_err(|error| error.to_string())
     }
 
-    pub(super) async fn set_repeat_state<T: Transport, S: TokenStore>(
+    pub(super) async fn set_repeat_state<T: Transport>(
         &self,
-        client: &SpotifyClient<T, S>,
+        client: &SpotifyClient<T>,
         repeat: RepeatMode,
     ) -> Result<(), String> {
         let (revision, generation, device_id, route_at_end, wrap) = {
@@ -533,11 +530,7 @@ impl ConnectBackend {
         });
     }
 
-    async fn poll<T: Transport + 'static, S: TokenStore + 'static>(
-        self,
-        client: Arc<SpotifyClient<T, S>>,
-        generation: u64,
-    ) {
+    async fn poll<T: Transport + 'static>(self, client: Arc<SpotifyClient<T>>, generation: u64) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.tick().await;
         loop {
@@ -800,8 +793,8 @@ fn queue_request(tracks: &[SnapshotTrack], index: usize) -> (Vec<String>, usize)
     (uris, index - start)
 }
 
-async fn play_snapshot<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+async fn play_snapshot<T: Transport>(
+    client: &SpotifyClient<T>,
     device_id: &str,
     tracks: &[SnapshotTrack],
     index: usize,
@@ -936,7 +929,7 @@ mod tests {
         responses: impl IntoIterator<Item = Response>,
         releases: Vec<Arc<Notify>>,
         entered: mpsc::UnboundedSender<String>,
-    ) -> SpotifyClient<DelayedTransport, InMemoryTokenStore> {
+    ) -> SpotifyClient<DelayedTransport> {
         SpotifyClient::new(
             "client",
             DelayedTransport {

@@ -6,10 +6,9 @@ use super::model::{ApplyFailure, ImportApplyFinished};
 use super::{
     apply::{apply_failure_event, apply_work_pending, execute_apply_job},
     current_import_view, enqueue_next_accept_all_job, lastfm_username, recover_before_apply_job,
-    startup_lastfm_identity_matches, startup_resume_plan, AcceptAllSummary,
-    CollectionAlbumCandidate, CountMode, ImportDefaults, ImportMatchSelection, ImportPageView,
-    ImportPhase, ImportQueuePage, ImportStateView, PageOptions, ReviewAction, ReviewApplyJob,
-    ReviewBatchKey, Service, LASTFM_QUEUE_PAGE_LIMIT,
+    AcceptAllSummary, CollectionAlbumCandidate, CountMode, ImportDefaults, ImportMatchSelection,
+    ImportPageView, ImportPhase, ImportQueuePage, ImportStateView, PageOptions, ReviewAction,
+    ReviewApplyJob, ReviewBatchKey, Service, LASTFM_QUEUE_PAGE_LIMIT,
 };
 
 const IMPORT_WINDOWS: [&str; 2] = ["main", "lastfm-importer"];
@@ -70,18 +69,23 @@ pub(super) fn use_cases(
 pub(crate) async fn resume_persisted_import(app: tauri::AppHandle) {
     let state = app.state::<crate::AppState>();
     let service = std::sync::Arc::clone(&state.lastfm_import);
-    let Some(session) = service.snapshot().await else {
+    let Some(owner) = service.owner_phase().await else {
         return;
     };
-    let Some((username, _)) = startup_resume_plan(Some(&session)) else {
+    if !matches!(
+        owner.phase,
+        ImportPhase::Downloading | ImportPhase::Aggregating
+    ) {
         return;
-    };
-    let live_username = if session.phase == ImportPhase::Aggregating {
+    }
+    let username = owner.lastfm_username;
+    let requires_identity_check = owner.phase == ImportPhase::Aggregating;
+    let live_username = if requires_identity_check {
         lastfm_username(state.lastfm.as_ref()).await.ok()
     } else {
         None
     };
-    if !startup_lastfm_identity_matches(&session, live_username.as_deref()) {
+    if requires_identity_check && live_username.as_deref() != Some(username.as_str()) {
         if service.suspend_for_account_mismatch().await.is_ok() {
             let _ = emit_import_invalidated(&app);
         }
@@ -249,12 +253,14 @@ pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportSta
 
 #[tauri::command]
 pub(crate) async fn open_lastfm_importer(app: tauri::AppHandle) -> Result<(), String> {
+    let service = std::sync::Arc::clone(&app.state::<crate::AppState>().lastfm_import);
+    service.set_importer_window_open(true);
     if let Some(window) = app.get_webview_window("lastfm-importer") {
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
-    WebviewWindowBuilder::new(
+    let result = WebviewWindowBuilder::new(
         &app,
         "lastfm-importer",
         WebviewUrl::App("index.html".into()),
@@ -262,9 +268,11 @@ pub(crate) async fn open_lastfm_importer(app: tauri::AppHandle) -> Result<(), St
     .title("Last.fm importer")
     .inner_size(1320.0, 840.0)
     .resizable(true)
-    .build()
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    .build();
+    if result.is_err() && app.get_webview_window("lastfm-importer").is_none() {
+        service.set_importer_window_open(false);
+    }
+    result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

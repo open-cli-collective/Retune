@@ -15,7 +15,7 @@ use super::{
     MAX_SERIALIZED_SESSION_BYTES, SESSION_VERSION,
 };
 
-use crate::persistence::read_limited;
+use crate::persistence::{durable_remove, read_limited, sync_parent};
 
 const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MAPPINGS_BYTES: u64 = 100 * 1024 * 1024;
@@ -39,10 +39,13 @@ pub(super) struct ReviewTransaction {
 }
 
 impl ReviewTransaction {
-    pub(super) fn new(session: LastFmImportSessionV2, mappings: PersistedLastFmMappings) -> Self {
+    pub(super) fn new(
+        session: Option<LastFmImportSessionV2>,
+        mappings: PersistedLastFmMappings,
+    ) -> Self {
         Self {
             version: REVIEW_TRANSACTION_VERSION,
-            session: Some(session),
+            session,
             sync_state: None,
             mappings,
         }
@@ -133,7 +136,12 @@ impl ReviewTransactionStore {
     }
 
     pub(super) fn clear(&self) -> Result<(), String> {
-        match fs::remove_file(&self.path) {
+        durable_remove(&self.path)
+            .map_err(|_| "Could not finish the Last.fm review transaction.".to_string())
+    }
+
+    pub(super) fn sync_parent(&self) -> Result<(), String> {
+        match sync_parent(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err("Could not finish the Last.fm review transaction.".into()),

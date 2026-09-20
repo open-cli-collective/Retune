@@ -2,7 +2,6 @@ use retune_core::model::Library;
 use retune_spotify::{
     catalog::SpotifyCatalog,
     client::{SpotifyClient, Transport},
-    tokens::TokenStore,
 };
 use tauri::Manager;
 
@@ -132,13 +131,13 @@ pub(super) async fn play_tracks(
     Ok(outcome)
 }
 
-async fn resolve_resources<T: Transport, S: TokenStore>(
+async fn resolve_resources<T: Transport>(
     resources: Vec<PlaybackResource>,
     start_index: usize,
     library: Library,
     playlists: crate::playlists::PlaylistCache,
     catalog: SpotifyCatalog,
-    client: Option<&SpotifyClient<T, S>>,
+    client: Option<&SpotifyClient<T>>,
 ) -> Result<(Vec<crate::playback::SnapshotTrack>, usize), String> {
     let (resources, mut resolved, enabled) = tauri::async_runtime::spawn_blocking(move || {
         let (resolved, enabled) = playback_resources::resolve_cached(

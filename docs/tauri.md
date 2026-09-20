@@ -148,7 +148,7 @@ identical. Platform overlays define the supported bundle contract:
 
 | Platform | Bundle | Minimum |
 | --- | --- | --- |
-| macOS arm64 | `.app` inside a `ditto`-created ZIP | macOS 11 |
+| macOS arm64 | `.app` inside a `ditto`-created ZIP | macOS 15+ (Apple-supported releases) |
 | Windows x64/ARM64 | NSIS | WebView2 105; downgrade disabled |
 | Ubuntu amd64/arm64 | Debian package | Ubuntu 22.04 / WebKitGTK 4.1 |
 

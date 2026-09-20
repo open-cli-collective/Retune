@@ -7,15 +7,21 @@ import type { AlbumPageView, ArtistPageView, BrowseView, DecisionTrack, LastFmIm
 import type { MainEvent } from '../src/ipc.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
-const nativeEventHandlers = vi.hoisted(() => new Map<string, (payload: unknown) => void>())
+const nativeEventHandlers = vi.hoisted(() => new Map<string, Set<(payload: unknown) => void>>())
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
   Channel: class { onmessage: (event: unknown) => void; constructor(onmessage: (event: unknown) => void) { this.onmessage = onmessage } },
 }))
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
-    nativeEventHandlers.set(name, (payload) => handler({ payload }))
-    return () => nativeEventHandlers.delete(name)
+    const listener = (payload: unknown) => handler({ payload })
+    const listeners = nativeEventHandlers.get(name) ?? new Set()
+    listeners.add(listener)
+    nativeEventHandlers.set(name, listeners)
+    return () => {
+      listeners.delete(listener)
+      if (!listeners.size) nativeEventHandlers.delete(name)
+    }
   }),
 }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn(async () => () => {}), setTitle: vi.fn(async () => {}) }) }))
@@ -53,7 +59,9 @@ beforeEach(() => {
 })
 
 async function emitNativeEvent(name: string, payload: unknown) {
-  await act(async () => nativeEventHandlers.get(name)?.(payload))
+  await act(async () => {
+    for (const handler of nativeEventHandlers.get(name) ?? []) handler(payload)
+  })
 }
 
 async function render(element: React.ReactNode) {
@@ -236,7 +244,7 @@ describe('mounted native interaction boundaries', () => {
     let playback: PlayerState = { trackId: null, uri: null, elapsed: 0, isPlaying: false, external: false, name: null, art: null, alb: null, durationSecs: 180, shuffle: false }
     const publishPlayback = () => {
       channel.onmessage({ type: 'playerState', payload: playback })
-      nativeEventHandlers.get('lastfm-import-playback')?.({ uri: playback.uri, isPlaying: playback.isPlaying })
+      for (const handler of nativeEventHandlers.get('lastfm-import-playback') ?? []) handler({ uri: playback.uri, isPlaying: playback.isPlaying })
     }
     let connected = initiallyConnected
     let channel: { onmessage: (event: MainEvent) => void }
@@ -392,12 +400,12 @@ describe('mounted native interaction boundaries', () => {
     expect(nativeEventHandlers.has('lastfm-import-playback')).toBe(false)
   })
 
-  it('starts a facet with its first enabled visible track', async () => {
+  it('reports unsupported fixture playback instead of simulating it', async () => {
     const tracks = [
       { ...track(1, 'Excluded'), uri: 'fixture:track:excluded', enabled: false },
       { ...track(2, 'Included'), uri: 'fixture:track:included', enabled: true },
     ]
-    let browse: BrowseView = {
+    const browse: BrowseView = {
       facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] },
       tracks,
       albumRating: null,
@@ -429,15 +437,9 @@ describe('mounted native interaction boundaries', () => {
     await waitFor(() => expect(view.querySelector('[data-facet="cat"] [data-row-index="1"]')).not.toBeNull())
 
     await act(async () => view.querySelector<HTMLButtonElement>('[data-facet="cat"] [data-row-index="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
-    await waitFor(() => expect(view.querySelector('.lcd-copy .marquee')?.textContent).toBe('Included'))
-
-    browse = {
-      ...browse,
-      tracks: browse.tracks.map((track, index) => ({ ...track, id: index + 3, name: `No Playback ${index + 1}`, enabled: false })),
-    }
-    await act(async () => view.querySelector<HTMLButtonElement>('[data-facet="art"] [data-row-index="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
-    await waitFor(() => expect(view.querySelector('[data-track-id="3"]')?.textContent).toContain('No Playback 1'))
-    expect(view.querySelector('.lcd-copy .marquee')?.textContent).toBe('Included')
+    await waitFor(() => expect(view.querySelector('.error-banner')?.textContent).toBe('Unsupported playback URI: fixture:track:included'))
+    expect(view.querySelector('.lcd-copy .marquee')?.textContent).not.toBe('Included')
+    expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
   })
 
   it('keeps unavailable artist follow state retryable and rejects a late stale retry', async () => {
@@ -589,7 +591,7 @@ describe('mounted native interaction boundaries', () => {
     const openMenu = async (target: HTMLElement) => act(async () => target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 250, clientY: 170 })))
     for (const target of [view.querySelector<HTMLElement>(`[data-facet="${facet}"] .column-header`)!, view.querySelector<HTMLElement>(`[data-facet="${facet}"] button[data-row-index="0"]`)!, facetRow('cat', 'Rock')]) {
       await openMenu(target)
-      expect(view.querySelector('[role="menu"] button')).toBeNull()
+      expect(view.querySelector('[role="menu"] > [role="menuitem"]')).toBeNull()
       expect(view.querySelector('[role="menu"] hr')).toBeNull()
       await act(async () => key(view.querySelector('[role="menu"]')!, 'Escape'))
     }
@@ -606,7 +608,14 @@ describe('mounted native interaction boundaries', () => {
     expect([...menu.querySelectorAll('[role="menuitemcheckbox"]')].map((item) => item.textContent)).toEqual(['Genre', 'Artist', 'Album'])
     expect(document.activeElement).toBe(navigation)
     await act(async () => key(navigation, 'ArrowDown'))
-    expect(document.activeElement).toBe(menu.querySelector('[role="menuitemcheckbox"]'))
+    const checkbox = menu.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]')!
+    expect(document.activeElement).toBe(checkbox)
+    checkbox.focus()
+    await act(async () => {
+      expect(key(checkbox, 'Enter').defaultPrevented).toBe(false)
+      checkbox.click()
+    })
+    await waitFor(() => expect(menu.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]')?.getAttribute('aria-checked')).toBe('false'))
     if (process.env.RETUNE_FACET_PREVIEW) {
       const { writeFileSync, readFileSync } = await import('node:fs')
       writeFileSync(process.env.RETUNE_FACET_PREVIEW + '-' + facet + '.html', '<!doctype html><html data-theme="dark"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + view.innerHTML + '</body></html>')
@@ -1820,7 +1829,7 @@ describe('mounted native interaction boundaries', () => {
     })
     const sortedRows = [rows[0], rows[2], rows[1]]
     const other = { ...base, source: { ...base.source, stableId: 'other', track: 'Another song' }, matchResult: { ...base.matchResult, trackMatches: { other: target } } }
-    let page = { ...fixtures.collectionPage, rows: [...rows, other], options: { ...fixtures.collectionPage.options, selectedTrackIds: [...rows, other].map(({ source }) => source.stableId) }, fuzzyGroups: { [target]: rows.map(({ source }) => source) }, resolvedCounts: { [target]: 121 } }
+    let page = { ...fixtures.collectionPage, rows: [...rows, other], options: { ...fixtures.collectionPage.options, selectedTrackIds: [...rows, other].map(({ source }) => source.stableId) }, fuzzyGroups: { [target]: rows.map(({ source }) => source.stableId) }, resolvedCounts: { [target]: 121 } }
     invokeMock.mockImplementation(async (command, args) => {
       if (command === 'lastfm_import_state') return fixtures.state
       if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }
@@ -1828,7 +1837,7 @@ describe('mounted native interaction boundaries', () => {
       if (command === 'lastfm_import_select_matches') return page
       if (command === 'lastfm_import_options') {
         const options = args?.options as typeof page.options
-        page = { ...page, options, fuzzyGroups: options.selectedTrackIds.length === 4 ? { [target]: rows.map(({ source }) => source) } : {} }
+        page = { ...page, options, fuzzyGroups: options.selectedTrackIds.length === 4 ? { [target]: rows.map(({ source }) => source.stableId) } : {} }
         return null
       }
       if (command === 'lastfm_import_review') return fixtures.state
@@ -1900,7 +1909,7 @@ describe('mounted native interaction boundaries', () => {
       decision: { status: id === 'done' ? 'done' as const : id === 'ignored' ? 'ignored-album' as const : 'pending' as const },
       matchResult: { ...base.matchResult, trackMatches: { [id]: target } },
     }))
-    const page = { ...fixtures.collectionPage, rows, options: { ...fixtures.collectionPage.options, selectedTrackIds: ['pending-a', 'pending-b'] }, fuzzyGroups: { [target]: rows.filter((row) => !['ignored-album', 'ignored-artist'].includes(row.decision.status)).map(({ source }) => source) }, resolvedCounts: { [target]: 12 } }
+    const page = { ...fixtures.collectionPage, rows, options: { ...fixtures.collectionPage.options, selectedTrackIds: ['pending-a', 'pending-b'] }, fuzzyGroups: { [target]: rows.filter((row) => !['ignored-album', 'ignored-artist'].includes(row.decision.status)).map(({ source }) => source.stableId) }, resolvedCounts: { [target]: 12 } }
     invokeMock.mockImplementation(async (command) => {
       if (command === 'lastfm_import_state') return fixtures.state
       if (command === 'lastfm_import_queue') return { cursor: 0, items: [fixtures.queue[0]], total: 1, nextCursor: null }

@@ -13,7 +13,9 @@ track URI and playing flag; elapsed-time updates do not refresh the review.
 The main window sends native elapsed-only changes to a per-player presentation
 store subscribed by the transport. Queue, origin, metadata, playback flags, and
 track changes still pass through the app reducer; the controller remains
-authoritative. Simulated playback keeps its reducer timer and elapsed value.
+authoritative. The frontend does not synthesize playback state: start requests
+accept only `spotify:` and `file:` URIs, and fixture or unknown URIs report an
+error before they can replace the active queue or origin.
 When the document is hidden, the presentation store retains native positions
 without notifying the transport and the title marquee pauses. On visibility
 restoration, subscribers read the latest position. Native events, queue changes,

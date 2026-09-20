@@ -170,7 +170,6 @@ pub(super) fn page_view(
             },
         })
         .collect();
-    let mut fuzzy_groups = BTreeMap::<String, Vec<SourceRow>>::new();
     let mut count_rows = BTreeMap::<String, Vec<&SourceRow>>::new();
     for row in &rows {
         let decision = default_decision(session, &row.stable_id);
@@ -192,12 +191,17 @@ pub(super) fn page_view(
             continue;
         };
         count_rows.entry(target_uri.clone()).or_default().push(*row);
-        fuzzy_groups
-            .entry(target_uri)
-            .or_default()
-            .push((*row).clone());
     }
-    fuzzy_groups.retain(|_, rows| rows.len() > 1 || rows.iter().any(|row| row.variants.len() > 1));
+    let fuzzy_groups = count_rows
+        .iter()
+        .filter(|(_, rows)| rows.len() > 1 || rows.iter().any(|row| row.variants.len() > 1))
+        .map(|(target, rows)| {
+            (
+                target.clone(),
+                rows.iter().map(|row| row.stable_id.clone()).collect(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let visible_targets = fuzzy_groups.keys().cloned().collect::<BTreeSet<_>>();
     let count_modes = visible_targets
         .iter()

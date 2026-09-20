@@ -6,6 +6,49 @@ use crate::{
     playlists::PlaylistCache, restore_latch::RestoreMutationState, store::FsPlaylistStore,
 };
 
+fn save_playlist_candidate(
+    store: &FsPlaylistStore,
+    current: &Mutex<CurrentPlaylistCache>,
+    next: PlaylistCache,
+    restore_mutations: &RestoreMutationState,
+) -> Result<(), String> {
+    let existed_before = match store.exists() {
+        Ok(existed) => existed,
+        Err(error) => {
+            restore_mutations.mark_recovery_required();
+            return Err(error.to_string());
+        }
+    };
+    match store.save(&next) {
+        Ok(()) => {
+            *current.lock().expect("playlist mutex poisoned") = CurrentPlaylistCache {
+                cache: next,
+                authoritative: true,
+            };
+            Ok(())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let disk = match store.exists() {
+                Ok(false) if !existed_before => Ok(None),
+                Ok(true) => store.load().map(Some).map_err(|error| error.to_string()),
+                Ok(false) => Err("playlist file disappeared after save".to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let mut state = current.lock().expect("playlist mutex poisoned");
+            let before = state.cache.clone();
+            state.authoritative = false;
+            match disk {
+                Ok(None) => {}
+                Ok(Some(actual)) if actual == next => state.cache = next,
+                Ok(Some(actual)) if actual == before => {}
+                _ => restore_mutations.mark_recovery_required(),
+            }
+            Err(message)
+        }
+    }
+}
+
 pub(crate) struct PlaylistState {
     current: Arc<Mutex<CurrentPlaylistCache>>,
     mutation_gate: Arc<AsyncMutex<()>>,
@@ -127,34 +170,27 @@ impl PlaylistState {
         &self,
         mut operation: PlaylistOperation,
         next: PlaylistCache,
-        invalidate_on_failure: bool,
+        _invalidate_on_failure: bool,
     ) -> Result<PlaylistOperation, String> {
         self.restore_mutations.ensure_allowed()?;
         let store = self.store.clone();
         let current = Arc::clone(&self.current);
+        let current_for_save = Arc::clone(&current);
+        let restore_mutations = Arc::clone(&self.restore_mutations);
         let completion = tauri::async_runtime::spawn(async move {
-            let result =
-                tauri::async_runtime::spawn_blocking(move || store.save(&next).map(|()| next))
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .map_err(|error| error.to_string());
-            let next = match result {
-                Ok(next) => next,
-                Err(error) => {
-                    if invalidate_on_failure || operation.remote_outcome_uncertain {
-                        current
-                            .lock()
-                            .expect("playlist mutex poisoned")
-                            .authoritative = false;
-                    }
-                    operation.remote_resolved();
-                    return Err(error);
-                }
-            };
-            *current.lock().expect("playlist mutex poisoned") = CurrentPlaylistCache {
-                cache: next,
-                authoritative: true,
-            };
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                save_playlist_candidate(&store, &current_for_save, next, &restore_mutations)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            if let Err(error) = result {
+                current
+                    .lock()
+                    .expect("playlist mutex poisoned")
+                    .authoritative = false;
+                operation.remote_resolved();
+                return Err(error);
+            }
             operation.remote_resolved();
             Ok(operation)
         });
@@ -182,15 +218,12 @@ impl PlaylistRestore<'_> {
     }
 
     pub(crate) fn replace(&self, next: PlaylistCache) -> Result<(), String> {
-        self.state
-            .store
-            .save(&next)
-            .map_err(|error| error.to_string())?;
-        *self.state.current.lock().expect("playlist mutex poisoned") = CurrentPlaylistCache {
-            cache: next,
-            authoritative: true,
-        };
-        Ok(())
+        save_playlist_candidate(
+            &self.state.store,
+            &self.state.current,
+            next,
+            &self.state.restore_mutations,
+        )
     }
 
     pub(crate) fn install_recovered(&self, next: PlaylistCache) {
@@ -297,12 +330,19 @@ mod tests {
         assert_eq!(store.load().unwrap(), current);
         let requests = client.transport().requests();
         assert_eq!(requests.len(), 2);
-        assert!(requests
+        let playlist_uris = requests
             .iter()
-            .any(|request| request.url.ends_with("/playlists/first/followers")));
-        assert!(requests
-            .iter()
-            .any(|request| request.url.ends_with("/playlists/second/followers")));
+            .filter_map(|request| url::Url::parse(&request.url).ok())
+            .filter(|url| url.path() == "/v1/me/library")
+            .flat_map(|url| {
+                url.query_pairs()
+                    .filter(|(key, _)| key == "uris")
+                    .map(|(_, uri)| uri.into_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(playlist_uris.contains(&"spotify:playlist:first".into()));
+        assert!(playlist_uris.contains(&"spotify:playlist:second".into()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

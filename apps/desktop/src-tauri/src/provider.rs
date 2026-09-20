@@ -2,7 +2,6 @@ use retune_core::model::NewTrack;
 use retune_spotify::{
     client::{endpoint_family, Album, Artist, Image, Page, SearchSource, SpotifyClient, Transport},
     normalize,
-    tokens::TokenStore,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -167,16 +166,16 @@ pub trait MediaProvider: Send + Sync {
     }
 }
 
-pub struct SpotifySyncProvider<'a, T, S> {
-    client: &'a SpotifyClient<T, S>,
+pub struct SpotifySyncProvider<'a, T> {
+    client: &'a SpotifyClient<T>,
     run: SyncRun<'a>,
     account_id: Option<String>,
 }
 
-impl<'a, T: Transport, S: TokenStore> SpotifySyncProvider<'a, T, S> {
+impl<'a, T: Transport> SpotifySyncProvider<'a, T> {
     #[cfg(test)]
     pub fn new(
-        client: &'a SpotifyClient<T, S>,
+        client: &'a SpotifyClient<T>,
         cooldown_store: &'a FsCooldownStore,
         artist_genres_store: &'a FsArtistGenresStore,
     ) -> Result<Self, String> {
@@ -184,7 +183,7 @@ impl<'a, T: Transport, S: TokenStore> SpotifySyncProvider<'a, T, S> {
     }
 
     pub fn for_account(
-        client: &'a SpotifyClient<T, S>,
+        client: &'a SpotifyClient<T>,
         cooldown_store: &'a FsCooldownStore,
         artist_genres_store: &'a FsArtistGenresStore,
         account_id: impl Into<String>,
@@ -198,7 +197,7 @@ impl<'a, T: Transport, S: TokenStore> SpotifySyncProvider<'a, T, S> {
     }
 
     fn new_with_account(
-        client: &'a SpotifyClient<T, S>,
+        client: &'a SpotifyClient<T>,
         cooldown_store: &'a FsCooldownStore,
         artist_genres_store: &'a FsArtistGenresStore,
         account_id: Option<String>,
@@ -554,13 +553,13 @@ impl<'a> SyncHealth<'a> {
     }
 }
 
-struct GenreSource<'c, T: Transport, S: TokenStore> {
-    client: &'c SpotifyClient<T, S>,
+struct GenreSource<'c, T: Transport> {
+    client: &'c SpotifyClient<T>,
     health: &'c SyncHealth<'c>,
 }
 
-impl<'c, T: Transport, S: TokenStore> GenreSource<'c, T, S> {
-    fn new(client: &'c SpotifyClient<T, S>, health: &'c SyncHealth<'c>) -> Self {
+impl<'c, T: Transport> GenreSource<'c, T> {
+    fn new(client: &'c SpotifyClient<T>, health: &'c SyncHealth<'c>) -> Self {
         Self { client, health }
     }
 
@@ -681,8 +680,8 @@ fn normalized_track(
     }
 }
 
-async fn enrich_music<T: Transport, S: TokenStore>(
-    genres: &GenreSource<'_, T, S>,
+async fn enrich_music<T: Transport>(
+    genres: &GenreSource<'_, T>,
     mut batches: Vec<Vec<PendingTrack>>,
 ) -> Result<Vec<Vec<NewTrack>>, String> {
     let ids = batches
@@ -718,8 +717,8 @@ async fn enrich_music<T: Transport, S: TokenStore>(
         .collect())
 }
 
-async fn normalized_album_tracks<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+async fn normalized_album_tracks<T: Transport>(
+    client: &SpotifyClient<T>,
     health: &SyncHealth<'_>,
     album: &Album,
     added_at: Option<u64>,
@@ -786,8 +785,8 @@ pub(crate) fn saved_album_record(
     }
 }
 
-async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
-    client: &'a SpotifyClient<T, S>,
+async fn spotify_library_snapshot<'a, T: Transport>(
+    client: &'a SpotifyClient<T>,
     kind: LibraryKind,
     run: Option<&'a SyncRun<'a>>,
     account_id: Option<&str>,
@@ -1050,8 +1049,8 @@ async fn spotify_library_snapshot<'a, T: Transport, S: TokenStore>(
     })
 }
 
-async fn spotify_library_snapshots<'a, T: Transport, S: TokenStore>(
-    client: &'a SpotifyClient<T, S>,
+async fn spotify_library_snapshots<'a, T: Transport>(
+    client: &'a SpotifyClient<T>,
     run: Option<&'a SyncRun<'a>>,
     account_id: Option<&str>,
     kinds: &[LibraryKind],
@@ -1079,7 +1078,7 @@ async fn spotify_library_snapshots<'a, T: Transport, S: TokenStore>(
     Ok(snapshots)
 }
 
-impl<T: Transport, S: TokenStore> MediaProvider for SpotifyClient<T, S> {
+impl<T: Transport> MediaProvider for SpotifyClient<T> {
     async fn complete_snapshot(
         &self,
         on_section: &mut (dyn FnMut(LibraryKind) + Send),
@@ -1098,8 +1097,8 @@ fn search_group<T, U>(page: Page<T>, offset: u32, map: impl FnMut(T) -> U) -> Se
     }
 }
 
-pub async fn search_with_source<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn search_with_source<T: Transport>(
+    client: &SpotifyClient<T>,
     query: &str,
     offset: u32,
 ) -> Result<SearchResultsWithSource, String> {
@@ -1149,8 +1148,8 @@ pub async fn search_with_source<T: Transport, S: TokenStore>(
 }
 
 #[cfg(test)]
-pub async fn search<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn search<T: Transport>(
+    client: &SpotifyClient<T>,
     query: &str,
     offset: u32,
 ) -> Result<SearchResults, String> {
@@ -1159,8 +1158,8 @@ pub async fn search<T: Transport, S: TokenStore>(
         .map(|response| response.results)
 }
 
-pub async fn search_albums_with_source<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn search_albums_with_source<T: Transport>(
+    client: &SpotifyClient<T>,
     query: &str,
 ) -> Result<(SearchGroup<SearchAlbum>, SearchSource), String> {
     let response =
@@ -1174,8 +1173,8 @@ pub async fn search_albums_with_source<T: Transport, S: TokenStore>(
 }
 
 #[cfg(test)]
-pub async fn search_albums<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn search_albums<T: Transport>(
+    client: &SpotifyClient<T>,
     query: &str,
 ) -> Result<SearchGroup<SearchAlbum>, String> {
     search_albums_with_source(client, query)
@@ -1183,8 +1182,8 @@ pub async fn search_albums<T: Transport, S: TokenStore>(
         .map(|(results, _)| results)
 }
 
-pub async fn search_tracks_with_source<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn search_tracks_with_source<T: Transport>(
+    client: &SpotifyClient<T>,
     query: &str,
 ) -> Result<(SearchGroup<SearchTrack>, SearchSource), String> {
     let response =
@@ -1217,8 +1216,8 @@ pub async fn search_tracks_with_source<T: Transport, S: TokenStore>(
     ))
 }
 
-pub async fn album_tracks<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn album_tracks<T: Transport>(
+    client: &SpotifyClient<T>,
     album: &str,
 ) -> Result<Vec<NewTrack>, String> {
     album_content(client, album, None)
@@ -1242,8 +1241,8 @@ impl std::fmt::Display for AlbumContentError {
     }
 }
 
-pub async fn album_content<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn album_content<T: Transport>(
+    client: &SpotifyClient<T>,
     album: &str,
     added_at: Option<u64>,
 ) -> Result<(Album, Vec<NewTrack>), AlbumContentError> {
@@ -1286,8 +1285,8 @@ pub async fn album_content<T: Transport, S: TokenStore>(
     Ok((album, tracks))
 }
 
-pub async fn artist_albums_page<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn artist_albums_page<T: Transport>(
+    client: &SpotifyClient<T>,
     artist: &str,
     offset: u32,
 ) -> retune_spotify::Result<ArtistAlbumsPage> {
@@ -1306,7 +1305,7 @@ pub async fn artist_albums_page<T: Transport, S: TokenStore>(
     })
 }
 
-impl<T: Transport, S: TokenStore> MediaProvider for SpotifySyncProvider<'_, T, S> {
+impl<T: Transport> MediaProvider for SpotifySyncProvider<'_, T> {
     async fn complete_snapshot(
         &self,
         on_section: &mut (dyn FnMut(LibraryKind) + Send),
@@ -1398,21 +1397,19 @@ mod tests {
 
     use super::*;
 
-    fn client(
-        responses: impl IntoIterator<Item = Response>,
-    ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
+    fn client(responses: impl IntoIterator<Item = Response>) -> SpotifyClient<FakeTransport> {
         fake_client(responses, "")
     }
 
     async fn client_snapshot(
-        client: &SpotifyClient<FakeTransport, InMemoryTokenStore>,
+        client: &SpotifyClient<FakeTransport>,
         kind: LibraryKind,
     ) -> Result<Snapshot, String> {
         spotify_library_snapshot(client, kind, None, None, &|_| {}).await
     }
 
     async fn provider_snapshot(
-        provider: &SpotifySyncProvider<'_, FakeTransport, InMemoryTokenStore>,
+        provider: &SpotifySyncProvider<'_, FakeTransport>,
         kind: LibraryKind,
     ) -> Result<Snapshot, String> {
         spotify_library_snapshot(

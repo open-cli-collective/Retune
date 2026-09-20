@@ -20,7 +20,7 @@ use retune_spotify::tokens::{TokenStore, Tokens};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    persistence::{atomic_write, read_limited, read_limited_file},
+    persistence::{atomic_write, durable_remove, read_limited, read_limited_file},
     playback::{PlaybackBackend, RepeatMode},
     playlists::PlaylistCache,
 };
@@ -98,6 +98,10 @@ pub type StoreResult<T> = Result<T, StoreError>;
 pub trait OverlayStore {
     fn load(&self) -> StoreResult<Option<Library>>;
     fn save(&self, library: &Library) -> StoreResult<()>;
+
+    fn exists(&self) -> StoreResult<bool> {
+        Ok(true)
+    }
 }
 
 #[derive(Clone)]
@@ -922,6 +926,10 @@ impl FsPlaylistStore {
         }
     }
 
+    pub(crate) fn exists(&self) -> std::io::Result<bool> {
+        self.path.try_exists()
+    }
+
     #[cfg(test)]
     pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
         *self.save_hook.lock().unwrap() = Some(hook);
@@ -1100,7 +1108,11 @@ impl FsCooldownStore {
         let result = update(&mut next);
         coalesce_legacy_quota_entries(&mut next);
         if &next != current {
-            atomic_write(&self.path, &serde_json::to_vec(&next)?, None)?;
+            let bytes = serde_json::to_vec(&next)?;
+            if let Err(error) = atomic_write(&self.path, &bytes, None) {
+                state.cooldowns = None;
+                return Err(error.into());
+            }
             state.cooldowns = Some(next);
         }
         Ok(result)
@@ -1111,7 +1123,11 @@ impl FsCooldownStore {
         self.load_cooldowns()?;
         let mut state = self.state.lock().expect("cooldown state mutex poisoned");
         if state.cooldowns.as_ref() != Some(cooldowns) {
-            atomic_write(&self.path, &serde_json::to_vec(cooldowns)?, None)?;
+            let bytes = serde_json::to_vec(cooldowns)?;
+            if let Err(error) = atomic_write(&self.path, &bytes, None) {
+                state.cooldowns = None;
+                return Err(error.into());
+            }
             state.cooldowns = Some(cooldowns.clone());
         }
         Ok(())
@@ -1337,6 +1353,10 @@ impl FsSpotifyLibraryStore {
         }
     }
 
+    pub(crate) fn exists(&self) -> std::io::Result<bool> {
+        self.path.try_exists()
+    }
+
     #[cfg(test)]
     pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
         *self.save_hook.lock().unwrap() = Some(hook);
@@ -1389,6 +1409,10 @@ impl FsSettingsStore {
         }
     }
 
+    pub(crate) fn exists(&self) -> std::io::Result<bool> {
+        self.path.try_exists()
+    }
+
     #[cfg(test)]
     pub(crate) fn arm_save(&self, hook: Arc<SaveHook>) {
         *self.save_hook.lock().unwrap() = Some(hook);
@@ -1425,6 +1449,38 @@ impl FsSettingsStore {
         settings.normalize();
         settings.validate()?;
         atomic_write(&self.path, &serde_json::to_vec(&settings)?, None).map_err(Into::into)
+    }
+}
+
+fn save_settings_candidate(
+    store: &FsSettingsStore,
+    before: &Settings,
+    next: Settings,
+    restore_mutations: &crate::restore_latch::RestoreMutationState,
+    publish: impl FnOnce(Settings),
+) -> Result<(), String> {
+    let existed_before = match store.exists() {
+        Ok(existed) => existed,
+        Err(error) => {
+            restore_mutations.mark_recovery_required();
+            return Err(error.to_string());
+        }
+    };
+    match store.save(&next) {
+        Ok(()) => {
+            publish(next);
+            Ok(())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            match store.load() {
+                Ok(Some(actual)) if actual == next => publish(next),
+                Ok(Some(actual)) if actual == *before => {}
+                Ok(None) if !existed_before => {}
+                _ => restore_mutations.mark_recovery_required(),
+            }
+            Err(message)
+        }
     }
 }
 
@@ -1501,14 +1557,22 @@ impl SettingsState {
             return Ok((value, previous));
         }
         let store = self.store.clone();
+        let previous_for_save = previous.clone();
         let saved = next.clone();
         let current = Arc::clone(&self.current);
+        let restore_mutations = Arc::clone(&self.restore_mutations);
         let completion = tauri::async_runtime::spawn(async move {
-            tauri::async_runtime::spawn_blocking(move || store.save(&saved))
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?;
-            *current.lock().expect("settings mutex poisoned") = next.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                save_settings_candidate(
+                    &store,
+                    &previous_for_save,
+                    saved,
+                    &restore_mutations,
+                    |next| *current.lock().expect("settings mutex poisoned") = next,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())??;
             Ok::<_, String>((mutation_guard, next))
         });
         let (_mutation_guard, next) = completion
@@ -1541,12 +1605,14 @@ impl SettingsRestore<'_> {
     }
 
     pub(crate) fn replace(&mut self, next: Settings) -> Result<(), String> {
-        self.state
-            .store
-            .save(&next)
-            .map_err(|error| error.to_string())?;
-        *self.state.current.lock().expect("settings mutex poisoned") = next;
-        Ok(())
+        let before = self.state.snapshot();
+        save_settings_candidate(
+            &self.state.store,
+            &before,
+            next,
+            &self.state.restore_mutations,
+            |next| *self.state.current.lock().expect("settings mutex poisoned") = next,
+        )
     }
 
     pub(crate) fn install_recovered(&mut self, next: Settings) {
@@ -1561,6 +1627,10 @@ impl FsOverlayStore {
             #[cfg(test)]
             save_hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) fn exists(&self) -> std::io::Result<bool> {
+        self.path.try_exists()
     }
 
     #[cfg(test)]
@@ -1579,6 +1649,10 @@ impl FsOverlayStore {
 }
 
 impl OverlayStore for FsOverlayStore {
+    fn exists(&self) -> StoreResult<bool> {
+        FsOverlayStore::exists(self).map_err(Into::into)
+    }
+
     fn load(&self) -> StoreResult<Option<Library>> {
         match read_limited(&self.path, MAX_LIBRARY_BYTES) {
             Ok(bytes) => Ok(Some(import(&bytes)?)),
@@ -1652,11 +1726,7 @@ impl FsTokenStore {
     }
 
     fn clear_file(&self) -> retune_spotify::Result<()> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(token_error(error)),
-        }
+        durable_remove(&self.path).map_err(token_error)
     }
 }
 

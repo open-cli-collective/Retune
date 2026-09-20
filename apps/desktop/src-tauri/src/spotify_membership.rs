@@ -4,10 +4,7 @@ use std::{
 };
 
 use retune_core::model::{Library, NewTrack, TrackRecord};
-use retune_spotify::{
-    client::{Album, SpotifyClient, Transport},
-    tokens::TokenStore,
-};
+use retune_spotify::client::{Album, SpotifyClient, Transport};
 
 use crate::{
     library_state::LibraryOwner,
@@ -15,6 +12,50 @@ use crate::{
     provider::{saved_album_record, AlbumContentError},
     store::{self, FsCooldownStore, FsSpotifyLibraryStore, SpotifyLibraryState},
 };
+
+fn save_membership_candidate(
+    store: &FsSpotifyLibraryStore,
+    current: &Mutex<SpotifyLibraryState>,
+    next: SpotifyLibraryState,
+    restore_mutations: &crate::restore_latch::RestoreMutationState,
+) -> store::StoreResult<()> {
+    let existed_before = match store.exists() {
+        Ok(existed) => existed,
+        Err(error) => {
+            restore_mutations.mark_recovery_required();
+            return Err(error.into());
+        }
+    };
+    match store.save(&next) {
+        Ok(()) => {
+            *current.lock().expect("Spotify library mutex poisoned") = next;
+            Ok(())
+        }
+        Err(error) => {
+            let disk = match store.exists() {
+                Ok(false) if !existed_before => Ok(None),
+                Ok(true) => store.load().map(Some),
+                Ok(false) => {
+                    Err(std::io::Error::other("Spotify library file disappeared after save").into())
+                }
+                Err(error) => Err(error.into()),
+            };
+            let before = current
+                .lock()
+                .expect("Spotify library mutex poisoned")
+                .clone();
+            match disk {
+                Ok(Some(actual)) if actual == next => {
+                    *current.lock().expect("Spotify library mutex poisoned") = actual;
+                }
+                Ok(Some(actual)) if actual == before => {}
+                Ok(None) if !existed_before => {}
+                _ => restore_mutations.mark_recovery_required(),
+            }
+            Err(error)
+        }
+    }
+}
 
 pub(super) fn album_track_uris(album: &Album) -> Vec<String> {
     album
@@ -226,13 +267,14 @@ impl SpotifyMembershipGuard {
             .map_err(std::io::Error::other)?;
         let gate = self.gate.take().expect("membership guard is active");
         let store = self.store.clone();
-        let saved = next.clone();
-        let current = Arc::clone(&self.current);
+        let current_for_save = Arc::clone(&self.current);
+        let restore_mutations = Arc::clone(&self.restore_mutations);
         let completion = tauri::async_runtime::spawn(async move {
-            tauri::async_runtime::spawn_blocking(move || store.save(&saved))
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))??;
-            *current.lock().expect("Spotify library mutex poisoned") = next;
+            tauri::async_runtime::spawn_blocking(move || {
+                save_membership_candidate(&store, &current_for_save, next, &restore_mutations)
+            })
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))??;
             Ok::<_, store::StoreError>((gate, owner))
         });
         let (gate, owner) = completion
@@ -422,8 +464,8 @@ pub(crate) fn spotify_action_error(
     spotify_action_failure(cooldown_store, error, crate::unix_now())
 }
 
-pub(crate) async fn remove_from_library<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
+pub(crate) async fn remove_from_library<T: Transport>(
+    provider: &SpotifyClient<T>,
     cooldown_store: &FsCooldownStore,
     uris: &[String],
     now: u64,
@@ -440,8 +482,8 @@ pub(crate) struct AlbumSaveResult {
 
 // This boundary coordinates independent API, membership, library, cooldown, and metadata inputs.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn save_album<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
+pub(crate) async fn save_album<T: Transport>(
+    provider: &SpotifyClient<T>,
     membership: &SpotifyMembership,
     library_owner: &LibraryOwner,
     cooldown_store: &FsCooldownStore,
@@ -466,8 +508,8 @@ pub(crate) async fn save_album<T: Transport, S: TokenStore>(
 
 // The locked variant preserves those explicit dependencies for its single caller.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn save_album_locked<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
+pub(crate) async fn save_album_locked<T: Transport>(
+    provider: &SpotifyClient<T>,
     membership: &mut SpotifyMembershipGuard,
     library_owner: &LibraryOwner,
     cooldown_store: &FsCooldownStore,
@@ -528,8 +570,8 @@ pub(crate) async fn save_album_locked<T: Transport, S: TokenStore>(
     })
 }
 
-pub(crate) async fn save_tracks<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
+pub(crate) async fn save_tracks<T: Transport>(
+    provider: &SpotifyClient<T>,
     membership: &SpotifyMembership,
     library_owner: &LibraryOwner,
     cooldown_store: &FsCooldownStore,
@@ -550,8 +592,8 @@ pub(crate) async fn save_tracks<T: Transport, S: TokenStore>(
     .await
 }
 
-pub(crate) async fn save_tracks_locked<T: Transport, S: TokenStore>(
-    provider: &SpotifyClient<T, S>,
+pub(crate) async fn save_tracks_locked<T: Transport>(
+    provider: &SpotifyClient<T>,
     membership: &mut SpotifyMembershipGuard,
     library_owner: &LibraryOwner,
     cooldown_store: &FsCooldownStore,

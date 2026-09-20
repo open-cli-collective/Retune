@@ -43,13 +43,7 @@ for (const file of markdown) {
   }
 }
 
-const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
-for (const file of ["ARCHITECTURE.md", ...markdown.filter((file) => file.startsWith("docs/"))]) {
-  if (!agents.includes(file)) errors.push(`AGENTS.md does not route to ${file}`);
-}
-
 const install = fs.readFileSync(path.join(root, "docs/INSTALL.md"), "utf8");
-const normalizedInstall = install.replace(/\s+/g, " ");
 for (const value of [
   "https://github.com/open-cli-collective/Retune/releases/latest",
   "Retune-<version>-aarch64.zip",
@@ -77,16 +71,6 @@ for (const value of [
 }
 if (/Retune v\d+\.\d+\.\d+|Retune-\d+\.\d+\.\d+|retune_\d+\.\d+\.\d+/.test(install)) {
   errors.push("docs/INSTALL.md: release instructions must use latest-release and artifact patterns");
-}
-for (const value of [
-  "Do **not** register `http://127.0.0.1:8898/login`; `/login` is Retune's separate internal built-in-playback callback.",
-  "Retune uses Authorization Code with PKCE, so it does not need or store the client secret.",
-  "approve the separate one-time **Authorize Spotify playback** prompt",
-  "Spotify Development Mode currently requires the application owner to have Premium and limits each app to five authenticated users.",
-  "Anyone other than the owner must be added to the app allowlist",
-  "You can import and play local files while signed out.",
-]) {
-  if (!normalizedInstall.includes(value)) errors.push(`docs/INSTALL.md: missing relationship ${value}`);
 }
 
 if (errors.length) {

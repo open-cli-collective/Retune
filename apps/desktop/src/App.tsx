@@ -2,7 +2,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
 import './App.css'
-import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, simulatedPlaybackTick, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
 import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
 import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackContextMenu, TrackList } from './libraryViews.tsx'
@@ -15,7 +15,7 @@ import { playbackEvents, playbackGateway } from './playbackGateway.ts'
 import { createPlaybackProgress, documentVisible, onlyPlaybackProgressChanged, subscribeDocumentVisibility } from './playbackProgress.ts'
 import { useTrackWindow } from './useTrackWindow.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
-import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEventHandlers, type SpotifyPlayRequest } from './ipc.ts'
+import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEvent, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
 import { RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
@@ -26,31 +26,42 @@ const emptyTracks: Track[] = []
 const ZOOM_MIN = 0.7
 const ZOOM_MAX = 1.8
 const ZOOM_BASE = 1.15
-function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void) {
-  const ref = useRef(handler)
-  ref.current = handler
+function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void, onError: (error: unknown) => void = () => {}) {
+  const handle = useEffectEvent(handler)
+  const reportError = useEffectEvent(onError)
   useEffect(() => {
-    const sub = listen<T>(event, ({ payload }) => ref.current(payload))
-    return () => { void sub.then((stop) => stop()) }
+    let active = true
+    const sub = listen<T>(event, ({ payload }) => { if (active) handle(payload) })
+    void sub.catch((error) => { if (active) reportError(error) })
+    return () => {
+      active = false
+      void sub.then((stop) => stop()).catch(() => {})
+    }
   }, [event])
 }
 
-function useTauriInvalidationSnapshot<T>(event: string, snapshot: () => Promise<T>, handler: (payload: T) => void) {
-  const handlerRef = useRef(handler)
-  const snapshotRef = useRef(snapshot)
-  handlerRef.current = handler
-  snapshotRef.current = snapshot
+function useTauriInvalidationSnapshot<T>(
+  event: string,
+  snapshot: () => Promise<T>,
+  handler: (payload: T) => void,
+  onError: (error: unknown) => void,
+) {
+  const read = useEffectEvent(snapshot)
+  const handle = useEffectEvent(handler)
+  const reportError = useEffectEvent(onError)
   useEffect(() => {
     let active = true
     const subscription = subscribeInvalidationThenSnapshot(
       (invalidate) => listen(event, invalidate),
-      () => snapshotRef.current(),
-      (value) => handlerRef.current(value),
+      () => read(),
+      (value) => handle(value),
       () => active,
+      (error) => { if (active) reportError(error) },
     )
+    void subscription.catch((error) => { if (active) reportError(error) })
     return () => {
       active = false
-      void subscription.then((stop) => stop())
+      void subscription.then((stop) => stop()).catch(() => {})
     }
   }, [event])
 }
@@ -87,40 +98,40 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     request().catch((error) => dispatch({ type: 'error', error: String(error) }))
   }, [dispatch])
 
-  const liveBackend = useCallback(() => {
-    const current = playingRef.current
-    return !current?.simulated && (connected || current?.uri?.startsWith('file:'))
-  }, [connected])
-
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin) => {
+    const target = tracks.find((track) => track.id === id)
+    if (!target || (!target.uri.startsWith('file:') && !target.uri.startsWith('spotify:'))) {
+      dispatch({ type: 'error', error: `Unsupported playback URI: ${target?.uri ?? 'unknown'}` })
+      return
+    }
     const playable = playbackQueue(tracks, id)
-    const target = playable.find((track) => track.id === id)
+    const targetIndex = playable.findIndex((track) => track.id === id)
+    if (targetIndex < 0) {
+      dispatch({ type: 'error', error: `Unsupported playback URI: ${target.uri}` })
+      return
+    }
     const request = beginRequestGeneration(playGeneration)
     queue.current = playable
     origin.current = launchOrigin
     pendingPlay.current = null
     dispatch({ type: 'playbackAuthorization', prompt: null })
-    if (playbackStartAction(target?.uri, connected) === 'connect') {
+    if (playbackStartAction(target.uri, connected) === 'connect') {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
       pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: false }
       run(spotifyGateway.connect)
       return
     }
-    if (target?.uri.startsWith('file:') || target?.uri.startsWith('spotify:')) {
-      playbackGateway.play(playable, playable.findIndex((track) => track.id === id))
-        .then((outcome) => {
-          const authorization = currentPlaybackAuthorization(request, playGeneration, outcome, playable)
-          if (!authorization) return
-          pendingPlay.current = { id: authorization.id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
-          dispatch({ type: 'playbackAuthorization', prompt: authorization.prompt })
-        })
-        .catch((error) => {
-          if (isCurrentRequestGeneration(request, playGeneration)) dispatch({ type: 'error', error: String(error) })
-        })
-      return
-    }
-    dispatch({ type: 'play', id, queue: playable, origin: launchOrigin })
+    playbackGateway.play(playable, targetIndex)
+      .then((outcome) => {
+        const authorization = currentPlaybackAuthorization(request, playGeneration, outcome, playable)
+        if (!authorization) return
+        pendingPlay.current = { id: authorization.id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
+        dispatch({ type: 'playbackAuthorization', prompt: authorization.prompt })
+      })
+      .catch((error) => {
+        if (isCurrentRequestGeneration(request, playGeneration)) dispatch({ type: 'error', error: String(error) })
+      })
   }, [connected, dispatch, run])
 
   useEffect(() => {
@@ -138,11 +149,9 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   }, [dispatch])
 
   const toggle = useCallback(() => {
-    if (liveBackend()) {
-      if (playingRef.current && !playingRef.current.external) run(playbackGateway.toggle)
-    }
-    else dispatch({ type: 'togglePlay' })
-  }, [dispatch, liveBackend, run])
+    if (!playingRef.current || playingRef.current.external) return
+    run(playbackGateway.toggle)
+  }, [run])
 
   const playRequestedTrack = useCallback((track: SpotifyPlayRequest) => {
     const current = playingRef.current
@@ -154,29 +163,19 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
   const step = useCallback((direction: number) => {
     const current = playingRef.current
-    if (liveBackend()) {
-      if (current && !current.external) run(direction < 0 ? playbackGateway.previous : playbackGateway.next)
-      return
-    }
-    if (!current?.queue.length || current.trackId === null) return
-    const index = current.queue.findIndex((track) => track.id === current.trackId)
-    const next = current.queue[(index + direction + current.queue.length) % current.queue.length]
-    dispatch({ type: 'step', id: next.id })
-  }, [dispatch, liveBackend, run])
+    if (!current || current.external) return
+    run(direction < 0 ? playbackGateway.previous : playbackGateway.next)
+  }, [run])
 
   const setVolume = useCallback((volume: number) => {
-    if (!liveBackend()) return
     window.clearTimeout(volumeTimer.current)
     volumeTimer.current = window.setTimeout(() => run(() => playbackGateway.setVolume(volume)), 150)
-  }, [liveBackend, run])
+  }, [run])
 
   const seek = useCallback((seconds: number) => {
-    if (liveBackend()) {
-      if (playingRef.current && !playingRef.current.external) run(() => playbackGateway.seek(seconds))
-      return
-    }
-    dispatch({ type: 'seek', elapsed: seconds })
-  }, [dispatch, liveBackend, run])
+    if (!playingRef.current || playingRef.current.external) return
+    run(() => playbackGateway.seek(seconds))
+  }, [run])
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
@@ -220,7 +219,7 @@ function App() {
   const playbackTracks = state.playing?.queue ?? emptyTracks
   const player = usePlayer(state.connection.connected, state.connection.playback_authorized, state.playing, dispatch)
 
-  const mainEventHandlers = useRef<MainEventHandlers>({
+  const handleMainEvent = useEffectEvent((event: MainEvent) => dispatchMainEvent(event, {
     spotifyPlayRequested: player.playRequestedTrack,
     playerState: player.onState,
     playbackAuthorizationRequired: player.onAuthorizationRequired,
@@ -228,16 +227,7 @@ function App() {
     operationRecovered: () => dispatch({ type: 'clear-error' }),
     localImportComplete: (summary) => dispatch({ type: 'importComplete', summary }),
     startupNotice: (notice) => dispatch({ type: 'notice', notice }),
-  })
-  mainEventHandlers.current = {
-    spotifyPlayRequested: player.playRequestedTrack,
-    playerState: player.onState,
-    playbackAuthorizationRequired: player.onAuthorizationRequired,
-    operationError: (error) => dispatch({ type: 'error', error }),
-    operationRecovered: () => dispatch({ type: 'clear-error' }),
-    localImportComplete: (summary) => dispatch({ type: 'importComplete', summary }),
-    startupNotice: (notice) => dispatch({ type: 'notice', notice }),
-  }
+  }))
   const persistSettings = useCallback((patch: SettingsPatch) => {
     appGateway.updateSettings(patch).catch(fail)
   }, [fail])
@@ -270,9 +260,8 @@ function App() {
     }
     if (state.viewKey !== browserPlayKey) return
     setBrowserPlayKey(undefined)
-    const queue = playbackQueue(displayedTracks)
-    const first = queue[0]
-    if (first && tracklistVisible) player.start(first.id, queue, { kind: 'library', source: state.source })
+    const first = displayedTracks.find((track) => track.enabled)
+    if (first && tracklistVisible) player.start(first.id, displayedTracks, { kind: 'library', source: state.source })
   }, [browserPlayKey, browseKey, displayedTracks, player, state.source, state.viewKey, tracklistVisible])
   const setBrowserPanes = useCallback((browserPanes: BrowserPanes) => {
     for (const facet of ['cat', 'art', 'alb'] as const) {
@@ -364,32 +353,32 @@ function App() {
   }, [playlists, state.selectedPlaylist])
 
   useTauriInvalidationSnapshot('settings-changed', appGateway.settings,
-    (settings) => dispatch({ type: 'hydrateSettings', settings }))
+    (settings) => dispatch({ type: 'hydrateSettings', settings }), fail)
   useTauriInvalidationSnapshot(spotifyEvents.connectionChanged, spotifyGateway.connectionState,
-    (connection) => dispatch({ type: 'connection', connection }))
+    (connection) => dispatch({ type: 'connection', connection }), fail)
   useTauriInvalidationSnapshot(spotifyEvents.syncStatusChanged, spotifyGateway.syncStatus,
-    (status) => dispatch({ type: 'spotifySyncStatus', status }))
+    (status) => dispatch({ type: 'spotifySyncStatus', status }), fail)
   useTauriInvalidationSnapshot('lastfm-changed', lastfmGateway.accountState,
-    (lastfm) => dispatch({ type: 'lastfm', lastfm }))
+    (lastfm) => dispatch({ type: 'lastfm', lastfm }), fail)
   useTauriInvalidationSnapshot('lastfm-import-changed', lastfmGateway.state,
     (lastfmImport) => {
       dispatch({ type: 'lastfmImport', lastfmImport })
       spotifyGateway.syncStatus().then((status) => dispatch({ type: 'spotifySyncStatus', status })).catch(fail)
-    })
+    }, fail)
 
   useEffect(() => subscribeMainEvents(
-    (event) => dispatchMainEvent(event, mainEventHandlers.current),
+    handleMainEvent,
     fail,
   ), [fail])
 
-  useTauriEvent('get-info', () => openInfo())
-  useTauriEvent(libraryEvents.changed, () => dispatch({ type: 'refresh' }))
-  useTauriEvent<string>(spotifyEvents.syncProgress, (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }))
-  useTauriEvent<{ tracks: number; fraction: number }>(spotifyEvents.syncProgressCount, (progress) => dispatch({ type: 'syncProgress', progress }))
-  useTauriEvent(spotifyEvents.playlistsChanged, () => dispatch({ type: 'playlistsRefresh' }))
-  useTauriEvent(libraryEvents.localImportStarted, () => dispatch({ type: 'importStarted' }))
-  useTauriEvent(libraryEvents.localImportFailed, () => dispatch({ type: 'importFailed' }))
-  useTauriEvent<boolean>(libraryEvents.localDragChanged, setNativeDragActive)
+  useTauriEvent('get-info', () => openInfo(), fail)
+  useTauriEvent(libraryEvents.changed, () => dispatch({ type: 'refresh' }), fail)
+  useTauriEvent<string>(spotifyEvents.syncProgress, (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }), fail)
+  useTauriEvent<{ tracks: number; fraction: number }>(spotifyEvents.syncProgressCount, (progress) => dispatch({ type: 'syncProgress', progress }), fail)
+  useTauriEvent(spotifyEvents.playlistsChanged, () => dispatch({ type: 'playlistsRefresh' }), fail)
+  useTauriEvent(libraryEvents.localImportStarted, () => dispatch({ type: 'importStarted' }), fail)
+  useTauriEvent(libraryEvents.localImportFailed, () => dispatch({ type: 'importFailed' }), fail)
+  useTauriEvent<boolean>(libraryEvents.localDragChanged, setNativeDragActive, fail)
 
   useEffect(() => {
     if (!state.importStatus || state.importStatus === 'Importing local files…') return
@@ -438,15 +427,6 @@ function App() {
     const title = state.source === 'music' ? 'Retune — Library' : `Retune — ${labels[state.source].name}`
     getCurrentWindow().setTitle(title).catch(fail)
   }, [state.source, fail])
-
-  useEffect(() => {
-    const tick = simulatedPlaybackTick(state.playing?.simulated, state.playing?.isPlaying, state.playing?.trackId, playbackTracks)
-    if (!tick) return
-    const timer = window.setInterval(() => {
-      dispatch({ type: 'tick', ...tick })
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [state.playing?.trackId, state.playing?.isPlaying, state.playing?.simulated, playbackTracks])
 
   const mutate = (mutation: () => Promise<unknown>) => {
     mutation()
@@ -558,16 +538,15 @@ function App() {
     else if (payload === 'toggle_zebra') updateSettings({ zebra: !state.settings.zebra })
     else if (payload === 'toggle_browser') toggleBrowser()
     else if (payload.startsWith('theme_')) updateSettings({ theme: payload.slice(6) as Theme })
-  })
+  }, fail)
   useTauriEvent<string>(playbackEvents.action, (payload) => {
     if (payload === 'play_pause') player.toggle()
     else player.step(payload === 'previous' ? -1 : 1)
-  })
-  useTauriEvent('open-preferences', openPreferences)
-  useTauriEvent('open-setup', () => dispatch({ type: 'setup', open: true }))
+  }, fail)
+  useTauriEvent('open-preferences', openPreferences, fail)
+  useTauriEvent('open-setup', () => dispatch({ type: 'setup', open: true }), fail)
 
-  const onKeyDown = useRef<(event: KeyboardEvent) => void>(() => {})
-  onKeyDown.current = (event: KeyboardEvent) => {
+  const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
     const modalOpen = Boolean(state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject)
     if (event.key === 'Escape' && modalOpen) {
       event.preventDefault()
@@ -630,12 +609,11 @@ function App() {
         window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-facet="${activePane}"] [data-row-index="${index}"]`)?.scrollIntoView({ block: 'nearest' }))
       }
     }
-  }
+  })
   useEffect(() => {
-    const handler = (event: KeyboardEvent) => onKeyDown.current(event)
-    window.addEventListener('keydown', handler)
+    window.addEventListener('keydown', onKeyDown)
     return () => {
-      window.removeEventListener('keydown', handler)
+      window.removeEventListener('keydown', onKeyDown)
       window.clearTimeout(typeahead.current.timer)
     }
   }, [])
@@ -955,7 +933,7 @@ export function TransportBar({ playing, progress, track, query, queryReset, scop
     if (next !== query) onQuery(next)
   }
   const nativeElapsed = useSyncExternalStore(progress?.subscribe ?? noProgressSubscription, progress?.getSnapshot ?? (() => playing?.elapsed ?? 0))
-  const elapsed = !playing ? 0 : playing.simulated ? playing.elapsed : nativeElapsed
+  const elapsed = !playing ? 0 : nativeElapsed
   const shown = playing?.external ? {
     name: `${playing.name ?? 'Unknown Track'} (Spotify)`,
     art: playing.art ?? '',

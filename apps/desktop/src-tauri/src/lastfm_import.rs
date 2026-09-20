@@ -117,8 +117,7 @@ pub(crate) use service::Service;
 use source::{
     aggregate_incremental_scrobbles, discard_post_cutoff, download_page_window_with_checkpoint,
     fetch_incremental_page_with_retry, fetch_source_page, read_incremental_events, run_import,
-    snapshot_cache_id, sort_scrobbles, startup_lastfm_identity_matches, startup_resume_plan,
-    SourceWindowOutcome,
+    snapshot_cache_id, sort_scrobbles, SourceWindowOutcome,
 };
 pub(crate) use source::{aggregate_scrobbles, normalize_for_match, parse_recent_tracks_page};
 #[cfg(test)]
@@ -953,16 +952,15 @@ async fn lastfm_username(lastfm: &crate::lastfm::Service) -> Result<String, Stri
         .ok_or_else(|| "Connect Last.fm before importing its history.".to_string())
 }
 
-async fn ensure_import_readable<T, S>(
+async fn ensure_import_readable<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl Fn() -> Result<bool, String>,
 ) -> Result<bool, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let Some(owner) = service.owner_phase().await else {
         return Ok(true);
@@ -1004,17 +1002,16 @@ where
     }
 }
 
-async fn current_spotify_binding_is_current<T, S>(
+async fn current_spotify_binding_is_current<T>(
     service: &Service,
     lastfm: &crate::lastfm::Service,
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
-    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T, S>>, String>,
+    provider: &impl Fn() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
     connection_state: impl FnOnce() -> Result<bool, String>,
     allow_suspended: bool,
 ) -> Result<bool, String>
 where
     T: retune_spotify::client::Transport,
-    S: retune_spotify::tokens::TokenStore,
 {
     let Some(owner) = service.owner_phase().await else {
         return Ok(false);
@@ -1097,15 +1094,15 @@ where
     Fut: Future<Output = Result<(), String>>,
 {
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     for (batch_id, artist, album) in batch_match_plan(&session, None) {
         prepare(batch_id, artist, album).await?;
     }
     let session = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
     let (albums, tracks) = accept_all_entity_uris(&session);
     Ok(AcceptAllSummary {
@@ -1122,12 +1119,12 @@ async fn select_best_matches_for_batch(
     artist: &str,
     album: &str,
 ) -> Result<(), String> {
-    let Some(page) = service.page(batch_id, artist, album).await else {
+    let Some(page) = service.page_for_work(batch_id, artist, album).await? else {
         return Err("Unknown Last.fm import review batch.".into());
     };
     let collection_shaped = service
-        .snapshot()
-        .await
+        .snapshot_for_work()
+        .await?
         .is_some_and(|session| batch_is_collection_shaped_for_id(&session, batch_id));
     let mut selected_album_uris = BTreeSet::new();
     for item in page.rows {
@@ -1191,7 +1188,7 @@ async fn enqueue_next_accept_all_job(service: &Service) -> Result<bool, String> 
         }
         let username = cursor.lastfm_username.clone();
         let spotify_account_id = cursor.spotify_account_id.clone();
-        let Some(session) = service.snapshot().await else {
+        let Some(session) = service.snapshot_for_work().await? else {
             return Err("No Last.fm import session is active.".into());
         };
         if session.cache_id != cursor.session_id
@@ -1260,8 +1257,8 @@ async fn enqueue_next_accept_all_job(service: &Service) -> Result<bool, String> 
         )
         .await?;
         let session = service
-            .snapshot()
-            .await
+            .snapshot_for_work()
+            .await?
             .ok_or_else(|| "No Last.fm import session is active.".to_string())?;
         let options = session.options_for_page_batch(&batch, &artist, &album, &rows);
         let selected_ids = options

@@ -1,3 +1,4 @@
+mod artwork_cache;
 mod backup;
 mod diagnostics;
 mod external_links;
@@ -29,7 +30,6 @@ mod sync;
 mod sync_orchestrator;
 
 use std::{
-    collections::HashMap,
     fs,
     path::PathBuf,
     sync::{
@@ -39,12 +39,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use artwork_cache::{LocalArtworkCache, MAX_LOCAL_ARTWORK_BYTES};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use library_state::LibraryState;
 #[cfg(test)]
-use library_state::{
-    commit_library_candidate, record_play_with as record_play, LibraryTransactionState,
-};
+use library_state::{record_play_with as record_play, LibraryTransactionState};
 
 #[cfg(test)]
 use playback::RepeatMode;
@@ -77,8 +76,6 @@ use spotify_commands::{
     SpotifyOpenTarget,
 };
 #[cfg(test)]
-use spotify_membership::album_track_uris;
-#[cfg(test)]
 use store::SpotifyLibraryState;
 use store::{
     FsArtistGenresStore, FsCooldownStore, FsOverlayStore, FsPlaylistStore, FsSettingsStore,
@@ -93,7 +90,7 @@ use tauri::{
 use tauri_plugin_opener::OpenerExt;
 
 pub(crate) type SharedTokenStore = Arc<CachedTokenStore<Box<dyn TokenStore>>>;
-type SpotifyProvider = SpotifyClient<HttpTransport, SharedTokenStore>;
+type SpotifyProvider = SpotifyClient<HttpTransport>;
 use tauri_plugin_dialog::DialogExt;
 
 enum PlaybackDurableEffect {
@@ -231,7 +228,7 @@ struct AppState {
     spotify_catalog_saved_generation: Arc<AtomicU64>,
     spotify_catalog_flush_gate: Arc<Mutex<()>>,
     spotify: Mutex<Option<Arc<SpotifyProvider>>>,
-    artwork_cache: Mutex<HashMap<(String, u32), Option<String>>>,
+    local_artwork_cache: LocalArtworkCache,
     playback: Arc<Playback>,
     playback_effects: PlaybackEffects,
     lastfm: Arc<lastfm::Service>,
@@ -291,7 +288,7 @@ pub(crate) fn test_app_state(
         spotify_catalog_saved_generation: Arc::new(AtomicU64::new(0)),
         spotify_catalog_flush_gate: Arc::new(Mutex::new(())),
         spotify: Mutex::new(None),
-        artwork_cache: Mutex::default(),
+        local_artwork_cache: LocalArtworkCache::new(app_data_dir.join("artwork-cache")),
         playback: Arc::new(Playback::default()),
         playback_effects: PlaybackEffects::disabled(),
         lastfm,
@@ -394,12 +391,12 @@ async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<lastfm::LastFmState,
 }
 
 async fn switch_to_local(state: &AppState, volume: u8) -> Result<(), String> {
-    state
-        .token_store
-        .load()
+    let client = provider_from(state)?;
+    client
+        .load_tokens()
+        .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Connect to Spotify before enabling built-in playback.".to_string())?;
-    let client = provider_from(state)?;
     state
         .playback
         .switch_to_local(client.as_ref(), volume)
@@ -584,24 +581,28 @@ fn album_id(uri: &str) -> Option<&str> {
     provider::spotify_id(uri, "album").ok()
 }
 
-async fn resolve_track_artwork<T: Transport, S: TokenStore>(
-    client: Option<&SpotifyClient<T, S>>,
-    cache: &Mutex<HashMap<(String, u32), Option<String>>>,
+async fn resolve_track_artwork<T: Transport>(
+    client: Option<&SpotifyClient<T>>,
+    cache: &LocalArtworkCache,
     local_path: Result<Option<PathBuf>, String>,
     uri: &str,
     min_width: u32,
 ) -> Result<Option<String>, String> {
-    resolve_track_artwork_with(client, cache, local_path, uri, min_width, |path| {
-        retune_audio::read_artwork(path, MAX_LOCAL_ARTWORK_BYTES)
-            .map_err(|error| error.to_string())
+    let local_cache = cache.clone();
+    let local_uri = uri.to_owned();
+    resolve_track_artwork_with(client, local_path, uri, min_width, move |path| {
+        local_cache
+            .get_or_load(&local_uri, &path, |path| {
+                retune_audio::read_artwork(path, MAX_LOCAL_ARTWORK_BYTES)
+                    .map_err(|error| error.to_string())
+            })
             .and_then(|artwork| artwork.map(local_artwork_data_url).transpose())
     })
     .await
 }
 
-async fn resolve_track_artwork_with<T, S, F>(
-    client: Option<&SpotifyClient<T, S>>,
-    cache: &Mutex<HashMap<(String, u32), Option<String>>>,
+async fn resolve_track_artwork_with<T, F>(
+    client: Option<&SpotifyClient<T>>,
     local_path: Result<Option<PathBuf>, String>,
     uri: &str,
     min_width: u32,
@@ -609,22 +610,12 @@ async fn resolve_track_artwork_with<T, S, F>(
 ) -> Result<Option<String>, String>
 where
     T: Transport,
-    S: TokenStore,
     F: FnOnce(PathBuf) -> Result<Option<String>, String> + Send + 'static,
 {
     let local_path = local_path?;
     let id = local_path.is_none().then(|| track_id(uri)).flatten();
     if local_path.is_none() && id.is_none() {
         return Ok(None);
-    }
-    let cache_key = (uri.into(), min_width);
-    if let Some(cached) = cache
-        .lock()
-        .expect("artwork cache mutex poisoned")
-        .get(&cache_key)
-        .cloned()
-    {
-        return Ok(cached);
     }
     let artwork = if let Some(path) = local_path {
         tauri::async_runtime::spawn_blocking(move || read_local(path))
@@ -639,15 +630,8 @@ where
             .and_then(|track| track.album)
             .and_then(|album| image_url_at_least(&album.images, min_width))
     };
-    let mut cache = cache.lock().expect("artwork cache mutex poisoned");
-    if cache.len() >= 512 {
-        cache.clear();
-    }
-    cache.insert(cache_key, artwork.clone());
     Ok(artwork)
 }
-
-const MAX_LOCAL_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
 
 fn local_artwork_data_url(artwork: retune_audio::Artwork) -> Result<String, String> {
     if artwork.bytes.len() > MAX_LOCAL_ARTWORK_BYTES {
@@ -655,14 +639,13 @@ fn local_artwork_data_url(artwork: retune_audio::Artwork) -> Result<String, Stri
             "Embedded artwork exceeds the {MAX_LOCAL_ARTWORK_BYTES}-byte limit."
         ));
     }
-    Ok(format!(
-        "data:{};base64,{}",
-        artwork
-            .mime
-            .as_deref()
-            .unwrap_or("application/octet-stream"),
-        BASE64_STANDARD.encode(artwork.bytes)
-    ))
+    let mime = artwork
+        .mime
+        .as_deref()
+        .unwrap_or("application/octet-stream");
+    let mut data_url = format!("data:{mime};base64,");
+    BASE64_STANDARD.encode_string(&artwork.bytes, &mut data_url);
+    Ok(data_url)
 }
 
 fn authorized_local_artwork_path(library: &Library, uri: &str) -> Result<Option<PathBuf>, String> {
@@ -687,7 +670,7 @@ pub(crate) async fn publish_media_artwork(app: tauri::AppHandle, event: PlayerSt
     .flatten();
     let Ok(Some(url)) = resolve_track_artwork(
         provider.as_deref(),
-        &state.artwork_cache,
+        &state.local_artwork_cache,
         Ok(local_path),
         event.uri.as_deref().unwrap_or_default(),
         300,
@@ -712,11 +695,6 @@ fn initial_library(debug: bool) -> Library {
     } else {
         Library::new()
     }
-}
-
-#[cfg(test)]
-fn remove_album_tracks(library: &mut Library, album: &Album) -> usize {
-    library.remove_uris(&album_track_uris(album))
 }
 
 fn import_local_files(app: &tauri::AppHandle) {
@@ -1194,7 +1172,7 @@ fn finish_startup(
         spotify_catalog_saved_generation,
         spotify_catalog_flush_gate,
         spotify: Mutex::new(spotify),
-        artwork_cache: Mutex::default(),
+        local_artwork_cache: LocalArtworkCache::new(app_data_dir.join("artwork-cache")),
         playback: Arc::clone(&playback),
         playback_effects,
         lastfm: Arc::clone(&lastfm),
@@ -1588,6 +1566,11 @@ pub fn run() {
         tauri::RunEvent::Ready => ready = true,
         tauri::RunEvent::WindowEvent { label, event, .. } => {
             handle_local_drag_event(app, &label, &event);
+            if label == "lastfm-importer" && matches!(&event, tauri::WindowEvent::Destroyed) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.lastfm_import.set_importer_window_open(false);
+                }
+            }
         }
         tauri::RunEvent::Resumed if ready => {
             let Some(state) = app.try_state::<AppState>() else {
@@ -2022,20 +2005,6 @@ mod tests {
         }
     }
 
-    struct RejectingOverlayStore;
-
-    impl OverlayStore for RejectingOverlayStore {
-        fn load(&self) -> store::StoreResult<Option<Library>> {
-            Ok(None)
-        }
-
-        fn save(&self, _library: &Library) -> store::StoreResult<()> {
-            Err(store::StoreError::Io(std::io::Error::other(
-                "save rejected",
-            )))
-        }
-    }
-
     use retune_core::model::NewTrack;
     use retune_spotify::{
         auth,
@@ -2053,28 +2022,6 @@ mod tests {
         ExportSettings,
     };
     use crate::store::{BrowserPanes, LastFmScrobblingProfile};
-
-    #[test]
-    fn failed_library_candidate_save_does_not_swap_live_memory() {
-        let mut live = Library::new();
-        live.add(metadata_track(
-            "spotify:track:existing",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
-        let before = retune_core::io::export_json(&live);
-        let mut candidate = live.clone();
-        candidate.add(metadata_track(
-            "spotify:track:new",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
-
-        assert!(commit_library_candidate(&RejectingOverlayStore, &mut live, candidate).is_err());
-        assert_eq!(retune_core::io::export_json(&live), before);
-    }
 
     #[test]
     fn corrupt_token_quarantine_preserves_the_damaged_file() {
@@ -2345,7 +2292,7 @@ mod tests {
 
     fn playlist_client(
         responses: impl IntoIterator<Item = Response>,
-    ) -> SpotifyClient<FakeTransport, InMemoryTokenStore> {
+    ) -> SpotifyClient<FakeTransport> {
         fake_client(responses, &auth::SCOPES)
     }
 
@@ -2457,7 +2404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn track_artwork_resolves_requested_sizes_and_caches_each() {
+    async fn track_artwork_resolves_requested_sizes_from_spotify_catalog() {
         let track = serde_json::json!({
             "uri": "spotify:track:track",
             "name": "Track",
@@ -2479,53 +2426,88 @@ mod tests {
                 serde_json::json!({"uri": "spotify:track:missing", "name": "Missing"}),
             ),
         ]);
-        let cache = Mutex::default();
-
+        let local_cache = LocalArtworkCache::new("unused");
         assert_eq!(track_id("spotify:track:track"), Some("track"));
         assert_eq!(track_id("spotify:album:album"), None);
         assert_eq!(track_id("spotify:track:"), None);
         assert_eq!(track_id("spotify:track:../albums"), None);
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:track", 64)
-                .await
-                .unwrap()
-                .as_deref(),
+            resolve_track_artwork(
+                Some(&client),
+                &local_cache,
+                Ok(None),
+                "spotify:track:track",
+                64
+            )
+            .await
+            .unwrap()
+            .as_deref(),
             Some("small")
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:track", 64)
-                .await
-                .unwrap(),
+            resolve_track_artwork(
+                Some(&client),
+                &local_cache,
+                Ok(None),
+                "spotify:track:track",
+                64
+            )
+            .await
+            .unwrap(),
             Some("small".into())
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:track", 300)
-                .await
-                .unwrap(),
+            resolve_track_artwork(
+                Some(&client),
+                &local_cache,
+                Ok(None),
+                "spotify:track:track",
+                300
+            )
+            .await
+            .unwrap(),
             Some("large".into())
         );
         assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:album:album", 64)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:missing", 64)
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            resolve_track_artwork(Some(&client), &cache, Ok(None), "spotify:track:missing", 64)
-                .await
-                .unwrap(),
+            resolve_track_artwork(
+                Some(&client),
+                &local_cache,
+                Ok(None),
+                "spotify:album:album",
+                64
+            )
+            .await
+            .unwrap(),
             None
         );
         assert_eq!(
             resolve_track_artwork(
                 Some(&client),
-                &cache,
+                &local_cache,
+                Ok(None),
+                "spotify:track:missing",
+                64
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_track_artwork(
+                Some(&client),
+                &local_cache,
+                Ok(None),
+                "spotify:track:missing",
+                64
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_track_artwork(
+                Some(&client),
+                &local_cache,
                 Ok(None),
                 "spotify:track:../albums",
                 64
@@ -2538,9 +2520,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_track_artwork_reads_tags_and_caches_missing_files() {
-        let cache = Mutex::default();
+    async fn local_track_artwork_uses_disk_cache_across_requested_sizes() {
         let dir = tempfile::tempdir().unwrap();
+        let cache = LocalArtworkCache::new(dir.path().join("artwork-cache"));
         let tagged = dir.path().join("tagged.mp3");
         let tagged_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../crates/retune-audio/tests/fixtures/cc0-audio-tagged.mp3");
@@ -2548,7 +2530,7 @@ mod tests {
         let uri = localfiles::file_uri(&tagged.canonicalize().unwrap());
 
         let artwork = resolve_track_artwork(
-            None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+            None::<&SpotifyClient<FakeTransport>>,
             &cache,
             Ok(Some(tagged.clone())),
             &uri,
@@ -2567,14 +2549,13 @@ mod tests {
                 .unwrap()
                 .bytes
         );
-        fs::remove_file(&tagged).unwrap();
         assert_eq!(
             resolve_track_artwork(
-                None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+                None::<&SpotifyClient<FakeTransport>>,
                 &cache,
                 Ok(Some(tagged.clone())),
                 &uri,
-                64
+                300
             )
             .await
             .unwrap(),
@@ -2585,7 +2566,7 @@ mod tests {
             .join("../../../crates/retune-audio/tests/fixtures/cc0-audio.wav");
         assert_eq!(
             resolve_track_artwork(
-                None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+                None::<&SpotifyClient<FakeTransport>>,
                 &cache,
                 Ok(Some(wav.clone())),
                 &localfiles::file_uri(&wav),
@@ -2599,16 +2580,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn slow_local_artwork_read_does_not_block_the_async_worker() {
-        let cache = Arc::new(Mutex::default());
         let started = Arc::new(tokio::sync::Notify::new());
         let (release, released) = std::sync::mpsc::channel();
         let resolver = {
-            let cache = Arc::clone(&cache);
             let started = Arc::clone(&started);
             tokio::spawn(async move {
                 resolve_track_artwork_with(
-                    None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
-                    &cache,
+                    None::<&SpotifyClient<FakeTransport>>,
                     Ok(Some(PathBuf::from("slow.mp3"))),
                     "file:///slow.mp3",
                     64,
@@ -2646,52 +2624,43 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_local_artwork_never_reads_tags() {
-        let cache = Mutex::default();
-        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let reader_reads = Arc::clone(&reads);
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("artwork-cache");
+        let cache = LocalArtworkCache::new(&cache_dir);
 
-        let result = resolve_track_artwork_with(
-            None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
+        let result = resolve_track_artwork(
+            None::<&SpotifyClient<FakeTransport>>,
             &cache,
             Err("Local artwork resource is not in the library.".into()),
             "file:///etc/passwd",
             64,
-            move |_| {
-                reader_reads.fetch_add(1, Ordering::SeqCst);
-                Ok(None)
-            },
         )
         .await;
 
         assert!(result.is_err());
-        assert_eq!(reads.load(Ordering::SeqCst), 0);
-        assert!(cache.lock().unwrap().is_empty());
+        assert!(!cache_dir.exists());
     }
 
-    #[tokio::test]
-    async fn local_artwork_errors_are_not_cached() {
-        let cache = Mutex::default();
+    #[test]
+    fn local_artwork_errors_are_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("oversized.mp3");
+        fs::write(&source, b"audio source").unwrap();
+        let cache_dir = dir.path().join("artwork-cache");
+        let cache = LocalArtworkCache::new(&cache_dir);
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         for _ in 0..2 {
             let reader_reads = Arc::clone(&reads);
-            let result = resolve_track_artwork_with(
-                None::<&SpotifyClient<FakeTransport, InMemoryTokenStore>>,
-                &cache,
-                Ok(Some(PathBuf::from("oversized.mp3"))),
-                "file:///oversized.mp3",
-                64,
-                move |_| {
-                    reader_reads.fetch_add(1, Ordering::SeqCst);
-                    Err("embedded artwork exceeds the byte limit".into())
-                },
-            )
-            .await;
+            let result = cache.get_or_load("file:///oversized.mp3", &source, move |_| {
+                reader_reads.fetch_add(1, Ordering::SeqCst);
+                Err("embedded artwork exceeds the byte limit".into())
+            });
             assert!(result.is_err());
         }
 
         assert_eq!(reads.load(Ordering::SeqCst), 2);
-        assert!(cache.lock().unwrap().is_empty());
+        assert!(!cache_dir.exists());
     }
 
     #[test]
@@ -2973,39 +2942,6 @@ mod tests {
 
         assert!(tracks[0].in_library);
         assert!(!tracks[1].in_library);
-    }
-
-    #[test]
-    fn remove_album_tracks_removes_exactly_the_album_uris() {
-        let mut library = Library::new();
-        library.add(metadata_track(
-            "spotify:track:one",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
-        library.add(metadata_track(
-            "spotify:track:two",
-            "Rock",
-            "Artist",
-            "Album",
-        ));
-        library.add(metadata_track(
-            "spotify:track:other",
-            "Rock",
-            "Artist",
-            "Other",
-        ));
-
-        assert_eq!(remove_album_tracks(&mut library, &spotify_album()), 2);
-        assert_eq!(
-            library
-                .tracks()
-                .iter()
-                .map(|track| track.uri.as_str())
-                .collect::<Vec<_>>(),
-            ["spotify:track:other"]
-        );
     }
 
     #[test]

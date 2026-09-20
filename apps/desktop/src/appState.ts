@@ -53,11 +53,6 @@ export type Action =
   | { type: 'scope'; scope: State['scope'] }
   | { type: 'selectTrack'; id: number }
   | { type: 'selection'; ids: Set<number>; anchor?: number }
-  | { type: 'play'; id: number; queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
-  | { type: 'togglePlay' }
-  | { type: 'step'; id: number }
-  | { type: 'tick'; duration: number; nextId: number }
-  | { type: 'seek'; elapsed: number }
   | { type: 'playerState'; player: PlayerState; queue: readonly PlaybackTrack[]; origin?: PlaybackOrigin }
   | { type: 'hydrateSettings'; settings: Settings }
   | { type: 'settings'; settings: Partial<Settings> }
@@ -169,31 +164,6 @@ export function reducer(state: State, action: Action): State {
       return { ...state, selectedTrackIds: new Set([action.id]), selectionAnchor: action.id }
     case 'selection':
       return { ...state, selectedTrackIds: action.ids, selectionAnchor: action.anchor }
-    case 'play':
-      return {
-        ...state,
-        selectedTrackIds: new Set([action.id]),
-        selectionAnchor: action.id,
-        playing: {
-          trackId: action.id, elapsed: 0, isPlaying: true, queue: action.queue,
-          uri: action.queue.find((track) => track.id === action.id)?.uri ?? null,
-          external: false, name: null, art: null, alb: null, durationSecs: null,
-          shuffle: state.settings.shuffle, origin: action.origin, simulated: true,
-        },
-      }
-    case 'togglePlay':
-      return state.playing
-        ? { ...state, playing: { ...state.playing, isPlaying: !state.playing.isPlaying } }
-        : state
-    case 'step':
-      return state.playing
-        ? { ...state, playing: { ...state.playing, trackId: action.id, elapsed: 0, isPlaying: true } }
-        : state
-    case 'tick':
-      if (!state.playing?.isPlaying) return state
-      return state.playing.elapsed + 1 >= action.duration
-        ? { ...state, playing: { ...state.playing, trackId: action.nextId, elapsed: 0, isPlaying: true } }
-        : { ...state, playing: { ...state.playing, elapsed: state.playing.elapsed + 1 } }
     case 'playerState':
       return action.player.trackId === null && !action.player.name
         ? { ...state, playing: null }
@@ -201,10 +171,6 @@ export function reducer(state: State, action: Action): State {
             ...state,
             playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue, origin: action.origin },
           }
-    case 'seek':
-      return state.playing
-        ? { ...state, playing: { ...state.playing, elapsed: action.elapsed } }
-        : state
     case 'hydrateSettings':
       return { ...state, settings: action.settings, settingsHydrated: true }
     case 'settings':

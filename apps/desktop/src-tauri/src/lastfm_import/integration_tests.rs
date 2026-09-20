@@ -1,4 +1,5 @@
 use super::model::ImportApplyFinished;
+use super::service::ImportOwnerPhase;
 use super::*;
 use crate::{
     spotify_membership::SpotifyMembership,
@@ -16,6 +17,30 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+
+#[cfg(target_os = "macos")]
+#[path = "memory_experiment.rs"]
+mod memory_experiment;
+
+struct SaveHookReleaseOnDrop(Option<Arc<crate::store::SaveHook>>);
+
+impl SaveHookReleaseOnDrop {
+    fn new(hook: Arc<crate::store::SaveHook>) -> Self {
+        Self(Some(hook))
+    }
+
+    fn release(&mut self) {
+        if let Some(hook) = self.0.take() {
+            hook.release();
+        }
+    }
+}
+
+impl Drop for SaveHookReleaseOnDrop {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 // Opt-in synthetic evidence for docs/lastfm-interaction-audit.md.
 #[tokio::test]
@@ -72,7 +97,7 @@ async fn audit_apply_acceptance_cost() {
     for sample in 0..3 {
         let directory = tempfile::tempdir().unwrap();
         let service = Service::new(directory.path());
-        *service.session.lock().await = Some(session.clone());
+        service.install_session_for_test(session.clone()).await;
         let start = Instant::now();
         super::apply::apply_page(
             &service,
@@ -1715,6 +1740,17 @@ async fn count_mode_use_case_persists_session_and_reusable_mapping_default() {
     .unwrap();
 
     assert_eq!(view.phase, Some(ImportPhase::Review));
+    assert_eq!(
+        service.snapshot().await.unwrap().default_count_mode,
+        CountMode::Overwrite
+    );
+    assert_eq!(
+        service.export_mappings().await.mappings.default_count_mode,
+        CountMode::Overwrite
+    );
+    tokio::time::timeout(Duration::from_secs(5), service.wait_for_queued_writes())
+        .await
+        .expect("queued review save should finish");
     let reloaded = Service::new(directory.path());
     assert_eq!(
         reloaded.snapshot().await.unwrap().default_count_mode,
@@ -1944,10 +1980,21 @@ async fn aborted_import_session_save_finishes_disk_and_memory_publication() {
         tokio::task::yield_now().await;
     }
     hook.wait_until_reached();
-    assert!(!service.snapshot().await.unwrap().search_terms);
+    let mut hook_release = SaveHookReleaseOnDrop::new(Arc::clone(&hook));
+    let reads = tokio::time::timeout(Duration::from_millis(250), async {
+        let snapshot = service.snapshot().await.unwrap();
+        let page = service.page_for_work(1, "Artist", "Album").await?;
+        let queue = service.queue_page(0, 1).await?;
+        Ok::<_, String>((snapshot, page, queue))
+    })
+    .await;
+    hook_release.release();
+    let (snapshot, _page, _queue) = reads
+        .expect("resident snapshot, page, and queue reads should bypass blocked disk writes")
+        .expect("resident snapshot, page, and queue reads should succeed");
+    assert!(!snapshot.search_terms);
 
     mutation.abort();
-    hook.release();
     assert!(mutation.await.unwrap_err().is_cancelled());
     tokio::time::timeout(Duration::from_secs(1), async {
         while !service.snapshot().await.unwrap().search_terms {
@@ -3030,30 +3077,35 @@ fn cached_spotify_identity_only_trusts_an_exact_matching_cache() {
 }
 
 #[test]
-fn session_account_matching_requires_bound_identity_for_owned_mutations() {
-    let mut session = LastFmImportSessionV2::new("lastfm-user".into(), "spotify-a".into(), 1);
-    assert!(session_account_matches(
-        &session,
+fn owner_account_matching_requires_bound_identity_for_owned_mutations() {
+    let mut owner = ImportOwnerPhase {
+        cache_id: "cache".into(),
+        lastfm_username: "lastfm-user".into(),
+        spotify_account_id: Some("spotify-a".into()),
+        phase: ImportPhase::Review,
+    };
+    assert!(owner_account_matches(
+        &owner,
         "lastfm-user",
         "spotify-a",
         true
     ));
-    assert!(!session_account_matches(
-        &session,
+    assert!(!owner_account_matches(
+        &owner,
         "lastfm-user",
         "spotify-b",
         true
     ));
 
-    session.spotify_account_id = None;
-    assert!(!session_account_matches(
-        &session,
+    owner.spotify_account_id = None;
+    assert!(!owner_account_matches(
+        &owner,
         "lastfm-user",
         "spotify-a",
         true
     ));
-    assert!(session_account_matches(
-        &session,
+    assert!(owner_account_matches(
+        &owner,
         "lastfm-user",
         "spotify-a",
         false
@@ -4221,7 +4273,7 @@ async fn large_queue_follows_every_cursor_in_order_without_materializing_prior_s
             album_labels: Vec::new(),
         })
         .collect();
-    *service.session.lock().await = Some(session);
+    service.install_session_for_test(session).await;
 
     let mut cursor = 0;
     let mut seen_pages = Vec::with_capacity(count as usize);
@@ -7491,7 +7543,7 @@ async fn page_projects_count_modes_to_visible_fuzzy_targets() {
         assert_eq!(
             page.fuzzy_groups[&visible_target]
                 .iter()
-                .map(|row| row.stable_id.clone())
+                .cloned()
                 .collect::<BTreeSet<_>>(),
             visible_ids.iter().cloned().collect::<BTreeSet<_>>()
         );
@@ -7676,7 +7728,7 @@ async fn interrupted_count_mode_transaction_rolls_forward_both_files_on_reload()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn aborted_journal_recovery_publishes_before_the_next_mutation() {
+async fn failed_review_save_latches_until_restart_and_recovery_cancellation_is_safe() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
     let mut session = LastFmImportSessionV2::new("user".into(), "spotify".into(), 10);
@@ -7704,38 +7756,73 @@ async fn aborted_journal_recovery_publishes_before_the_next_mutation() {
     failed_save.release();
     assert!(transaction.await.unwrap().is_err());
 
+    let blocked = service
+        .set_search_terms("user", "spotify", true)
+        .await
+        .unwrap_err();
+    assert!(blocked.contains("recovery"));
+
+    let reloaded = Service::new(dir.path());
+    assert_eq!(
+        reloaded.snapshot().await.unwrap().default_count_mode,
+        CountMode::Zero
+    );
+    assert_eq!(
+        reloaded
+            .mappings_for("user", Some("spotify"))
+            .await
+            .unwrap()
+            .default_count_mode,
+        CountMode::Zero
+    );
+
+    let mut pending_session = reloaded.snapshot().await.unwrap();
+    pending_session.default_count_mode = CountMode::Overwrite;
+    let mut pending_mappings = reloaded.export_mappings().await;
+    pending_mappings.mappings.default_count_mode = CountMode::Overwrite;
+    reloaded
+        .review_transaction_store
+        .save(&super::store::ReviewTransaction::new(
+            Some(pending_session),
+            pending_mappings,
+        ))
+        .unwrap();
     let recovery_hook = crate::store::SaveHook::new(false);
-    service
+    reloaded
         .review_transaction_store
         .arm_recovery(Arc::clone(&recovery_hook));
     let cancelled = {
-        let service = Arc::clone(&service);
-        tokio::spawn(async move { service.set_search_terms("user", "spotify", true).await })
+        let reloaded = Arc::clone(&reloaded);
+        tokio::spawn(async move { reloaded.set_search_terms("user", "spotify", true).await })
     };
-    while !recovery_hook.is_reached() {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !recovery_hook.is_reached() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recovery should reach its test hook");
     recovery_hook.wait_until_reached();
     cancelled.abort();
     recovery_hook.release();
     assert!(cancelled.await.unwrap_err().is_cancelled());
 
-    service
+    reloaded
         .set_search_terms("user", "spotify", true)
         .await
         .unwrap();
     assert_eq!(
-        service.snapshot().await.unwrap().default_count_mode,
-        CountMode::Zero
+        reloaded.snapshot().await.unwrap().default_count_mode,
+        CountMode::Overwrite
     );
     assert_eq!(
-        service.export_mappings().await.mappings.default_count_mode,
-        CountMode::Zero
+        reloaded.export_mappings().await.mappings.default_count_mode,
+        CountMode::Overwrite
     );
-    let reloaded = Service::new(dir.path());
-    let session = reloaded.snapshot().await.unwrap();
+    let persisted = Service::new(dir.path());
+    let session = persisted.snapshot().await.unwrap();
     assert!(session.search_terms);
-    assert_eq!(session.default_count_mode, CountMode::Zero);
+    assert_eq!(session.default_count_mode, CountMode::Overwrite);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -9618,18 +9705,33 @@ async fn overlapping_mutations_preserve_memory_and_disk_changes() {
 #[tokio::test]
 async fn failed_blocking_persistence_does_not_commit_live_mutation() {
     let dir = tempfile::tempdir().unwrap();
-    let mut service = Service::new(dir.path());
+    let service = Service::new(dir.path());
     start_bound(&service, "lastfm-user", "spotify-user", 500).await;
     let mut review_session = service.snapshot().await.unwrap();
     review_session.phase = ImportPhase::Review;
     service.save(review_session).await.unwrap();
-    Arc::get_mut(&mut service).unwrap().store.path = dir.path().to_path_buf();
+    let hook = crate::store::SaveHook::new(true);
+    service.store.arm_save(Arc::clone(&hook));
+    let mutation = {
+        let service = Arc::clone(&service);
+        tokio::spawn(async move {
+            service
+                .set_search_terms("lastfm-user", "spotify-user", false)
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !hook.is_reached() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("blocking save should reach its failure hook");
+    hook.wait_until_reached();
+    hook.release();
 
-    let error = service
-        .set_search_terms("lastfm-user", "spotify-user", false)
-        .await
-        .unwrap_err();
-    assert!(error.contains("Could not save the Last.fm import session."));
+    let error = mutation.await.unwrap().unwrap_err();
+    assert!(error.contains("injected save failure"));
     assert!(service.snapshot().await.unwrap().search_terms);
     assert!(
         ImportSessionStore::new(dir.path())
@@ -11034,7 +11136,7 @@ async fn cancelled_and_panicked_runner_guards_release_their_claims() {
         let started = Arc::new(tokio::sync::Notify::new());
         let task_started = Arc::clone(&started);
         let task = tokio::spawn(async move {
-            let _run = RunnerGuard::claim(&task_running).unwrap();
+            let _run = RunnerGuard::claim(&task_running, &std::sync::Weak::new()).unwrap();
             task_started.notify_one();
             if panic {
                 panic!("runner panic");
@@ -11048,7 +11150,7 @@ async fn cancelled_and_panicked_runner_guards_release_their_claims() {
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
         }
-        assert!(RunnerGuard::claim(&running).is_some());
+        assert!(RunnerGuard::claim(&running, &std::sync::Weak::new()).is_some());
     }
 }
 

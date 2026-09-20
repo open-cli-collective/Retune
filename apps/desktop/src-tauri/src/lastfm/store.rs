@@ -2,7 +2,6 @@
 use std::sync::Arc;
 use std::{
     collections::VecDeque,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -242,9 +241,6 @@ fn write_secret_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
         .map_err(|_| "Could not save the Last.fm credential.".to_string())
 }
 fn remove_file(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("Could not remove a Last.fm local store.".into()),
-    }
+    crate::persistence::durable_remove(path)
+        .map_err(|_| "Could not remove a Last.fm local store.".into())
 }

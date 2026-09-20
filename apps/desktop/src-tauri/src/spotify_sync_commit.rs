@@ -1,13 +1,10 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use retune_core::model::Library;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    persistence::{atomic_write, read_limited},
+    persistence::{atomic_write, durable_remove, read_limited},
     store::{
         FsOverlayStore, FsSettingsStore, FsSpotifyLibraryStore, OverlayStore, Settings,
         SpotifyLibraryState,
@@ -98,7 +95,17 @@ impl Store {
     }
 
     pub(crate) fn commit(&self, journal: &Journal) -> Result<(), String> {
-        self.save(journal)?;
+        if let Err(begin_error) = self.save(journal) {
+            match self.recover_exact_applying(journal) {
+                Ok(true) => return Ok(()),
+                Ok(false) => return Err(begin_error),
+                Err(recovery_error) => {
+                    return Err(format!(
+                        "Spotify sync journal could not be started ({begin_error}) and immediate recovery failed ({recovery_error}). Restart Retune to recover before making more changes."
+                    ));
+                }
+            }
+        }
         let primary = self
             .roll_forward(journal)
             .and_then(|()| self.mark_complete(journal));
@@ -124,6 +131,7 @@ impl Store {
             return Ok(());
         };
         if journal.phase == Phase::Complete {
+            self.save(&journal)?;
             if let Err(error) = self.cleanup() {
                 log::warn!("Could not remove completed Spotify sync journal: {error}");
             }
@@ -136,6 +144,38 @@ impl Store {
             log::warn!("Could not remove completed Spotify sync journal: {error}");
         }
         Ok(())
+    }
+
+    pub(crate) fn needs_recovery_after_error(&self, expected: &Journal) -> Result<bool, String> {
+        let Some(actual) = self.load()? else {
+            return Ok(false);
+        };
+        if actual == *expected {
+            return Ok(true);
+        }
+        let mut expected_complete = expected.clone();
+        expected_complete.phase = Phase::Complete;
+        if actual == expected_complete {
+            return Ok(true);
+        }
+        if actual.phase == Phase::Complete {
+            return Ok(false);
+        }
+        Err("Spotify sync journal contains a different Applying transaction.".into())
+    }
+
+    fn recover_exact_applying(&self, expected: &Journal) -> Result<bool, String> {
+        let Some(actual) = self.load()? else {
+            return Ok(false);
+        };
+        if actual == *expected {
+            self.recover()?;
+            return Ok(true);
+        }
+        if actual.phase == Phase::Complete {
+            return Ok(false);
+        }
+        Err("Spotify sync journal conflicts with the intended transaction.".into())
     }
 
     fn roll_forward(&self, journal: &Journal) -> Result<(), String> {
@@ -239,11 +279,7 @@ impl Store {
     }
 
     fn cleanup(&self) -> Result<(), String> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
-        }
+        durable_remove(&self.path).map_err(|error| error.to_string())
     }
 }
 
@@ -362,5 +398,45 @@ mod tests {
             store.recover().unwrap();
             assert_after(dir.path(), &journal);
         }
+    }
+
+    #[test]
+    fn complete_reflush_failure_keeps_recovery_required_until_retry() {
+        let dir = tempdir().unwrap();
+        let journal = fixture();
+        let store = Store::new(dir.path());
+        store.save(&journal).unwrap();
+        store.roll_forward(&journal).unwrap();
+        store.mark_complete(&journal).unwrap();
+
+        crate::persistence::fail_next_atomic_write(
+            &dir.path().join(FILE),
+            crate::persistence::FailureStage::ParentSync,
+        );
+        assert!(store.recover().is_err());
+        assert!(store.needs_recovery_after_error(&journal).unwrap());
+
+        store.recover().unwrap();
+        assert!(!store.needs_recovery_after_error(&journal).unwrap());
+        assert!(!dir.path().join(FILE).exists());
+    }
+
+    #[test]
+    fn failed_begin_does_not_accept_unrelated_complete_journal() {
+        let dir = tempdir().unwrap();
+        let expected = fixture();
+        let mut unrelated = fixture();
+        unrelated.membership.after.account_id = "other-account".into();
+        unrelated.phase = Phase::Complete;
+        let store = Store::new(dir.path());
+        store.save(&unrelated).unwrap();
+
+        crate::persistence::fail_next_atomic_write(
+            &dir.path().join(FILE),
+            crate::persistence::FailureStage::Rename,
+        );
+        let error = store.commit(&expected).unwrap_err();
+        assert!(error.contains("injected atomic-write failure"));
+        assert_eq!(store.load().unwrap(), Some(unrelated));
     }
 }

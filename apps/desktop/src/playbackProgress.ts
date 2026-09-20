@@ -26,6 +26,6 @@ export function createPlaybackProgress() {
 }
 
 export function onlyPlaybackProgressChanged(current: Playing | null, next: PlayerState) {
-  return current !== null && !current.simulated
+  return current !== null
     && (Object.keys(next) as (keyof PlayerState)[]).every(key => key === 'elapsed' || current[key] === next[key])
 }

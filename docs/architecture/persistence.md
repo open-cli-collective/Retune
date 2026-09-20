@@ -3,13 +3,16 @@
 The Tauri shell stores Retune state in the platform application-data directory.
 All JSON state writes use one shared primitive that creates a unique,
 same-directory temporary file without truncating an existing writer, syncs it,
-and atomically renames it into place. Windows serializes the final replacement
-because simultaneous `MoveFileExW` calls can reject one another. Open, write,
-sync, and rename failures
-leave the previous destination intact and remove only that writer's temporary
-file. Secret temporaries are created with mode 0600 on Unix before any bytes are
-written; legacy secret permissions are repaired through the open descriptor
-before their contents are read.
+atomically renames it into place, and on Unix syncs the containing directory
+after the replacement. Windows serializes the final replacement and requests
+write-through because simultaneous `MoveFileExW` calls can reject one another.
+Open, write, sync, and rename failures leave the previous destination intact;
+a post-rename directory-sync error reports failure even though the replacement
+may already be visible. Owners reconcile the exact disk candidate or prior
+value after that error and latch when the result is ambiguous. Secret
+temporaries are created with mode 0600 on Unix before any bytes are written;
+legacy secret permissions are repaired through the open descriptor before
+their contents are read.
 
 ## Files
 
@@ -107,8 +110,18 @@ whole token record. Replacing the Web OAuth grant clears the playback credential
 because the new grant may belong to a different account. It is machine-specific
 and never belongs in backup/export.
 
-Built-in Spotify playback also maintains an `audio-cache` directory. Cache data
-is disposable; library and settings files are not.
+The synchronous `TokenStore` API is retained for native startup and other
+blocking callers. `SpotifyClient` runs token loads and compare-and-replace
+operations on Tokio's blocking pool before publishing the resulting token state
+to its request path.
+
+Built-in Spotify playback maintains an `audio-cache` directory. Cache data is
+disposable; library and settings files are not. Local embedded artwork uses a
+separate `artwork-cache` directory capped at 512 MiB. It stores raw image bytes
+keyed by the local track URI and source-file length/modification time; the data
+URL is rebuilt when an image is requested. This cache is disposable and excluded
+from backup/export, and its budget does not reduce the audio cache's separate
+2 GiB limit.
 
 Backup export clones the library, settings, and playlist cache under one owner
 lock at a time, releasing each before acquiring the next, then fetches Last.fm
@@ -127,6 +140,9 @@ all replacement files and the Complete marker are durable. Settings, playlist,
 and library refreshes are then attempted independently, so one shell-side
 notification failure cannot suppress the others or reclassify the durable
 restore as failed.
+A failed journal begin is accepted for recovery only when an existing Applying
+or Complete record exactly matches the intended transaction; an absent or
+unrelated Complete record leaves the original failure in place.
 
 `backup.rs` owns the portable envelope, native file dialogs, and multi-owner
 runtime coordination. `restore.rs` remains the low-level journal and recovery
@@ -288,6 +304,14 @@ Startup and the next serialized mutation roll any surviving record forward
 before accepting a third value. Disk work runs on the blocking pool, and an
 owned completion publishes all corresponding in-memory snapshots together even
 if the initiating command is cancelled.
+Interactive review changes publish to memory first and mark one coalesced
+writer dirty. The writer takes the shared persistence gate before reading the
+latest live session and mappings and holds it through the transaction, so a
+concurrent durable mutation waits for the disk operation rather than being
+overwritten by an older queued snapshot. If the session was invalidated before
+that flush, the writer persists the current mappings without recreating the
+invalid session. A failed queued save blocks further importer writes until
+startup recovery succeeds; any surviving review journal is replayed then.
 
 `lastfm-sync.json` stores the Last.fm/Spotify identities, `syncedThrough`,
 `lastSyncedAt`, one fixed padded download range and cache identity, stable

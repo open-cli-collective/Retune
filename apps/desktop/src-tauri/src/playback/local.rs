@@ -16,7 +16,6 @@ use librespot_playback::{
     player::{Player, PlayerEvent},
 };
 use librespot_protocol::authentication::AuthenticationType;
-use retune_spotify::tokens::TokenStore;
 use tokio::sync::mpsc;
 
 use super::{
@@ -62,7 +61,7 @@ impl LocalBackend {
         cache_dir: Option<&Path>,
         audio: AudioSettings,
     ) -> Result<Self, PlaybackError> {
-        let credentials = stored_credentials(client)?;
+        let credentials = stored_credentials(client).await?;
         // Read farther ahead to survive short network stalls.
         let _ = AudioFetchParams::set(AudioFetchParams {
             read_ahead_during_playback: Duration::from_secs(30),
@@ -70,13 +69,12 @@ impl LocalBackend {
         });
         let cache = cache_dir.and_then(audio_cache);
         let session = Session::new(SessionConfig::default(), cache);
-        session
-            .connect(credentials, false)
-            .await
-            .map_err(|error| session_error(client, error))?;
+        if let Err(error) = session.connect(credentials, false).await {
+            return Err(session_error(client, error).await);
+        }
         if let Err(error) = session.login5().auth_token().await {
             session.shutdown();
-            return Err(session_error(client, error));
+            return Err(session_error(client, error).await);
         }
 
         let mixer = mixer::find(None)
@@ -142,7 +140,7 @@ impl LocalBackend {
         &mut self,
         client: &LiveClient,
     ) -> Result<(), PlaybackError> {
-        let credentials = stored_credentials(client)?;
+        let credentials = stored_credentials(client).await?;
         let (config, cache) = {
             let runtime = self
                 .runtime
@@ -154,13 +152,12 @@ impl LocalBackend {
             )
         };
         let session = Session::new(config, cache);
-        session
-            .connect(credentials, false)
-            .await
-            .map_err(|error| session_error(client, error))?;
+        if let Err(error) = session.connect(credentials, false).await {
+            return Err(session_error(client, error).await);
+        }
         if let Err(error) = session.login5().auth_token().await {
             session.shutdown();
-            return Err(session_error(client, error));
+            return Err(session_error(client, error).await);
         }
         let runtime = self
             .runtime
@@ -182,13 +179,10 @@ impl LocalBackend {
             .runtime
             .as_ref()
             .ok_or_else(|| PlaybackError::message("Local playback is unavailable"))?;
-        runtime
-            .session
-            .login5()
-            .auth_token()
-            .await
-            .map(|_| ())
-            .map_err(|error| session_error(client, error))
+        match runtime.session.login5().auth_token().await {
+            Ok(_) => Ok(()),
+            Err(error) => Err(session_error(client, error).await),
+        }
     }
 
     pub(super) fn play(
@@ -301,10 +295,10 @@ fn bitrate(value: u16) -> Bitrate {
     }
 }
 
-fn stored_credentials(client: &LiveClient) -> Result<Credentials, PlaybackError> {
+async fn stored_credentials(client: &LiveClient) -> Result<Credentials, PlaybackError> {
     let tokens = client
-        .token_store()
-        .load()
+        .load_tokens()
+        .await
         .map_err(|error| PlaybackError::message(error.to_string()))?;
     let credentials = tokens
         .and_then(|tokens| tokens.playback_credentials)
@@ -317,7 +311,7 @@ fn stored_credentials(client: &LiveClient) -> Result<Credentials, PlaybackError>
     })
 }
 
-fn session_error(client: &LiveClient, error: LibrespotError) -> PlaybackError {
+async fn session_error(client: &LiveClient, error: LibrespotError) -> PlaybackError {
     if !matches!(
         error.kind,
         ErrorKind::PermissionDenied | ErrorKind::Unauthenticated | ErrorKind::FailedPrecondition
@@ -328,15 +322,15 @@ fn session_error(client: &LiveClient, error: LibrespotError) -> PlaybackError {
         "Spotify playback authorization rejected during session verification; clearing stored credential secret (kind={:?}, error={error:?})",
         error.kind
     );
-    match client.token_store().load() {
+    match client.load_tokens().await {
         Ok(Some(current)) => {
             let mut cleared = current.clone();
             if let Some(credentials) = cleared.playback_credentials.as_mut() {
                 credentials.auth_data.clear();
             }
             match client
-                .token_store()
-                .replace_if_current(&current, &cleared)
+                .replace_tokens_if_current(&current, &cleared)
+                .await
             {
                 Ok(_) => PlaybackError::authorization(PlaybackAuthorizationReason::Rejected),
                 Err(clear_error) => PlaybackError::message(format!(
@@ -523,7 +517,7 @@ mod tests {
     use super::*;
     use retune_spotify::{
         client::{HttpTransport, SpotifyClient},
-        tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials, Tokens},
+        tokens::{CachedTokenStore, InMemoryTokenStore, PlaybackCredentials, TokenStore, Tokens},
     };
     use std::sync::Mutex;
 
@@ -609,8 +603,8 @@ mod tests {
         assert_eq!(bitrate(0), Bitrate::Bitrate320);
     }
 
-    #[test]
-    fn semantic_playback_rejection_retains_verified_username() {
+    #[tokio::test]
+    async fn semantic_playback_rejection_retains_verified_username() {
         let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(Some(Tokens {
             access: "web-access".into(),
             refresh: "web-refresh".into(),
@@ -629,7 +623,7 @@ mod tests {
         );
 
         assert!(matches!(
-            session_error(&client, error),
+            session_error(&client, error).await,
             PlaybackError::AuthorizationRequired {
                 reason: PlaybackAuthorizationReason::Rejected,
                 ..
@@ -643,8 +637,8 @@ mod tests {
         assert!(playback.auth_data.is_empty());
     }
 
-    #[test]
-    fn transient_session_error_keeps_playback_credentials() {
+    #[tokio::test]
+    async fn transient_session_error_keeps_playback_credentials() {
         let tokens: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(Some(Tokens {
             access: "web-access".into(),
             refresh: "web-refresh".into(),
@@ -663,7 +657,7 @@ mod tests {
         );
 
         assert!(matches!(
-            session_error(&client, error),
+            session_error(&client, error).await,
             PlaybackError::Message(_)
         ));
         assert!(store
@@ -674,8 +668,8 @@ mod tests {
             .is_some());
     }
 
-    #[test]
-    fn semantic_rejection_does_not_overwrite_concurrently_refreshed_tokens() {
+    #[tokio::test]
+    async fn semantic_rejection_does_not_overwrite_concurrently_refreshed_tokens() {
         let old = Tokens {
             access: "old-access".into(),
             refresh: "old-refresh".into(),
@@ -709,7 +703,7 @@ mod tests {
             std::io::Error::other("rejected"),
         );
         assert!(matches!(
-            session_error(&client, error),
+            session_error(&client, error).await,
             PlaybackError::AuthorizationRequired { .. }
         ));
         assert_eq!(store.load().unwrap(), Some(replacement));

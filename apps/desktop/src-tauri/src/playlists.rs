@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use retune_core::model::Library;
 use retune_spotify::{
     client::{Playlist, SpotifyClient, Track, Transport},
-    tokens::{TokenStore, Tokens},
+    tokens::Tokens,
     Error,
 };
 use serde::{Deserialize, Serialize};
@@ -96,8 +96,8 @@ pub struct CachedTrack {
     pub release_date: Option<String>,
 }
 
-pub async fn sync<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn sync<T: Transport>(
+    client: &SpotifyClient<T>,
     current: &PlaylistCache,
 ) -> retune_spotify::Result<PlaylistCache> {
     let user_id = client.me().await?.id;
@@ -197,8 +197,8 @@ pub fn reorder_playlists(cache: &mut PlaylistCache, ids: &[String]) -> Result<()
     Ok(())
 }
 
-pub async fn unfollow<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn unfollow<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     id: &str,
 ) -> retune_spotify::Result<()> {
@@ -211,8 +211,8 @@ pub async fn unfollow<T: Transport, S: TokenStore>(
     Ok(())
 }
 
-pub async fn create<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn create<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     name: &str,
 ) -> retune_spotify::Result<()> {
@@ -232,8 +232,8 @@ pub async fn create<T: Transport, S: TokenStore>(
     Ok(())
 }
 
-pub async fn add<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn add<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     library: &Library,
     id: &str,
@@ -320,8 +320,8 @@ impl From<Error> for PlaylistAddError {
     }
 }
 
-pub async fn reorder<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn reorder<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     id: &str,
     range_start: u32,
@@ -384,8 +384,8 @@ impl From<Error> for PlaylistMutationError {
     }
 }
 
-async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+async fn recover_stale_snapshot<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     id: &str,
     result: retune_spotify::Result<String>,
@@ -410,8 +410,8 @@ async fn recover_stale_snapshot<T: Transport, S: TokenStore>(
     }
 }
 
-pub async fn remove<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+pub async fn remove<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     id: &str,
     indices: &[u32],
@@ -502,8 +502,8 @@ pub(crate) fn classify_error(error: Error, tokens: Option<&Tokens>) -> PlaylistF
     }
 }
 
-async fn refresh_one<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+async fn refresh_one<T: Transport>(
+    client: &SpotifyClient<T>,
     cache: &mut PlaylistCache,
     id: &str,
 ) -> retune_spotify::Result<()> {
@@ -534,8 +534,8 @@ async fn refresh_one<T: Transport, S: TokenStore>(
     }
 }
 
-async fn fetch<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+async fn fetch<T: Transport>(
+    client: &SpotifyClient<T>,
     summary: Playlist,
 ) -> retune_spotify::Result<CachedPlaylist> {
     let (track_count, tracks, spotify_tracks) = fetch_tracks(client, &summary.id).await?;
@@ -552,8 +552,8 @@ async fn fetch<T: Transport, S: TokenStore>(
     })
 }
 
-async fn fetch_tracks<T: Transport, S: TokenStore>(
-    client: &SpotifyClient<T, S>,
+async fn fetch_tracks<T: Transport>(
+    client: &SpotifyClient<T>,
     id: &str,
 ) -> retune_spotify::Result<(usize, Vec<String>, Vec<CachedTrack>)> {
     let mut tracks = vec![];
@@ -1254,7 +1254,7 @@ mod tests {
             assert_eq!(request.method, Method::Delete);
             assert_eq!(
                 url::Url::parse(&request.url).unwrap().path(),
-                "/v1/playlists/playlist/followers"
+                "/v1/me/library"
             );
         }
 
