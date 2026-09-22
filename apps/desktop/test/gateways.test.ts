@@ -143,14 +143,16 @@ test('main event dispatch is exhaustive over the tagged contract', () => {
     playerState: () => received.push('playerState'),
     playbackAuthorizationRequired: () => received.push('playbackAuthorizationRequired'),
     operationError: (payload: string) => received.push(payload),
+    spotifySyncError: () => received.push('spotifySyncError'),
     operationRecovered: () => received.push('operationRecovered'),
     localImportComplete: () => received.push('localImportComplete'),
     startupNotice: (payload: string) => received.push(payload),
   }
   dispatchMainEvent({ type: 'operationError', payload: 'error' }, handlers)
+  dispatchMainEvent({ type: 'spotifySyncError' }, handlers)
   dispatchMainEvent({ type: 'operationRecovered' }, handlers)
   dispatchMainEvent({ type: 'startupNotice', payload: 'notice' }, handlers)
-  assert.deepEqual(received, ['error', 'operationRecovered', 'notice'])
+  assert.deepEqual(received, ['error', 'spotifySyncError', 'operationRecovered', 'notice'])
 })
 
 test('main event registration serializes StrictMode cleanup before replacement', async () => {

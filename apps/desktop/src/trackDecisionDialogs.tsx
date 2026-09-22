@@ -68,7 +68,7 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
     libraryGateway.mergePreview(ids).then((value) => {
       if (request !== generation.current) return
       setPreview(value); setDraft(initialDraft(value)); setBusy(false)
-    }).catch((error) => { if (request === generation.current) { setError(String(error)); setBusy(false) } })
+    }).catch(() => { if (request === generation.current) { setError('Couldn’t load the selected tracks. Your library is unchanged. Try Reload preview.'); setBusy(false) } })
     return () => { beginRequestGeneration(generation); beginRequestGeneration(searchGeneration) }
   }, [ids])
   const reload = async (targetUri?: string) => {
@@ -78,7 +78,7 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
       const value = await libraryGateway.mergePreview(ids, targetUri)
       if (request !== generation.current) return
       setPreview(value); setDraft(initialDraft(value))
-    } catch (error) { if (request === generation.current) setError(String(error)) }
+    } catch { if (request === generation.current) setError('Couldn’t reload the merge preview. Your library is unchanged. Try again.') }
     finally { if (request === generation.current) setBusy(false) }
   }
   const search = async (offset = 0) => {
@@ -90,7 +90,7 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
       if (request !== searchGeneration.current) return
       setResults((previous) => offset ? [...previous, ...result.tracks.items.filter((track) => !previous.some((known) => known.uri === track.uri))] : result.tracks.items)
       setNextOffset(result.tracks.nextOffset)
-    } catch (error) { if (request === searchGeneration.current) setSearchError(String(error)) }
+    } catch { if (request === searchGeneration.current) setSearchError('Couldn’t search Spotify recordings. Existing matches are unchanged. Try again.') }
     finally { if (request === searchGeneration.current) setSearching(false) }
   }
   const all = preview ? contributors(preview) : []
@@ -103,14 +103,14 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
     try {
       const id = await libraryGateway.mergeTracks(ids, preview.target.uri, { ...draft, rating: draft.rating === 'none' ? null : Number(draft.rating), playCount: mode === 'custom' ? { mode, value: total } : { mode } }, preview.revision)
       setMerged(id); onChanged(id)
-    } catch (error) { setError(String(error)) }
+    } catch { setError('Couldn’t merge these tracks. Your library is unchanged. Try again.') }
     finally { setBusy(false) }
   }
   const undo = async () => {
     if (merged === undefined) return
     setBusy(true); setError('')
     try { await libraryGateway.undoMerge(merged); onChanged(); onClose() }
-    catch (error) { setError(String(error)); setBusy(false) }
+    catch { setError('Couldn’t undo this merge. Your library is unchanged. Try again.'); setBusy(false) }
   }
   const { genres, ratings } = preview ? choices(preview) : { genres: [], ratings: [] }
   const added = all.flatMap((track) => track.addedAt === null ? [] : [track.addedAt])
@@ -129,7 +129,7 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
             <MergeRecordingSummary track={track} mostPlays={mostPlays} />
           </label>)}</div>
           {preview.target && !preview.tracks.some((track) => track.uri === preview.target?.uri) && <div className="merge-external-recording"><p>Different recording selected</p><div className="merge-recording chosen"><MergeRecordingSummary track={preview.target} mostPlays={mostPlays} /></div></div>}
-          <details><summary>Choose a different Spotify recording</summary><div className="merge-search"><input aria-label="Search recordings" value={query} placeholder="Track and artist" onChange={(event) => { searchGeneration.current++; setQuery(event.target.value); setResults([]); setNextOffset(null); setSearching(false) }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search() } }} /><button type="button" disabled={searching || !query.trim()} onClick={() => void search()}>{searching ? 'Searching…' : 'Search'}</button></div>
+          <details><summary>Choose a different Spotify recording</summary><div className="merge-search"><input aria-label="Search recordings" value={query} placeholder="Track and artist" onChange={(event) => { searchGeneration.current++; setQuery(event.target.value); setResults([]); setNextOffset(null); setSearching(false); setSearchError('') }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void search() } }} /><button type="button" disabled={searching || !query.trim()} onClick={() => void search()}>{searching ? 'Searching…' : 'Search'}</button></div>
             {searchError && <p role="alert">{searchError}</p>}
             <div className="merge-search-results">{results.map((track) => <button type="button" key={track.uri} onClick={() => void reload(track.uri)}><strong>{track.name}</strong><span>{track.artist} · {track.alb} · {formatTime(track.durationSecs)}</span></button>)}</div>
             {nextOffset !== null && <button type="button" disabled={searching} onClick={() => void search(nextOffset)}>More results</button>}
@@ -168,7 +168,7 @@ export function RemoveTrackDialog({ tracks, spotify, onClose, onChanged }: { tra
   useEffect(() => {
     if (!spotify) return
     let active = true
-    libraryGateway.getTrack(tracks[0].id).then((value) => { if (active) setInfo(value) }).catch((error) => { if (active) setError(String(error)) })
+    libraryGateway.getTrack(tracks[0].id).then((value) => { if (active) setInfo(value) }).catch(() => { if (active) setError('Couldn’t check Spotify membership. Your track is unchanged. Try again.') })
     return () => { active = false }
   }, [spotify, tracks])
   const canRemove = !spotify || Boolean(info?.sources.savedTrack && info.sources.membershipKnown)
@@ -179,12 +179,17 @@ export function RemoveTrackDialog({ tracks, spotify, onClose, onChanged }: { tra
       if (spotify) await spotifyGateway.removeTrack(tracks[0].uri)
       else await libraryGateway.removeTracks(tracks.map((track) => track.id))
       onChanged(); onClose()
-    } catch (error) { setError(String(error)); setBusy(false) }
+    } catch {
+      setError(spotify
+        ? `Couldn’t confirm removing ${tracks.length === 1 ? 'this track' : 'these tracks'} from Spotify. Refresh Spotify and try again.`
+        : `Couldn’t remove ${tracks.length === 1 ? 'this track' : 'these tracks'} from Retune. Your library is unchanged. Try again.`)
+      setBusy(false)
+    }
   }
   const exclude = async () => {
     setBusy(true); setError('')
     try { await libraryGateway.setTrackEnabled(tracks[0].id, false); onChanged(); onClose() }
-    catch (error) { setError(String(error)); setBusy(false) }
+    catch { setError('Couldn’t exclude this track from playback. Your library is unchanged. Try again.'); setBusy(false) }
   }
   const referenced = info && (info.sources.savedAlbums.length > 0 || info.mergedSources.some((track) => track.uri !== info.uri && (track.sources.savedTrack || track.sources.savedAlbums.length > 0)))
   return <ModalDialog className="get-info track-removal" labelledBy="track-removal-title" onCancel={busy ? undefined : onClose} onSubmit={remove}>
@@ -205,13 +210,13 @@ export function RemovedTracksManager({ onBack, onChanged }: { onBack: () => void
     setTracks(undefined)
     setError('')
     try { setTracks(await libraryGateway.removedTracks()) }
-    catch (error) { setError(String(error)) }
+    catch { setError('Couldn’t load removed tracks. Your library is unchanged. Try again.') }
   }, [])
   useEffect(() => { void load() }, [load])
   const restore = async (uri: string) => {
     setBusy(uri); setError('')
     try { await libraryGateway.restoreTrack(uri); setTracks((tracks) => tracks?.filter((track) => track.uri !== uri)); onChanged() }
-    catch (error) { setError(String(error)) }
+    catch { setError('Couldn’t restore this track. Your library is unchanged. Try again.') }
     finally { setBusy(undefined) }
   }
   const filtered = tracks?.filter((track) => `${track.name} ${track.art} ${track.alb}`.toLowerCase().includes(query.toLowerCase()))

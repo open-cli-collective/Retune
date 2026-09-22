@@ -133,6 +133,13 @@ export const failSpotifySearchGroup = (state: SpotifySearchState, group: Spotify
   }
 }
 
+export const dismissSpotifySearchGroup = (state: SpotifySearchState, group: SpotifyResultGroupKey): SpotifySearchState => {
+  if (!state.errors[group]) return state
+  const errors = { ...state.errors }
+  delete errors[group]
+  return { ...state, errors }
+}
+
 export const moreSpotifySearchLabel = (state: SpotifySearchState, group: SpotifyResultGroupKey) => {
   const remaining = state.groups[group].total - Math.min(state.visible[group], state.groups[group].total)
   return remaining > 0 && state.groups[group].nextOffset !== null
