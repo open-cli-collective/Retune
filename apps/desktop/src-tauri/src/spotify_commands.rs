@@ -234,6 +234,13 @@ pub(super) async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 const SPOTIFY_SYNC_ERROR: &str = "Retune couldn’t sync Spotify; your cached library is unchanged. The network may be blocking Spotify. Try another network or VPN, then sync again.";
+const SPOTIFY_SYNC_FAILURE_LOG_CATEGORY: &str = "spotify_sync_failed";
+
+fn translate_spotify_sync_result<T>(result: Result<T, String>) -> Result<(), String> {
+    result
+        .map(|_| ())
+        .map_err(|_| SPOTIFY_SYNC_ERROR.to_string())
+}
 
 async fn run_sync_loop(
     app: &tauri::AppHandle,
@@ -262,10 +269,10 @@ async fn run_sync_loop(
         } else if let Some(deadline) = fallback_deadline {
             schedule_auto_resume(app, deadline);
         }
-        return result.map(|_| ()).map_err(|error| {
-            log::error!("Spotify sync failed: {error}");
-            SPOTIFY_SYNC_ERROR.to_string()
-        });
+        if result.is_err() {
+            log::error!("Spotify sync failed ({SPOTIFY_SYNC_FAILURE_LOG_CATEGORY})");
+        }
+        return translate_spotify_sync_result(result);
     }
 }
 
@@ -1952,8 +1959,8 @@ mod tests {
     use super::{
         album_page_view, commit_sync_state, normalize_sync_baseline, playback_credentials,
         rating_view, rebase_sync_membership, remember_playback_profile_id,
-        required_artist_follow_state, validate_spotify_track_uris, web_oauth_tokens,
-        SpotifySession,
+        required_artist_follow_state, translate_spotify_sync_result, validate_spotify_track_uris,
+        web_oauth_tokens, SpotifySession, SPOTIFY_SYNC_ERROR, SPOTIFY_SYNC_FAILURE_LOG_CATEGORY,
     };
     use crate::{
         library_state::LibraryState,
@@ -2152,6 +2159,19 @@ mod tests {
 
         assert!(error.contains("artist"));
         assert!(error.contains("offline"));
+    }
+
+    #[test]
+    fn spotify_sync_result_translation_is_safe_and_actionable() {
+        assert!(translate_spotify_sync_result::<()>(Ok(())).is_ok());
+
+        let canary = "response-body-access-token";
+        let error = translate_spotify_sync_result::<()>(Err(canary.to_owned())).unwrap_err();
+
+        assert_eq!(error, SPOTIFY_SYNC_ERROR);
+        let log_message = format!("Spotify sync failed ({SPOTIFY_SYNC_FAILURE_LOG_CATEGORY})");
+        assert!(!log_message.contains(canary));
+        assert!(!SPOTIFY_SYNC_FAILURE_LOG_CATEGORY.contains(canary));
     }
 
     #[test]
