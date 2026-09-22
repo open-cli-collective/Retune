@@ -891,8 +891,8 @@ fn install_file_menu(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resu
             "sync_spotify" => {
                 let handle = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(error) = sync_spotify(&handle).await {
-                        notify_error(&handle, error);
+                    if sync_spotify(&handle).await.is_err() {
+                        notify_spotify_sync_error(&handle);
                     }
                 });
             }
