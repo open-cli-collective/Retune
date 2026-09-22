@@ -31,10 +31,8 @@ const emptyState: ImportStateView = { phase: null, username: null, spotifyAccoun
 const invalidApplyResultMessage = 'Retune received an invalid Last.fm import result.'
 type DisplayError = { message: string; code: ImportApplyErrorCode; retryAt: number | null }
 
-function lastfmOperationError(reason: unknown) {
-  const detail = (reason instanceof Error ? reason.message : String(reason)).replace(/^Error:\s*/, '').trim()
-  const technical = /(?:reqwest|hyper|http\s*\d{3}|status code|transport|socket|deserialize)/i.test(detail)
-  return `Couldn’t complete that Last.fm operation.${technical || !detail ? '' : ` ${detail}`} Your import queue is unchanged. Try again.`
+function lastfmOperationError() {
+  return 'Couldn’t complete that Last.fm operation. Your import queue is unchanged. Try again.'
 }
 
 function SpotifyLimitNotice({ code, retryAt }: { code: ImportApplyErrorCode; retryAt?: number | null }) {
@@ -1078,7 +1076,7 @@ export default function LastFmImporter() {
   const [pageMutationRunning, setPageMutationRunning] = useState(false)
   const [batchNameEdit, setBatchNameEdit] = useState<BatchNameEdit | null>(null)
   const [batchNameError, setBatchNameError] = useState<string | null>(null)
-  const reportError = useCallback((reason: unknown) => setError({ message: lastfmOperationError(reason), code: 'apply-failed', retryAt: null }), [])
+  const reportError = useCallback((_reason: unknown) => setError({ message: lastfmOperationError(), code: 'apply-failed', retryAt: null }), [])
   useEffect(() => {
     let active = true
     const subscription = subscribeThenSnapshot(
@@ -1277,7 +1275,7 @@ export default function LastFmImporter() {
         setError({ message: invalidApplyResultMessage, code: 'apply-failed', retryAt: null })
         refreshSafely(refreshQueueOnly)
       } else if (result.status === 'failed') {
-        setError(result)
+        setError(result.code === 'apply-failed' ? { ...result, message: lastfmOperationError() } : result)
         if (result.batchId === selectedPageRef.current) refreshSafely(refresh)
         else refreshSafely(refreshQueueOnly)
       } else if (!advancingApply.current && result.batchId === selectedPageRef.current) {

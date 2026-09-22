@@ -331,7 +331,7 @@ describe('mounted native interaction boundaries', () => {
     }
     rejectRequest = true
     await act(async () => play.click())
-    expect(importer.querySelector('[role="alert"]')?.textContent).toContain('Playback request failed')
+    expect(importer.querySelector('[role="alert"]')?.textContent).toContain('Your import queue is unchanged')
   })
 
   it('shows unfiltered play and completed-batch totals in the footer and refreshes them', async () => {
@@ -463,7 +463,7 @@ describe('mounted native interaction boundaries', () => {
     expect(view.querySelector('.error-banner')?.textContent).not.toContain('network blocked')
   })
 
-  it('dismisses a main operation error and can show a later error from the native event boundary', async () => {
+  it('dismisses a typed Spotify sync error and can show a later error from the native event boundary', async () => {
     const tracks = [{ ...track(1, 'Included'), uri: 'spotify:track:included', enabled: true }]
     const browse: BrowseView = {
       facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
@@ -490,15 +490,14 @@ describe('mounted native interaction boundaries', () => {
     })
     const view = await render(<App />)
     await waitFor(() => expect(channel).toBeDefined())
-    const error = 'Retune couldn’t sync Spotify; your cached library is unchanged. The network may be blocking Spotify. Try another network or VPN, then sync again.'
-    await act(async () => channel!.onmessage({ type: 'operationError', payload: error }))
+    await act(async () => channel!.onmessage({ type: 'spotifySyncError' }))
     expect(view.querySelector('[role="alert"]')?.textContent).toContain('cached library is unchanged')
     expect(view.querySelector('[role="alert"] button[aria-label="Dismiss error"]')).not.toBeNull()
 
     await act(async () => view.querySelector<HTMLButtonElement>('[role="alert"] button[aria-label="Dismiss error"]')!.click())
     expect(view.querySelector('.error-banner')).toBeNull()
 
-    await act(async () => channel!.onmessage({ type: 'operationError', payload: error }))
+    await act(async () => channel!.onmessage({ type: 'spotifySyncError' }))
     expect(view.querySelector('.error-banner[role="alert"]')?.textContent).toContain('Try another network or VPN')
   })
 
@@ -1163,7 +1162,7 @@ describe('mounted native interaction boundaries', () => {
     expect(view.querySelector<HTMLButtonElement>('[data-import-nav="queue"]')!.disabled).toBe(true)
     await act(async () => acknowledgement.resolve(null))
     if (fail) {
-      await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Disk is full'))
+      await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Your import queue is unchanged'))
       expect(view.querySelector('#import-review-title')?.textContent).toContain('Release One')
       expect([...view.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Accept')?.disabled).toBe(false)
     } else {
@@ -1518,7 +1517,7 @@ describe('mounted native interaction boundaries', () => {
     expect(view.querySelector('#import-review-title')?.textContent).toContain('Release Three')
     expect(view.querySelectorAll('[data-import-nav="queue"]')).toHaveLength(1)
     await act(async () => secondSave.resolve())
-    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Could not ignore Release Two: Error: Disk unavailable')
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Your import queue is unchanged')
     expect(view.querySelector('#import-review-title')?.textContent).toContain('Release Three')
     expect([...view.querySelectorAll('[data-import-nav="queue"]')].map((row) => row.textContent)).toEqual([expect.stringContaining('Release Two'), expect.stringContaining('Release Three')])
     expect(queueReads()).toBe(initialReads + 1)
@@ -1659,7 +1658,7 @@ describe('mounted native interaction boundaries', () => {
     expect(view.querySelector('.import-limit-reset')?.textContent).toContain('did not provide a reset time')
 
     await emitNativeEvent('lastfm-import-apply-finished', { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Spotify rate limited until tomorrow.', retryAt })
-    await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Spotify rate limited until tomorrow.'))
+    await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Your import queue is unchanged'))
     expect(view.querySelector('.import-limit-reset')).toBeNull()
   })
 
@@ -1679,8 +1678,9 @@ describe('mounted native interaction boundaries', () => {
     queue = fixtures.queue.map((item) => item.page === 1
       ? { ...item, status: 'failed' as const, error: 'Disk full', errorCode: 'apply-failed', retryAt: null }
       : item)
-    await emitNativeEvent('lastfm-import-apply-finished', { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Disk full', retryAt: null })
-    await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Disk full'))
+    await emitNativeEvent('lastfm-import-apply-finished', { status: 'failed', batchId: 1, code: 'apply-failed', message: 'provider response body: secret', retryAt: null })
+    await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Your import queue is unchanged'))
+    expect(view.querySelector('[role="alert"]')?.textContent).not.toContain('provider response body: secret')
 
     await act(async () => view.querySelector<HTMLButtonElement>('[role="alert"] button[aria-label="Dismiss error"]')!.click())
     await waitFor(() => expect(view.querySelector('[role="alert"]')).toBeNull())
@@ -2232,7 +2232,7 @@ describe('mounted native interaction boundaries', () => {
     if (fail) {
       await act(async () => acknowledgement.resolve(null))
       expect(view.querySelector('#import-review-title')?.textContent).toContain('Release One')
-      expect(view.textContent).toContain('Disk is full')
+      expect(view.textContent).toContain('Your import queue is unchanged')
     } else {
       await act(async () => acknowledgement.resolve(fixtures.state))
       expect(view.querySelector('#import-review-title')).toBeNull()

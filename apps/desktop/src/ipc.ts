@@ -12,6 +12,7 @@ export type MainEvent =
   | { type: 'playerState'; payload: PlayerState }
   | { type: 'playbackAuthorizationRequired'; payload: PlaybackAuthorizationPrompt }
   | { type: 'operationError'; payload: string }
+  | { type: 'spotifySyncError' }
   | { type: 'operationRecovered' }
   | { type: 'localImportComplete'; payload: ImportSummary }
   | { type: 'startupNotice'; payload: string }
@@ -28,6 +29,7 @@ export function dispatchMainEvent(event: MainEvent, handlers: MainEventHandlers)
     case 'playerState': handlers.playerState(event.payload); break
     case 'playbackAuthorizationRequired': handlers.playbackAuthorizationRequired(event.payload); break
     case 'operationError': handlers.operationError(event.payload); break
+    case 'spotifySyncError': handlers.spotifySyncError(); break
     case 'operationRecovered': handlers.operationRecovered(); break
     case 'localImportComplete': handlers.localImportComplete(event.payload); break
     case 'startupNotice': handlers.startupNotice(event.payload); break

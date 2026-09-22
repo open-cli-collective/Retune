@@ -113,6 +113,8 @@ timestamp, an empty cooldown leaves the daily value in place, and an expired
 timestamp is removed. Disconnect and sign-out do not clear either value. Startup
 and the bottom status bar use the same effective deadline, and automatic resume
 uses that exact deadline without additional jitter.
+Automatic startup and resume failures publish the payload-free `spotifySyncError`
+main event, while a manual sync command returns its local actionable error copy.
 
 The shared cooldown store keeps one global Development Mode quota record under
 `__global_quota__` plus transient records by endpoint family; legacy per-endpoint

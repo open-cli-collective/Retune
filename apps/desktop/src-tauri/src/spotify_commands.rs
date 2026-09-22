@@ -12,7 +12,7 @@ use crate::{
     album_id, auth, emit_connection_state_async, emit_main, emit_main_event, empty_player_state,
     image_url, image_url_at_least,
     library_commands::{rating_view, RatingView},
-    main_events, notify_error, playlist_commands,
+    main_events, playlist_commands,
     provider::{
         self, artist_albums_page, artist_descriptor, title_case, ArtistAlbumsPage, SearchGroup,
         SearchResults, SpotifySyncProvider, SyncBatch,
@@ -336,8 +336,8 @@ pub(super) fn schedule_auto_resume(app: &tauri::AppHandle, deadline: u64) {
         state.sync_orchestrator.retry_fired();
         if let Some(run) = state.sync_orchestrator.begin() {
             let _ = emit_spotify_sync_status(&handle);
-            if let Err(error) = Box::pin(run_sync_loop(&handle, run)).await {
-                notify_error(&handle, error);
+            if Box::pin(run_sync_loop(&handle, run)).await.is_err() {
+                crate::notify_spotify_sync_error(&handle);
             }
         }
     });

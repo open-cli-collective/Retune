@@ -191,7 +191,8 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const reportInfrastructureError = useCallback(() => dispatch({ type: 'error', error: INFRASTRUCTURE_ERROR }), [])
-  const reportMainOperationError = useCallback((error: string) => dispatch({ type: 'error', error: error === SPOTIFY_SYNC_ERROR ? error : INFRASTRUCTURE_ERROR }), [])
+  const reportMainOperationError = useCallback(() => dispatch({ type: 'error', error: INFRASTRUCTURE_ERROR }), [])
+  const reportSpotifySyncError = useCallback(() => dispatch({ type: 'error', error: SPOTIFY_SYNC_ERROR }), [])
   const [nativeDragActive, setNativeDragActive] = useState(false)
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
@@ -229,6 +230,7 @@ function App() {
     playerState: player.onState,
     playbackAuthorizationRequired: player.onAuthorizationRequired,
     operationError: reportMainOperationError,
+    spotifySyncError: reportSpotifySyncError,
     operationRecovered: () => dispatch({ type: 'clear-error' }),
     localImportComplete: (summary) => dispatch({ type: 'importComplete', summary }),
     startupNotice: (notice) => dispatch({ type: 'notice', notice }),

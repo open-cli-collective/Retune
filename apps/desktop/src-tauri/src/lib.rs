@@ -950,6 +950,10 @@ fn notify_error(app: &tauri::AppHandle, error: String) {
     let _ = emit_main_event(app, main_events::MainEvent::OperationError(error));
 }
 
+pub(crate) fn notify_spotify_sync_error(app: &tauri::AppHandle) {
+    let _ = emit_main_event(app, main_events::MainEvent::SpotifySyncError);
+}
+
 pub(crate) fn emit_main_event<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     event: main_events::MainEvent,
@@ -1364,7 +1368,11 @@ fn finish_startup(
                 },
             };
             if let Err(error) = result {
-                notify_error(&handle, error);
+                if startup_action == StartupAction::Sync {
+                    notify_spotify_sync_error(&handle);
+                } else {
+                    notify_error(&handle, error);
+                }
             }
         });
     }
