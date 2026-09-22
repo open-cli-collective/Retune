@@ -3,7 +3,7 @@
 import { act, createRef, Profiler, StrictMode, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AlbumPageView, ArtistPageView, BrowseView, DecisionTrack, LastFmImportState, LastFmState, LibrarySources, PlayerState, Settings, SpotifyNavEntry, SpotifySyncStatus, Track, TrackInfo, TrackMergePreview } from '../src/types.ts'
+import type { AlbumPageView, ArtistPageView, BrowseView, DecisionTrack, LastFmImportState, LastFmState, LibrarySources, PlayerState, Settings, SpotifyNavEntry, SpotifyResults, SpotifySyncStatus, Track, TrackInfo, TrackMergePreview } from '../src/types.ts'
 import type { MainEvent } from '../src/ipc.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
@@ -442,6 +442,45 @@ describe('mounted native interaction boundaries', () => {
     expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
   })
 
+  it('dismisses a main operation error and can show a later error from the native event boundary', async () => {
+    const tracks = [{ ...track(1, 'Included'), uri: 'spotify:track:included', enabled: true }]
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: tracks.length, totalSecs: 180, perSource: { music: tracks.length, podcasts: 0, audiobooks: 0 } },
+    }
+    const settings: Settings = { ...defaultSettings, theme: 'light' }
+    const lastfm: LastFmState = { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+    const lastfmImport = idleLastFmImport()
+    let channel: { onmessage: (event: MainEvent) => void } | undefined
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'browse') return browse
+      if (command === 'get_settings') return settings
+      if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return lastfm
+      if (command === 'lastfm_import_state') return lastfmImport
+      if (command === 'playlists_list') return []
+      if (command === 'subscribe_main_events') {
+        channel = args?.channel as { onmessage: (event: MainEvent) => void }
+        return 1
+      }
+      return null
+    })
+    const view = await render(<App />)
+    await waitFor(() => expect(channel).toBeDefined())
+    const error = 'Retune couldn’t sync Spotify; your cached library is unchanged. The network may be blocking Spotify. Try another network or VPN, then sync again.'
+    await act(async () => channel!.onmessage({ type: 'operationError', payload: error }))
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('cached library is unchanged')
+    expect(view.querySelector('[role="alert"] button[aria-label="Dismiss error"]')).not.toBeNull()
+
+    await act(async () => view.querySelector<HTMLButtonElement>('[role="alert"] button[aria-label="Dismiss error"]')!.click())
+    expect(view.querySelector('.error-banner')).toBeNull()
+
+    await act(async () => channel!.onmessage({ type: 'operationError', payload: error }))
+    expect(view.querySelector('.error-banner[role="alert"]')?.textContent).toContain('Try another network or VPN')
+  })
+
   it('keeps unavailable artist follow state retryable and rejects a late stale retry', async () => {
     const lateArtistA = deferred<ArtistPageView>()
     let artistACalls = 0
@@ -553,6 +592,69 @@ describe('mounted native interaction boundaries', () => {
       expect(document.activeElement).toBe(artwork)
     }
     expect(invokeMock.mock.calls).toHaveLength(before)
+  })
+
+  it('stops loading a rejected Spotify album and retries into the ready view', async () => {
+    const page: AlbumPageView = {
+      uri: 'spotify:album:retry', name: 'Retry Release', artist: 'Artist', artistId: 'artist', albumType: 'Album', year: '2026',
+      imageUrl: null, totalDurationSecs: 180, savedAlbum: false, contentComplete: false, addedAt: null, albumRating: null,
+      tracks: [{ uri: 'spotify:track:retry', name: 'Retry Track', trackNo: 1, durationSecs: 180, enabled: true, trackId: null, savedIndividually: false, rating: null }],
+    }
+    let albumCalls = 0
+    invokeMock.mockImplementation(async (command) => {
+      if (command !== 'spotify_album_page') return null
+      albumCalls += 1
+      if (albumCalls === 1) throw new Error('network blocked')
+      return page
+    })
+    const view = await render(<SpotifySearch query="" searching={false} results={null} navigation={{ kind: 'album', uri: page.uri }} playingUri={null}
+      onAdd={vi.fn(async () => {})} onAddTrack={vi.fn(async () => {})} onRemoveTrack={vi.fn(async () => {})} onPlay={vi.fn()} onPlaylist={vi.fn()} onClose={vi.fn()} onError={vi.fn()} />)
+    await waitFor(() => expect(view.querySelector('.spotify-page-error[role="alert"]')).not.toBeNull())
+    expect(view.textContent).toContain('Couldn’t load this Spotify album.')
+    expect(view.textContent).toContain('cached library is unchanged')
+    expect(view.textContent).not.toContain('Loading album…')
+    expect([...view.querySelectorAll<HTMLButtonElement>('.spotify-page-error button')].map((button) => button.textContent)).toEqual(['Retry'])
+
+    await act(async () => view.querySelector<HTMLButtonElement>('.spotify-page-error button')!.click())
+    await waitFor(() => expect(view.querySelector('h1')?.textContent).toBe(page.name))
+    expect(albumCalls).toBe(2)
+  })
+
+  it('keeps cached Spotify search rows while paging errors can be dismissed and retried', async () => {
+    const artists = Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: 'Rock', imageUrl: null }))
+    const initial: SpotifyResults = {
+      artists: { items: artists, total: 20, nextOffset: 10 },
+      albums: { items: [], total: 0, nextOffset: null },
+      tracks: { items: [], total: 0, nextOffset: null },
+    }
+    const next: SpotifyResults = {
+      ...initial,
+      artists: { items: artists.slice(5).map((artist, index) => ({ ...artist, id: `artist-${index + 10}`, name: `Artist ${index + 10}` })), total: 20, nextOffset: null },
+    }
+    let pageCalls = 0
+    invokeMock.mockImplementation(async (command) => {
+      if (command !== 'spotify_search') return null
+      pageCalls += 1
+      if (pageCalls < 3) throw new Error('network blocked')
+      return next
+    })
+    const view = await render(<SpotifySearch query="jazz" searching={false} results={initial} playingUri={null}
+      onAdd={vi.fn(async () => {})} onAddTrack={vi.fn(async () => {})} onRemoveTrack={vi.fn(async () => {})} onPlay={vi.fn()} onPlaylist={vi.fn()} onClose={vi.fn()} onError={vi.fn()} />)
+    const more = () => [...view.querySelectorAll<HTMLButtonElement>('.spotify-search-more button')].find((button) => button.textContent?.includes('more artists'))
+    await waitFor(() => expect(more()).not.toBeUndefined())
+    expect(view.querySelectorAll('.spotify-search-row')).toHaveLength(5)
+
+    await act(async () => more()!.click())
+    await waitFor(() => expect(view.querySelector('.spotify-search-error[role="alert"]')?.textContent).toContain('Cached artists results are unchanged'))
+    expect(view.querySelectorAll('.spotify-search-row')).toHaveLength(5)
+    await act(async () => view.querySelector<HTMLButtonElement>('.spotify-search-error button[aria-label="Dismiss error"]')!.click())
+    expect(view.querySelector('.spotify-search-error[role="alert"]')).toBeNull()
+
+    await act(async () => more()!.click())
+    await waitFor(() => expect(view.querySelector('.spotify-search-error[role="alert"]')).not.toBeNull())
+    await act(async () => view.querySelector<HTMLButtonElement>('.spotify-search-error button:not([aria-label="Dismiss error"])')!.click())
+    await waitFor(() => expect(view.querySelectorAll('.spotify-search-row')).toHaveLength(15))
+    expect(pageCalls).toBe(3)
   })
 
   it.each([['alb', false], ['art', false], ['alb', true]] as const)('opens the right-clicked %s above separated column options (local only: %s)', async (facet, localOnly) => {
@@ -1478,6 +1580,32 @@ describe('mounted native interaction boundaries', () => {
     await emitNativeEvent('lastfm-import-apply-finished', { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Spotify rate limited until tomorrow.', retryAt })
     await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Spotify rate limited until tomorrow.'))
     expect(view.querySelector('.import-limit-reset')).toBeNull()
+  })
+
+  it('dismisses a transient Last.fm apply alert while retaining the durable failed batch', async () => {
+    const fixtures = importerFixtures()
+    let queue: ImportQueueItem[] = fixtures.queue
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'lastfm_import_state') return fixtures.state
+      if (command === 'lastfm_import_queue') return { cursor: 0, items: queue, total: queue.length, nextCursor: null }
+      if (command === 'lastfm_import_page') return fixtures.pages.get(Number(args?.batchId))
+      if (command === 'metadata_values') return { cats: [], arts: [], albs: [] }
+      if (command === 'get_appearance') return { theme: 'light' }
+      return null
+    })
+    const view = await render(<LastFmImporter />)
+    await waitFor(() => expect(view.querySelector('#import-review-title')?.textContent).toContain('Release One'))
+    queue = fixtures.queue.map((item) => item.page === 1
+      ? { ...item, status: 'failed' as const, error: 'Disk full', errorCode: 'apply-failed', retryAt: null }
+      : item)
+    await emitNativeEvent('lastfm-import-apply-finished', { status: 'failed', batchId: 1, code: 'apply-failed', message: 'Disk full', retryAt: null })
+    await waitFor(() => expect(view.querySelector('[role="alert"]')?.textContent).toContain('Disk full'))
+
+    await act(async () => view.querySelector<HTMLButtonElement>('[role="alert"] button[aria-label="Dismiss error"]')!.click())
+    await waitFor(() => expect(view.querySelector('[role="alert"]')).toBeNull())
+    expect(view.textContent).toContain('Apply failed: Disk full')
+    expect(view.querySelector('.import-review-footer')?.textContent).toContain('This batch failed and its choices are frozen.')
+    expect(view.querySelector('.import-review-footer button')?.textContent).toBe('Retry Apply')
   })
 
   it('rejects malformed apply events, clears limit metadata, and refreshes the durable queue', async () => {

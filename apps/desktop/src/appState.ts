@@ -33,6 +33,7 @@ export type State = {
   lastfmImport: LastFmImportState
   spotifyResults: SpotifyResults | null
   spotifySearching: boolean
+  spotifySearchError?: string
   spotifyNavigation?: SpotifyNavEntry
   selectedPlaylist?: string
   playlistRevision: number
@@ -70,6 +71,7 @@ export type Action =
   | { type: 'lastfmImport'; lastfmImport: LastFmImportState }
   | { type: 'spotifyResults'; results: SpotifyResults | null }
   | { type: 'spotifySearching'; searching: boolean }
+  | { type: 'spotifySearchError'; error?: string }
   | { type: 'spotifyNavigate'; entry: SpotifyNavEntry }
   | { type: 'syncPhase'; phase?: string }
   | { type: 'syncProgress'; progress: { tracks: number; fraction: number } }
@@ -141,7 +143,7 @@ export const initialState: State = {
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'view':
-      return { ...state, view: action.view, viewKey: action.key, browsePending: false, error: undefined }
+      return { ...state, view: action.view, viewKey: action.key, browsePending: false }
     case 'browsePending':
       return { ...state, browsePending: action.pending }
     case 'error':
@@ -157,7 +159,7 @@ export function reducer(state: State, action: Action): State {
       return { ...state, sel, savedSelections: rememberSelection(state.savedSelections, state.source, sel), selectedTrackIds: new Set(), selectionAnchor: undefined }
     }
     case 'query':
-      return { ...state, query: action.query, spotifyResults: null, spotifySearching: false, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
+      return { ...state, query: action.query, spotifyResults: null, spotifySearching: false, spotifySearchError: undefined, spotifyNavigation: undefined, selectedTrackIds: new Set(), selectionAnchor: undefined }
     case 'scope':
       return { ...state, scope: action.scope, spotifyNavigation: undefined }
     case 'selectTrack':
@@ -211,9 +213,11 @@ export function reducer(state: State, action: Action): State {
     case 'lastfmImport':
       return { ...state, lastfmImport: action.lastfmImport }
     case 'spotifyResults':
-      return { ...state, spotifyResults: action.results, spotifySearching: false }
+      return { ...state, spotifyResults: action.results, spotifySearching: false, spotifySearchError: undefined }
     case 'spotifySearching':
       return { ...state, spotifySearching: action.searching }
+    case 'spotifySearchError':
+      return { ...state, spotifySearchError: action.error, spotifySearching: false }
     case 'spotifyNavigate':
       return { ...state, scope: 'spotify', query: '', queryReset: state.queryReset + 1, spotifyNavigation: action.entry, selectedPlaylist: undefined }
     case 'syncPhase':

@@ -233,6 +233,8 @@ pub(super) async fn sync_spotify(app: &tauri::AppHandle) -> Result<(), String> {
     run_sync_loop(app, run).await
 }
 
+const SPOTIFY_SYNC_ERROR: &str = "Retune couldn’t sync Spotify; your cached library is unchanged. The network may be blocking Spotify. Try another network or VPN, then sync again.";
+
 async fn run_sync_loop(
     app: &tauri::AppHandle,
     mut run: crate::sync_orchestrator::SyncRun,
@@ -260,7 +262,10 @@ async fn run_sync_loop(
         } else if let Some(deadline) = fallback_deadline {
             schedule_auto_resume(app, deadline);
         }
-        return result.map(|_| ());
+        return result.map(|_| ()).map_err(|error| {
+            log::error!("Spotify sync failed: {error}");
+            SPOTIFY_SYNC_ERROR.to_string()
+        });
     }
 }
 
