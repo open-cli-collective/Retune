@@ -103,7 +103,7 @@ export function TrackMergeDialog({ ids, onClose, onChanged }: { ids: number[]; o
     try {
       const id = await libraryGateway.mergeTracks(ids, preview.target.uri, { ...draft, rating: draft.rating === 'none' ? null : Number(draft.rating), playCount: mode === 'custom' ? { mode, value: total } : { mode } }, preview.revision)
       setMerged(id); onChanged(id)
-    } catch (error) { setError(`Couldn’t merge these tracks: ${String(error).replace(/^Error:\s*/, '')} Your library is unchanged. Try again.`) }
+    } catch { setError('Couldn’t merge these tracks. Your library is unchanged. Try again.') }
     finally { setBusy(false) }
   }
   const undo = async () => {
@@ -179,7 +179,12 @@ export function RemoveTrackDialog({ tracks, spotify, onClose, onChanged }: { tra
       if (spotify) await spotifyGateway.removeTrack(tracks[0].uri)
       else await libraryGateway.removeTracks(tracks.map((track) => track.id))
       onChanged(); onClose()
-    } catch (error) { setError(`Couldn’t remove ${tracks.length === 1 ? 'this track' : 'these tracks'}: ${String(error).replace(/^Error:\s*/, '')} Nothing was changed. Try again.`); setBusy(false) }
+    } catch {
+      setError(spotify
+        ? `Couldn’t confirm removing ${tracks.length === 1 ? 'this track' : 'these tracks'} from Spotify. Refresh Spotify and try again.`
+        : `Couldn’t remove ${tracks.length === 1 ? 'this track' : 'these tracks'} from Retune. Your library is unchanged. Try again.`)
+      setBusy(false)
+    }
   }
   const exclude = async () => {
     setBusy(true); setError('')

@@ -346,7 +346,7 @@ function SpotifyArtistPage({ id, backLabel, adding, membership, onBack, onAlbum,
     } catch {
       const restored = { ...page, following: !following }
       setLoaded({ id, status: 'ready', page: restored })
-      onError('Couldn’t update the artist follow state. Your Spotify account is unchanged. Try again.')
+      onError('Couldn’t confirm the artist follow state. Refresh Spotify and try again.')
     } finally {
       setToggling(false)
     }
@@ -463,7 +463,7 @@ export function SpotifySearch({ query, searching, results, searchError, navigati
   const add = (album: { uri: string; name: string; artist: string }) =>
     mutateMembership(album.uri, true, () => onAdd(album))
   const remove = (uri: string) => mutateMembership(uri, false, () =>
-    spotifyGateway.removeAlbum(uri).catch((error) => { onError('Couldn’t remove this album from Retune. Your library is unchanged. Try again.'); throw error }))
+    spotifyGateway.removeAlbum(uri).catch((error) => { onError('Couldn’t confirm removing this album from Retune. Refresh your library and try again.'); throw error }))
   const addTrack = (uri: string) => mutateMembership(uri, true, () => onAddTrack(uri))
   const removeTrack = (uri: string) => mutateMembership(uri, false, () => onRemoveTrack(uri))
   const playAlbum = async (album: SearchAlbum) => {

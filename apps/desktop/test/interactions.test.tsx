@@ -437,9 +437,30 @@ describe('mounted native interaction boundaries', () => {
     await waitFor(() => expect(view.querySelector('[data-facet="cat"] [data-row-index="1"]')).not.toBeNull())
 
     await act(async () => view.querySelector<HTMLButtonElement>('[data-facet="cat"] [data-row-index="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
-    await waitFor(() => expect(view.querySelector('.error-banner')?.textContent).toBe('Unsupported playback URI: fixture:track:included'))
+    await waitFor(() => expect(view.querySelector('.error-banner')?.textContent).toBe('This track can’t be played because its source isn’t supported.'))
     expect(view.querySelector('.lcd-copy .marquee')?.textContent).not.toBe('Included')
     expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
+  })
+
+  it('does not expose a raw browse transport failure in the global error banner', async () => {
+    const settings: Settings = { ...defaultSettings, theme: 'light' }
+    const lastfm: LastFmState = { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'browse') throw new Error('reqwest::Error: network blocked by policy')
+      if (command === 'get_settings') return settings
+      if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return lastfm
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return []
+      if (command === 'subscribe_main_events') return 1
+      return null
+    })
+    const view = await render(<App />)
+    await waitFor(() => expect(view.querySelector('.error-banner')).not.toBeNull())
+    expect(view.querySelector('.error-banner')?.textContent).toContain('Couldn’t load your library')
+    expect(view.querySelector('.error-banner')?.textContent).not.toContain('reqwest')
+    expect(view.querySelector('.error-banner')?.textContent).not.toContain('network blocked')
   })
 
   it('dismisses a main operation error and can show a later error from the native event boundary', async () => {
@@ -479,6 +500,66 @@ describe('mounted native interaction boundaries', () => {
 
     await act(async () => channel!.onmessage({ type: 'operationError', payload: error }))
     expect(view.querySelector('.error-banner[role="alert"]')?.textContent).toContain('Try another network or VPN')
+  })
+
+  it('does not let a late Spotify search retry replace results for a newer query', async () => {
+    vi.useFakeTimers()
+    const browse: BrowseView = {
+      facets: { cats: [], arts: [], albs: [] }, tracks: [],
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: 0, totalSecs: 0, perSource: { music: 0, podcasts: 0, audiobooks: 0 } },
+    }
+    const settings: Settings = { ...defaultSettings, theme: 'light' }
+    const lastfm: LastFmState = { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
+    const oldResults: SpotifyResults = {
+      artists: { items: [{ id: 'old-artist', name: 'Old Artist', descriptor: 'Rock', imageUrl: null }], total: 1, nextOffset: null },
+      albums: { items: [], total: 0, nextOffset: null }, tracks: { items: [], total: 0, nextOffset: null },
+    }
+    const newResults: SpotifyResults = {
+      artists: { items: [{ id: 'new-artist', name: 'New Artist', descriptor: 'Jazz', imageUrl: null }], total: 1, nextOffset: null },
+      albums: { items: [], total: 0, nextOffset: null }, tracks: { items: [], total: 0, nextOffset: null },
+    }
+    let searchCalls = 0
+    const pendingSearches: Array<{ query: string; resolve: (results: SpotifyResults) => void }> = []
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'browse') return browse
+      if (command === 'get_settings') return settings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return lastfm
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return []
+      if (command === 'subscribe_main_events') return 1
+      if (command === 'spotify_search') {
+        searchCalls += 1
+        if (searchCalls === 1) throw new Error('network blocked')
+        const pending = deferred<SpotifyResults>()
+        pendingSearches.push({ query: String(args?.query), resolve: pending.resolve })
+        return pending.promise
+      }
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => [...view.querySelectorAll<HTMLButtonElement>('.scope-pills button')].find((button) => button.textContent === 'Spotify')!.click())
+    const input = view.querySelector<HTMLInputElement>('input.search')!
+    await typeInput(input, 'old')
+    await act(async () => { vi.advanceTimersByTime(100) })
+    await act(async () => { vi.advanceTimersByTime(300); await Promise.resolve() })
+    expect(searchCalls).toBe(1)
+    expect(view.querySelector('.spotify-search-error[role="alert"]')).not.toBeNull()
+    await act(async () => view.querySelector<HTMLButtonElement>('.spotify-search-error button:not([aria-label="Dismiss error"])')!.click())
+    await act(async () => { vi.advanceTimersByTime(300); await Promise.resolve() })
+    expect(searchCalls).toBe(2)
+
+    await typeInput(input, 'new')
+    await act(async () => { vi.advanceTimersByTime(100) })
+    await act(async () => { vi.advanceTimersByTime(300); await Promise.resolve() })
+    expect(searchCalls).toBe(3)
+    await act(async () => pendingSearches[0].resolve(oldResults))
+    expect(view.textContent).not.toContain('Old Artist')
+
+    await act(async () => pendingSearches[1].resolve(newResults))
+    expect(view.textContent).toContain('New Artist')
   })
 
   it('keeps unavailable artist follow state retryable and rejects a late stale retry', async () => {
@@ -2489,7 +2570,8 @@ describe('library track decisions', () => {
       writeFileSync(`${process.env.RETUNE_DECISIONS_PREVIEW}-review.html`, '<!doctype html><html data-theme="light"><meta charset="utf-8"><style>' + ['src/index.css', 'src/App.css', 'src/trackDecisions.css'].map((path) => readFileSync(path, 'utf8')).join('\n') + '</style><body>' + copy.innerHTML + '</body></html>')
     }
     await clickText(view, 'Merge tracks')
-    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Disk unavailable')
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Couldn’t merge these tracks. Your library is unchanged. Try again.')
+    expect(view.querySelector('[role="alert"]')?.textContent).not.toContain('Disk unavailable')
     expect(changed).not.toHaveBeenCalled()
     await clickText(view, 'Merge tracks')
     expect(invokeMock).toHaveBeenLastCalledWith('merge_library_tracks', { ids: [1, 2, 3], targetUri: fixture.target!.uri, edit: { name: 'My merged recording', art: 'Lauv', alb: fixture.target!.alb, cat: 'Rock', rating: 4, playCount: { mode: 'custom', value: 25 } }, expectedRevision: 'current' })
@@ -2559,7 +2641,8 @@ describe('library track decisions', () => {
     const changed = vi.fn()
     const view = await render(<RemoveTrackDialog tracks={[track(1, 'Song'), track(2, 'Other')]} spotify={false} onClose={vi.fn()} onChanged={changed} />)
     await clickText(view, 'Remove from Retune')
-    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Write failed')
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Couldn’t remove these tracks from Retune. Your library is unchanged. Try again.')
+    expect(view.querySelector('[role="alert"]')?.textContent).not.toContain('Write failed')
     await clickText(view, 'Remove from Retune')
     expect(invokeMock).toHaveBeenLastCalledWith('remove_retune_tracks', { ids: [1, 2] })
     await act(async () => root!.render(<RemovedTracksManager onBack={vi.fn()} onChanged={changed} />))

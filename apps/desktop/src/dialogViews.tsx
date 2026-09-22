@@ -129,7 +129,9 @@ export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: 
       if (targetIds.length) await libraryGateway.editTracks(targetIds, { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) })
       onSaved()
     } catch {
-      onError('Couldn’t save the selected track overlays. Your library is unchanged. Try again.')
+      onError(addMissing
+        ? 'Couldn’t finish adding the selected tracks to Retune. Refresh your library and try again.'
+        : 'Couldn’t save the selected track overlays. Your library is unchanged. Try again.')
     } finally {
       setSaving(false)
     }
