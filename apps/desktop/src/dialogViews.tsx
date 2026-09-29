@@ -49,7 +49,7 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
   const [decisionError, setDecisionError] = useState('')
   const reportError = useEffectEvent(onError)
   useEffect(() => {
-    libraryGateway.metadataValues().then(setSuggestions).catch((error) => reportError(String(error)))
+    libraryGateway.metadataValues().then(setSuggestions).catch(() => reportError('Couldn’t load metadata suggestions. Existing values are unchanged. Try again.'))
   }, [])
   const genres = useMemo(() => [...new Map([...suggestions.cats, ...track.genres].filter((genre) => genre && genre !== 'Uncategorized').map((genre) => [genre.toLowerCase(), genre] as const)).values()]
     .sort((left, right) => left.toLowerCase().localeCompare(right.toLowerCase())), [suggestions.cats, track.genres])
@@ -64,8 +64,8 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
       const edit = Object.fromEntries(Object.entries(draft).filter(([, value]) => value.trim() !== ''))
       await libraryGateway.editTrack(track.id, { ...edit, ratingChange })
       onSaved()
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t save this track overlay. Your library is unchanged. Try again.')
     } finally {
       setBusy(false)
     }
@@ -73,13 +73,13 @@ export function GetInfo({ track, onCancel, onSaved, onError }: { track: TrackInf
   const toggleEnabled = async (next: boolean) => {
     setBusy(true); setDecisionError('')
     try { await libraryGateway.setTrackEnabled(track.id, next); setEnabled(next) }
-    catch (error) { setDecisionError(String(error)) }
+    catch { setDecisionError('Couldn’t update playback inclusion. Your library is unchanged. Try again.') }
     finally { setBusy(false) }
   }
   const undoMerge = async () => {
     setBusy(true); setDecisionError('')
     try { await libraryGateway.undoMerge(track.id); onSaved() }
-    catch (error) { setDecisionError(String(error)); setBusy(false) }
+    catch { setDecisionError('Couldn’t undo this merge. Your library is unchanged. Try again.'); setBusy(false) }
   }
   const dirty = draft.name !== track.name || draft.art !== track.art || draft.alb !== track.alb || draft.cat !== (track.cat === 'Uncategorized' ? '' : track.cat) || rating?.stars !== track.rating?.stars || rating?.explicit !== track.rating?.explicit
   const field = (key: keyof typeof draft) => ({
@@ -117,7 +117,7 @@ export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: 
   const [saving, setSaving] = useState(false)
   const reportError = useEffectEvent(onError)
   useEffect(() => {
-    libraryGateway.metadataValues().then(setSuggestions).catch((error) => reportError(String(error)))
+    libraryGateway.metadataValues().then(setSuggestions).catch(() => reportError('Couldn’t load metadata suggestions. Existing values are unchanged. Try again.'))
   }, [])
   const placeholder = (key: Field) => tracks.every((track) => track[key] === tracks[0][key]) ? tracks[0][key] : 'Mixed'
   const { ids, missingUris } = overlayEditTargets(tracks)
@@ -128,8 +128,10 @@ export function MultipleItemInformation({ tracks, onCancel, onSaved, onError }: 
       const targetIds = [...new Set([...ids, ...addedIds])]
       if (targetIds.length) await libraryGateway.editTracks(targetIds, { ...draft, ...(rating === undefined ? {} : { ratingChange: { stars: rating } }) })
       onSaved()
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError(addMissing
+        ? 'Couldn’t finish adding the selected tracks to Retune. Refresh your library and try again.'
+        : 'Couldn’t save the selected track overlays. Your library is unchanged. Try again.')
     } finally {
       setSaving(false)
     }
@@ -196,8 +198,8 @@ export function PlaybackAuthorization({ prompt, onCancel, onAuthorize }: {
     setAuthorizing(true)
     try {
       await onAuthorize()
-    } catch (error) {
-      setError(String(error))
+    } catch {
+      setError('Couldn’t authorize Spotify playback. Your library connection is unchanged. Try again.')
     } finally {
       setAuthorizing(false)
     }
@@ -220,7 +222,7 @@ function BugPreferences() {
     let active = true
     appGateway.diagnostics()
       .then((next) => { if (active) setReport(next) })
-      .catch((reason) => { if (active) setError(String(reason)) })
+      .catch(() => { if (active) setError('Couldn’t load diagnostics. Try again.') })
     return () => { active = false }
   }, [])
   const counts = Object.fromEntries(diagnosticLevels.map((level) => [level, report.entries.filter((entry) => entry.level === level).length])) as Record<DiagnosticLevel, number>
@@ -232,15 +234,15 @@ function BugPreferences() {
       await navigator.clipboard.writeText(body)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1600)
-    } catch (reason) {
-      setError(String(reason))
+    } catch {
+      setError('Couldn’t copy diagnostics. Try again.')
     }
   }
   const email = async () => {
     try {
       await appGateway.emailDiagnostics(body)
-    } catch (reason) {
-      setError(String(reason))
+    } catch {
+      setError('Couldn’t email diagnostics. Copy Logs and share the report instead.')
     }
   }
   const toggleLevel = (level: DiagnosticLevel) => setLevels((current) => {
@@ -326,8 +328,8 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
       if (action === 'finish') {
         setLastfmScrobbling(true)
       }
-    } catch (error) {
-      setLastfmError(String(error))
+    } catch {
+      setLastfmError(`Couldn’t ${action} Last.fm. Your account connection is unchanged. Try again.`)
     } finally {
       setLastfmBusy(false)
     }
@@ -389,7 +391,7 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
               {lastfm.problem && lastfm.available && <small className="error-text" role="alert">{lastfm.problem}</small>}
               {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
             </div>
-            <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" onClick={(event) => { event.preventDefault(); void openExternalDestination({ kind: 'lastFm' }).catch((error) => setLastfmError(String(error))) }}>Last.fm</a>.</small>
+            <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" onClick={(event) => { event.preventDefault(); void openExternalDestination({ kind: 'lastFm' }).catch(() => setLastfmError('Couldn’t open Last.fm. Try again.')) }}>Last.fm</a>.</small>
           </div></section>
           <section className="preference-group removed-tracks-preference"><h3>Removed tracks</h3><div className="preference-inset preference-recovery"><div><strong>Recover tracks removed from Retune</strong><small>Restore their metadata and play history without changing Spotify.</small></div><button type="button" onClick={() => setRemovedTracksOpen(true)}>Manage…</button></div></section>
         </>)}

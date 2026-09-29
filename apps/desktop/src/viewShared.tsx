@@ -50,6 +50,19 @@ export function ArtworkLightbox({ artwork, name, onClose }: { artwork: string | 
   </ModalDialog>
 }
 
+export function ErrorNotice({ children, className, actions, onDismiss, dismissLabel = 'Dismiss error' }: {
+  children: ReactNode
+  className?: string
+  actions?: ReactNode
+  onDismiss?: () => void
+  dismissLabel?: string
+}) {
+  return <div className={`error-notice${className ? ` ${className}` : ''}`} role="alert">
+    <div className="error-notice-copy">{children}</div>
+    {(actions || onDismiss) && <div className="error-notice-actions">{actions}{onDismiss && <button type="button" className="error-notice-dismiss" aria-label={dismissLabel} title={dismissLabel} onClick={onDismiss} />}</div>}
+  </div>
+}
+
 export function ContextMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
   const menu = useRef<HTMLDivElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)

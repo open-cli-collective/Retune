@@ -891,8 +891,8 @@ fn install_file_menu(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resu
             "sync_spotify" => {
                 let handle = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(error) = sync_spotify(&handle).await {
-                        notify_error(&handle, error);
+                    if sync_spotify(&handle).await.is_err() {
+                        notify_spotify_sync_error(&handle);
                     }
                 });
             }
@@ -948,6 +948,10 @@ fn install_file_menu(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resu
 fn notify_error(app: &tauri::AppHandle, error: String) {
     log::error!("{error}");
     let _ = emit_main_event(app, main_events::MainEvent::OperationError(error));
+}
+
+pub(crate) fn notify_spotify_sync_error(app: &tauri::AppHandle) {
+    let _ = emit_main_event(app, main_events::MainEvent::SpotifySyncError);
 }
 
 pub(crate) fn emit_main_event<R: tauri::Runtime>(
@@ -1364,7 +1368,11 @@ fn finish_startup(
                 },
             };
             if let Err(error) = result {
-                notify_error(&handle, error);
+                if startup_action == StartupAction::Sync {
+                    notify_spotify_sync_error(&handle);
+                } else {
+                    notify_error(&handle, error);
+                }
             }
         });
     }

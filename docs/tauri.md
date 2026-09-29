@@ -74,8 +74,11 @@ The core event bus carries targeted, payload-free invalidations such as library,
 playlist, connection, settings, appearance, and import-state changes. A
 consumer responds by fetching an authorized snapshot. Main-only player state,
 startup notices, operation errors, and local-import results use the private
-main channel. Consumers subscribe before taking their initial snapshot so a
-change cannot fall between snapshot and subscription.
+main channel. Automatic Spotify sync failures use the payload-free
+`spotifySyncError` variant so the frontend can select its closed recovery copy;
+other operation failures use the generic `operationError` fallback. Consumers
+subscribe before taking their initial snapshot so a change cannot fall between
+snapshot and subscription.
 
 Native menu and media-key actions enter the same Rust-owned application paths
 as UI actions. Playback backends emit neutral events; the controller/reducer

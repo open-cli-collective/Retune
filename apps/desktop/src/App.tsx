@@ -8,7 +8,7 @@ import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, S
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackContextMenu, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, LastFmImportState, PlaybackOrigin, PlaybackTrack, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, SettingsPatch, Source, SpotifySyncStatus, Theme, Track } from './types.ts'
-import { ArtworkLightbox, CheckboxMenu, ContextMenu, ModalDialog } from './viewShared.tsx'
+import { ArtworkLightbox, CheckboxMenu, ContextMenu, ErrorNotice, ModalDialog } from './viewShared.tsx'
 import { importDownloadPercent, importDownloadProgressLabel, importStatusText } from './lastfmImportState.ts'
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
@@ -21,6 +21,9 @@ import { lastfmGateway } from './lastfmGateway.ts'
 import { RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
 
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
+const SPOTIFY_SYNC_ERROR = 'Retune couldn’t sync Spotify; your cached library is unchanged. The network may be blocking Spotify. Try another network or VPN, then sync again.'
+const SPOTIFY_SEARCH_ERROR = 'Couldn’t search Spotify. Existing results are unchanged. Try another network or VPN, then search again.'
+const INFRASTRUCTURE_ERROR = 'Retune couldn’t refresh the app state. Your current view is unchanged. Try again.'
 
 const emptyTracks: Track[] = []
 const ZOOM_MIN = 0.7
@@ -94,20 +97,20 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     dispatch({ type: 'playbackAuthorization', prompt })
   }, [dispatch])
 
-  const run = useCallback((request: () => Promise<unknown>) => {
-    request().catch((error) => dispatch({ type: 'error', error: String(error) }))
+  const run = useCallback((request: () => Promise<unknown>, message: string) => {
+    request().catch(() => dispatch({ type: 'error', error: message }))
   }, [dispatch])
 
   const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin) => {
     const target = tracks.find((track) => track.id === id)
     if (!target || (!target.uri.startsWith('file:') && !target.uri.startsWith('spotify:'))) {
-      dispatch({ type: 'error', error: `Unsupported playback URI: ${target?.uri ?? 'unknown'}` })
+      dispatch({ type: 'error', error: 'This track can’t be played because its source isn’t supported.' })
       return
     }
     const playable = playbackQueue(tracks, id)
     const targetIndex = playable.findIndex((track) => track.id === id)
     if (targetIndex < 0) {
-      dispatch({ type: 'error', error: `Unsupported playback URI: ${target.uri}` })
+      dispatch({ type: 'error', error: 'This track can’t be played because its source isn’t supported.' })
       return
     }
     const request = beginRequestGeneration(playGeneration)
@@ -119,7 +122,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
       pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: false }
-      run(spotifyGateway.connect)
+      run(spotifyGateway.connect, 'Couldn’t connect to Spotify. Try again.')
       return
     }
     playbackGateway.play(playable, targetIndex)
@@ -129,8 +132,8 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
         pendingPlay.current = { id: authorization.id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
         dispatch({ type: 'playbackAuthorization', prompt: authorization.prompt })
       })
-      .catch((error) => {
-        if (isCurrentRequestGeneration(request, playGeneration)) dispatch({ type: 'error', error: String(error) })
+      .catch(() => {
+        if (isCurrentRequestGeneration(request, playGeneration)) dispatch({ type: 'error', error: 'Couldn’t start playback. Playback is unchanged. Try again.' })
       })
   }, [connected, dispatch, run])
 
@@ -150,7 +153,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
   const toggle = useCallback(() => {
     if (!playingRef.current || playingRef.current.external) return
-    run(playbackGateway.toggle)
+    run(playbackGateway.toggle, 'Couldn’t change playback. Try again.')
   }, [run])
 
   const playRequestedTrack = useCallback((track: SpotifyPlayRequest) => {
@@ -164,17 +167,17 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   const step = useCallback((direction: number) => {
     const current = playingRef.current
     if (!current || current.external) return
-    run(direction < 0 ? playbackGateway.previous : playbackGateway.next)
+    run(direction < 0 ? playbackGateway.previous : playbackGateway.next, `Couldn’t skip to the ${direction < 0 ? 'previous' : 'next'} track. Playback is unchanged. Try again.`)
   }, [run])
 
   const setVolume = useCallback((volume: number) => {
     window.clearTimeout(volumeTimer.current)
-    volumeTimer.current = window.setTimeout(() => run(() => playbackGateway.setVolume(volume)), 150)
+    volumeTimer.current = window.setTimeout(() => run(() => playbackGateway.setVolume(volume), 'Couldn’t change the volume. Playback is unchanged. Try again.'), 150)
   }, [run])
 
   const seek = useCallback((seconds: number) => {
     if (!playingRef.current || playingRef.current.external) return
-    run(() => playbackGateway.seek(seconds))
+    run(() => playbackGateway.seek(seconds), 'Couldn’t seek in this track. Playback is unchanged. Try again.')
   }, [run])
 
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
@@ -187,13 +190,16 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
 
 function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
-  const fail = useCallback((error: unknown) => dispatch({ type: 'error', error: String(error) }), [])
+  const reportInfrastructureError = useCallback(() => dispatch({ type: 'error', error: INFRASTRUCTURE_ERROR }), [])
+  const reportMainOperationError = useCallback(() => dispatch({ type: 'error', error: INFRASTRUCTURE_ERROR }), [])
+  const reportSpotifySyncError = useCallback(() => dispatch({ type: 'error', error: SPOTIFY_SYNC_ERROR }), [])
   const [nativeDragActive, setNativeDragActive] = useState(false)
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
   const [artworkOpen, setArtworkOpen] = useState(false)
   const [trackDecision, setTrackDecision] = useState<{ kind: 'merge'; ids: number[] } | { kind: 'remove'; tracks: Pick<Track, 'id' | 'uri' | 'name'>[]; spotify: boolean }>()
+  const [spotifySearchRetry, setSpotifySearchRetry] = useState(0)
   const [playingMenu, setPlayingMenu] = useState<{ x: number; y: number; uri: string; name: string; trackId?: number }>()
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
   const search = useRef<HTMLInputElement>(null)
@@ -223,14 +229,15 @@ function App() {
     spotifyPlayRequested: player.playRequestedTrack,
     playerState: player.onState,
     playbackAuthorizationRequired: player.onAuthorizationRequired,
-    operationError: (error) => dispatch({ type: 'error', error }),
+    operationError: reportMainOperationError,
+    spotifySyncError: reportSpotifySyncError,
     operationRecovered: () => dispatch({ type: 'clear-error' }),
     localImportComplete: (summary) => dispatch({ type: 'importComplete', summary }),
     startupNotice: (notice) => dispatch({ type: 'notice', notice }),
   }))
   const persistSettings = useCallback((patch: SettingsPatch) => {
-    appGateway.updateSettings(patch).catch(fail)
-  }, [fail])
+    appGateway.updateSettings(patch).catch(() => dispatch({ type: 'error', error: 'Couldn’t save settings. Try again.' }))
+  }, [])
   const updateSettings = useCallback((patch: SettingsPatch) => {
     dispatch({ type: 'settings', settings: patch })
     persistSettings(patch)
@@ -284,7 +291,7 @@ function App() {
     void loadCurrentGeneration(infoGeneration,
       () => libraryGateway.getTrack(id),
       (track) => dispatch({ type: 'info', info: { kind: 'single', track } }),
-      fail)
+      () => dispatch({ type: 'error', error: 'Couldn’t load track details. Your library is unchanged. Try again.' }))
   }
   const openInfo = (id?: number) => {
     cancelTrackInfoLoad(infoGeneration)
@@ -311,10 +318,10 @@ function App() {
       const fallback = staleSelectionFacet(request.sel, next.facets)
       if (fallback) selectFacet(fallback, [])
       else dispatch({ type: 'view', view: next, key: request.key })
-    }).catch((error) => {
+    }).catch(() => {
       if (!browseMounted.current || browseDesiredToken.current !== request.token) return
       dispatch({ type: 'browsePending', pending: false })
-      fail(error)
+      dispatch({ type: 'error', error: 'Couldn’t load your library. Existing rows are unchanged. Try again.' })
     }).finally(() => {
       browseInFlight.current = false
       drainBrowse()
@@ -342,9 +349,9 @@ function App() {
     let active = true
     spotifyGateway.playlists()
       .then((rows) => active && setPlaylists(rows))
-      .catch((error) => active && fail(error))
+      .catch(() => active && dispatch({ type: 'error', error: 'Couldn’t load Spotify playlists. Existing playlists are unchanged. Try again.' }))
     return () => { active = false }
-  }, [state.playlistRevision, fail])
+  }, [state.playlistRevision])
 
   useEffect(() => {
     if (playlists && state.selectedPlaylist && !playlists.some((playlist) => playlist.id === state.selectedPlaylist)) {
@@ -353,32 +360,32 @@ function App() {
   }, [playlists, state.selectedPlaylist])
 
   useTauriInvalidationSnapshot('settings-changed', appGateway.settings,
-    (settings) => dispatch({ type: 'hydrateSettings', settings }), fail)
+    (settings) => dispatch({ type: 'hydrateSettings', settings }), reportInfrastructureError)
   useTauriInvalidationSnapshot(spotifyEvents.connectionChanged, spotifyGateway.connectionState,
-    (connection) => dispatch({ type: 'connection', connection }), fail)
+    (connection) => dispatch({ type: 'connection', connection }), reportInfrastructureError)
   useTauriInvalidationSnapshot(spotifyEvents.syncStatusChanged, spotifyGateway.syncStatus,
-    (status) => dispatch({ type: 'spotifySyncStatus', status }), fail)
+    (status) => dispatch({ type: 'spotifySyncStatus', status }), reportInfrastructureError)
   useTauriInvalidationSnapshot('lastfm-changed', lastfmGateway.accountState,
-    (lastfm) => dispatch({ type: 'lastfm', lastfm }), fail)
+    (lastfm) => dispatch({ type: 'lastfm', lastfm }), reportInfrastructureError)
   useTauriInvalidationSnapshot('lastfm-import-changed', lastfmGateway.state,
     (lastfmImport) => {
       dispatch({ type: 'lastfmImport', lastfmImport })
-      spotifyGateway.syncStatus().then((status) => dispatch({ type: 'spotifySyncStatus', status })).catch(fail)
-    }, fail)
+      spotifyGateway.syncStatus().then((status) => dispatch({ type: 'spotifySyncStatus', status })).catch(reportInfrastructureError)
+    }, reportInfrastructureError)
 
   useEffect(() => subscribeMainEvents(
     handleMainEvent,
-    fail,
-  ), [fail])
+    reportInfrastructureError,
+  ), [reportInfrastructureError])
 
-  useTauriEvent('get-info', () => openInfo(), fail)
-  useTauriEvent(libraryEvents.changed, () => dispatch({ type: 'refresh' }), fail)
-  useTauriEvent<string>(spotifyEvents.syncProgress, (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }), fail)
-  useTauriEvent<{ tracks: number; fraction: number }>(spotifyEvents.syncProgressCount, (progress) => dispatch({ type: 'syncProgress', progress }), fail)
-  useTauriEvent(spotifyEvents.playlistsChanged, () => dispatch({ type: 'playlistsRefresh' }), fail)
-  useTauriEvent(libraryEvents.localImportStarted, () => dispatch({ type: 'importStarted' }), fail)
-  useTauriEvent(libraryEvents.localImportFailed, () => dispatch({ type: 'importFailed' }), fail)
-  useTauriEvent<boolean>(libraryEvents.localDragChanged, setNativeDragActive, fail)
+  useTauriEvent('get-info', () => openInfo(), reportInfrastructureError)
+  useTauriEvent(libraryEvents.changed, () => dispatch({ type: 'refresh' }), reportInfrastructureError)
+  useTauriEvent<string>(spotifyEvents.syncProgress, (phase) => dispatch({ type: 'syncPhase', phase: phase || undefined }), reportInfrastructureError)
+  useTauriEvent<{ tracks: number; fraction: number }>(spotifyEvents.syncProgressCount, (progress) => dispatch({ type: 'syncProgress', progress }), reportInfrastructureError)
+  useTauriEvent(spotifyEvents.playlistsChanged, () => dispatch({ type: 'playlistsRefresh' }), reportInfrastructureError)
+  useTauriEvent(libraryEvents.localImportStarted, () => dispatch({ type: 'importStarted' }), reportInfrastructureError)
+  useTauriEvent(libraryEvents.localImportFailed, () => dispatch({ type: 'importFailed' }), reportInfrastructureError)
+  useTauriEvent<boolean>(libraryEvents.localDragChanged, setNativeDragActive, reportInfrastructureError)
 
   useEffect(() => {
     if (!state.importStatus || state.importStatus === 'Importing local files…') return
@@ -397,17 +404,23 @@ function App() {
     const timer = window.setTimeout(() => {
       spotifyGateway.search(query, 0)
         .then((results) => active && dispatch({ type: 'spotifyResults', results }))
-        .catch((error) => {
+        .catch(() => {
           if (!active) return
-          dispatch({ type: 'spotifySearching', searching: false })
-          fail(error)
+          dispatch({ type: 'spotifySearchError', error: SPOTIFY_SEARCH_ERROR })
         })
     }, 300)
     return () => {
       active = false
       window.clearTimeout(timer)
     }
-  }, [state.scope, state.query, state.connection.connected, fail])
+  }, [state.scope, state.query, state.connection.connected, spotifySearchRetry])
+
+  const retrySpotifySearch = useCallback(() => {
+    const query = state.query.trim()
+    if (!query || !state.connection.connected) return
+    dispatch({ type: 'spotifySearchError' })
+    setSpotifySearchRetry((current) => current + 1)
+  }, [state.connection.connected, state.query])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -425,28 +438,35 @@ function App() {
 
   useEffect(() => {
     const title = state.source === 'music' ? 'Retune — Library' : `Retune — ${labels[state.source].name}`
-    getCurrentWindow().setTitle(title).catch(fail)
-  }, [state.source, fail])
+    getCurrentWindow().setTitle(title).catch(reportInfrastructureError)
+  }, [reportInfrastructureError, state.source])
 
   const mutate = (mutation: () => Promise<unknown>) => {
     mutation()
       .then(() => dispatch({ type: 'refresh' }))
-      .catch(fail)
+      .catch(() => dispatch({ type: 'error', error: 'Couldn’t update track playback inclusion. Your library is unchanged. Try again.' }))
   }
   const rate = (key: string, mutation: () => Promise<unknown>) => {
-    void loadCurrentGeneration(entityRequestGeneration(ratingGenerations.current, key), mutation, () => dispatch({ type: 'refresh' }), fail)
+    void loadCurrentGeneration(entityRequestGeneration(ratingGenerations.current, key), mutation, () => dispatch({ type: 'refresh' }), () => dispatch({ type: 'error', error: 'Couldn’t update the rating. Your library is unchanged. Try again.' }))
   }
   const navigateSpotify = (track: Pick<Track, 'uri'>, destination: 'album' | 'artist') => spotifyGateway.resolveTrackDestination(track.uri, destination)
     .then((entry) => dispatch({ type: 'spotifyNavigate', entry }))
-    .catch(fail)
+    .catch(() => dispatch({ type: 'error', error: `Couldn’t open this Spotify ${destination}. Your library is unchanged. Try again.` }))
   const navigateFacetSpotify = async (facet: 'art' | 'alb', value: string) => {
+    let track: Track | undefined
     try {
       const selection = selectionAfterFacet(state.sel, facet, [value])
       const result = await libraryGateway.browse(state.source, selection, state.query.trim() || undefined)
-      const track = result.tracks.find((track) => track.uri.startsWith('spotify:track:'))
-      if (!track) throw new Error(`This ${facet === 'alb' ? 'album' : 'artist'} has no Spotify tracks to open.`)
-      await navigateSpotify(track, facet === 'alb' ? 'album' : 'artist')
-    } catch (error) { fail(error) }
+      track = result.tracks.find((candidate) => candidate.uri.startsWith('spotify:track:'))
+    } catch {
+      dispatch({ type: 'error', error: `Couldn’t open this Spotify ${facet === 'alb' ? 'album' : 'artist'}. Your library is unchanged. Try again.` })
+      return
+    }
+    if (!track) {
+      dispatch({ type: 'error', error: `This ${facet === 'alb' ? 'album' : 'artist'} has no Spotify tracks to open.` })
+      return
+    }
+    void navigateSpotify(track, facet === 'alb' ? 'album' : 'artist')
   }
   const setZoom = useCallback((zoom: number) => {
     updateSettings({ zoom: normalizeZoom(zoom, ZOOM_MIN, ZOOM_MAX) })
@@ -456,16 +476,17 @@ function App() {
     dispatch({ type: 'preferences', open: true })
   }
   const openLastfmImporter = () => {
-    appGateway.openLastFmImporter().catch(fail)
+    appGateway.openLastFmImporter().catch(() => dispatch({ type: 'error', error: 'Couldn’t open the Last.fm importer. Try again.' }))
   }
   const syncLastfm = () => {
     lastfmGateway.syncPlays()
       .then((lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
-      .catch(fail)
+      .catch(() => dispatch({ type: 'error', error: 'Couldn’t sync Last.fm. Existing import state is unchanged. Try again.' }))
   }
   const syncSpotify = useCallback(() => {
-    spotifyGateway.sync().catch(fail)
-  }, [fail])
+    dispatch({ type: 'clear-error' })
+    spotifyGateway.sync().catch(() => dispatch({ type: 'error', error: SPOTIFY_SYNC_ERROR }))
+  }, [])
   const cancelPreferences = () => {
     dispatch({ type: 'settings', settings: { zoom: preferenceZoom.current } })
     dispatch({ type: 'preferences', open: false })
@@ -538,13 +559,13 @@ function App() {
     else if (payload === 'toggle_zebra') updateSettings({ zebra: !state.settings.zebra })
     else if (payload === 'toggle_browser') toggleBrowser()
     else if (payload.startsWith('theme_')) updateSettings({ theme: payload.slice(6) as Theme })
-  }, fail)
+  }, reportInfrastructureError)
   useTauriEvent<string>(playbackEvents.action, (payload) => {
     if (payload === 'play_pause') player.toggle()
     else player.step(payload === 'previous' ? -1 : 1)
-  }, fail)
-  useTauriEvent('open-preferences', openPreferences, fail)
-  useTauriEvent('open-setup', () => dispatch({ type: 'setup', open: true }), fail)
+  }, reportInfrastructureError)
+  useTauriEvent('open-preferences', openPreferences, reportInfrastructureError)
+  useTauriEvent('open-setup', () => dispatch({ type: 'setup', open: true }), reportInfrastructureError)
 
   const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
     const modalOpen = Boolean(state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject)
@@ -684,9 +705,9 @@ function App() {
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
           onReorder={setPlaylists}
           onCollapse={() => updateSettings({ plCollapsed: !state.settings.plCollapsed })}
-          onShuffle={(shuffle) => playbackGateway.setShuffle(shuffle).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch(fail)}
-          onRepeat={(repeat) => playbackGateway.setRepeat(repeat).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch(fail)}
-          onDrop={(id, subject) => addToPlaylist(id, subject).catch(fail)}
+          onShuffle={(shuffle) => playbackGateway.setShuffle(shuffle).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch(() => dispatch({ type: 'error', error: 'Couldn’t change shuffle. Playback is unchanged. Try again.' }))}
+          onRepeat={(repeat) => playbackGateway.setRepeat(repeat).then(() => dispatch({ type: 'settings', settings: { repeat } })).catch(() => dispatch({ type: 'error', error: 'Couldn’t change repeat mode. Playback is unchanged. Try again.' }))}
+          onDrop={(id, subject) => addToPlaylist(id, subject).catch(() => dispatch({ type: 'error', error: 'Couldn’t confirm adding this selection to the playlist. Refresh Spotify and try again.' }))}
           onError={(error) => dispatch({ type: 'error', error })}
           artwork={artworkOpen && state.playing?.uri ? <ArtworkPanel
             uri={state.playing.uri}
@@ -695,26 +716,29 @@ function App() {
           /> : undefined}
         />
         <section className="content" aria-busy={state.browsePending}>
-          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => spotifyGateway.connect().catch(fail)}>Reconnect</button></div>}
+          {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => spotifyGateway.connect().catch(() => dispatch({ type: 'error', error: 'Couldn’t reconnect Spotify. Try again.' }))}>Reconnect</button></div>}
           {spotifySearchActive ? (
             !state.connectionHydrated ? <div className="spotify-stub"><span>Checking Spotify connection…</span></div> : state.connection.connected ? <SpotifySearch
               key={JSON.stringify([state.query.trim(), state.spotifyNavigation ?? null])}
               query={state.query.trim()}
               searching={state.spotifySearching}
               results={state.spotifyResults}
+              searchError={state.spotifySearchError}
               navigation={state.spotifyNavigation}
               playingUri={state.playing?.uri ?? null}
               onAdd={(album) => spotifyGateway.addAlbum(album)
-                .catch((error) => { fail(error); throw error })}
+                .catch((error) => { dispatch({ type: 'error', error: 'Couldn’t confirm adding this album to Retune. Refresh your library and try again.' }); throw error })}
               onAddTrack={(uri) => spotifyGateway.addTrack(uri)
-                .catch((error) => { fail(error); throw error })}
+                .catch((error) => { dispatch({ type: 'error', error: 'Couldn’t confirm adding this track to Retune. Refresh your library and try again.' }); throw error })}
               onRemoveTrack={(uri) => spotifyGateway.removeTrack(uri)
-                .catch((error) => { fail(error); throw error })}
+                .catch((error) => { dispatch({ type: 'error', error: 'Couldn’t confirm removing this track from Retune. Refresh your library and try again.' }); throw error })}
               onPlay={player.start}
               onPlaylist={setPlaylistSubject}
               onClose={() => dispatch({ type: 'scope', scope: 'library' })}
+              onRetrySearch={retrySpotifySearch}
+              onDismissSearch={() => dispatch({ type: 'spotifySearchError' })}
               onError={(error) => dispatch({ type: 'error', error })}
-            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => spotifyGateway.connect().catch(fail)}>Connect to Spotify</button></div>
+            /> : <div className="spotify-stub"><span>Connect to Spotify to search artists and albums.</span><button onClick={() => spotifyGateway.connect().catch(() => dispatch({ type: 'error', error: 'Couldn’t connect to Spotify. Try again.' }))}>Connect to Spotify</button></div>
           ) : selectedPlaylist ? <PlaylistView
             key={selectedPlaylist.id}
             playlist={selectedPlaylist}
@@ -728,7 +752,7 @@ function App() {
             onBack={() => dispatch({ type: 'playlist' })}
             onPlay={(id, tracks) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id })}
             onRate={(id, stars) => rate(`track:${id}`, () => libraryGateway.clickTrackStar(id, stars))}
-            onOpen={(target) => spotifyGateway.openPlaylist(selectedPlaylist.id, target).catch(fail)}
+            onOpen={(target) => spotifyGateway.openPlaylist(selectedPlaylist.id, target).catch(() => dispatch({ type: 'error', error: 'Couldn’t open this playlist in Spotify. Try again.' }))}
             onPlaylist={setPlaylistSubject}
             onInfo={(tracks) => {
               if (tracks.length > 1 || tracks[0]?.id === null) {
@@ -813,7 +837,7 @@ function App() {
               />
             </>
           )}
-          {state.error && <div className="error-banner">{state.error}</div>}
+          {state.error && <ErrorNotice className="error-banner" onDismiss={() => dispatch({ type: 'clear-error' })}><span>{state.error}</span></ErrorNotice>}
           <StatusBar view={view} unit={labels[state.source].item} browsePending={state.browsePending} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
         </section>
       </div>
@@ -829,12 +853,12 @@ function App() {
       {trackDecision?.kind === 'remove' && <RemoveTrackDialog tracks={trackDecision.tracks} spotify={trackDecision.spotify} onClose={() => setTrackDecision(undefined)} onChanged={() => { dispatch({ type: 'refresh' }); dispatch({ type: 'selection', ids: new Set() }) }} />}
       {state.setup && <SetupLibrary settings={state.settings} connected={state.connection.connected} connectionHydrated={state.connectionHydrated} onCancel={() => dispatch({ type: 'setup', open: false })} onConnect={(clientId) => saveSetupClientId(clientId)
         .then(spotifyGateway.connect)
-        .catch(fail)} onSync={(clientId) => saveSetupClientId(clientId)
+        .catch(() => dispatch({ type: 'error', error: 'Couldn’t connect to Spotify. Try again.' }))} onSync={(clientId) => saveSetupClientId(clientId)
         .then(() => {
           dispatch({ type: 'setup', open: false })
           return spotifyGateway.sync()
         })
-        .catch(fail)} />}
+        .catch(() => dispatch({ type: 'error', error: SPOTIFY_SYNC_ERROR }))} />}
       {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={(zoom) => dispatch({ type: 'settings', settings: { zoom } })} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onLibraryChanged={() => dispatch({ type: 'refresh' })} onSave={({ browserPanes, ...settings }) => {
         const patch = { ...settings, browserPanes, zoom: state.settings.zoom }
         dispatch({ type: 'settings', settings })
@@ -1035,8 +1059,8 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       await spotifyGateway.createPlaylist(name)
       setName('')
       setCreating(false)
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t confirm playlist creation. Refresh Spotify playlists and try again.')
     } finally {
       createPending.current.delete('create')
       setCreateBusy(false)
@@ -1049,7 +1073,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
     setInsertBefore(undefined)
     onReorder(reordered)
     try { await spotifyGateway.reorderPlaylists(ids) }
-    catch (error) { onReorder(playlists); onError(String(error)) }
+    catch { onReorder(playlists); onError('Couldn’t confirm playlist order. Refresh Spotify playlists and try again.') }
   }
   const cancelPlaylistDrag = () => {
     playlistDrag.current = undefined
@@ -1063,8 +1087,8 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
     try {
       await spotifyGateway.unfollowPlaylist(confirming.id)
       setConfirming(undefined)
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t confirm unfollowing this playlist. Refresh Spotify playlists and try again.')
     } finally {
       setBusy(false)
     }
@@ -1142,7 +1166,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
           if (hasLocalTracks(subject)) onError(LOCAL_PLAYLIST_HINT)
           else onDrop(playlist.id, subject)
         }
-        catch { onError('Could not read the dragged playlist item.') }
+        catch { onError('Couldn’t read the dragged playlist item. Nothing was changed. Try again.') }
       }}
       onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, playlist }) }}
     >
@@ -1211,10 +1235,10 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     let active = true
     spotifyGateway.playlistTracks(playlist.id)
       .then((rows) => active && setTrackState((current) => resolvedPlaylistRows(current, playlist.id, rows)))
-      .catch((error) => {
+      .catch(() => {
         if (!active) return
         setTrackState((current) => failedPlaylistRows(current, playlist.id))
-        onErrorRef.current(String(error))
+        onErrorRef.current('Couldn’t load this playlist. Existing tracks are unchanged. Try again.')
       })
     return () => { active = false }
   }, [playlist.id, playlist.itemsAvailable, revision, libraryRevision])
@@ -1321,8 +1345,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     setInsertBefore(undefined)
     try {
       await spotifyGateway.reorderPlaylist(playlist.id, range.start, index, range.length)
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t confirm track order in this playlist. Refresh Spotify and try again.')
     } finally {
       setSelected(new Set())
       setSelectionAnchor(undefined)
@@ -1340,8 +1364,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     setMutating(true)
     try {
       await spotifyGateway.removeFromPlaylist(playlist.id, indices)
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t confirm removing tracks from this playlist. Refresh Spotify and try again.')
     } finally {
       setSelected(new Set())
       setSelectionAnchor(undefined)
@@ -1355,8 +1379,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     setMutating(true)
     try {
       await spotifyGateway.addTracks(uris)
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t confirm adding these tracks to Retune. Refresh your library and try again.')
     } finally {
       setMutating(false)
     }
@@ -1523,14 +1547,14 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
     let active = true
     spotifyGateway.playlists(subject.kind === 'tracks' ? subject.uris : undefined)
       .then((rows) => active && setPlaylists(rows))
-      .catch((error) => active && reportError(String(error)))
+      .catch(() => active && reportError('Couldn’t load your playlists. Existing playlists are unchanged. Try again.'))
     return () => { active = false }
   }, [revision, subject])
   const add = async (id: string) => {
     if (!beginPendingEntity(pending.current, id)) return
     setBusy(pendingEntities(pending.current))
     try { await onAdd(id, subject) }
-    catch (error) { onError(String(error)) }
+    catch { onError('Couldn’t confirm adding this selection to the playlist. Refresh Spotify and try again.') }
     finally { pending.current.delete(id); setBusy(pendingEntities(pending.current)) }
   }
   const create = async () => {
@@ -1541,8 +1565,8 @@ function AddToPlaylist({ subject, revision, onAdd, onClose, onError }: {
       await onAdd(playlist.id, subject)
       setName('')
       setCreating(false)
-    } catch (error) {
-      onError(String(error))
+    } catch {
+      onError('Couldn’t confirm creating the playlist or adding this selection. Refresh Spotify and try again.')
     } finally {
       pending.current.delete('new')
       setBusy(pendingEntities(pending.current))

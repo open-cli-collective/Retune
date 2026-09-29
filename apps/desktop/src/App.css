@@ -219,7 +219,11 @@ button { color: inherit; }
 .spotify-result-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .spotify-result-actions button:disabled { opacity: .55; }
 .spotify-search-loading, .spotify-search-error, .spotify-search-more { display: flex; align-items: center; gap: 8px; padding: 6px 12px; color: var(--dim); }
+.spotify-search-error { align-items: flex-start; }
+.spotify-search-error .error-notice-copy { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
 .spotify-search-error button, .spotify-search-more button { padding: 3px 9px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--control); }
+.spotify-search-error .error-notice-actions { align-items: center; }
+.spotify-search-error .error-notice-dismiss { padding: 0 4px; border: 0; color: var(--dim); background: transparent; font-size: 16px; }
 .spotify-page { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow-y: auto; background: var(--list); }
 .spotify-page-back { width: 100%; padding: 9px 16px; border: 0; border-bottom: 1px solid var(--border); color: var(--accent); background: var(--list); text-align: left; font-size: 12px; }
 .spotify-page-header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 13px; padding: 13px 15px 17px; border-bottom: 1px solid var(--border); }
@@ -274,7 +278,18 @@ button.spotify-page-art:focus-visible { outline: 2px solid var(--accent); outlin
 .status-separator { flex: none; color: var(--dim); }
 .sync-status { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .sync-meter { width: 120px; height: 5px; accent-color: var(--accent); }
-.error-banner { position: absolute; right: 10px; bottom: 30px; max-width: 430px; padding: 5px 8px; border: 1px solid #b33; color: #fff; background: #8d2d2d; }
+.error-notice { display: flex; align-items: flex-start; gap: 10px; }
+.error-notice-copy { min-width: 0; flex: 1; }
+.error-notice-actions { display: flex; align-items: flex-start; flex: none; gap: 6px; }
+.error-notice-dismiss { min-width: 22px; padding: 0 4px; border: 0; color: inherit; background: transparent; font-size: 18px; line-height: 1.1; }
+.error-notice-dismiss::before { content: '×'; }
+.error-banner { position: absolute; right: 10px; bottom: 30px; max-width: 430px; padding: 7px 8px; border: 1px solid #b33; color: #fff; background: #8d2d2d; }
+.error-banner .error-notice-dismiss { color: #fff; }
+.spotify-page-error { margin: 12px; padding: 10px 12px; border: 1px solid #d66; border-radius: 5px; color: var(--text); background: color-mix(in srgb, #f88 12%, var(--list)); }
+.spotify-page-error .error-notice-copy { display: flex; flex-direction: column; gap: 4px; }
+.spotify-page-error .error-notice-copy small { color: var(--dim); }
+.spotify-page-error button { padding: 4px 11px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--control); }
+.spotify-page-error .error-notice-dismiss { padding: 0 4px; border: 0; background: transparent; }
 .dialog-error { color: var(--danger); }
 .startup-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--notice-border); color: var(--notice-text); background: var(--notice-bg); }
 .startup-notice button { border: 0; color: inherit; background: transparent; font-size: 16px; }

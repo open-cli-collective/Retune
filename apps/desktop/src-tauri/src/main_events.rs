@@ -15,6 +15,7 @@ pub(crate) enum MainEvent {
     PlayerState(PlayerStateEvent),
     PlaybackAuthorizationRequired(PlaybackAuthorizationPrompt),
     OperationError(String),
+    SpotifySyncError,
     OperationRecovered,
     LocalImportComplete(ImportSummary),
     StartupNotice(String),
@@ -29,6 +30,7 @@ impl MainEvent {
                 Some(MainEventKind::PlaybackAuthorizationRequired)
             }
             Self::OperationError(_) => Some(MainEventKind::OperationError),
+            Self::SpotifySyncError => Some(MainEventKind::OperationError),
             Self::OperationRecovered => None,
             Self::LocalImportComplete(_) => Some(MainEventKind::LocalImportComplete),
             Self::StartupNotice(_) => Some(MainEventKind::StartupNotice),
@@ -239,6 +241,10 @@ mod tests {
             serde_json::to_value(MainEvent::OperationRecovered).unwrap(),
             serde_json::json!({ "type": "operationRecovered" })
         );
+        assert_eq!(
+            serde_json::to_value(MainEvent::SpotifySyncError).unwrap(),
+            serde_json::json!({ "type": "spotifySyncError" })
+        );
     }
 
     #[test]
@@ -375,10 +381,30 @@ mod tests {
     }
 
     #[test]
+    fn spotify_sync_error_uses_operation_error_retention() {
+        let sink = MainEventSink::default();
+        sink.send(MainEvent::OperationError("stale".into()))
+            .unwrap();
+        sink.send(MainEvent::SpotifySyncError).unwrap();
+        assert_eq!(
+            sink.0.lock().unwrap().pending,
+            vec![MainEvent::SpotifySyncError]
+        );
+
+        sink.send(MainEvent::OperationError("latest".into()))
+            .unwrap();
+        assert_eq!(
+            sink.0.lock().unwrap().pending,
+            vec![MainEvent::OperationError("latest".into())]
+        );
+    }
+
+    #[test]
     fn recovery_clears_an_error_that_was_never_observed() {
         let sink = MainEventSink::default();
         sink.send(MainEvent::OperationError("temporary".into()))
             .unwrap();
+        sink.send(MainEvent::SpotifySyncError).unwrap();
 
         sink.send(MainEvent::OperationRecovered).unwrap();
 
