@@ -1,0 +1,71 @@
+name: Arch package
+
+on:
+  pull_request:
+    paths:
+      - scripts/package-arch.py
+      - .github/workflows/arch-package.yml
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Package checksum-verified desktop fixtures for both architectures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools
+          mkdir fixtures tools packages
+          gh release download v0.3.18 --repo open-cli-collective/Retune \
+            --pattern 'retune_0.3.18_*.deb' --pattern checksums.txt --dir fixtures
+          (cd fixtures; sha256sum -c checksums.txt --ignore-missing)
+          gh release download v2.47.0 --repo goreleaser/nfpm \
+            --pattern nfpm_2.47.0_Linux_x86_64.tar.gz --pattern checksums.txt --dir tools
+          (cd tools; sha256sum -c checksums.txt --ignore-missing)
+          tar -xzf tools/nfpm_2.47.0_Linux_x86_64.tar.gz -C tools nfpm
+          for arch in amd64 arm64; do
+            python3 scripts/package-arch.py "fixtures/retune_0.3.18_${arch}.deb" \
+              0.3.18 "$arch" packages --nfpm "$PWD/tools/nfpm"
+          done
+          if python3 scripts/package-arch.py fixtures/retune_0.3.18_amd64.deb \
+            0.3.19 amd64 packages --nfpm "$PWD/tools/nfpm"; then
+            echo '::error::mismatched payload version accepted'
+            exit 1
+          fi
+          if python3 scripts/package-arch.py fixtures/retune_0.3.18_amd64.deb \
+            0.3.18 arm64 packages --nfpm "$PWD/tools/nfpm"; then
+            echo '::error::mismatched payload architecture accepted'
+            exit 1
+          fi
+          bsdtar -xOf packages/retune_0.3.18_linux_arm64.pkg.tar.zst .PKGINFO | grep -qx 'arch = aarch64'
+      - name: Verify native desktop payload and dependencies in Arch
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/packages:/packages:ro" archlinux:base bash -c '
+            set -euo pipefail
+            pacman -Syu --noconfirm
+            pacman -U --noconfirm /packages/retune_0.3.18_linux_amd64.pkg.tar.zst
+            pacman -Qkk retune
+            pacman -Qo /usr/bin/retune-desktop
+            test -x /usr/bin/retune-desktop
+            test -f /usr/share/applications/Retune.desktop
+            test -f /usr/share/icons/hicolor/128x128/apps/retune-desktop.png
+            ldd /usr/bin/retune-desktop > /tmp/retune-libraries
+            if grep -q "not found" /tmp/retune-libraries; then
+              cat /tmp/retune-libraries
+              exit 1
+            fi
+            pacman -R --noconfirm retune
+            test ! -e /usr/bin/retune-desktop
+            pacman -U --noconfirm /packages/retune_0.3.18_linux_amd64.pkg.tar.zst
+            pacman -Qkk retune
+          '

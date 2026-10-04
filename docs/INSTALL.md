@@ -11,8 +11,10 @@ current floor.
 | Windows 10/11 | x64, ARM64 | WebView2 105 (the installer updates older runtimes) |
 | Ubuntu 22.04 | amd64, arm64 | Distribution WebKitGTK 4.1 |
 | Compatible Debian/Ubuntu systems | amd64, arm64 | WebKitGTK 4.1 |
+| Arch Linux / Omarchy | x86_64 | Distribution WebKitGTK 4.1 |
+| Compatible Arch Linux ARM systems | aarch64 | Distribution WebKitGTK 4.1 |
 
-Homebrew, Winget, and APT are recommended because they manage updates and verify
+Homebrew, Winget, APT, and pacman are recommended because they manage updates and verify
 published package metadata.
 
 ## Direct downloads
@@ -28,6 +30,8 @@ in each artifact name:
 | Windows | ARM64 | `Retune-<version>-windows-arm64-setup.exe` |
 | Debian/Ubuntu | amd64 | `retune_<version>_amd64.deb` |
 | Debian/Ubuntu | arm64 | `retune_<version>_arm64.deb` |
+| Arch Linux | x86_64 | `retune_<version>_linux_amd64.pkg.tar.zst` |
+| Arch Linux ARM | aarch64 | `retune_<version>_linux_arm64.pkg.tar.zst` |
 
 Download `checksums.txt` from that same latest release and verify the matching
 asset before installing. The macOS artifact uses the Open CLI Collective's
@@ -173,3 +177,15 @@ documentation](https://developer.spotify.com/documentation/web-api/concepts/quot
   run `sha256sum -c checksums.txt --ignore-missing` on Linux, `shasum -a 256`
   on macOS, or `Get-FileHash -Algorithm SHA256` in PowerShell and compare the
   result.
+
+## Arch Linux / Omarchy
+
+Add the signed [Open CLI Collective pacman repository](https://github.com/open-cli-collective/linux-packages#arch-linux-pacman) once, then install:
+
+```sh
+sudo pacman -Syu retune
+```
+
+Launch Retune from the desktop application menu. Pacman installs the WebKitGTK,
+GTK, audio, and D-Bus runtime dependencies and upgrades Retune with the system.
+Packages become available after a release finishes repository publication.

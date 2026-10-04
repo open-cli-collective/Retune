@@ -79,7 +79,9 @@ must match the configured release line and point to a commit reachable from
 `main`. It builds and publishes exactly these assets: `Retune-<version>-aarch64.zip`,
 `Retune-<version>-windows-x64-setup.exe`,
 `Retune-<version>-windows-arm64-setup.exe`,
-`retune_<version>_amd64.deb`, `retune_<version>_arm64.deb`, and
+`retune_<version>_amd64.deb`, `retune_<version>_arm64.deb`,
+`retune_<version>_linux_amd64.pkg.tar.zst`,
+`retune_<version>_linux_arm64.pkg.tar.zst`, and
 `checksums.txt`. The tag version is passed to Tauri through its `--config`
 override so package metadata matches the release tag. The automatic
 workflow's `workflow_dispatch` only evaluates the release gate and reports the
@@ -191,3 +193,13 @@ Do not make CI depend on live Spotify credentials or an audio device.
 architectural boundary, invariant, persistence format, or external contract,
 update that document in the same commit. Delete completed plans after durable
 decisions have been incorporated.
+
+### Arch Linux packaging
+
+`scripts/package-arch.py` packages the validated Tauri Debian payload with
+nFPM 2.47.0, preserving its executable, desktop launcher, icons, and file modes.
+It checks payload version and architecture before assigning Arch runtime
+dependencies. Release checksums cover both Arch packages; the Linux package
+repository signs them and updates its pacman index. No second application build
+or credentials are introduced. Test the resulting package in a clean Arch
+container before shipping changes to this packaging path.

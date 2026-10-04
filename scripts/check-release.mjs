@@ -225,6 +225,8 @@ for (const asset of [
   'Retune-${VERSION}-windows-arm64-setup.exe',
   'retune_${VERSION}_amd64.deb',
   'retune_${VERSION}_arm64.deb',
+  'retune_${VERSION}_linux_amd64.pkg.tar.zst',
+  'retune_${VERSION}_linux_arm64.pkg.tar.zst',
   'checksums.txt',
 ]) required(workflow, asset, `asset contract ${asset}`)
 assert.doesNotMatch(workflow, /Retune-\$\{VERSION\}-aarch64\.tar\.gz|tar -czf/, 'macOS release must use Apple-compatible ZIP packaging')
@@ -356,3 +358,8 @@ required(winget, 'Retune-0.0.0-windows-x64-setup.exe')
 required(winget, 'Retune-0.0.0-windows-arm64-setup.exe')
 
 console.log(`release contract OK (${tauri.version})`)
+
+required(workflow, "python3 scripts/package-arch.py", "Arch payload packaging step");
+required(workflow, "nfpm_2.47.0_Linux_${tool_arch}.tar.gz", "pinned Arch packager");
+required(workflow, "sha256sum -c checksums.txt --ignore-missing", "packager checksum verification");
+required(workflow, "name: retune-arch-${{ matrix.arch }}", "Arch artifact upload");

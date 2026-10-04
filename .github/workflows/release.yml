@@ -123,6 +123,7 @@ jobs:
             curl \
             file \
             libasound2-dev \
+            libarchive-tools \
             libayatana-appindicator3-dev \
             libdbus-1-dev \
             libssl-dev \
@@ -314,6 +315,33 @@ jobs:
           [ "$package_version" = "$VERSION" ] || { echo "::error::Debian package version $package_version does not match $VERSION"; exit 1; }
           mv "${files[0]}" "$bundle/retune_${VERSION}_${ARCH}.deb"
 
+      - name: Package Arch Linux payload
+        if: startsWith(matrix.os, 'ubuntu-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          tool_dir="$(mktemp -d)"
+          tool_arch=x86_64
+          if [ "$ARCH" = arm64 ]; then tool_arch=arm64; fi
+          gh release download v2.47.0 --repo goreleaser/nfpm \
+            --pattern "nfpm_2.47.0_Linux_${tool_arch}.tar.gz" --pattern checksums.txt --dir "$tool_dir"
+          (cd "$tool_dir"; sha256sum -c checksums.txt --ignore-missing)
+          tar -xzf "$tool_dir/nfpm_2.47.0_Linux_${tool_arch}.tar.gz" -C "$tool_dir" nfpm
+          python3 scripts/package-arch.py \
+            "target/release/bundle/deb/retune_${VERSION}_${ARCH}.deb" \
+            "$VERSION" "$ARCH" target/release/bundle/arch --nfpm "$tool_dir/nfpm"
+
+      - name: Upload Arch Linux artifact
+        if: startsWith(matrix.os, 'ubuntu-')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: retune-arch-${{ matrix.arch }}
+          path: target/release/bundle/arch/retune_${{ needs.prepare.outputs.version }}_linux_${{ matrix.arch }}.pkg.tar.zst
+          if-no-files-found: error
+
       - name: Upload macOS artifact
         if: matrix.os == 'macos-15'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -428,6 +456,8 @@ jobs:
             "Retune-${VERSION}-windows-arm64-setup.exe"
             "retune_${VERSION}_amd64.deb"
             "retune_${VERSION}_arm64.deb"
+            "retune_${VERSION}_linux_amd64.pkg.tar.zst"
+            "retune_${VERSION}_linux_arm64.pkg.tar.zst"
           )
           for asset in "${expected[@]}"; do
             test -f "dist/assets/$asset" || { echo "::error::missing release asset $asset"; exit 1; }
@@ -457,7 +487,7 @@ jobs:
         run: |
           set -euo pipefail
           cat > dist/release-notes.md <<EOF
-          Retune $VERSION for macOS Apple Silicon, Windows x64/ARM64, and Ubuntu amd64/arm64.
+          Retune $VERSION for macOS Apple Silicon, Windows x64/ARM64, and Ubuntu/Arch Linux amd64/arm64.
 
           macOS is stable-signed with the Open CLI Collective self-signed certificate but is not Apple-notarized.
           Windows application payloads and NSIS installers are unsigned.
@@ -468,6 +498,8 @@ jobs:
             "dist/assets/Retune-${VERSION}-windows-arm64-setup.exe"
             "dist/assets/retune_${VERSION}_amd64.deb"
             "dist/assets/retune_${VERSION}_arm64.deb"
+            "dist/assets/retune_${VERSION}_linux_amd64.pkg.tar.zst"
+            "dist/assets/retune_${VERSION}_linux_arm64.pkg.tar.zst"
             dist/assets/checksums.txt
           )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
