@@ -272,7 +272,7 @@ impl SyncRun<'_> {
     fn note_deadline(&self, deadline: u64) {
         let _ =
             self.earliest_cooldown
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     Some(if current == 0 {
                         deadline
                     } else {
@@ -583,7 +583,7 @@ impl<'c, T: Transport> GenreSource<'c, T> {
             }
             let lookup =
                 run.artist_lookups
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |lookups| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |lookups| {
                         (lookups < ARTIST_LOOKUPS_PER_SYNC).then_some(lookups + 1)
                     });
             let Ok(lookup) = lookup else {

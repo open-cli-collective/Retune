@@ -154,6 +154,7 @@ identical. Platform overlays define the supported bundle contract:
 | macOS arm64 | `.app` inside a `ditto`-created ZIP | macOS 15+ (Apple-supported releases) |
 | Windows x64/ARM64 | NSIS | WebView2 105; downgrade disabled |
 | Ubuntu amd64/arm64 | Debian package | Ubuntu 22.04 / WebKitGTK 4.1 |
+| Arch x86_64 / Arch ARM aarch64 | `.pkg.tar.zst` from the same Linux payload | Distribution WebKitGTK 4.1 |
 
 The Windows application manifest is an explicit build input and `build.rs`
 emits `cargo:rerun-if-changed` for it. Tauri's build helper owns capability,
