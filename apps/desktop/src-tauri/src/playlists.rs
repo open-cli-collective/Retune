@@ -77,6 +77,8 @@ pub struct CachedPlaylist {
     pub tracks: Vec<String>,
     #[serde(default)]
     pub track_metadata_version: u8,
+    #[serde(default)]
+    pub shadow: Option<crate::shadow_playlists::Shadow>,
     #[serde(default, alias = "non_library_tracks")]
     pub spotify_tracks: Vec<CachedTrack>,
 }
@@ -115,8 +117,15 @@ pub async fn sync<T: Transport>(
             let cached = current
                 .playlists
                 .iter()
-                .find(|playlist| playlist.id == summary.id);
+                .find(|playlist| playlist.id == summary.id)
+                .filter(|p| p.shadow.as_ref().is_none_or(|s| s.account == user_id));
             spotify_order.push(summary.id.clone());
+            if let Some(shadow) =
+                cached.filter(|p| p.shadow.as_ref().is_some_and(|s| s.account == user_id))
+            {
+                refreshed.insert(summary.id, shadow.clone());
+                continue;
+            }
             if !summary.owned && !summary.collaborative {
                 let mut cached = cached.cloned().unwrap_or_else(|| CachedPlaylist {
                     id: summary.id.clone(),
@@ -126,6 +135,7 @@ pub async fn sync<T: Transport>(
                     owner: None,
                     track_count: 0,
                     tracks: vec![],
+                    shadow: None,
                     track_metadata_version: TRACK_METADATA_VERSION,
                     spotify_tracks: vec![],
                 });
@@ -163,9 +173,14 @@ pub async fn sync<T: Transport>(
         .playlists
         .iter()
         .filter_map(|playlist| {
-            refreshed
-                .remove(&playlist.id)
-                .or_else(|| incomplete.then(|| playlist.clone()))
+            refreshed.remove(&playlist.id).or_else(|| {
+                (playlist
+                    .shadow
+                    .as_ref()
+                    .is_some_and(|s| s.account == user_id)
+                    || (incomplete && playlist.shadow.is_none()))
+                .then(|| playlist.clone())
+            })
         })
         .collect::<Vec<_>>();
     playlists.extend(
@@ -226,6 +241,7 @@ pub async fn create<T: Transport>(
         owner: None,
         track_count: 0,
         tracks: vec![],
+        shadow: None,
         track_metadata_version: TRACK_METADATA_VERSION,
         spotify_tracks: vec![],
     });
@@ -547,6 +563,7 @@ async fn fetch<T: Transport>(
         owner: Some(summary.owner.display_name.unwrap_or(summary.owner.id)),
         track_count,
         tracks,
+        shadow: None,
         track_metadata_version: TRACK_METADATA_VERSION,
         spotify_tracks,
     })
@@ -650,10 +667,109 @@ mod tests {
                 owner: None,
                 track_count: 2,
                 tracks: vec!["spotify:track:1".into(), "spotify:track:2".into()],
+                shadow: None,
                 track_metadata_version: TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],
         }
+    }
+
+    fn shadowed() -> PlaylistCache {
+        let mut cache = cached();
+        cache.playlists[0].owned = false;
+        cache.playlists[0].shadow = Some(crate::shadow_playlists::Shadow {
+            account: "user".into(),
+            refreshed_at: 10,
+            attempted_at: 10,
+            error: None,
+        });
+        cache
+    }
+
+    #[test]
+    fn shadow_failure_keeps_tracks_and_survives_disk_round_trip() {
+        let mut cache = shadowed();
+        let before = cache.playlists[0].clone();
+        assert!(crate::shadow_playlists::apply_refresh(
+            &mut cache.playlists[0],
+            Err("offline".into()),
+            30
+        )
+        .is_err());
+        assert_eq!(cache.playlists[0].tracks, before.tracks);
+        assert_eq!(cache.playlists[0].snapshot_id, before.snapshot_id);
+        assert_eq!(cache.playlists[0].shadow.as_ref().unwrap().refreshed_at, 10);
+        assert_eq!(
+            cache.playlists[0].shadow.as_ref().unwrap().error.as_deref(),
+            Some("offline")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsPlaylistStore::new(dir.path());
+        store.save(&cache).unwrap();
+        assert_eq!(store.load().unwrap(), cache);
+        let mut legacy = serde_json::to_value(cached()).unwrap();
+        legacy["playlists"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("shadow");
+        assert!(serde_json::from_value::<PlaylistCache>(legacy)
+            .unwrap()
+            .playlists[0]
+            .shadow
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn web_sync_preserves_shadows_only_for_the_same_account() {
+        for (user, summaries, expected) in [
+            ("user", serde_json::json!([]), true),
+            ("other", serde_json::json!([]), false),
+            (
+                "user",
+                serde_json::json!([{
+                    "id": "playlist", "name": "Web summary", "snapshot_id": "web",
+                    "owner": {"id": "spotify"}, "tracks": {"total": 999}
+                }]),
+                true,
+            ),
+        ] {
+            let client = fake_client(
+                [
+                    Response::json(200, serde_json::json!({"id": user})),
+                    Response::json(200, serde_json::json!({"items": summaries, "next": null})),
+                ],
+                &retune_spotify::auth::SCOPES,
+            );
+            let current = shadowed();
+            let synced = sync(&client, &current).await.unwrap();
+            if expected {
+                assert_eq!(synced, current);
+            } else {
+                assert!(synced.playlists.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shadow_content_is_read_only() {
+        let client = fake_client([], &retune_spotify::auth::SCOPES);
+        let mut cache = shadowed();
+        assert!(matches!(
+            add(
+                &client,
+                &mut cache,
+                &Library::new(),
+                "playlist",
+                vec!["spotify:track:new".into()]
+            )
+            .await,
+            Err(PlaylistAddError::ReadOnly)
+        ));
+        assert!(reorder(&client, &mut cache, "playlist", 0, 2, 1)
+            .await
+            .is_err());
+        assert!(remove(&client, &mut cache, "playlist", &[0]).await.is_err());
+        assert!(client.transport().requests().is_empty());
     }
 
     fn ordered() -> PlaylistCache {

@@ -22,6 +22,7 @@ mod provider;
 mod restore;
 mod restore_latch;
 mod settings_commands;
+mod shadow_playlists;
 mod spotify_commands;
 mod spotify_membership;
 mod spotify_sync_commit;
@@ -1445,6 +1446,10 @@ pub fn run() {
             spotify_commands::add_spotify_tracks,
             spotify_commands::remove_spotify_track,
             playlist_commands::playlists_list,
+            playlist_commands::discover_shadow_playlists,
+            playlist_commands::shadow_playlist,
+            playlist_commands::stop_shadowing_playlist,
+            playlist_commands::refresh_shadow_playlists,
             playlist_commands::open_spotify_playlist,
             playlist_commands::resolve_spotify_track_destination,
             playlist_commands::reorder_playlists,
@@ -2220,6 +2225,7 @@ mod tests {
                 owner: None,
                 track_count: 2,
                 tracks: vec!["one".into(), "two".into()],
+                shadow: None,
                 track_metadata_version: playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],
@@ -3239,6 +3245,7 @@ mod tests {
                     owner: None,
                     track_count: 0,
                     tracks: vec![],
+                    shadow: None,
                     track_metadata_version: playlists::TRACK_METADATA_VERSION,
                     spotify_tracks: vec![],
                 })
@@ -3470,6 +3477,7 @@ mod tests {
                 owner: None,
                 track_count: 1,
                 tracks: vec!["spotify:track:restored".into()],
+                shadow: None,
                 track_metadata_version: playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],
@@ -3580,6 +3588,7 @@ mod tests {
                 owner: None,
                 track_count: 0,
                 tracks: vec![],
+                shadow: None,
                 track_metadata_version: playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],
@@ -3681,6 +3690,7 @@ mod tests {
                 owner: None,
                 track_count: 0,
                 tracks: vec![],
+                shadow: None,
                 track_metadata_version: playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],

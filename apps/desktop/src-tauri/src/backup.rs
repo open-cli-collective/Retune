@@ -719,6 +719,7 @@ mod tests {
                     owner: None,
                     track_count: 0,
                     tracks: Vec::new(),
+                    shadow: None,
                     track_metadata_version: playlists::TRACK_METADATA_VERSION,
                     spotify_tracks: Vec::new(),
                 }],

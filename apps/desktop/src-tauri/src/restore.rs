@@ -302,6 +302,7 @@ mod tests {
                 owner: None,
                 track_count: 1,
                 tracks: vec!["spotify:track:restored".into()],
+                shadow: None,
                 track_metadata_version: TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],

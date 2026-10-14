@@ -2975,6 +2975,7 @@ mod tests {
                 owner: Some("Owner Name".into()),
                 track_count: 0,
                 tracks: vec![],
+                shadow: None,
                 track_metadata_version: crate::playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],

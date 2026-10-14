@@ -101,6 +101,7 @@ export type PlaylistListView = {
   contains: boolean
   trackCount: number
   itemsAvailable: boolean
+  shadow?: { account: string; refreshedAt: number; attemptedAt: number; error: string | null } | null
 }
 type RatingView = { stars: number; explicit: boolean }
 export type SearchAlbum = {
@@ -271,3 +272,5 @@ export type MetadataValues = { arts: string[]; albs: string[]; cats: string[] }
 export type InfoDialog =
   | { kind: 'single'; track: TrackInfo }
   | { kind: 'multiple'; tracks: PlaylistTrack[] }
+
+export type ShadowCandidate = { id: string; name: string; owner: string; account: string }

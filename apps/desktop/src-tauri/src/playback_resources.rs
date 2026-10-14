@@ -318,6 +318,7 @@ mod tests {
             owner: None,
             track_count: 1,
             tracks: vec!["spotify:track:same".into()],
+            shadow: None,
             track_metadata_version: TRACK_METADATA_VERSION,
             spotify_tracks: vec![CachedTrack {
                 uri: "spotify:track:same".into(),
@@ -402,6 +403,7 @@ mod tests {
                     .iter()
                     .map(|track| track.uri.clone())
                     .collect(),
+                shadow: None,
                 track_metadata_version: TRACK_METADATA_VERSION,
                 spotify_tracks: playlist_tracks,
             }],

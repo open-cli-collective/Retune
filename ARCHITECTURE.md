@@ -111,8 +111,8 @@ policy live in [Last.fm import matching](docs/architecture/lastfm-import-matchin
 - The desktop shell targets macOS arm64, Windows x64/ARM64, and Ubuntu 22.04
   amd64/arm64.
 - Spotify Premium is required for built-in Spotify playback.
-- Spotify restricts third-party access to playlists the current user does not
-  own; Retune does not request those items.
+- Spotify Web API playlist-content access is restricted. Explicit read-only
+  shadows use separately authorized librespot metadata for saved playlists.
 - Audiobook chapters can be synchronized but are not currently playable.
 
 ## Domain details

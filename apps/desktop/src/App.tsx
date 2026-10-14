@@ -1,3 +1,4 @@
+import { ShadowDiscovery } from './ShadowDiscovery'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
@@ -20,6 +21,7 @@ import { appGateway } from './appGateway.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
 import { RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
 
+const SHADOW_PLAYLIST_HINT = 'Shadowing keeps a read-only copy of a Spotify playlist’s track list in Retune, so you can browse and play it here. It refreshes automatically as the original changes. The Spotify playlist is never changed, and music still streams from Spotify.'
 const LOCAL_PLAYLIST_HINT = "Selection includes local files — Spotify playlists can't contain them."
 const SPOTIFY_SYNC_ERROR = 'Retune couldn’t sync Spotify; your cached library is unchanged. The network may be blocking Spotify. Try another network or VPN, then sync again.'
 const SPOTIFY_SEARCH_ERROR = 'Couldn’t search Spotify. Existing results are unchanged. Try another network or VPN, then search again.'
@@ -351,7 +353,15 @@ function App() {
       .then((rows) => active && setPlaylists(rows))
       .catch(() => active && dispatch({ type: 'error', error: 'Couldn’t load Spotify playlists. Existing playlists are unchanged. Try again.' }))
     return () => { active = false }
-  }, [state.playlistRevision])
+  }, [state.playlistRevision, state.connection])
+
+  useEffect(() => {
+    if (!state.connection.connected || !state.connection.playback_authorized) return
+    const refresh = () => { void spotifyGateway.refreshShadows().catch(() => { /* Refresh errors remain on the shadow. */ }) }
+    refresh()
+    const timer = window.setInterval(refresh, 15 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [state.connection.connected, state.connection.playback_authorized])
 
   useEffect(() => {
     if (playlists && state.selectedPlaylist && !playlists.some((playlist) => playlist.id === state.selectedPlaylist)) {
@@ -1026,7 +1036,7 @@ export function TransportBar({ playing, progress, track, query, queryReset, scop
   </header>
 }
 
-function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError, artwork }: {
+function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError, artwork }: {
   state: State
   playlists?: PlaylistListView[]
   onSource: (source: Source) => void
@@ -1039,6 +1049,18 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
   onError: (error: string) => void
   artwork?: React.ReactNode
 }) {
+  const playlists = useMemo(() => incomingPlaylists ? [...incomingPlaylists.filter(p => !p.shadow), ...incomingPlaylists.filter(p => p.shadow)] : undefined, [incomingPlaylists])
+  const [discovering, setDiscovering] = useState(false)
+  const [shadowBusy, setShadowBusy] = useState(false)
+  const shadowPending = useRef(false)
+  const shadowAction = async (action: () => Promise<void>) => {
+    if (shadowPending.current) return
+    shadowPending.current = true
+    setShadowBusy(true)
+    setMenu(undefined)
+    try { await action() } catch (error) { onError(String(error)) }
+    finally { shadowPending.current = false; setShadowBusy(false) }
+  }
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [dropTarget, setDropTarget] = useState<string>()
@@ -1112,7 +1134,7 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       if (event.key === 'Enter') void create()
       else if (event.key === 'Escape') { setCreating(false); setName('') }
     }} /></div>}
-    {!state.settings.plCollapsed && playlists?.map((playlist, index) => <Fragment key={playlist.id}><button
+    {!state.settings.plCollapsed && playlists?.map((playlist, index) => <Fragment key={playlist.id}>{playlist.shadow && !playlists[index - 1]?.shadow && <div className="section-label">Shadowed playlists</div>}<button
       className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''} ${dragging === playlist.id ? 'dragging' : ''} ${insertBefore === index ? 'insert-before' : ''} ${insertBefore === playlists.length && index === playlists.length - 1 ? 'insert-after' : ''}`}
       onClick={(event) => {
         if (suppressPlaylistClick.current) { suppressPlaylistClick.current = false; event.preventDefault(); return }
@@ -1170,16 +1192,17 @@ function Sidebar({ state, playlists, onSource, onPlaylist, onReorder, onCollapse
       }}
       onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, playlist }) }}
     >
-      <span>{playlist.owned ? '' : '🌐'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
-    </button>{menu?.playlist.id === playlist.id && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}><button onClick={() => { setConfirming(playlist); setMenu(undefined) }}>{playlist.owned ? 'Delete Playlist…' : 'Unfollow Playlist…'}</button></ContextMenu>}</Fragment>)}
+      <span title={playlist.shadow ? SHADOW_PLAYLIST_HINT : undefined}>{playlist.shadow ? '◐' : playlist.owned ? '' : '🌐'}</span><span title={playlist.name}>{playlist.name}</span><span className="source-count">{playlist.trackCount}</span>
+    </button>{menu?.playlist.id === playlist.id && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>{playlist.shadow ? <><button disabled={shadowBusy} onClick={() => void shadowAction(() => spotifyGateway.refreshShadows(playlist.id, true))}>Refresh shadow</button><button disabled={shadowBusy} onClick={() => void shadowAction(() => spotifyGateway.stopShadowing(playlist.id))}>Stop shadowing</button></> : <>{!playlist.owned && <button disabled={shadowBusy} onClick={() => void shadowAction(() => spotifyGateway.shadowPlaylist(playlist.id))}>Shadow playlist</button>}<button onClick={() => { setConfirming(playlist); setMenu(undefined) }}>{playlist.owned ? 'Delete Playlist…' : 'Unfollow Playlist…'}</button></>}</ContextMenu>}</Fragment>)}
     </div>
+    <button className="shadow-discover-button" title={SHADOW_PLAYLIST_HINT} aria-description={SHADOW_PLAYLIST_HINT} onClick={() => setDiscovering(true)}>Shadow playlists…</button>
     {artwork}
     <div className="sidebar-actions">
       <button data-tooltip="New playlist" aria-label="New playlist" onClick={() => { setCreating(true); if (state.settings.plCollapsed) onCollapse() }}><svg aria-hidden="true" width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M9 3.6v10.8M3.6 9h10.8" /></svg></button>
       <button className={state.settings.shuffle ? 'active' : ''} data-tooltip={`Shuffle: ${state.settings.shuffle ? 'on' : 'off'}`} aria-label={`Shuffle: ${state.settings.shuffle ? 'on' : 'off'}`} aria-pressed={state.settings.shuffle} onClick={() => onShuffle(!state.settings.shuffle)}><svg aria-hidden="true" width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.6 5h3.2C7 5 7.9 6.4 9 9s2 4 3.2 4h2.6M2.6 13h3.2C7 13 7.9 11.6 9 9s2-4 3.2-4h2.6M12.9 3.1 15.1 5l-2.2 1.9M12.9 11.1l2.2 1.9-2.2 1.9" /></svg></button>
       <button className={state.settings.repeat !== 'off' ? 'active' : ''} data-tooltip={`Repeat: ${state.settings.repeat}`} aria-label={`Repeat: ${state.settings.repeat}`} aria-pressed={state.settings.repeat !== 'off'} onClick={() => onRepeat(state.settings.repeat === 'off' ? 'all' : state.settings.repeat === 'all' ? 'one' : 'off')}><svg aria-hidden="true" width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3.9 9.4V7.2a3 3 0 0 1 3-3h6.5M11.6 2.4l2.1 1.8L11.6 6M14.1 8.6v2.2a3 3 0 0 1-3 3H4.6M6.4 12l-2.1 1.8 2.1 1.8" /></svg>{state.settings.repeat === 'one' && <span className="repeat-one-badge" aria-hidden="true">1</span>}</button>
     </div>
-  </aside>{confirming && <ModalDialog className="get-info playlist-confirm" labelledBy="playlist-confirm-title" onCancel={busy ? undefined : () => setConfirming(undefined)} onSubmit={busy ? undefined : unfollow} closeOnBackdrop><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button type="submit" className="danger" disabled={busy}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></ModalDialog>}</>
+  </aside>{discovering && <ShadowDiscovery playlists={playlists ?? []} onClose={() => setDiscovering(false)} />}{confirming && <ModalDialog className="get-info playlist-confirm" labelledBy="playlist-confirm-title" onCancel={busy ? undefined : () => setConfirming(undefined)} onSubmit={busy ? undefined : unfollow} closeOnBackdrop><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button type="submit" className="danger" disabled={busy}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></ModalDialog>}</>
 }
 
 function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onBack, onPlay, onRate, onOpen, onPlaylist, onInfo, onReorder, onColumnWidths, onHiddenColumns, onError }: {
@@ -1202,6 +1225,22 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   onHiddenColumns: (columns: ColumnKey[]) => void
   onError: (error: string) => void
 }) {
+  const [shadowBusy, setShadowBusy] = useState(false)
+  const shadowPending = useRef(false)
+  const shadowAction = async () => {
+    if (shadowPending.current) return
+    shadowPending.current = true
+    setShadowBusy(true)
+    try {
+      if (playlist.shadow) await spotifyGateway.refreshShadows(playlist.id, true)
+      else await spotifyGateway.shadowPlaylist(playlist.id)
+    } catch (error) { onError(String(error)) }
+    finally { shadowPending.current = false; setShadowBusy(false) }
+  }
+  const isShadow = !!playlist.shadow
+  useEffect(() => {
+    if (isShadow) void spotifyGateway.refreshShadows(playlist.id).catch(() => { /* Status is stored with the cached shadow. */ })
+  }, [playlist.id, isShadow])
   const [trackState, setTrackState] = useState(() => loadingPlaylistRows<PlaylistTrack>(playlist.id))
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [selectionAnchor, setSelectionAnchor] = useState<number>()
@@ -1400,7 +1439,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   return <div className="playlist-view">
     <SpotifyPageBack label={backLabel} onBack={onBack} />
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}{sortColumn ? ` · sorted by ${headings[sortColumn]}` : ''}</span>{playlist.owned && <button disabled={!canChangePlaylist || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
-    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Spotify does not allow third-party apps to interact with playlists not owned by you. :-(</span><div className="playlist-open-actions"><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
+    {playlist.shadow && <div className="shadow-status"><span title={SHADOW_PLAYLIST_HINT}>◐ Shadow · read-only · Updated {new Date(playlist.shadow.refreshedAt * 1000).toLocaleString()}{playlist.shadow.error ? ` · Refresh failed: ${playlist.shadow.error} Cached tracks kept.` : ''}</span><button disabled={shadowBusy} onClick={() => void shadowAction()}>{shadowBusy ? 'Refreshing…' : 'Refresh shadow'}</button><button onClick={() => onOpen('app')}>Open in Spotify</button></div>}
+    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Shadow this playlist to cache and play its tracks in Retune. The original stays read-only.</span><div className="playlist-open-actions"><button disabled={shadowBusy} onClick={() => void shadowAction()}>{shadowBusy ? 'Shadowing…' : 'Shadow playlist'}</button><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
     <div ref={scroll} onScroll={readViewport} className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
       if (event.target !== event.currentTarget && !(event.target as Element).matches('.playlist-end-drop, .playlist-track-window')) return
       setSelected(new Set())

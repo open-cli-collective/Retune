@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discover-shadow-playlists"
+description = "Enables the discover_shadow_playlists command without any pre-configured scope."
+commands.allow = ["discover_shadow_playlists"]
+
+[[permission]]
+identifier = "deny-discover-shadow-playlists"
+description = "Denies the discover_shadow_playlists command without any pre-configured scope."
+commands.deny = ["discover_shadow_playlists"]

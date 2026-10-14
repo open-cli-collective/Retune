@@ -1285,6 +1285,47 @@ describe('mounted native interaction boundaries', () => {
     expect(view.querySelector<HTMLElement>('[data-track-id="1"]')?.tabIndex).toBe(0)
   })
 
+  it('discovers and shadows personalized playlists without a URL, then refreshes without replacing playback', async () => {
+    const tracks = [track(1, 'Weekly song')]
+    let shadowed = false
+    let refreshFailed = false
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'discover_shadow_playlists') return [{ id: 'weekly', name: 'Discover Weekly', owner: 'spotify', account: 'me' }]
+      if (command === 'shadow_playlist') { shadowed = true; return null }
+      if (command === 'playlists_list') return shadowed ? [{ id: 'weekly', name: 'Discover Weekly', owned: false, owner: 'spotify', itemsAvailable: true, trackCount: 1, shadow: { account: 'me', refreshedAt: 100, attemptedAt: 100, error: refreshFailed ? 'offline' : null } }] : []
+      if (command === 'playlist_tracks') return tracks
+      if (command === 'refresh_shadow_playlists' && args?.force) { refreshFailed = true; throw new Error('offline') }
+      if (command === 'play_tracks') return 'started'
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => [...view.querySelectorAll('button')].find(b => b.textContent === 'Shadow playlists…')!.click())
+    expect(invokeMock).toHaveBeenCalledWith('discover_shadow_playlists', undefined)
+    expect(document.querySelector('input[placeholder*="http"]')).toBeNull()
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Shadow Discover Weekly"]')!.click())
+    expect(invokeMock).toHaveBeenCalledWith('shadow_playlist', { id: 'weekly', account: 'me' })
+    await emitNativeEvent('playlists-changed', null)
+    await act(async () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Done')!.click())
+    expect(view.textContent).toContain('Shadowed playlists')
+    const row = view.querySelector<HTMLButtonElement>('.playlist-row')!
+    await act(async () => row.click())
+    expect(view.textContent).toContain('Shadow · read-only')
+    expect(view.querySelector('.playlist-track-row.reorderable')).toBeNull()
+    await act(async () => view.querySelector<HTMLElement>('.playlist-track-row')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    const plays = invokeMock.mock.calls.filter(([command]) => command === 'play_tracks').length
+    await act(async () => [...view.querySelectorAll('button')].find(b => b.textContent === 'Refresh shadow')!.click())
+    await emitNativeEvent('playlists-changed', null)
+    expect(view.textContent).toContain('Cached tracks kept')
+    expect(view.textContent).toContain('Weekly song')
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'play_tracks')).toHaveLength(plays)
+    expect(invokeMock.mock.calls.some(([command]) => ['playlist_add', 'playlist_remove', 'playlist_reorder'].includes(command))).toBe(false)
+  })
+
   it('windows playlist rows while retaining duplicate positions, range selection, playback, and drag indices', async () => {
     const tracks = Array.from({ length: 4000 }, (_, index) => ({ ...track(index, `Track ${index % 100}`), id: null, uri: `spotify:track:${index % 100}` }))
     invokeMock.mockImplementation(async command => {

@@ -476,3 +476,11 @@ cooldown reads run together on the blocking pool. The shell publishes their
 results only after all reads succeed; application commands wait at the shell
 dispatcher until initialization finishes. Existing valid settings are read without
 a redundant save; missing defaults still use atomic persistence.
+
+### Shadow playlist cache
+
+`playlists.json` entries may contain an optional `shadow` record with the Spotify
+account, successful/attempted refresh timestamps, and last refresh error. Absent
+records retain legacy playlist behavior. Shadow track lists and display metadata
+use the existing playlist atomic store; no audio is downloaded to this cache.
+Failed refreshes persist their status while retaining the last complete content.
