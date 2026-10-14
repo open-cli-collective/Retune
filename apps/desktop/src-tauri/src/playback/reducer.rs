@@ -28,6 +28,7 @@ struct LoadIntent {
     id: u64,
     uri: String,
     playing: bool,
+    session_retried: bool,
 }
 
 pub(super) struct EventReducer {
@@ -153,9 +154,39 @@ impl EventReducer {
             id: self.next_intent,
             uri: uri.to_owned(),
             playing,
+            session_retried: false,
         };
         self.latest_intent = Some(intent.id);
         self.pending.push_back(intent);
+    }
+
+    pub(super) fn session_retry(&self, event: &NeutralEvent) -> Option<(String, bool, u32)> {
+        let NeutralEvent::Unavailable {
+            generation,
+            request_id,
+            uri,
+        } = event
+        else {
+            return None;
+        };
+        let intent = self.current_intent(*request_id, uri)?;
+        if *generation != self.generation
+            || intent.session_retried
+            || self.snapshot.as_ref()?.current().uri != *uri
+        {
+            return None;
+        }
+        Some((uri.clone(), intent.playing, self.previous_position_ms))
+    }
+
+    pub(super) fn queue_session_retry(
+        &mut self,
+        event: &NeutralEvent,
+    ) -> Option<(String, bool, u32)> {
+        let retry = self.session_retry(event)?;
+        self.queue_load(&retry.0, retry.1);
+        self.pending.back_mut()?.session_retried = true;
+        Some(retry)
     }
 
     pub(super) fn handle(&mut self, event: NeutralEvent) -> Vec<ReducerAction> {
@@ -806,6 +837,56 @@ mod tests {
                 .as_slice(),
             [ReducerAction::Error(_), ReducerAction::Advance]
         ));
+    }
+
+    #[test]
+    fn interrupted_load_retries_same_track_once_and_rejects_stale_events() {
+        let mut reducer = reducer();
+        bind(&mut reducer, "spotify:track:1", false, 1);
+        reducer.handle(NeutralEvent::Loading {
+            generation: 7,
+            request_id: 1,
+            uri: "spotify:track:1".into(),
+            position_ms: 1250,
+        });
+        let failure = NeutralEvent::Unavailable {
+            generation: 7,
+            request_id: 1,
+            uri: "spotify:track:1".into(),
+        };
+        assert_eq!(
+            reducer.queue_session_retry(&failure),
+            Some(("spotify:track:1".into(), false, 1250))
+        );
+        assert_eq!(reducer.snapshot().unwrap().index, 0);
+        assert!(reducer.queue_session_retry(&failure).is_none());
+        assert!(reducer.handle(failure.clone()).is_empty());
+        reducer.handle(NeutralEvent::RequestIdChanged {
+            generation: 7,
+            request_id: 2,
+        });
+        let second_failure = NeutralEvent::Unavailable {
+            generation: 7,
+            request_id: 2,
+            uri: "spotify:track:1".into(),
+        };
+        assert!(reducer.queue_session_retry(&second_failure).is_none());
+        assert!(matches!(
+            reducer.handle(second_failure).as_slice(),
+            [ReducerAction::Error(_), ReducerAction::Advance]
+        ));
+
+        bind(&mut reducer, "spotify:track:1", true, 3);
+        let new_failure = NeutralEvent::Unavailable {
+            generation: 7,
+            request_id: 3,
+            uri: "spotify:track:1".into(),
+        };
+        assert!(reducer.session_retry(&new_failure).is_some());
+        reducer.queue_load("spotify:track:2", true);
+        assert!(reducer.queue_session_retry(&new_failure).is_none());
+        reducer.activate(8);
+        assert!(reducer.queue_session_retry(&failure).is_none());
     }
 
     #[test]

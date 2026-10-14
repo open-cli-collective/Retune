@@ -1,11 +1,11 @@
 import { ShadowDiscovery } from './ShadowDiscovery'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Fragment, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
+import { Fragment, useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
 import './App.css'
-import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
-import { defaultSettings, initialState, reducer, type Action, type State } from './appState.ts'
-import { GetInfo, MultipleItemInformation, PlaybackAuthorization, Preferences, SetupLibrary } from './dialogViews.tsx'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseTypeaheadContextKey, browseViewForRequest, cancelTrackInfoLoad, COLUMN_SPECS, compareBrowseTracks, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, DRAG_LOCAL_TYPE, DRAG_TYPE, entityRequestGeneration, facetLabel, failedPlaylistRows, formatTime, hasLocalTracks, insertionIndexAtY, isCurrentRequestGeneration, isCurrentTrack, labels, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, moveBefore, moveToIndex, normalizeZoom, pendingEntities, pendingPlaybackTarget, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_COLUMNS, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, resolvedPlaylistRows, resizedColumnWidth, routeGlobalShortcut, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, trackColumnHeadings, trackGridColumns, visibleColumnOrder } from './ui.ts'
+import { initialState, reducer, type Action, type State } from './appState.ts'
+import { GetInfo, MultipleItemInformation, PlaybackAuthorization, SetupLibrary } from './dialogViews.tsx'
 import { AlbumRatingStrip, BrowserPane, TrackCell, TrackContextMenu, TrackList } from './libraryViews.tsx'
 import { SpotifyPageBack, SpotifySearch } from './spotifyViews.tsx'
 import type { ActivePane, BrowseView, BrowserPanes, ColumnKey, LastFmImportState, PlaybackOrigin, PlaybackTrack, Playing, PlaylistListView, PlaylistSubject, PlaylistTrack, RepeatMode, Selection, SettingsPatch, Source, SpotifySyncStatus, Theme, Track } from './types.ts'
@@ -14,9 +14,10 @@ import { importDownloadPercent, importDownloadProgressLabel, importStatusText } 
 import { libraryEvents, libraryGateway } from './libraryGateway.ts'
 import { playbackEvents, playbackGateway } from './playbackGateway.ts'
 import { createPlaybackProgress, documentVisible, onlyPlaybackProgressChanged, subscribeDocumentVisibility } from './playbackProgress.ts'
+import { useTauriInvalidationSnapshot } from './useTauriInvalidationSnapshot.ts'
 import { useTrackWindow } from './useTrackWindow.ts'
 import { spotifyEvents, spotifyGateway } from './spotifyGateway.ts'
-import { dispatchMainEvent, subscribeInvalidationThenSnapshot, subscribeMainEvents, type MainEvent, type SpotifyPlayRequest } from './ipc.ts'
+import { dispatchMainEvent, subscribeMainEvents, type MainEvent, type SpotifyPlayRequest } from './ipc.ts'
 import { appGateway } from './appGateway.ts'
 import { lastfmGateway } from './lastfmGateway.ts'
 import { RemoveTrackDialog, TrackMergeDialog } from './trackDecisionDialogs.tsx'
@@ -45,37 +46,13 @@ function useTauriEvent<T = unknown>(event: string, handler: (payload: T) => void
   }, [event])
 }
 
-function useTauriInvalidationSnapshot<T>(
-  event: string,
-  snapshot: () => Promise<T>,
-  handler: (payload: T) => void,
-  onError: (error: unknown) => void,
-) {
-  const read = useEffectEvent(snapshot)
-  const handle = useEffectEvent(handler)
-  const reportError = useEffectEvent(onError)
-  useEffect(() => {
-    let active = true
-    const subscription = subscribeInvalidationThenSnapshot(
-      (invalidate) => listen(event, invalidate),
-      () => read(),
-      (value) => handle(value),
-      () => active,
-      (error) => { if (active) reportError(error) },
-    )
-    void subscription.catch((error) => { if (active) reportError(error) })
-    return () => {
-      active = false
-      void subscription.then((stop) => stop()).catch(() => {})
-    }
-  }, [event])
-}
 
 function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Playing | null, dispatch: React.Dispatch<Action>) {
   const [progress] = useState(createPlaybackProgress)
   const queue = useRef<readonly PlaybackTrack[]>(emptyTracks)
   const origin = useRef<PlaybackOrigin | undefined>(undefined)
-  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin; awaitingPlaybackAuthorization: boolean } | null>(null)
+  const collectionStart = useRef(false)
+  const pendingPlay = useRef<{ id: number; tracks: readonly PlaybackTrack[]; origin?: PlaybackOrigin; collection?: boolean; awaitingPlaybackAuthorization: boolean } | null>(null)
   const playGeneration = useRef(0)
   const playingRef = useRef(playing)
   const volumeTimer = useRef<number>(undefined)
@@ -95,7 +72,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     const id = pendingPlaybackTarget(prompt, queue.current)
     if (id === null) return
     beginRequestGeneration(playGeneration)
-    pendingPlay.current = { id, tracks: queue.current, origin: origin.current, awaitingPlaybackAuthorization: true }
+    pendingPlay.current = { id, tracks: queue.current, origin: origin.current, collection: collectionStart.current, awaitingPlaybackAuthorization: true }
     dispatch({ type: 'playbackAuthorization', prompt })
   }, [dispatch])
 
@@ -103,7 +80,7 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     request().catch(() => dispatch({ type: 'error', error: message }))
   }, [dispatch])
 
-  const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin) => {
+  const start = useCallback((id: number, tracks: readonly PlaybackTrack[], launchOrigin?: PlaybackOrigin, collection = false) => {
     const target = tracks.find((track) => track.id === id)
     if (!target || (!target.uri.startsWith('file:') && !target.uri.startsWith('spotify:'))) {
       dispatch({ type: 'error', error: 'This track can’t be played because its source isn’t supported.' })
@@ -118,20 +95,24 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
     const request = beginRequestGeneration(playGeneration)
     queue.current = playable
     origin.current = launchOrigin
+    collectionStart.current = collection
     pendingPlay.current = null
     dispatch({ type: 'playbackAuthorization', prompt: null })
     if (playbackStartAction(target.uri, connected) === 'connect') {
       // Kick off the OAuth flow instead of erroring; the pending play fires
       // once connection-changed reports connected.
-      pendingPlay.current = { id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: false }
+      pendingPlay.current = { id, tracks: playable, origin: launchOrigin, collection, awaitingPlaybackAuthorization: false }
       run(spotifyGateway.connect, 'Couldn’t connect to Spotify. Try again.')
       return
     }
-    playbackGateway.play(playable, targetIndex)
+    playbackGateway.play(playable, collection ? null : targetIndex)
       .then((outcome) => {
         const authorization = currentPlaybackAuthorization(request, playGeneration, outcome, playable)
-        if (!authorization) return
-        pendingPlay.current = { id: authorization.id, tracks: playable, origin: launchOrigin, awaitingPlaybackAuthorization: true }
+        if (!authorization) {
+          if (isCurrentRequestGeneration(request, playGeneration)) collectionStart.current = false
+          return
+        }
+        pendingPlay.current = { id: authorization.id, tracks: playable, origin: launchOrigin, collection, awaitingPlaybackAuthorization: true }
         dispatch({ type: 'playbackAuthorization', prompt: authorization.prompt })
       })
       .catch(() => {
@@ -139,12 +120,33 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
       })
   }, [connected, dispatch, run])
 
+  const startPlaylist = useCallback(async (playlist: PlaylistListView) => {
+    if (!playlist.itemsAvailable) {
+      dispatch({ type: 'error', error: 'Spotify does not make this playlist’s tracks available to Retune.' })
+      return
+    }
+    const request = beginRequestGeneration(playGeneration)
+    pendingPlay.current = null
+    try {
+      const rows = await spotifyGateway.playlistTracks(playlist.id)
+      if (!isCurrentRequestGeneration(request, playGeneration)) return
+      const tracks = playbackQueue(rows.map((track, index) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + index })))
+      if (!tracks.length) {
+        dispatch({ type: 'error', error: 'This playlist has no enabled, playable tracks.' })
+        return
+      }
+      start(tracks[0].id, tracks, { kind: 'playlist', id: playlist.id }, true)
+    } catch {
+      if (isCurrentRequestGeneration(request, playGeneration)) dispatch({ type: 'error', error: 'Couldn’t load this playlist for playback. Try again.' })
+    }
+  }, [dispatch, start])
+
   useEffect(() => {
     if (!connected || !pendingPlay.current) return
     if (!playbackRetryReady(connected, playbackAuthorized, pendingPlay.current.awaitingPlaybackAuthorization)) return
-    const { id, tracks, origin: launchOrigin } = pendingPlay.current
+    const { id, tracks, origin: launchOrigin, collection } = pendingPlay.current
     pendingPlay.current = null
-    start(id, tracks, launchOrigin)
+    start(id, tracks, launchOrigin, collection)
   }, [connected, playbackAuthorized, start])
 
   const cancelPending = useCallback(() => {
@@ -185,8 +187,8 @@ function usePlayer(connected: boolean, playbackAuthorized: boolean, playing: Pla
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
   return useMemo(
-    () => ({ start, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired, progress }),
-    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, progress, seek, setVolume, start, step, toggle],
+    () => ({ start, startPlaylist, toggle, playRequestedTrack, step, setVolume, seek, cancelPending, onState, onAuthorizationRequired, progress }),
+    [cancelPending, onAuthorizationRequired, onState, playRequestedTrack, progress, seek, setVolume, start, startPlaylist, step, toggle],
   )
 }
 
@@ -199,13 +201,15 @@ function App() {
   const [activePane, setActivePane] = useState<ActivePane>('track')
   const [playlists, setPlaylists] = useState<PlaylistListView[]>()
   const [playlistSubject, setPlaylistSubject] = useState<PlaylistSubject>()
+  const [playlistTotals, setPlaylistTotals] = useState<{ playlistId: string; counts: Pick<BrowseView['counts'], 'tracks' | 'totalSecs'> | null }>()
   const [artworkOpen, setArtworkOpen] = useState(false)
   const [trackDecision, setTrackDecision] = useState<{ kind: 'merge'; ids: number[] } | { kind: 'remove'; tracks: Pick<Track, 'id' | 'uri' | 'name'>[]; spotify: boolean }>()
   const [spotifySearchRetry, setSpotifySearchRetry] = useState(0)
   const [playingMenu, setPlayingMenu] = useState<{ x: number; y: number; uri: string; name: string; trackId?: number }>()
   const [browserPlayKey, setBrowserPlayKey] = useState<string>()
+  const [originReveal, setOriginReveal] = useState<{ uri: string; origin: PlaybackOrigin; queryReset: number }>()
+  const libraryRevealHandled = useRef<typeof originReveal>(undefined)
   const search = useRef<HTMLInputElement>(null)
-  const preferenceZoom = useRef(defaultSettings.zoom)
   const facetAnchors = useRef<Partial<Record<keyof Selection, string>>>({})
   const typeahead = useRef<{ buffer: string; timer: number; context: string; candidates: { value: string; id?: number }[] }>({ buffer: '', timer: 0, context: '', candidates: [] })
   const browseDesiredToken = useRef('')
@@ -218,8 +222,8 @@ function App() {
   const view = browseViewForRequest(state.view, state.viewKey, browseKey)
   const tracks = view?.tracks ?? emptyTracks
   const displayedTracks = useMemo(() => state.settings.sortColumn
-    ? [...tracks].sort((left, right) => compareTracks(left, right, state.settings.sortColumn!, state.settings.sortDesc))
-    : tracks, [state.settings.sortColumn, state.settings.sortDesc, tracks])
+    ? [...tracks].sort((left, right) => compareTracks(left, right, state.settings.sortColumn!, state.settings.sortDesc, state.settings.ignoreLeadingThe))
+    : state.settings.ignoreLeadingThe ? [...tracks].sort((left, right) => compareBrowseTracks(left, right, state.sel)) : tracks, [state.settings.sortColumn, state.settings.sortDesc, state.settings.ignoreLeadingThe, state.sel, tracks])
   const selectedTracks = displayedTracks.filter((track) => state.selectedTrackIds.has(track.id))
   const spotifySearchActive = state.scope === 'spotify' && Boolean(state.query.trim() || state.spotifyNavigation)
   const tracklistVisible = !spotifySearchActive && !state.selectedPlaylist
@@ -270,8 +274,8 @@ function App() {
     if (state.viewKey !== browserPlayKey) return
     setBrowserPlayKey(undefined)
     const first = displayedTracks.find((track) => track.enabled)
-    if (first && tracklistVisible) player.start(first.id, displayedTracks, { kind: 'library', source: state.source })
-  }, [browserPlayKey, browseKey, displayedTracks, player, state.source, state.viewKey, tracklistVisible])
+    if (first && tracklistVisible) player.start(first.id, displayedTracks, { kind: 'library', source: state.source, selection: state.sel, query: state.scope === 'library' ? state.query : '' }, true)
+  }, [browserPlayKey, browseKey, displayedTracks, player, state.source, state.sel, state.query, state.scope, state.viewKey, tracklistVisible])
   const setBrowserPanes = useCallback((browserPanes: BrowserPanes) => {
     for (const facet of ['cat', 'art', 'alb'] as const) {
       if (!browserPanes[facet]) delete facetAnchors.current[facet]
@@ -482,25 +486,15 @@ function App() {
     updateSettings({ zoom: normalizeZoom(zoom, ZOOM_MIN, ZOOM_MAX) })
   }, [updateSettings])
   const openPreferences = () => {
-    preferenceZoom.current = state.settings.zoom
-    dispatch({ type: 'preferences', open: true })
+    appGateway.openPreferences().catch(() => dispatch({ type: 'error', error: 'Couldn’t open Preferences. Try again.' }))
   }
   const openLastfmImporter = () => {
     appGateway.openLastFmImporter().catch(() => dispatch({ type: 'error', error: 'Couldn’t open the Last.fm importer. Try again.' }))
-  }
-  const syncLastfm = () => {
-    lastfmGateway.syncPlays()
-      .then((lastfmImport) => dispatch({ type: 'lastfmImport', lastfmImport }))
-      .catch(() => dispatch({ type: 'error', error: 'Couldn’t sync Last.fm. Existing import state is unchanged. Try again.' }))
   }
   const syncSpotify = useCallback(() => {
     dispatch({ type: 'clear-error' })
     spotifyGateway.sync().catch(() => dispatch({ type: 'error', error: SPOTIFY_SYNC_ERROR }))
   }, [])
-  const cancelPreferences = () => {
-    dispatch({ type: 'settings', settings: { zoom: preferenceZoom.current } })
-    dispatch({ type: 'preferences', open: false })
-  }
   const saveSetupClientId = async (spotifyClientId: string) => {
     if (spotifyClientId === state.settings.spotifyClientId) return
     dispatch({ type: 'settings', settings: { spotifyClientId } })
@@ -510,7 +504,7 @@ function App() {
   const selectedAlbum = state.sel.alb?.length === 1 ? state.sel.alb[0] : undefined
   const handlePrefix = (event: Pick<KeyboardEvent, 'key' | 'altKey' | 'ctrlKey' | 'metaKey' | 'isComposing' | 'preventDefault' | 'stopPropagation'>, pane: ActivePane): boolean => {
     if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.key.length !== 1) return false
-    const context = browseTypeaheadContextKey(pane, state.source, state.sel, browseKey)
+    const context = browseTypeaheadContextKey(pane, state.source, state.sel, browseKey) + state.settings.ignoreLeadingThe
     if (typeahead.current.context !== context) {
       window.clearTimeout(typeahead.current.timer)
       typeahead.current.buffer = ''
@@ -520,7 +514,7 @@ function App() {
     if (event.key === ' ' && !typeahead.current.buffer) return false
     if (!typeahead.current.buffer) {
       const facet = pane === 'track' ? undefined : pane
-      const values = facet ? browseFacetValues(state.view, state.viewKey, browseKey, facet) : []
+      const values = facet ? browseFacetValues(state.view, state.viewKey, browseKey, facet, state.settings.ignoreLeadingThe) : []
       typeahead.current = {
         ...typeahead.current,
         buffer: '',
@@ -578,11 +572,10 @@ function App() {
   useTauriEvent('open-setup', () => dispatch({ type: 'setup', open: true }), reportInfrastructureError)
 
   const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
-    const modalOpen = Boolean(state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject)
+    const modalOpen = Boolean(state.info || state.setup || state.playbackAuthorization || playlistSubject)
     if (event.key === 'Escape' && modalOpen) {
       event.preventDefault()
       if (state.info) closeInfo()
-      else if (state.preferences) cancelPreferences()
       else if (state.setup) dispatch({ type: 'setup', open: false })
       else if (state.playbackAuthorization) player.cancelPending()
       else setPlaylistSubject(undefined)
@@ -609,7 +602,7 @@ function App() {
     } else if (command && event.key === ',') {
       event.preventDefault()
       openPreferences()
-    } else if (!command && event.key === ' ' && (!typeahead.current.buffer || typeahead.current.context !== browseTypeaheadContextKey(activePane, state.source, state.sel, browseKey))) {
+    } else if (!command && event.key === ' ' && (!typeahead.current.buffer || typeahead.current.context !== browseTypeaheadContextKey(activePane, state.source, state.sel, browseKey) + state.settings.ignoreLeadingThe)) {
       event.preventDefault()
       typeahead.current.buffer = ''
       player.toggle()
@@ -632,7 +625,7 @@ function App() {
         dispatch({ type: 'selectTrack', id: displayedTracks[index].id })
         window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-track-id="${displayedTracks[index].id}"]`)?.scrollIntoView({ block: 'nearest' }))
       } else {
-        const facetValues = view?.facets[activePane === 'cat' ? 'cats' : activePane === 'art' ? 'arts' : 'albs'] ?? []
+        const facetValues = browseFacetValues(state.view, state.viewKey, browseKey, activePane, state.settings.ignoreLeadingThe)
         const values: (string | undefined)[] = [undefined, ...facetValues]
         const current = values.indexOf(facetAnchors.current[activePane] ?? state.sel[activePane]?.[0])
         const index = Math.max(0, Math.min(values.length - 1, current + direction))
@@ -651,13 +644,20 @@ function App() {
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || state.info || state.preferences || state.setup || state.playbackAuthorization || playlistSubject) return
+      if (!(event.metaKey || event.ctrlKey) || state.info || state.setup || state.playbackAuthorization || playlistSubject) return
       event.preventDefault()
       setZoom(state.settings.zoom + (event.deltaY < 0 ? 0.1 : -0.1))
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [playlistSubject, setZoom, state.info, state.playbackAuthorization, state.preferences, state.setup, state.settings.zoom])
+  }, [playlistSubject, setZoom, state.info, state.playbackAuthorization, state.setup, state.settings.zoom])
+
+  useEffect(() => {
+    if (!originReveal || originReveal.origin.kind !== 'library' || libraryRevealHandled.current === originReveal || !view || !tracklistVisible) return
+    libraryRevealHandled.current = originReveal
+    const track = displayedTracks.find(track => track.uri === originReveal.uri)
+    if (track) dispatch({ type: 'selectTrack', id: track.id })
+  }, [originReveal, view, tracklistVisible, displayedTracks])
 
   const selectedPlaylist = playlists?.find((playlist) => playlist.id === state.selectedPlaylist)
   const playlistLayout = playlistLayoutFor(selectedPlaylist?.id, state.settings)
@@ -665,7 +665,7 @@ function App() {
     const origin = state.playing?.origin
     if (!origin) return
     facetAnchors.current = {}
-    dispatch({ type: 'scope', scope: 'library' })
+    setOriginReveal({ uri: state.playing!.uri!, origin, queryReset: state.queryReset + 1 })
     dispatch(playbackOriginAction(origin))
   }
   return (
@@ -713,6 +713,7 @@ function App() {
           playlists={playlists}
           onSource={(source) => { facetAnchors.current = {}; dispatch({ type: 'source', source }) }}
           onPlaylist={(id) => dispatch({ type: 'playlist', id })}
+          onPlayPlaylist={player.startPlaylist}
           onReorder={setPlaylists}
           onCollapse={() => updateSettings({ plCollapsed: !state.settings.plCollapsed })}
           onShuffle={(shuffle) => playbackGateway.setShuffle(shuffle).then(() => dispatch({ type: 'settings', settings: { shuffle } })).catch(() => dispatch({ type: 'error', error: 'Couldn’t change shuffle. Playback is unchanged. Try again.' }))}
@@ -729,7 +730,8 @@ function App() {
           {state.connection.needs_reauth && <div className="startup-notice reauth-notice"><span>Spotify needs to be reconnected to enable playlists.</span><button onClick={() => spotifyGateway.connect().catch(() => dispatch({ type: 'error', error: 'Couldn’t reconnect Spotify. Try again.' }))}>Reconnect</button></div>}
           {spotifySearchActive ? (
             !state.connectionHydrated ? <div className="spotify-stub"><span>Checking Spotify connection…</span></div> : state.connection.connected ? <SpotifySearch
-              key={JSON.stringify([state.query.trim(), state.spotifyNavigation ?? null])}
+              key={JSON.stringify([state.query.trim(), state.spotifyNavigation ?? null, state.queryReset])}
+              restore={originReveal?.origin.kind === 'spotify' && originReveal.queryReset === state.queryReset ? originReveal : undefined}
               query={state.query.trim()}
               searching={state.spotifySearching}
               results={state.spotifyResults}
@@ -752,15 +754,18 @@ function App() {
           ) : selectedPlaylist ? <PlaylistView
             key={selectedPlaylist.id}
             playlist={selectedPlaylist}
+            ignoreLeadingThe={state.settings.ignoreLeadingThe}
+            onTotals={setPlaylistTotals}
             backLabel={labels[state.source].name}
             revision={state.playlistRevision}
             libraryRevision={state.revision}
             playing={state.playing}
+            revealRequest={originReveal?.origin.kind === 'playlist' && originReveal.origin.id === selectedPlaylist.id ? originReveal : undefined}
             columnOrder={playlistLayout.columnOrder}
             columnWidths={playlistLayout.columnWidths}
             hiddenColumns={playlistLayout.hiddenColumns}
             onBack={() => dispatch({ type: 'playlist' })}
-            onPlay={(id, tracks) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id })}
+            onPlay={(id, tracks, sortColumn, sortDesc) => player.start(id, tracks, { kind: 'playlist', id: selectedPlaylist.id, sortColumn, sortDesc })}
             onRate={(id, stars) => rate(`track:${id}`, () => libraryGateway.clickTrackStar(id, stars))}
             onOpen={(target) => spotifyGateway.openPlaylist(selectedPlaylist.id, target).catch(() => dispatch({ type: 'error', error: 'Couldn’t open this playlist in Spotify. Try again.' }))}
             onPlaylist={setPlaylistSubject}
@@ -829,7 +834,7 @@ function App() {
                     dispatch({ type: 'selectTrack', id })
                   }
                 }}
-                onPlay={(id) => player.start(id, displayedTracks, { kind: 'library', source: state.source })}
+                onPlay={(id) => player.start(id, displayedTracks, { kind: 'library', source: state.source, selection: state.sel, query: state.scope === 'library' ? state.query : '' })}
                 onEnabled={(id, enabled) => mutate(() => libraryGateway.setTrackEnabled(id, enabled))}
                 onRate={(id, stars) => rate(`track:${id}`, () => libraryGateway.clickTrackStar(id, stars))}
                 onInfo={openInfo}
@@ -848,7 +853,7 @@ function App() {
             </>
           )}
           {state.error && <ErrorNotice className="error-banner" onDismiss={() => dispatch({ type: 'clear-error' })}><span>{state.error}</span></ErrorNotice>}
-          <StatusBar view={view} unit={labels[state.source].item} browsePending={state.browsePending} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={libraryEmpty} />
+          <StatusBar view={view} counts={selectedPlaylist ? playlistTotals?.playlistId === selectedPlaylist.id ? playlistTotals.counts : null : undefined} unit={selectedPlaylist ? 'track' : labels[state.source].item} browsePending={!selectedPlaylist && state.browsePending} syncPhase={state.syncPhase} syncProgress={state.syncProgress} importStatus={state.importStatus} spotifySyncStatus={state.spotifySyncStatus} lastfmImport={state.lastfmImport} onSpotifySync={syncSpotify} onLastfmImport={openLastfmImporter} empty={!selectedPlaylist && libraryEmpty} />
         </section>
       </div>
       {state.info?.kind === 'single' && <GetInfo key={state.info.track.id} track={state.info.track} onCancel={closeInfo} onSaved={() => {
@@ -869,13 +874,6 @@ function App() {
           return spotifyGateway.sync()
         })
         .catch(() => dispatch({ type: 'error', error: SPOTIFY_SYNC_ERROR }))} />}
-      {state.preferences && <Preferences settings={state.settings} lastfm={state.lastfm} lastfmImport={state.lastfmImport} onZoom={(zoom) => dispatch({ type: 'settings', settings: { zoom } })} onCancel={cancelPreferences} onLastfm={(lastfm) => dispatch({ type: 'lastfm', lastfm })} onImport={openLastfmImporter} onSyncLastfm={syncLastfm} onLibraryChanged={() => dispatch({ type: 'refresh' })} onSave={({ browserPanes, ...settings }) => {
-        const patch = { ...settings, browserPanes, zoom: state.settings.zoom }
-        dispatch({ type: 'settings', settings })
-        dispatch({ type: 'browserPanes', browserPanes })
-        persistSettings(patch)
-        dispatch({ type: 'preferences', open: false })
-      }} />}
       {state.playbackAuthorization && <PlaybackAuthorization prompt={state.playbackAuthorization} onCancel={player.cancelPending} onAuthorize={spotifyGateway.authorizePlayback} />}
       {playlistSubject && <AddToPlaylist subject={playlistSubject} revision={state.playlistRevision} onAdd={addToPlaylist} onClose={() => setPlaylistSubject(undefined)} onError={(error) => dispatch({ type: 'error', error })} />}
       {nativeDragActive && <div className="native-drop-overlay"><strong>Drop to add to Library</strong><span>Audio files and folders</span></div>}
@@ -998,7 +996,7 @@ export function TransportBar({ playing, progress, track, query, queryReset, scop
         onOrigin()
       }}
       onKeyDown={(event) => {
-        if (!playing?.origin || (event.key !== 'Enter' && event.key !== ' ')) return
+        if (event.target !== event.currentTarget || !playing?.origin || (event.key !== 'Enter' && event.key !== ' ')) return
         event.preventDefault()
         onOrigin()
       }}
@@ -1036,11 +1034,12 @@ export function TransportBar({ playing, progress, track, query, queryReset, scop
   </header>
 }
 
-function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError, artwork }: {
+function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, onPlayPlaylist, onReorder, onCollapse, onShuffle, onRepeat, onDrop, onError, artwork }: {
   state: State
   playlists?: PlaylistListView[]
   onSource: (source: Source) => void
   onPlaylist: (id: string) => void
+  onPlayPlaylist: (playlist: PlaylistListView) => void
   onReorder: (playlists: PlaylistListView[]) => void
   onCollapse: () => void
   onShuffle: (shuffle: boolean) => void
@@ -1074,6 +1073,7 @@ function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, on
   const playlistDrag = useRef<{ id: string; pointerId: number; startY: number; moved: boolean } | undefined>(undefined)
   const dragInsertBefore = useRef<number | undefined>(undefined)
   const suppressPlaylistClick = useRef(false)
+  const playlistPrefix = useRef({ text: '', at: 0 })
   const create = async () => {
     if (!name.trim() || !beginPendingEntity(createPending.current, 'create')) return
     setCreateBusy(true)
@@ -1115,13 +1115,34 @@ function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, on
       setBusy(false)
     }
   }
-  return <><aside className="sidebar" tabIndex={0} onKeyDown={(event) => {
+  return <><aside className="sidebar" tabIndex={0} onPointerDownCapture={() => { playlistPrefix.current = { text: '', at: 0 } }} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) playlistPrefix.current = { text: '', at: 0 }
+  }} onKeyDown={(event) => {
+    if (!event.nativeEvent.isComposing && !event.altKey && !event.ctrlKey && !event.metaKey && event.key.length === 1
+      && (event.target === event.currentTarget || (event.target as Element).closest('.playlist-row, .source-row'))) {
+      const now = performance.now()
+      if (now - playlistPrefix.current.at > 1000) playlistPrefix.current.text = ''
+      if (event.key !== ' ' || playlistPrefix.current.text) {
+        event.preventDefault()
+        event.stopPropagation()
+        playlistPrefix.current = { text: playlistPrefix.current.text + event.key, at: now }
+        const row = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.playlist-row')]
+          .find(row => row.dataset.playlistName?.toLocaleLowerCase().startsWith(playlistPrefix.current.text.toLocaleLowerCase()))
+        row?.click()
+        row?.focus()
+        row?.scrollIntoView({ block: 'nearest' })
+        return
+      }
+    }
     if (event.target instanceof HTMLInputElement || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
     event.preventDefault()
+    event.stopPropagation()
+    playlistPrefix.current = { text: '', at: 0 }
     const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.source-row, .playlist-row')]
     const current = rows.findIndex((row) => row.classList.contains('active'))
     const next = rows[current + (event.key === 'ArrowUp' ? -1 : 1)]
     next?.click()
+    next?.focus()
     next?.scrollIntoView({ block: 'nearest' })
   }}>
     <div className="section-label">Library</div>
@@ -1135,11 +1156,13 @@ function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, on
       else if (event.key === 'Escape') { setCreating(false); setName('') }
     }} /></div>}
     {!state.settings.plCollapsed && playlists?.map((playlist, index) => <Fragment key={playlist.id}>{playlist.shadow && !playlists[index - 1]?.shadow && <div className="section-label">Shadowed playlists</div>}<button
+      data-playlist-name={playlist.name}
       className={`playlist-row ${state.selectedPlaylist === playlist.id || dropTarget === playlist.id ? 'active' : ''} ${dragging === playlist.id ? 'dragging' : ''} ${insertBefore === index ? 'insert-before' : ''} ${insertBefore === playlists.length && index === playlists.length - 1 ? 'insert-after' : ''}`}
       onClick={(event) => {
         if (suppressPlaylistClick.current) { suppressPlaylistClick.current = false; event.preventDefault(); return }
         onPlaylist(playlist.id)
       }}
+      onDoubleClick={() => { if (!suppressPlaylistClick.current) onPlayPlaylist(playlist) }}
       onPointerDown={(event) => {
         if (event.button !== 0) return
         suppressPlaylistClick.current = false
@@ -1205,17 +1228,20 @@ function Sidebar({ state, playlists: incomingPlaylists, onSource, onPlaylist, on
   </aside>{discovering && <ShadowDiscovery playlists={playlists ?? []} onClose={() => setDiscovering(false)} />}{confirming && <ModalDialog className="get-info playlist-confirm" labelledBy="playlist-confirm-title" onCancel={busy ? undefined : () => setConfirming(undefined)} onSubmit={busy ? undefined : unfollow} closeOnBackdrop><h2 id="playlist-confirm-title">{confirming.owned ? 'Delete Playlist?' : 'Unfollow Playlist?'}</h2><p>{confirming.owned ? `Delete “${confirming.name}” from Spotify?` : `Stop following “${confirming.name}”?`}</p><div className="modal-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirming(undefined)}>Cancel</button><button type="submit" className="danger" disabled={busy}>{busy ? 'Working…' : confirming.owned ? 'Delete' : 'Unfollow'}</button></div></ModalDialog>}</>
 }
 
-function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing, columnOrder, columnWidths, hiddenColumns, onBack, onPlay, onRate, onOpen, onPlaylist, onInfo, onReorder, onColumnWidths, onHiddenColumns, onError }: {
+function PlaylistView({ playlist, ignoreLeadingThe, onTotals, backLabel, revision, libraryRevision, playing, revealRequest, columnOrder, columnWidths, hiddenColumns, onBack, onPlay, onRate, onOpen, onPlaylist, onInfo, onReorder, onColumnWidths, onHiddenColumns, onError }: {
   playlist: PlaylistListView
+  ignoreLeadingThe: boolean
+  onTotals: (totals: { playlistId: string; counts: Pick<BrowseView['counts'], 'tracks' | 'totalSecs'> | null }) => void
   backLabel: string
   revision: number
   libraryRevision: number
   playing: State['playing']
+  revealRequest?: { uri: string; origin: PlaybackOrigin }
   columnOrder: ColumnKey[]
   columnWidths: Partial<Record<ColumnKey, number>>
   hiddenColumns: ColumnKey[]
   onBack: () => void
-  onPlay: (id: number, tracks: readonly PlaybackTrack[]) => void
+  onPlay: (id: number, tracks: readonly PlaybackTrack[], sortColumn: ColumnKey | null, sortDesc: boolean) => void
   onRate: (id: number, stars: number) => void
   onOpen: (target: 'app' | 'web') => void
   onPlaylist: (subject: PlaylistSubject) => void
@@ -1245,6 +1271,8 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [selectionAnchor, setSelectionAnchor] = useState<number>()
   const [focusedUpstreamIndex, setFocusedUpstreamIndex] = useState<number>()
+  const trackPrefix = useRef({ text: '', at: 0 })
+  const pendingRowFocus = useRef<number>(undefined)
   const [insertBefore, setInsertBefore] = useState<number>()
   const [mutating, setMutating] = useState(false)
   const [sortColumn, setSortColumn] = useState<ColumnKey | null>(null)
@@ -1260,6 +1288,11 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
   const resize = useRef<{ column: ColumnKey; pointerId: number; startX: number; startWidth: number; scale: number } | undefined>(undefined)
   onErrorRef.current = onError
   const tracks = currentPlaylistRows(trackState, playlist.id)
+  useEffect(() => {
+    onTotals({ playlistId: playlist.id, counts: playlistRowsReady(trackState, playlist.id) ? {
+      tracks: trackState.rows.length, totalSecs: trackState.rows.reduce((total, track) => total + track.durationSecs, 0),
+    } : null })
+  }, [onTotals, playlist.id, trackState])
   const canChangePlaylist = playlist.owned && playlistRowsReady(trackState, playlist.id) && tracks.length === playlist.trackCount
   const canReorder = canChangePlaylist && sortColumn === null
   useEffect(() => setLiveWidths(columnWidths), [columnWidths])
@@ -1268,6 +1301,9 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     setSelected(new Set())
     setSelectionAnchor(undefined)
     setFocusedUpstreamIndex(undefined)
+    trackPrefix.current = { text: '', at: 0 }
+  }, [playlist.id, playlist.itemsAvailable, revision])
+  useEffect(() => {
     if (!playlist.itemsAvailable) {
       return
     }
@@ -1276,7 +1312,7 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
       .then((rows) => active && setTrackState((current) => resolvedPlaylistRows(current, playlist.id, rows)))
       .catch(() => {
         if (!active) return
-        setTrackState((current) => failedPlaylistRows(current, playlist.id))
+        setTrackState((current) => playlistRowsReady(current, playlist.id) ? current : failedPlaylistRows(current, playlist.id))
         onErrorRef.current('Couldn’t load this playlist. Existing tracks are unchanged. Try again.')
       })
     return () => { active = false }
@@ -1295,13 +1331,38 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
     window.addEventListener('keydown', selectAll)
     return () => window.removeEventListener('keydown', selectAll)
   }, [tracks])
-  const rows = useMemo(() => playlistRows(tracks, sortColumn, sortDesc), [tracks, sortColumn, sortDesc])
+  const rows = useMemo(() => playlistRows(tracks, sortColumn, sortDesc, ignoreLeadingThe), [tracks, sortColumn, sortDesc, ignoreLeadingThe])
   const rovingUpstreamIndex = rows.some((row) => row.upstreamIndex === focusedUpstreamIndex)
     ? focusedUpstreamIndex
     : rows.find((row) => selected.has(row.upstreamIndex))?.upstreamIndex ?? rows[0]?.upstreamIndex
   const queue = useMemo(() => rows.map(({ track, upstreamIndex }) => ({ ...track, id: track.id ?? SYNTHETIC_BASE + upstreamIndex })), [rows])
   const rowHeight = 20
   const { scroll, readViewport, reveal, indices: rowIndices } = useTrackWindow(rows.length, rowHeight, rows.findIndex(row => row.upstreamIndex === rovingUpstreamIndex))
+  useLayoutEffect(() => {
+    if (pendingRowFocus.current === undefined) return
+    // Focus before the next key arrives; virtualization may have removed its old target.
+    scroll.current?.querySelector<HTMLElement>(`[data-upstream-index="${pendingRowFocus.current}"]`)?.focus({ preventScroll: true })
+    pendingRowFocus.current = undefined
+  })
+  const handledReveal = useRef<typeof revealRequest>(undefined)
+  useEffect(() => {
+    if (!revealRequest || handledReveal.current === revealRequest || !playlistRowsReady(trackState, playlist.id)) return
+    const origin = revealRequest.origin
+    if (origin.kind !== 'playlist') return
+    if (sortColumn !== (origin.sortColumn ?? null) || sortDesc !== (origin.sortDesc ?? false)) {
+      setSortColumn(origin.sortColumn ?? null)
+      setSortDesc(origin.sortDesc ?? false)
+      return
+    }
+    handledReveal.current = revealRequest
+    const index = rows.findIndex(({ track }) => track.uri === revealRequest.uri)
+    if (index < 0) return
+    const upstreamIndex = rows[index].upstreamIndex
+    setSelected(new Set([upstreamIndex]))
+    setSelectionAnchor(upstreamIndex)
+    setFocusedUpstreamIndex(upstreamIndex)
+    reveal(index)
+  }, [revealRequest, trackState, playlist.id, rows, sortColumn, sortDesc, reveal])
   const headings = { ...trackColumnHeadings(labels.music), track: 'Track' }
   const customizableColumns = columnOrder.filter((column) => PLAYLIST_COLUMNS.includes(column))
   const visibleColumns = visibleColumnOrder(customizableColumns, hiddenColumns)
@@ -1484,14 +1545,34 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
         onFocus={() => setFocusedUpstreamIndex(upstreamIndex)}
         onClick={(event) => {
           if (suppressTrackClick.current) { suppressTrackClick.current = false; event.preventDefault(); return }
+          trackPrefix.current = { text: '', at: 0 }
           select(upstreamIndex, event)
         }}
-        onDoubleClick={() => onPlay(queue[rowIndex].id, queue)}
+        onDoubleClick={() => onPlay(queue[rowIndex].id, queue, sortColumn, sortDesc)}
         onKeyDown={(event) => {
           if (event.target !== event.currentTarget) return
+          if (!event.nativeEvent.isComposing && !event.altKey && !event.ctrlKey && !event.metaKey && event.key.length === 1) {
+            const now = performance.now()
+            if (now - trackPrefix.current.at > 1000) trackPrefix.current.text = ''
+            if (event.key !== ' ' || trackPrefix.current.text) {
+              event.preventDefault()
+              event.stopPropagation()
+              trackPrefix.current = { text: trackPrefix.current.text + event.key, at: now }
+              const nextIndex = rows.findIndex(({ track }) => track.name.toLocaleLowerCase().startsWith(trackPrefix.current.text.toLocaleLowerCase()))
+              const next = rows[nextIndex]
+              if (next) {
+                setSelected(new Set([next.upstreamIndex]))
+                setSelectionAnchor(next.upstreamIndex)
+                setFocusedUpstreamIndex(next.upstreamIndex)
+                reveal(nextIndex)
+                pendingRowFocus.current = next.upstreamIndex
+              }
+              return
+            }
+          }
           if (event.key === 'Enter') {
             event.preventDefault()
-            onPlay(queue[rowIndex].id, queue)
+            onPlay(queue[rowIndex].id, queue, sortColumn, sortDesc)
             return
           }
           if (event.key === ' ') {
@@ -1507,11 +1588,10 @@ function PlaylistView({ playlist, backLabel, revision, libraryRevision, playing,
           select(next.upstreamIndex, event)
           setFocusedUpstreamIndex(next.upstreamIndex)
           reveal(nextIndex)
-          const rowContainer = event.currentTarget.parentElement
-          window.requestAnimationFrame(() => rowContainer?.querySelector<HTMLElement>(`[data-upstream-index="${next.upstreamIndex}"]`)?.focus())
+          pendingRowFocus.current = next.upstreamIndex
         }}
         onPointerDown={canReorder && !mutating ? (event) => {
-          if (event.button !== 0) return
+          if (event.button !== 0 || (event.target as Element).closest('button, input, select, textarea, a')) return
           setFocusedUpstreamIndex(upstreamIndex)
           suppressTrackClick.current = false
           trackDrag.current = { indices: selected.has(upstreamIndex) ? [...selected] : [upstreamIndex], pointerId: event.pointerId, startY: event.clientY, moved: false }
@@ -1649,11 +1729,11 @@ function statusDuration(totalSeconds: number) {
   return parts.slice(0, 3).join(' ') || '<1m'
 }
 
-export function StatusBar({ view, unit, browsePending, syncPhase, syncProgress, importStatus, spotifySyncStatus, lastfmImport, onSpotifySync, onLastfmImport, empty }: { view: BrowseView | null; unit: string; browsePending?: boolean; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; spotifySyncStatus: SpotifySyncStatus; lastfmImport: LastFmImportState; onSpotifySync: () => void; onLastfmImport: () => void; empty: boolean }) {
-  const total = view?.counts.totalSecs ?? 0
+export function StatusBar({ view, counts = view?.counts, unit, browsePending, syncPhase, syncProgress, importStatus, spotifySyncStatus, lastfmImport, onSpotifySync, onLastfmImport, empty }: { view: BrowseView | null; counts?: Pick<BrowseView['counts'], 'tracks' | 'totalSecs'> | null; unit: string; browsePending?: boolean; syncPhase?: string; syncProgress?: { tracks: number; fraction: number }; importStatus?: string; spotifySyncStatus: SpotifySyncStatus; lastfmImport: LastFmImportState; onSpotifySync: () => void; onLastfmImport: () => void; empty: boolean }) {
+  const total = counts?.totalSecs ?? 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
-  const count = view?.counts.tracks ?? 0
+  const count = counts?.tracks ?? 0
   const sourceWork = lastfmImport.phase === 'downloading' || lastfmImport.phase === 'aggregating'
   const lastfmLoading = lastfmImport.syncProblem === 'Retune is still loading Last.fm import state.'
   const progress = importDownloadProgressLabel(lastfmImport.processedScrobbles, lastfmImport.totalScrobbles, importDownloadPercent(lastfmImport.downloadedPages, lastfmImport.totalPages))
@@ -1664,7 +1744,7 @@ export function StatusBar({ view, unit, browsePending, syncPhase, syncProgress, 
     return () => window.clearInterval(timer)
   }, [spotifySyncStatus.cooldown, spotifySyncStatus.lastFullSync, spotifySyncStatus.nextSync])
 
-  const librarySummary = importStatus ?? (browsePending ? 'Filtering library…' : empty ? 'No library — set up to begin' : `${count.toLocaleString()} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)
+  const librarySummary = importStatus ?? (browsePending ? 'Filtering library…' : empty ? 'No library — set up to begin' : counts === null ? 'Track totals unavailable' : `${count.toLocaleString()} ${count === 1 ? unit : `${unit}s`}, ${hours}:${String(minutes).padStart(2, '0')} hours`)
   const spotifySegment = spotifySyncStatus.running
     ? <span className="sync-status status-spotify"><span>⟳ {syncPhase ?? 'Syncing from Spotify…'}</span>{syncProgress && <><progress className="sync-meter" max={1} value={syncProgress.fraction} /><span>{syncProgress.tracks} tracks synced</span></>}</span>
     : spotifySyncStatus.cooldown

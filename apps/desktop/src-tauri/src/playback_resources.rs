@@ -93,23 +93,26 @@ pub(crate) fn resolve_cached(
 
 pub(crate) fn finish(
     tracks: Vec<SnapshotTrack>,
-    start_index: usize,
+    start_index: Option<usize>,
     enabled: &[bool],
 ) -> Result<(Vec<SnapshotTrack>, usize), String> {
-    if tracks.get(start_index).is_none() || enabled.len() != tracks.len() {
+    if tracks.get(start_index.unwrap_or(0)).is_none() || enabled.len() != tracks.len() {
         return Err("Playback start index is out of range.".into());
     }
     let mut resolved_index = 0;
-    let tracks = tracks
+    let tracks: Vec<_> = tracks
         .into_iter()
         .enumerate()
         .filter_map(|(index, track)| {
-            if index < start_index && enabled[index] {
+            if index < start_index.unwrap_or(0) && enabled[index] {
                 resolved_index += 1;
             }
-            (index == start_index || enabled[index]).then_some(track)
+            (Some(index) == start_index || enabled[index]).then_some(track)
         })
         .collect();
+    if tracks.is_empty() {
+        return Err("Choose an enabled track to play.".into());
+    }
     Ok((tracks, resolved_index))
 }
 
@@ -360,7 +363,14 @@ mod tests {
                 duration_secs: 1,
             })
             .to_vec();
-        let (tracks, index) = finish(tracks, 1, &[false, false, true]).unwrap();
+        let (collection, index) = finish(tracks.clone(), None, &[false, false, true]).unwrap();
+        assert_eq!(
+            collection.iter().map(|track| track.id).collect::<Vec<_>>(),
+            [3]
+        );
+        assert_eq!(index, 0);
+        assert!(finish(tracks.clone(), None, &[false, false, false]).is_err());
+        let (tracks, index) = finish(tracks, Some(1), &[false, false, true]).unwrap();
         assert_eq!(
             tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
             [2, 3]
@@ -437,7 +447,7 @@ mod tests {
                 let (tracks, enabled) =
                     resolve_cached(&resources, 0, &library, &playlists, &catalog).unwrap();
                 let tracks = tracks.into_iter().collect::<Option<Vec<_>>>().unwrap();
-                finish(tracks, 0, &enabled).unwrap().0
+                finish(tracks, Some(0), &enabled).unwrap().0
             };
             let expected = resources
                 .iter()

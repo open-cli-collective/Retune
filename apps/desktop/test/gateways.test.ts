@@ -347,6 +347,7 @@ test('app gateway preserves shell command names and argument shapes', async () =
   await app.settings()
   await app.updateSettings(fixture.settingsPatch)
   await app.appearance()
+  await app.openPreferences()
   await app.openLastFmImporter()
   await app.diagnostics()
   await app.emailDiagnostics('redacted report')
@@ -355,6 +356,7 @@ test('app gateway preserves shell command names and argument shapes', async () =
     ['get_settings', undefined],
     ['update_settings', { patch: fixture.settingsPatch }],
     ['get_appearance', undefined],
+    ['open_preferences', undefined],
     ['open_lastfm_importer', undefined],
     ['load_diagnostics', undefined],
     ['email_diagnostics', { body: 'redacted report' }],

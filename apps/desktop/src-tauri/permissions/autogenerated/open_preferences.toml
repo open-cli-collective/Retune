@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-preferences"
+description = "Enables the open_preferences command without any pre-configured scope."
+commands.allow = ["open_preferences"]
+
+[[permission]]
+identifier = "deny-open-preferences"
+description = "Denies the open_preferences command without any pre-configured scope."
+commands.deny = ["open_preferences"]

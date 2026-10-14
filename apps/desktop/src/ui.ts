@@ -49,15 +49,15 @@ export const browseViewForRequest = <T>(view: T | null, resolvedKey: string | un
     && sameValues(resolved[3], requested[3]) ? view : null
 }
 
-export function browseFacetValues(view: BrowseView | null, resolvedKey: string | undefined, requestKey: string, facet: keyof Selection): string[] {
+export function browseFacetValues(view: BrowseView | null, resolvedKey: string | undefined, requestKey: string, facet: keyof Selection, ignoreLeadingThe = false): string[] {
   if (!view) return []
   const resolved = browseKeyParts(resolvedKey)
   const requested = browseKeyParts(requestKey)
   if (!resolved || !requested || resolved[0] !== requested[0]) return []
   if (facet === 'cat') return view.facets.cats
   if (!sameValues(resolved[1], requested[1])) return []
-  if (facet === 'art') return view.facets.arts
-  return sameValues(resolved[2], requested[2]) ? view.facets.albs : []
+  const values = facet === 'art' ? view.facets.arts : sameValues(resolved[2], requested[2]) ? view.facets.albs : []
+  return ignoreLeadingThe ? [...values].sort((a, b) => compareMusicText(a, b, true)) : values
 }
 
 export const browseTypeaheadContextKey = (pane: 'track' | keyof Selection, source: Source, selection: Selection, requestKey: string) => pane === 'cat'
@@ -123,14 +123,12 @@ export const pendingPlaybackTarget = (prompt: PlaybackAuthorizationPrompt, track
 export const playbackRetryReady = (connected: boolean, playbackAuthorized: boolean, awaitingAuthorization: boolean) =>
   connected && (!awaitingAuthorization || playbackAuthorized)
 
-export const playbackOriginAction = (origin: PlaybackOrigin) => origin.kind === 'playlist'
-  ? { type: 'playlist' as const, id: origin.id }
-  : { type: 'source' as const, source: origin.source }
+export const playbackOriginAction = (origin: PlaybackOrigin) => ({ type: 'playingOrigin' as const, origin })
 
 export const isCurrentTrack = (
   playing: { trackId: number | null; uri: string | null } | null,
   track: { id: number; uri: string },
-) => playing?.trackId === track.id && playing.uri === track.uri
+) => playing?.uri === track.uri
 
 export const facetLabel = (title: string, value: string) =>
   title === 'Genre' && value === 'Uncategorized' ? 'No Genre' : value
@@ -154,7 +152,23 @@ const sortValue = (track: SortableTrack, column: ColumnKey): string | number | n
   return track.releaseDate
 }
 
-export const compareTracks = (left: SortableTrack, right: SortableTrack, column: ColumnKey, desc: boolean) => {
+export const compareMusicText = (left: string, right: string, ignoreLeadingThe: boolean) => {
+  const key = (value: string) => ignoreLeadingThe ? value.replace(/^the\s+(?=\S)/i, '') : value
+  return key(left).localeCompare(key(right), undefined, { sensitivity: 'base' })
+    || left.localeCompare(right, undefined, { sensitivity: 'base' })
+}
+
+export const compareBrowseTracks = (left: SortableTrack, right: SortableTrack, selection: Selection) => {
+  const field = selection.alb?.length ? 'alb' : selection.art?.length ? 'art' : 'cat'
+  const rank = (track: SortableTrack) => selection[field]?.indexOf(track[field]) ?? 0
+  return rank(left) - rank(right)
+    || compareMusicText(left.art, right.art, true)
+    || compareMusicText(left.alb, right.alb, true)
+    || (left.discNo ?? 1) - (right.discNo ?? 1)
+    || (left.trackNo ?? Number.MAX_SAFE_INTEGER) - (right.trackNo ?? Number.MAX_SAFE_INTEGER)
+}
+
+export const compareTracks = (left: SortableTrack, right: SortableTrack, column: ColumnKey, desc: boolean, ignoreLeadingThe = false) => {
   const primary: ColumnKey[] = column === 'track' ? ['disc', 'track'] : [column]
   const columns = [...primary, ...(['disc', 'track', 'artist', 'album', 'genre'] as ColumnKey[]).filter((key) => !primary.includes(key))]
   for (const key of columns) {
@@ -165,15 +179,15 @@ export const compareTracks = (left: SortableTrack, right: SortableTrack, column:
     if (b === null) return -1
     const compared = typeof a === 'number' && typeof b === 'number'
       ? a - b
-      : String(a).localeCompare(String(b), undefined, { sensitivity: 'base' })
+      : compareMusicText(String(a), String(b), ignoreLeadingThe && ['name', 'artist', 'album'].includes(key))
     if (compared) return desc ? -compared : compared
   }
   return 0
 }
 
-export const playlistRows = <T extends SortableTrack>(tracks: readonly T[], column: ColumnKey | null, desc: boolean) => {
+export const playlistRows = <T extends SortableTrack>(tracks: readonly T[], column: ColumnKey | null, desc: boolean, ignoreLeadingThe = false) => {
   const rows = tracks.map((track, upstreamIndex) => ({ track, upstreamIndex }))
-  return column ? rows.sort((left, right) => compareTracks(left.track, right.track, column, desc)) : rows
+  return column ? rows.sort((left, right) => compareTracks(left.track, right.track, column, desc, ignoreLeadingThe)) : rows
 }
 
 export type KeyedPlaylistRows<T> = {

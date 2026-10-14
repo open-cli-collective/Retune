@@ -380,8 +380,9 @@ still refresh the local projection used when Spotify search is closed. Category
 prefix candidates depend on source, artist candidates on source and category,
 and album candidates on source, category, and artist, so a focused pane can
 finish a prefix while its own selection request is pending. Double-clicking a
-facet row waits for that exact projection, then starts its first enabled visible
-track with the enabled projection as the new queue.
+facet row waits for that exact projection, then starts the enabled projection as
+a collection queue. Shuffle off starts at its first track; shuffle on shuffles
+the whole scope before selecting the first track.
 
 Right-clicking an artist or album value offers the corresponding Spotify
 navigation before a separator and the column visibility controls. The action
@@ -418,3 +419,12 @@ envelope; see [Persistence](persistence.md).
 Keep provider translation out of this crate. New behavior belongs here only when
 it can be expressed and tested as a deterministic transformation of library
 state.
+
+
+The Library preference “Ignore leading ‘The’ when sorting” defaults to off.
+When enabled, the frontend sorts artist/album browser values, the default
+library artist/album groups, and explicit song/artist/album column sorts using
+the name after a case-insensitive leading `The` plus whitespace. Display names,
+selection identities, the narrowest selected facet's group order, disc/track
+order, and canonical playlist order remain intact. Keyboard navigation and
+prefix search use the same sorted browser values as the rendered columns.

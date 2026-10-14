@@ -95,10 +95,27 @@ for (const command of importerCommands) {
   if (!registered.includes(command)) errors.push(`importer command is not registered: ${command}`);
 }
 
+const preferencesCommands = [
+  "get_settings", "update_settings", "lastfm_state", "connect_lastfm", "finish_lastfm",
+  "disconnect_lastfm", "lastfm_import_state", "sync_lastfm_plays", "open_lastfm_importer",
+  "removed_retune_tracks", "restore_retune_track", "load_diagnostics", "email_diagnostics",
+  "open_external_destination",
+];
+checkSet("preferences command permissions", permissionList("apps/desktop/src-tauri/permissions/preferences.toml"), preferencesCommands.map(allow));
+for (const command of preferencesCommands) {
+  if (!registered.includes(command)) errors.push(`preferences command is not registered: ${command}`);
+}
+
 const capabilityFiles = fs.readdirSync(path.join(tauri, "capabilities")).sort();
-checkSet("capability files", capabilityFiles, ["default.json", "lastfm-importer.json"]);
+checkSet("capability files", capabilityFiles, ["default.json", "lastfm-importer.json", "preferences.json"]);
 const main = JSON.parse(read("apps/desktop/src-tauri/capabilities/default.json"));
 const importer = JSON.parse(read("apps/desktop/src-tauri/capabilities/lastfm-importer.json"));
+const preferences = JSON.parse(read("apps/desktop/src-tauri/capabilities/preferences.json"));
+checkSet("preferences capability windows", preferences.windows ?? [], ["preferences"]);
+checkSet("preferences capability platforms", preferences.platforms ?? [], ["linux", "macOS", "windows"]);
+checkSet("preferences capability permissions", preferences.permissions ?? [], [
+  "core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-close", "preferences-commands",
+]);
 checkSet("main capability windows", main.windows ?? [], ["main"]);
 checkSet("importer capability windows", importer.windows ?? [], ["lastfm-importer"]);
 checkSet("main capability platforms", main.platforms ?? [], ["linux", "macOS", "windows"]);
@@ -116,13 +133,13 @@ checkSet("importer capability permissions", importer.permissions ?? [], [
 ]);
 
 const config = JSON.parse(read("apps/desktop/src-tauri/tauri.conf.json"));
-checkSet("configured capabilities", config.app?.security?.capabilities ?? [], ["default", "lastfm-importer"]);
+checkSet("configured capabilities", config.app?.security?.capabilities ?? [], ["default", "lastfm-importer", "preferences"]);
 checkSet("configured window labels", (config.app?.windows ?? []).map((window) => window.label), ["main"]);
 const csp = new Set((config.app?.security?.csp ?? "").split(";").map((directive) => directive.trim()));
 for (const directive of ["base-uri 'none'", "object-src 'none'", "frame-src 'none'", "form-action 'none'"]) {
   if (!csp.has(directive)) errors.push(`missing CSP directive: ${directive}`);
 }
-const allCapabilityPermissions = [...(main.permissions ?? []), ...(importer.permissions ?? [])];
+const allCapabilityPermissions = [...(main.permissions ?? []), ...(importer.permissions ?? []), ...(preferences.permissions ?? [])];
 for (const forbidden of [":default", "allow-emit", "allow-image-from-path", "allow-reveal-item-in-dir"]) {
   if (allCapabilityPermissions.some((permission) => permission.includes(forbidden))) {
     errors.push(`forbidden capability permission: ${forbidden}`);

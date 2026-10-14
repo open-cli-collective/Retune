@@ -1,0 +1,19 @@
+[[set]]
+identifier = "preferences-commands"
+description = "Settings, account setup, recovery, and diagnostics in Preferences."
+permissions = [
+  "allow-get-settings",
+  "allow-update-settings",
+  "allow-lastfm-state",
+  "allow-connect-lastfm",
+  "allow-finish-lastfm",
+  "allow-disconnect-lastfm",
+  "allow-lastfm-import-state",
+  "allow-sync-lastfm-plays",
+  "allow-open-lastfm-importer",
+  "allow-removed-retune-tracks",
+  "allow-restore-retune-track",
+  "allow-load-diagnostics",
+  "allow-email-diagnostics",
+  "allow-open-external-destination",
+]

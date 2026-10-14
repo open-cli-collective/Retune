@@ -23,6 +23,7 @@ export type Settings = {
   playlistColumnWidths: Record<string, Partial<Record<ColumnKey, number>>>
   sortColumn: ColumnKey | null
   sortDesc: boolean
+  ignoreLeadingThe: boolean
   autoAddSpotifyLibrary: boolean
   autoConnect: boolean
   spotifyClientId: string
@@ -183,7 +184,10 @@ export type Track = {
 }
 
 export type PlaybackTrack = Pick<Track, 'id' | 'uri' | 'name' | 'art' | 'alb' | 'durationSecs' | 'enabled'>
-export type PlaybackOrigin = { kind: 'library'; source: Source } | { kind: 'playlist'; id: string }
+export type PlaybackOrigin =
+  | { kind: 'library'; source: Source; selection?: Selection; query?: string }
+  | { kind: 'playlist'; id: string; sortColumn?: ColumnKey | null; sortDesc?: boolean }
+  | { kind: 'spotify'; query: string; navigation: SpotifyNavEntry[]; search: import('./spotifySearch.ts').SpotifySearchState }
 export type PlaylistTrack = Omit<Track, 'id'> & { id: number | null }
 export type PlaylistSubject =
   | { kind: 'tracks'; label: string; uris: string[] }

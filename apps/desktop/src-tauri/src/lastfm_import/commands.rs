@@ -28,6 +28,8 @@ fn emit_to_import_windows<T: Clone + Serialize>(
 }
 
 fn emit_import_invalidated(app: &tauri::AppHandle) -> Result<(), String> {
+    app.emit_to("preferences", "lastfm-import-changed", ())
+        .map_err(|error| error.to_string())?;
     emit_to_import_windows(app, "lastfm-import-changed", ())
 }
 

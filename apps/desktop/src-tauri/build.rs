@@ -17,6 +17,7 @@ const APP_COMMANDS: &[&str] = &[
     "subscribe_main_events",
     "unsubscribe_main_events",
     "get_settings",
+    "open_preferences",
     "get_appearance",
     "update_settings",
     "connection_state",

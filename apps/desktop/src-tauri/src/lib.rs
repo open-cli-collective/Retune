@@ -923,7 +923,12 @@ fn install_file_menu(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resu
                     .show(|_| {});
             }
             "preferences" => {
-                let _ = emit_main(app, "open-preferences", ());
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = settings_commands::open_preferences(app.clone()).await {
+                        notify_error(&app, error);
+                    }
+                });
             }
             "zoom_in" | "zoom_out" | "actual_size" | "toggle_zebra" | "toggle_browser"
             | "theme_system" | "theme_light" | "theme_dark" => {
@@ -1098,6 +1103,7 @@ fn finish_startup(
         ),
         Arc::new(move |_| {
             let _ = emit_main(&lastfm_app, "lastfm-changed", ());
+            let _ = lastfm_app.emit_to("preferences", "lastfm-changed", ());
         }),
     );
     let restore_mutations = Arc::new(restore_latch::RestoreMutationState::default());
@@ -1261,6 +1267,7 @@ fn finish_startup(
         if import_result.is_ok() {
             let _ = profile_app.emit_to("main", "lastfm-import-changed", ());
             let _ = profile_app.emit_to("lastfm-importer", "lastfm-import-changed", ());
+            let _ = profile_app.emit_to("preferences", "lastfm-import-changed", ());
         }
         if let Err(error) = &lastfm_result {
             notify_error(&profile_app, error.clone());
@@ -1397,7 +1404,7 @@ pub fn run() {
     #[cfg(all(desktop, not(test)))]
     let builder = builder.plugin(
         tauri_plugin_window_state::Builder::default()
-            .with_denylist(&["lastfm-importer"])
+            .with_denylist(&["lastfm-importer", "preferences"])
             .with_state_flags(
                 tauri_plugin_window_state::StateFlags::SIZE
                     | tauri_plugin_window_state::StateFlags::POSITION
@@ -1427,6 +1434,7 @@ pub fn run() {
             main_events::subscribe_main_events,
             main_events::unsubscribe_main_events,
             settings_commands::get_settings,
+            settings_commands::open_preferences,
             settings_commands::get_appearance,
             settings_commands::update_settings,
             spotify_commands::connection_state,
@@ -3320,6 +3328,7 @@ mod tests {
             )]),
             sort_column: Some("plays".into()),
             sort_desc: true,
+            ignore_leading_the: true,
             auto_add_spotify_library: false,
             auto_connect: false,
             spotify_client_id: "exported-machine".into(),

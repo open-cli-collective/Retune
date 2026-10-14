@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::{
     emit_main,
@@ -14,6 +14,23 @@ use crate::{
 #[tauri::command]
 pub(super) fn get_settings(state: tauri::State<'_, AppState>) -> SettingsView {
     SettingsView::from(&state.settings.snapshot())
+}
+
+#[tauri::command]
+pub(super) async fn open_preferences(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("preferences") {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        return window.set_focus().map_err(|error| error.to_string());
+    }
+    WebviewWindowBuilder::new(&app, "preferences", WebviewUrl::App("index.html".into()))
+        .title("Preferences")
+        .inner_size(680.0, 640.0)
+        .min_inner_size(480.0, 360.0)
+        .resizable(true)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -35,6 +52,8 @@ pub(crate) fn emit_settings_changed(
     current: &Settings,
 ) -> Result<(), String> {
     emit_main(app, "settings-changed", ()).map_err(|error| error.to_string())?;
+    app.emit_to("preferences", "settings-changed", ())
+        .map_err(|error| error.to_string())?;
     if previous.theme != current.theme {
         app.emit_to(
             "lastfm-importer",
@@ -51,6 +70,7 @@ pub(crate) fn emit_settings_changed(
 struct SettingsCommit {
     client_id_changed: bool,
     audio_changed: bool,
+    backend_changed: bool,
     settings: Settings,
 }
 
@@ -61,10 +81,11 @@ async fn persist_settings_patch(
     committed: impl FnOnce(&Settings, &Settings) -> Result<(), String>,
 ) -> Result<SettingsCommit, String> {
     patch.validate()?;
-    let ((client_id_changed, audio_changed), settings) = settings
+    let ((client_id_changed, audio_changed, backend_changed), settings) = settings
         .mutate(
             |settings| {
                 let previous_client_id = settings.spotify_client_id.clone();
+                let previous_backend = settings.playback_backend;
                 let previous_audio = (
                     settings.streaming_bitrate,
                     settings.normalize_volume,
@@ -84,6 +105,7 @@ async fn persist_settings_patch(
                             settings.normalize_volume,
                             settings.gapless,
                         ),
+                    previous_backend != settings.playback_backend,
                 ))
             },
             committed,
@@ -92,6 +114,7 @@ async fn persist_settings_patch(
     Ok(SettingsCommit {
         client_id_changed,
         audio_changed,
+        backend_changed,
         settings,
     })
 }
@@ -111,6 +134,7 @@ pub(super) async fn update_settings(
     let SettingsCommit {
         client_id_changed,
         audio_changed,
+        backend_changed,
         settings,
     } = persist_settings_patch(
         &state.settings,
@@ -119,9 +143,11 @@ pub(super) async fn update_settings(
         |previous, current| emit_settings_changed(&app, previous, current),
     )
     .await?;
-    state
-        .playback
-        .set_requested_backend(settings.playback_backend);
+    if backend_changed {
+        state
+            .playback
+            .set_requested_backend(settings.playback_backend);
+    }
     // Local activation is intentionally lazy: playback owns authorization
     // prompts, and unrelated preference saves must remain offline-safe.
     match settings.playback_backend {
@@ -285,6 +311,44 @@ mod tests {
                 started_at: cutoff,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn unrelated_settings_do_not_request_a_backend_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = SettingsState::new(Settings::default(), FsSettingsStore::new(temp.path()));
+        let original = state.snapshot().playback_backend;
+        for patch in [
+            SettingsPatch {
+                ignore_leading_the: Some(true),
+                ..SettingsPatch::default()
+            },
+            SettingsPatch {
+                playback_backend: Some(original),
+                ..SettingsPatch::default()
+            },
+        ] {
+            let result = persist_settings_patch(&state, patch, None, |_, _| Ok(()))
+                .await
+                .unwrap();
+            assert!(!result.backend_changed);
+        }
+        let other = match original {
+            PlaybackBackend::Local => PlaybackBackend::Connect,
+            PlaybackBackend::Connect => PlaybackBackend::Local,
+        };
+        let result = persist_settings_patch(
+            &state,
+            SettingsPatch {
+                playback_backend: Some(other),
+                ..SettingsPatch::default()
+            },
+            None,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(result.backend_changed);
     }
 
     #[test]

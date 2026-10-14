@@ -5,7 +5,7 @@ export const playbackEvents = { action: 'player-action' } as const
 
 export function createPlaybackGateway(invoke: Invoker) {
   return {
-    play: (snapshot: readonly PlaybackTrack[], startIndex: number) => invoke<PlayOutcome>('play_tracks', {
+    play: (snapshot: readonly PlaybackTrack[], startIndex: number | null) => invoke<PlayOutcome>('play_tracks', {
       resources: snapshot.map(({ id, uri }) => ({ id, uri })),
       startIndex,
     }),

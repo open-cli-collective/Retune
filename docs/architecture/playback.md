@@ -48,7 +48,14 @@ work. The callback runs on the serialized playback event path and must not
 synchronously re-enter `Playback`; artwork publication remains spawned by the
 shell.
 
-Shuffle permutes only the future suffix and retains the canonical list so turning
+Playlist sidebar double-click loads the playlist in canonical order and starts a
+collection queue. The playback IPC uses a null start index for collection starts:
+shuffle off starts at the first enabled track; shuffle on permutes the entire
+queue before selecting its first track. Explicit track starts retain a numeric
+index and keep the selected track first. Late playlist loads cannot replace a
+newer frontend play request.
+
+During playback, shuffle permutes only the future suffix and retains the canonical list so turning
 shuffle off restores normal order without losing the current track. Repeat off,
 all, and one are controller policies shared by every backend.
 The persisted and IPC boundaries use closed lowercase `RepeatMode`
@@ -60,6 +67,14 @@ apply to the live backend before settings persistence.
 Ordinary queues omit overlay tracks disabled by the user. Explicitly starting a
 disabled track includes that track for the run while later advancement still skips
 the other disabled tracks.
+
+The main-window playing title returns to the view captured by the explicit play
+request: library source, Genre/Artist/Album filters and query; playlist and its
+sort; or Spotify query, result tab/pages and album navigation. This snapshot is
+session-local React state, retained as the queue advances. Return navigation
+reveals and selects the current URI after rows load without sending a playback
+command. Missing or removed rows leave the restored view usable. External
+Spotify playback has no Retune launch view.
 
 Navigation and resolved Library projections are view-only; they never mutate or
 replace the active queue. An explicit Library, playlist, or other play/start
@@ -172,6 +187,14 @@ preserving the current decoder, CDN download, cache handle, mixer, output queue,
 and playback position. Unexpected player-thread failure rebuilds the local
 runtime and resumes from the millisecond position reported by the player. Explicit
 backend and audio-setting changes may also replace the runtime.
+
+If the AP session drops during a load (including its audio-key request), an
+unavailable event gets one same-track retry after session refresh, before the
+normal unavailable/advance policy. The reducer binds the retry to the current
+generation, request, URI, and load intent; newer playback commands supersede it.
+A second failure follows the normal error policy. Healthy-session failures and
+local-file failures are not retried this way. Recovery does not clear the audio
+cache: missing decryption keys do not establish corrupt cached audio.
 
 Near the end of a track, librespot asks Retune to preload the next item. The
 controller rejects stale generation, request, or URI signals, then selects the

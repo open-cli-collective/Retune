@@ -274,8 +274,9 @@ function BugPreferences() {
   </>
 }
 
-export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSyncLastfm, onSave, onLibraryChanged = () => {} }: {
+export function Preferences({ settings, saving = false, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSyncLastfm, onSave, onLibraryChanged = () => {} }: {
   settings: Settings
+  saving?: boolean
   lastfm: LastFmState
   lastfmImport: LastFmImportState
   onZoom: (zoom: number) => void
@@ -284,13 +285,14 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
   onImport: () => void
   onSyncLastfm: () => void
   onLibraryChanged?: () => void
-  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling'>) => void
+  onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling' | 'ignoreLeadingThe'>) => void
 }) {
   type PreferenceTab = 'appearance' | 'library' | 'audio' | 'bug'
   const [tab, setTab] = useState<PreferenceTab>('appearance')
   const [theme, setTheme] = useState(settings.theme)
   const [browserVisible, setBrowserVisible] = useState(settings.browserVisible)
   const [browserPanes, setBrowserPanes] = useState(settings.browserPanes)
+  const [ignoreLeadingThe, setIgnoreLeadingThe] = useState(settings.ignoreLeadingThe)
   const [autoAdd, setAutoAdd] = useState(settings.autoAddSpotifyLibrary)
   const [autoConnect, setAutoConnect] = useState(settings.autoConnect)
   const [clientId, setClientId] = useState(settings.spotifyClientId)
@@ -314,7 +316,7 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
     ['light', 'Light', 'Always use the light theme.'],
     ['dark', 'Dark', 'Always use the dark theme.'],
   ]
-  const save = () => onSave({ theme, browserVisible, browserPanes, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent, lastfmScrobbling })
+  const save = () => onSave({ theme, browserVisible, browserPanes, ignoreLeadingThe, autoAddSpotifyLibrary: autoAdd, autoConnect, spotifyClientId: clientId.trim(), playbackBackend, streamingBitrate, normalizeVolume, gapless, playThresholdPercent, lastfmScrobbling })
   const lastfmAction = async (action: 'connect' | 'finish' | 'disconnect') => {
     setLastfmBusy(true)
     setLastfmError(undefined)
@@ -356,6 +358,9 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
           </section>
         </>}
         {tab === 'library' && (removedTracksOpen ? <RemovedTracksManager onBack={() => { setRemovedTracksOpen(false); setTab('library') }} onChanged={onLibraryChanged} /> : <>
+          <section className="preference-group"><h3>Alphabetizing</h3><div className="preference-inset">
+            <label className="preference-choice"><input type="checkbox" checked={ignoreLeadingThe} onChange={(event) => setIgnoreLeadingThe(event.target.checked)} /><span><strong>Ignore leading “The” when sorting</strong><small>Sort The Beatles under B. Applies to artists, albums, and song titles; names and playlist order stay unchanged.</small></span></label>
+          </div></section>
           <section className="preference-group"><h3>Spotify account</h3><div className="preference-inset client-id-field">
             <label><span>Client ID:</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="From developer.spotify.com" /></label>
             <small>From your Spotify Developer dashboard. Stored on this Mac only.</small>
@@ -412,6 +417,6 @@ export function Preferences({ settings, lastfm, lastfmImport, onZoom, onCancel, 
         </>}
         {tab === 'bug' && <BugPreferences />}
       </div>
-      <div className="modal-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">OK</button></div>
+      <div className="modal-actions"><button type="button" disabled={saving} onClick={onCancel}>Cancel</button><button type="submit" disabled={saving} className="primary">{saving ? 'Saving…' : 'OK'}</button></div>
   </ModalDialog>
 }

@@ -256,12 +256,14 @@ impl Snapshot {
 
     fn new_with(
         tracks: Vec<SnapshotTrack>,
-        index: usize,
+        index: Option<usize>,
         shuffle: bool,
         permute: impl FnOnce(&mut [usize]),
     ) -> Self {
-        let mut snapshot = Self::new(tracks, index);
-        if shuffle {
+        let mut snapshot = Self::new(tracks, index.unwrap_or(0));
+        if shuffle && index.is_none() {
+            permute(&mut snapshot.order);
+        } else if shuffle {
             snapshot.set_shuffle_with(true, permute);
         }
         snapshot
@@ -561,6 +563,7 @@ struct ControllerState {
     generation: u64,
     reducer: EventReducer,
     volume: u8,
+    load_intent: u64,
 }
 
 pub struct Playback {
@@ -622,6 +625,7 @@ impl Playback {
                 generation,
                 reducer,
                 volume: 62,
+                load_intent: 0,
             }),
             backend: tokio::sync::Mutex::new(PlayerBackend::Connect(ConnectBackend::new(
                 events.clone(),
@@ -727,19 +731,23 @@ impl Playback {
         index: usize,
     ) -> Result<PlayOutcome, String> {
         let intent = self.begin_play_intent();
-        self.play_for_intent(client, tracks, index, intent).await
+        self.play_for_intent(client, tracks, Some(index), intent)
+            .await
     }
 
     pub(crate) async fn play_for_intent(
         &self,
         client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
-        index: usize,
+        index: Option<usize>,
         intent: u64,
     ) -> Result<PlayOutcome, String> {
-        let target_track_id = tracks.get(index).map(|track| track.id).unwrap_or(0);
+        let target_track_id = tracks
+            .get(index.unwrap_or(0))
+            .map(|track| track.id)
+            .unwrap_or(0);
         let target_track_uri = tracks
-            .get(index)
+            .get(index.unwrap_or(0))
             .map(|track| track.uri.clone())
             .unwrap_or_default();
         match self
@@ -764,17 +772,20 @@ impl Playback {
         &self,
         client: Option<Arc<LiveClient>>,
         tracks: Vec<SnapshotTrack>,
-        index: usize,
+        index: Option<usize>,
         intent: u64,
         permute: impl FnOnce(&mut [usize]),
     ) -> Result<PlayOutcome, PlaybackError> {
-        if tracks.is_empty() || index >= tracks.len() {
+        if tracks.is_empty() || index.unwrap_or(0) >= tracks.len() {
             return Err("Choose a track to play".into());
         }
         if !self.is_current_play_intent(intent) {
             return Ok(PlayOutcome::Started);
         }
-        if reject_chapter(&tracks[index].uri) {
+        let mut backend = self.backend.lock().await;
+        let shuffle = self.state.lock().await.reducer.shuffle();
+        let snapshot = Snapshot::new_with(tracks, index, shuffle, permute);
+        if reject_chapter(&snapshot.current().uri) {
             let generation = self.state.lock().await.generation;
             let _ = self.events.send(NeutralEvent::Error {
                 generation,
@@ -782,9 +793,6 @@ impl Playback {
             });
             return Ok(PlayOutcome::Started);
         }
-        let mut backend = self.backend.lock().await;
-        let shuffle = self.state.lock().await.reducer.shuffle();
-        let snapshot = Snapshot::new_with(tracks, index, shuffle, permute);
         if self.local_requested() && !is_file_uri(&snapshot.current().uri) {
             let client = require_spotify(client.as_deref())?;
             if let Err(error) = self.ensure_local_backend(&mut backend, client).await {
@@ -1321,6 +1329,7 @@ impl Playback {
                 return Ok(());
             }
             state.reducer.queue_load(&uri, playing);
+            state.load_intent = intent;
             return Ok(state.file.load(&uri, playing, position_ms)?);
         }
 
@@ -1347,6 +1356,7 @@ impl Playback {
             return Ok(());
         }
         state.reducer.queue_load(&uri, playing);
+        state.load_intent = intent;
         let repeat = state.reducer.repeat();
         drop(state);
         backend
@@ -1387,12 +1397,66 @@ impl Playback {
         ]
     }
 
+    async fn retry_interrupted_load(
+        &self,
+        event: &NeutralEvent,
+        resolve_provider: &Arc<ProviderResolver>,
+    ) -> bool {
+        if !matches!(event, NeutralEvent::Unavailable { uri, .. } if uri.starts_with("spotify:")) {
+            return false;
+        }
+        let intent = self.current_play_intent();
+        let mut backend = self.backend.lock().await;
+        let PlayerBackend::Local(local) = &mut *backend else {
+            return false;
+        };
+        if local.player_is_invalid() || !local.session_is_invalid() {
+            return false;
+        }
+        {
+            let state = self.state.lock().await;
+            if state.load_intent != intent {
+                return true;
+            }
+            if state.reducer.session_retry(event).is_none() {
+                return false;
+            }
+        }
+        let Ok(client) = resolve_provider() else {
+            return false;
+        };
+        // A lost audio-key connection is recoverable; do not skip its track.
+        if let Err(error) = local.refresh_session(&client).await {
+            log::warn!("Unable to reconnect for interrupted Spotify load: {error}");
+            return false;
+        }
+        if !self.is_current_play_intent(intent) {
+            return true;
+        }
+        let mut state = self.state.lock().await;
+        let Some((uri, playing, position_ms)) = state.reducer.queue_session_retry(event) else {
+            return true;
+        };
+        log::info!("Retrying interrupted Spotify load after session refresh: uri={uri}");
+        if let Err(error) = local.load(&uri, playing, position_ms) {
+            log::warn!("Unable to retry interrupted Spotify load: {error}");
+            let _ = self.events.send(NeutralEvent::Error {
+                generation: state.generation,
+                message: error,
+            });
+        }
+        true
+    }
+
     async fn handle_event(
         self: &Arc<Self>,
         event: NeutralEvent,
         resolve_provider: &Arc<ProviderResolver>,
         on_effect: &Arc<EffectSink>,
     ) {
+        if self.retry_interrupted_load(&event, resolve_provider).await {
+            return;
+        }
         let (actions, facts) = {
             let mut state = self.state.lock().await;
             let actions = state.reducer.handle(event);
@@ -1884,6 +1948,104 @@ mod tests {
         ))
     }
 
+    #[tokio::test]
+    async fn file_failures_do_not_attempt_spotify_session_recovery() {
+        let playback = Playback::default();
+        let resolver: Arc<ProviderResolver> =
+            Arc::new(|| panic!("file failure must not connect to Spotify"));
+        let event = NeutralEvent::Unavailable {
+            generation: 1,
+            request_id: 1,
+            uri: "file:///missing.mp3".into(),
+        };
+        assert!(!playback.retry_interrupted_load(&event, &resolver).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Spotify playback credentials, network, and an audio device"]
+    async fn live_interrupted_load_recovers_same_track() {
+        let path = std::env::var("RETUNE_PLAYBACK_PROBE_TOKENS").expect("dev token path");
+        let tokens = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let store: Box<dyn TokenStore> = Box::new(InMemoryTokenStore::new(Some(tokens)));
+        let client = Arc::new(SpotifyClient::new(
+            "test",
+            HttpTransport::new(),
+            Arc::new(CachedTokenStore::new(store)),
+        ));
+        let playback = Arc::new(Playback::default());
+        playback.set_requested_backend(PlaybackBackend::Local);
+        let intent = playback.begin_play_intent();
+        let cache = tempfile::tempdir().unwrap();
+        let audio = *playback.audio.lock().unwrap();
+        let mut local = LocalBackend::activate(
+            &client,
+            playback.events.clone(),
+            1,
+            0,
+            Some(cache.path()),
+            audio,
+        )
+        .await
+        .unwrap();
+        let uri = "spotify:track:4YAEQfowheSnPLKJKD6alk";
+        let snapshot = Snapshot::new(
+            vec![
+                SnapshotTrack {
+                    id: 1,
+                    uri: uri.into(),
+                    name: "Follow You".into(),
+                    art: "First to Eleven".into(),
+                    alb: String::new(),
+                    duration_secs: 235,
+                },
+                SnapshotTrack {
+                    id: 2,
+                    uri: "spotify:track:4SaYK1xomZ5jAIOnqClQsV".into(),
+                    name: "Next track".into(),
+                    art: String::new(),
+                    alb: String::new(),
+                    duration_secs: 295,
+                },
+            ],
+            0,
+        );
+        {
+            let mut state = playback.state.lock().await;
+            state.reducer.set_snapshot(Some(snapshot.clone()));
+            state.reducer.queue_load(uri, true);
+            state.load_intent = intent;
+        }
+        local.interrupt_session_for_test();
+        local.play(snapshot, true, 0).unwrap();
+        *playback.backend.lock().await = PlayerBackend::Local(local);
+        let mut receiver = playback.receiver.lock().unwrap().take().unwrap();
+        let resolver: Arc<ProviderResolver> = Arc::new(move || Ok(client.clone()));
+        let effects: Arc<EffectSink> = Arc::new(|effect| {
+            assert!(
+                !matches!(effect, PlaybackEffect::OperationError(_)),
+                "{effect:?}"
+            );
+        });
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let mut failed = false;
+            loop {
+                let event = receiver.recv().await.unwrap();
+                if matches!(&event, NeutralEvent::Unavailable { uri: failed_uri, .. } if failed_uri == uri) {
+                    assert!(!failed, "retry also failed");
+                    failed = true;
+                }
+                let recovered = matches!(&event, NeutralEvent::PositionChanged { uri: playing_uri, position_ms, .. } if playing_uri == uri && *position_ms >= 1000);
+                playback.handle_event(event, &resolver, &effects).await;
+                assert_eq!(playback.state.lock().await.reducer.snapshot().unwrap().index, 0);
+                if recovered {
+                    assert!(failed, "test must exercise a failed load before recovery");
+                    break;
+                }
+            }
+        }).await.expect("same track should recover and decode after reconnection");
+        playback.backend.lock().await.stop(None).await.unwrap();
+    }
+
     #[test]
     fn shuffle_only_permutes_future_and_restores_duplicate_occurrence() {
         let duplicate = SnapshotTrack {
@@ -1984,13 +2146,29 @@ mod tests {
         assert!(state.reducer.state().shuffle);
     }
 
+    #[test]
+    fn collection_start_shuffles_every_track_and_retains_canonical_order() {
+        let mut shuffled = Snapshot::new_with(file_tracks(5), None, true, |order| order.reverse());
+        assert_eq!(shuffled.order, [4, 3, 2, 1, 0]);
+        assert_eq!(shuffled.index, 0);
+        assert_eq!(shuffled.current().id, 5);
+        shuffled.set_shuffle_with(false, |_| unreachable!());
+        assert_eq!(shuffled.order, [0, 1, 2, 3, 4]);
+        assert_eq!(shuffled.current().id, 5);
+        let ordered = Snapshot::new_with(file_tracks(5), None, false, |_| unreachable!());
+        assert_eq!(ordered.order, [0, 1, 2, 3, 4]);
+        assert_eq!(ordered.current().id, 1);
+    }
+
     #[tokio::test]
     async fn enabled_shuffle_constructs_exact_queue_then_event_advance_and_prev_follow_it() {
         let playback = Playback::default();
         playback.set_shuffle_with(true, |_| unreachable!()).await;
         let intent = playback.begin_play_intent();
         playback
-            .play_with(None, file_tracks(5), 1, intent, |suffix| suffix.reverse())
+            .play_with(None, file_tracks(5), Some(1), intent, |suffix| {
+                suffix.reverse()
+            })
             .await
             .unwrap();
         let mut state = playback.state.lock().await;
@@ -2430,7 +2608,9 @@ mod tests {
         playback.set_shuffle_with(true, |_| unreachable!()).await;
         let intent = playback.begin_play_intent();
         playback
-            .play_with(None, file_tracks(4), 1, intent, |suffix| suffix.reverse())
+            .play_with(None, file_tracks(4), Some(1), intent, |suffix| {
+                suffix.reverse()
+            })
             .await
             .unwrap();
         let request = receiver.recv().await.unwrap();
@@ -2640,7 +2820,7 @@ mod tests {
                 let mut stale = file_tracks(1);
                 stale[0].id = 99;
                 playback
-                    .play_for_intent(None, stale, 0, older)
+                    .play_for_intent(None, stale, Some(0), older)
                     .await
                     .unwrap();
             }
@@ -2648,7 +2828,7 @@ mod tests {
         let newer = playback.begin_play_intent();
 
         playback
-            .play_for_intent(None, file_tracks(1), 0, newer)
+            .play_for_intent(None, file_tracks(1), Some(0), newer)
             .await
             .unwrap();
         release.notify_one();
@@ -2696,7 +2876,7 @@ mod tests {
         let stopped = playback.begin_play_intent();
         playback.stop(None).await.unwrap();
         playback
-            .play_for_intent(None, file_tracks(1), 0, stopped)
+            .play_for_intent(None, file_tracks(1), Some(0), stopped)
             .await
             .unwrap();
         assert!(playback.state.lock().await.reducer.snapshot().is_none());
@@ -2704,7 +2884,7 @@ mod tests {
         let switched = playback.begin_play_intent();
         playback.set_requested_backend(PlaybackBackend::Connect);
         playback
-            .play_for_intent(None, file_tracks(1), 0, switched)
+            .play_for_intent(None, file_tracks(1), Some(0), switched)
             .await
             .unwrap();
         assert!(playback.state.lock().await.reducer.snapshot().is_none());

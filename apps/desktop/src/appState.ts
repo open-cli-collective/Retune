@@ -23,7 +23,6 @@ export type State = {
   error?: string
   notice?: string
   info?: InfoDialog
-  preferences: boolean
   setup: boolean
   playbackAuthorization: PlaybackAuthorizationPrompt | null
   connection: ConnectionState
@@ -43,6 +42,7 @@ export type State = {
 }
 
 export type Action =
+  | { type: 'playingOrigin'; origin: PlaybackOrigin }
   | { type: 'view'; view: BrowseView; key: string }
   | { type: 'browsePending'; pending: boolean }
   | { type: 'error'; error: string }
@@ -62,7 +62,6 @@ export type Action =
   | { type: 'refresh' }
   | { type: 'notice'; notice?: string }
   | { type: 'info'; info?: InfoDialog }
-  | { type: 'preferences'; open: boolean }
   | { type: 'setup'; open: boolean }
   | { type: 'playbackAuthorization'; prompt: PlaybackAuthorizationPrompt | null }
   | { type: 'connection'; connection: ConnectionState }
@@ -97,6 +96,7 @@ export const defaultSettings: Settings = {
   playlistColumnWidths: {},
   sortColumn: null,
   sortDesc: false,
+  ignoreLeadingThe: false,
   autoAddSpotifyLibrary: true,
   autoConnect: true,
   spotifyClientId: '',
@@ -127,7 +127,6 @@ export const initialState: State = {
   viewKey: undefined,
   browsePending: false,
   revision: 0,
-  preferences: false,
   setup: false,
   playbackAuthorization: null,
   connection: { connected: false, needs_reauth: false, playback_authorized: false },
@@ -142,6 +141,14 @@ export const initialState: State = {
 
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
+    case 'playingOrigin': {
+      const origin = action.origin
+      const base = { ...state, query: '', queryReset: state.queryReset + 1, scope: 'library' as const, spotifyNavigation: undefined, selectedPlaylist: undefined, selectedTrackIds: new Set<number>(), selectionAnchor: undefined }
+      if (origin.kind === 'playlist') return { ...base, selectedPlaylist: origin.id }
+      if (origin.kind === 'spotify') return { ...base, scope: 'spotify', query: origin.query, spotifyNavigation: origin.query.trim() ? undefined : origin.navigation[0] }
+      const sel = origin.selection ?? {}
+      return { ...base, source: origin.source, sel, query: origin.query ?? '', savedSelections: rememberSelection(state.savedSelections, origin.source, sel) }
+    }
     case 'view':
       return { ...state, view: action.view, viewKey: action.key, browsePending: false }
     case 'browsePending':
@@ -173,8 +180,10 @@ export function reducer(state: State, action: Action): State {
             ...state,
             playing: { ...action.player, queue: action.player.external ? emptyTracks : action.queue, origin: action.origin },
           }
-    case 'hydrateSettings':
-      return { ...state, settings: action.settings, settingsHydrated: true }
+    case 'hydrateSettings': {
+      const next = reducer(state, { type: 'browserPanes', browserPanes: action.settings.browserPanes })
+      return { ...next, settings: action.settings, settingsHydrated: true }
+    }
     case 'settings':
       return { ...state, settings: { ...state.settings, ...action.settings } }
     case 'browserPanes': {
@@ -189,14 +198,12 @@ export function reducer(state: State, action: Action): State {
     case 'notice':
       return { ...state, notice: action.notice }
     case 'info':
-      return { ...state, info: action.info, preferences: false, setup: false }
-    case 'preferences':
-      return { ...state, preferences: action.open, setup: false, info: undefined }
+      return { ...state, info: action.info, setup: false }
     case 'setup':
-      return { ...state, setup: action.open, preferences: false, info: undefined }
+      return { ...state, setup: action.open, info: undefined }
     case 'playbackAuthorization':
       return action.prompt
-        ? { ...state, playbackAuthorization: action.prompt, info: undefined, preferences: false, setup: false }
+        ? { ...state, playbackAuthorization: action.prompt, info: undefined, setup: false }
         : { ...state, playbackAuthorization: null }
     case 'connection':
       return {

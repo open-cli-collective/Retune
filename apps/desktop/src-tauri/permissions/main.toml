@@ -20,6 +20,7 @@ permissions = [
   "allow-subscribe-main-events",
   "allow-unsubscribe-main-events",
   "allow-get-settings",
+  "allow-open-preferences",
   "allow-get-appearance",
   "allow-update-settings",
   "allow-connection-state",

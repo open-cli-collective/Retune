@@ -213,3 +213,13 @@ comma-separated IDs of saved playlists from other creators, then run
 `cargo test -p retune-desktop --lib live_shadow_round_trip -- --ignored --nocapture`.
 It verifies discovery, full metadata, repeated refresh/order, and a temporary
 cache save/reload. It does not mutate Spotify or the application's real cache.
+
+### Live interrupted-playback check
+
+Set `RETUNE_PLAYBACK_PROBE_TOKENS` to an existing development token file and run
+`cargo test -p retune-desktop --lib live_interrupted_load_recovers_same_track -- --ignored --nocapture`.
+This opt-in probe installs a disconnected AP session before loading Follow You,
+requires an unavailable event, and verifies that a fresh session decodes the same
+track past one second without advancing the queue. It uses muted native output,
+a temporary audio cache, and an in-memory token store; no library or listening
+history callbacks are installed. Network and an audio device are required.

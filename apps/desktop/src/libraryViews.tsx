@@ -5,7 +5,7 @@ import { CheckboxMenu, ContextMenu, RatingStars } from './viewShared.tsx'
 import { useTrackWindow } from './useTrackWindow.ts'
 
 export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onToggle, onPrefix, onNavigate }: {
-  state: { source: Source; view: BrowseView | null; viewKey?: string; browseKey: string; settings: Pick<Settings, 'browserPanes' | 'browserVisible'>; sel: Selection }
+  state: { source: Source; view: BrowseView | null; viewKey?: string; browseKey: string; settings: Pick<Settings, 'browserPanes' | 'browserVisible' | 'ignoreLeadingThe'>; sel: Selection }
   anchors: { current: Partial<Record<keyof Selection, string>> }
   onActivate: (facet: keyof Selection) => void
   onSelect: (facet: keyof Selection, values: string[], anchor?: string) => void
@@ -19,7 +19,7 @@ export function BrowserPane({ state, anchors, onActivate, onSelect, onPlay, onTo
   const pane = useRef<HTMLDivElement>(null)
   const resize = useRef<{ pointerId: number; startY: number; startHeight: number; maxHeight: number; zoom: number } | undefined>(undefined)
   const sourceLabels = labels[state.source].facets
-  const values = (['cat', 'art', 'alb'] as const).map((facet) => browseFacetValues(state.view, state.viewKey, state.browseKey, facet))
+  const values = (['cat', 'art', 'alb'] as const).map((facet) => browseFacetValues(state.view, state.viewKey, state.browseKey, facet, state.settings.ignoreLeadingThe))
   const facets: (keyof Selection)[] = ['cat', 'art', 'alb']
   const visible = facets.filter((facet) => state.settings.browserPanes[facet])
   if (!state.settings.browserVisible || !visible.length) return null
