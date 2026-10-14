@@ -339,9 +339,36 @@ desktop track-add command additionally rejects malformed/non-track URIs before
 reading managed state or creating provider/event effects.
 
 Spotify is canonical for owned-playlist content. Reordering uses snapshot IDs to
-detect concurrent changes, then reloads stale state. Retune does not request or
-mutate item contents for playlists the current user does not own; it may display
-their available metadata and cached counts.
+detect concurrent changes, then reloads stale state. Ordinary Web API sync only
+requests contents for owned or collaborative playlists. Other playlists can be
+explicitly **shadowed** using the separately authorized librespot metadata path;
+shadows never write to the source playlist.
+
+`shadow_playlists::Reader` opens a short-lived metadata-only session using the
+shared token store's verified playback credentials. It creates no audio player
+and shuts down even on cancellation. Discovery pages the account's saved
+rootlist, including saved Discover Weekly and Release Radar playlists omitted
+by the public API. It does not discover unsaved recommendations. A discovery
+candidate carries its account ID, which is rechecked before shadowing.
+
+A shadow stores complete ordered track URIs, display metadata, the source
+revision, account, last successful/attempted refresh times, and last error in
+`playlists.json`. Existing files default to no shadow. PlaylistState's existing
+atomic commit gate owns these writes; a Spotify session revision check rejects
+results after disconnect or account changes. Web API sync preserves same-account
+shadows even when omitted upstream and cannot overwrite their native revision
+or counts. List/track commands hide or reject shadows from another account.
+
+The main window checks every 15 minutes and when opening a shadow. Snapshots
+become due after six hours, with 15-minute backoff after failure; a manual
+Refresh bypasses that age check. Complete metadata is required before replacement.
+Partial/truncated lists, unsupported non-track items, and metadata failures keep
+the last successful snapshot and report an error. Metadata for unchanged track
+URIs is reused. Refresh never changes the playback controller's current queue.
+`Stop shadowing` removes only Retune's cached copy; it does not unfollow Spotify.
+Shadows appear under **Shadowed playlists**, with a ◐ hint and a read-only status
+showing their last successful refresh. All content mutation guards remain in
+force because shadows are never owned playlists.
 
 One concrete `PlaylistState` owns the current cache, its filesystem store, and
 one global async mutation gate. The gate spans the latest cache snapshot,

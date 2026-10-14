@@ -7,6 +7,7 @@ export function createAppGateway(invoke: Invoker) {
     settings: () => invoke<Settings>('get_settings'),
     updateSettings: (patch: SettingsPatch) => invoke<void>('update_settings', { patch }),
     appearance: () => invoke<Appearance>('get_appearance'),
+    openPreferences: () => invoke<void>('open_preferences'),
     openLastFmImporter: () => invoke<void>('open_lastfm_importer'),
     diagnostics: () => invoke<DiagnosticReport>('load_diagnostics'),
     emailDiagnostics: (body: string) => invoke<void>('email_diagnostics', { body }),

@@ -336,16 +336,16 @@ save, and export restore all validate this boundary.
 
 One native settings owner serializes every runtime mutation from the latest
 in-memory value through normalization, validation, atomic replacement, and the
-memory swap. User-visible changes then emit one `settings-changed` event in the
-same serialized operation; private bookkeeping changes remain eventless.
+memory swap. User-visible changes then emit targeted `settings-changed`
+invalidations to the main and Preferences windows in the same serialized operation; private bookkeeping changes remain eventless.
 Once a settings save starts, an owned completion retains the mutation gate
 through the durable write and memory swap even if the invoking command is
 cancelled.
 Frontend commands send field patches or playback intents instead of persisted
 snapshots. The public settings view omits
 `spotifySyncCompleted`, `lastFullSync`, and `lastfmScrobblingProfile`; those
-remain native bookkeeping in the unchanged `settings.json` format. Secondary
-windows read the narrow appearance payload and subscribe to
+remain native bookkeeping in the unchanged `settings.json` format. The Preferences window reads the public settings view. The importer
+reads the narrow appearance payload and subscribe to
 `appearance-changed` rather than loading the settings record.
 The existing lowercase `playbackBackend` and `repeat` bytes are closed enums;
 missing values default to `local` and `off`, while unknown or case-changed
@@ -476,3 +476,16 @@ cooldown reads run together on the blocking pool. The shell publishes their
 results only after all reads succeed; application commands wait at the shell
 dispatcher until initialization finishes. Existing valid settings are read without
 a redundant save; missing defaults still use atomic persistence.
+
+### Shadow playlist cache
+
+`playlists.json` entries may contain an optional `shadow` record with the Spotify
+account, successful/attempted refresh timestamps, and last refresh error. Absent
+records retain legacy playlist behavior. Shadow track lists and display metadata
+use the existing playlist atomic store; no audio is downloaded to this cache.
+Failed refreshes persist their status while retaining the last complete content.
+
+
+The Library preference `ignoreLeadingThe` is persisted as a boolean, defaulting
+to false for new and legacy settings. It changes presentation sorting only;
+track names, library identities, and stored playlist order are unchanged.

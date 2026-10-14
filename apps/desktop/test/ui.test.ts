@@ -6,7 +6,7 @@ import { initialState, reducer, type Action } from '../src/appState.ts'
 import type { BrowseView, PlaybackTrack, PlayOutcome, Selection, Settings, SpotifyResults } from '../src/types.ts'
 import { createSpotifySearchState, expandSpotifySearchGroup, failSpotifySearchGroup, moreSpotifySearchLabel, receiveSpotifySearchPage, replaceSpotifySearchResults, resetSpotifySearchQuery, retrySpotifySearchGroup, setSpotifySearchTab, spotifyMembership, spotifySearchGroupHeader, spotifySearchPendingPageKey } from '../src/spotifySearch.ts'
 import { activeImportQueue, applyCurrentImportRefresh, beginImportRefresh, canHandleImportShortcut, collectionAlbumActionLabel, collectionAlbumTrackStatuses, collectionAmbiguousChoices, collectionCoverageStatus, collectionDialogInitialState, collectionDialogScreen, collectionDialogTransition, collectionImportBranch, collectionPreviewCoverageCopy, collectionSuggestion, downloadAction, filterImportQueue, handleImportQueueTab, importAlbumActionAdvances, importApplyErrorCode, importCountMergePresentation, importDownloadCopy, importDownloadPercent, importDownloadProgressLabel, importEmptyPageMessage, importHistoryBreadcrumb, importQueueHighlightIndex, importQueueTabTarget, importQueueVisibleRange, importStatusText, isCurrentImportPageResponse, loadSelectedImportPage, mergeReviewBatchDraft, moveImportNavigationRow, moveImportQueueIndex, nextRemainingImportQueue, parseImportApplyResult, pickerCandidates, pickerSelectedUri, projectAcknowledgedImportApply, resolveImportCount, runCheckedImportMutation, selectImportRows, selectedCollectionAlbumUris, selectedImportTrackConfidence, shouldRefreshImportEvent, showsImportRemaining, sortImportQueue, sortImportRows, spotifyLimitCountdown, stablePartitionImportRows, strongImportAlbumMatch, trackPickerQuery, validImportIntent, type ImportQueueItem, type ImportSourceRow, type ReviewState } from '../src/lastfmImportState.ts'
-import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
+import { appliedZoom, beginPendingEntity, beginRequestGeneration, browseFacetValues, browseRequestKey, browseViewForRequest, cancelTrackInfoLoad, clearedTrackRating, compareBrowseTracks, compareMusicText, compareTracks, contiguousRange, currentPlaybackAuthorization, currentPlaylistRows, dialogTabTarget, entityRequestGeneration, facetLabel, failedPlaylistRows, insertionIndexAtY, isCurrentTrack, LIBRARY_DEFAULT_COLUMN_ORDER, LIBRARY_DEFAULT_HIDDEN_COLUMNS, loadArtwork, loadCurrentGeneration, loadingPlaylistRows, menuPosition, mergeByUri, moveBefore, moveToIndex, normalizeZoom, overlayEditTargets, pendingEntities, pendingPlaybackTarget, playbackAuthorizationPrompt, playbackOriginAction, playbackQueue, playbackRetryReady, playbackStartAction, playlistLayoutFor, playlistOverride, playlistRows, playlistRowsReady, PLAYLIST_DEFAULT_COLUMN_ORDER, PLAYLIST_DEFAULT_HIDDEN_COLUMNS, rememberSelection, resolvedPlaylistRows, restoreSelection, resizedColumnWidth, resizedPaneHeight, selectionAfterFacet, staleSelectionFacet, SYNTHETIC_BASE, visibleColumnOrder } from '../src/ui.ts'
 
 const searchPage = (overrides: Partial<SpotifyResults> = {}): SpotifyResults => ({
   artists: { items: Array.from({ length: 10 }, (_, index) => ({ id: `artist-${index}`, name: `Artist ${index}`, descriptor: '', imageUrl: null })), total: 21, nextOffset: 10 },
@@ -797,7 +797,7 @@ test('source, pane, and playlist transitions restore and retain the intended sel
   let state = reducer(initialState, { type: 'select', facet: 'cat', values: ['Rock'] })
   state = reducer(state, { type: 'select', facet: 'art', values: ['Artist'] })
   state = reducer(state, { type: 'select', facet: 'alb', values: ['Album'] })
-  state = reducer(state, { type: 'source', source: 'podcasts' })
+  state = reducer(state, { type: 'playingOrigin', origin: { kind: 'library', source: 'podcasts' } })
   state = reducer(state, { type: 'select', facet: 'cat', values: ['The Hobbit'] })
   state = reducer(state, { type: 'source', source: 'music' })
 
@@ -1066,15 +1066,41 @@ test('ordinary queues skip exclusions but an explicit start still plays one', ()
   assert.deepEqual(playbackQueue(tracks, 3).map((track) => track.id), [1, 3])
 })
 
-test('playlist highlights require both the synthetic id and Spotify URI', () => {
+test('playlist highlights follow the URI when adding a playing track to the library', () => {
   const playing = { trackId: SYNTHETIC_BASE + 15, uri: 'spotify:track:better-days' }
   assert.equal(isCurrentTrack(playing, { id: SYNTHETIC_BASE + 15, uri: 'spotify:track:silent-thanks' }), false)
   assert.equal(isCurrentTrack(playing, { id: SYNTHETIC_BASE + 15, uri: 'spotify:track:better-days' }), true)
+  assert.equal(isCurrentTrack(playing, { id: 42, uri: 'spotify:track:better-days' }), true)
+  assert.equal(isCurrentTrack(null, { id: 42, uri: 'spotify:track:better-days' }), false)
+  assert.equal(isCurrentTrack({ trackId: null, uri: null }, { id: 42, uri: 'spotify:track:better-days' }), false)
 })
 
 test('playback origins return to the launching library or playlist', () => {
-  assert.deepEqual(playbackOriginAction({ kind: 'library', source: 'podcasts' }), { type: 'source', source: 'podcasts' })
-  assert.deepEqual(playbackOriginAction({ kind: 'playlist', id: 'road-trip' }), { type: 'playlist', id: 'road-trip' })
+  assert.deepEqual(playbackOriginAction({ kind: 'library', source: 'podcasts' }), { type: 'playingOrigin', origin: { kind: 'library', source: 'podcasts' } })
+  assert.deepEqual(playbackOriginAction({ kind: 'playlist', id: 'road-trip' }), { type: 'playingOrigin', origin: { kind: 'playlist', id: 'road-trip' } })
+})
+
+test('returning to a library origin restores launch filters and query without changing playback', () => {
+  const origin = { kind: 'library' as const, source: 'music' as const, selection: { cat: ['Rock'], art: ['Artist'], alb: ['Album'] }, query: 'song' }
+  const away = { ...initialState, scope: 'spotify' as const, query: 'other', sel: { cat: ['Jazz'] }, selectedPlaylist: 'other' }
+  const restored = reducer(away, playbackOriginAction(origin))
+  assert.deepEqual(restored.sel, origin.selection)
+  assert.deepEqual(restored.savedSelections.music, origin.selection)
+  assert.equal(restored.query, 'song')
+  assert.equal(restored.queryReset, away.queryReset + 1)
+  assert.equal(restored.scope, 'library')
+  assert.equal(restored.selectedPlaylist, undefined)
+  assert.equal(restored.playing, away.playing)
+})
+
+test('Spotify origin keeps search navigation rooted in results', () => {
+  const origin = { kind: 'spotify' as const, query: 'Nightwish Nemo', navigation: [{ kind: 'album' as const, uri: 'spotify:album:once' }], search: createSpotifySearchState('Nightwish Nemo') }
+  const restored = reducer(initialState, playbackOriginAction(origin))
+  assert.equal(restored.scope, 'spotify')
+  assert.equal(restored.query, origin.query)
+  assert.equal(restored.spotifyNavigation, undefined)
+  const direct = reducer(initialState, playbackOriginAction({ ...origin, query: '' }))
+  assert.deepEqual(direct.spotifyNavigation, origin.navigation[0])
 })
 
 test('playback start and result decisions keep OAuth outside the controller', () => {
@@ -1204,4 +1230,21 @@ test('release dates sort chronologically with the standard tie-breakers and miss
   const tracks = [track(null, 1), track('2024-01-01', 2), track('2024-01-01', 1), track('2020', 1)]
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'releaseDate', false)), [tracks[3], tracks[2], tracks[1], tracks[0]])
   assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, 'releaseDate', true)), [tracks[1], tracks[2], tracks[3], tracks[0]])
+})
+
+
+test('ignoring leading The sorts music labels without changing names or playlist order', () => {
+  const names = ['The Beatles', 'ABBA', 'Thelonious Monk', 'the Cure', 'Queen']
+  assert.deepEqual([...names].sort((a, b) => compareMusicText(a, b, true)), ['ABBA', 'The Beatles', 'the Cure', 'Queen', 'Thelonious Monk'])
+  assert.deepEqual([...names].sort((a, b) => compareMusicText(a, b, false)), ['ABBA', 'Queen', 'The Beatles', 'the Cure', 'Thelonious Monk'])
+  assert.ok(compareMusicText('The', 'Them', true) < 0)
+  assert.ok(compareMusicText('Breathe the Air', 'Cure', true) < 0)
+  const tracks = names.map((name, index) => ({ name, art: name, alb: name, cat: 'Rock', discNo: 1, trackNo: 1, durationSecs: 180, rating: null, playCount: 0, kind: null, bitrateKbps: null, lastPlayedAt: null, addedAt: null, releaseDate: null, index }))
+  for (const column of ['name', 'artist', 'album'] as const) {
+    assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, column, false, true)).map(track => track.index), [1, 0, 3, 4, 2])
+    assert.deepEqual([...tracks].sort((a, b) => compareTracks(a, b, column, true, true)).map(track => track.index), [2, 4, 3, 0, 1])
+  }
+  assert.deepEqual(playlistRows(tracks, null, false, true).map(row => row.upstreamIndex), [0, 1, 2, 3, 4])
+  assert.deepEqual([...tracks].sort((a, b) => compareBrowseTracks(a, b, {})).map(track => track.index), [1, 0, 3, 4, 2])
+  assert.deepEqual([...tracks].sort((a, b) => compareBrowseTracks(a, b, { art: ['Queen', 'The Beatles'] })).filter(track => ['Queen', 'The Beatles'].includes(track.art)).map(track => track.index), [4, 0])
 })

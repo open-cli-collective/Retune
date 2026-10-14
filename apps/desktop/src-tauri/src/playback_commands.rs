@@ -89,7 +89,7 @@ pub(crate) async fn handle_media_control(
 pub(super) async fn play_tracks(
     app: tauri::AppHandle,
     resources: Vec<PlaybackResource>,
-    start_index: usize,
+    start_index: Option<usize>,
 ) -> Result<PlayOutcome, String> {
     let state = app.state::<AppState>();
     let intent = state.playback.begin_play_intent();
@@ -105,7 +105,7 @@ pub(super) async fn play_tracks(
         .expect("Spotify catalog mutex poisoned")
         .clone();
     let client = provider_from(&state).ok();
-    let (snapshot, start_index) = resolve_resources(
+    let (snapshot, resolved_index) = resolve_resources(
         resources,
         start_index,
         library,
@@ -116,7 +116,12 @@ pub(super) async fn play_tracks(
     .await?;
     let outcome = state
         .playback
-        .play_for_intent(client.clone(), snapshot, start_index, intent)
+        .play_for_intent(
+            client.clone(),
+            snapshot,
+            start_index.map(|_| resolved_index),
+            intent,
+        )
         .await?;
     if let PlayOutcome::PlaybackAuthorizationRequired(prompt) = &outcome {
         let client = provider_from(&state).ok();
@@ -133,7 +138,7 @@ pub(super) async fn play_tracks(
 
 async fn resolve_resources<T: Transport>(
     resources: Vec<PlaybackResource>,
-    start_index: usize,
+    start_index: Option<usize>,
     library: Library,
     playlists: crate::playlists::PlaylistCache,
     catalog: SpotifyCatalog,
@@ -142,7 +147,7 @@ async fn resolve_resources<T: Transport>(
     let (resources, mut resolved, enabled) = tauri::async_runtime::spawn_blocking(move || {
         let (resolved, enabled) = playback_resources::resolve_cached(
             &resources,
-            start_index,
+            start_index.unwrap_or(0),
             &library,
             &playlists,
             &catalog,
@@ -310,6 +315,7 @@ mod tests {
                 owner: None,
                 track_count: 1,
                 tracks: vec![uri.into()],
+                shadow: None,
                 track_metadata_version: TRACK_METADATA_VERSION,
                 spotify_tracks: vec![CachedTrack {
                     uri: uri.into(),
@@ -334,7 +340,7 @@ mod tests {
         ] {
             let (tracks, index) = resolve_resources(
                 vec![resource(7, uri)],
-                0,
+                Some(0),
                 Library::new(),
                 playlist_track(uri, name),
                 SpotifyCatalog::default(),
@@ -364,7 +370,7 @@ mod tests {
         );
         let (tracks, _) = resolve_resources(
             vec![resource(8, "spotify:track:track2")],
-            0,
+            Some(0),
             Library::new(),
             PlaylistCache::default(),
             SpotifyCatalog::default(),
@@ -393,7 +399,7 @@ mod tests {
         ];
         let (tracks, index) = resolve_resources(
             resources.to_vec(),
-            1,
+            Some(1),
             library,
             playlist_track("spotify:track:track3", "Spotify"),
             SpotifyCatalog::default(),

@@ -31,14 +31,15 @@ time-bounded audit, not in a permanent completed-findings ledger.
 
 ## Windows and authority
 
-Retune has two webview labels:
+Retune has three webview labels:
 
 | Window | Purpose | Authority |
 | --- | --- | --- |
-| `main` | Library, settings, Spotify, playback, diagnostics, and import launch | `main-commands`, event listen/unlisten, and title mutation |
+| `main` | Library, Spotify, playback, and auxiliary-window launch | `main-commands`, event listen/unlisten, and title mutation |
 | `lastfm-importer` | Last.fm import review and application | `importer-commands` and event listen/unlisten |
+| `preferences` | Preferences, account setup, removed-track recovery, and diagnostics | `preferences-commands`, event listen/unlisten, and closing its own window |
 
-`tauri.conf.json` activates exactly `default` and `lastfm-importer`; adding a
+`tauri.conf.json` activates exactly `default`, `lastfm-importer`, and `preferences`; adding a
 capability file does not silently enable it. The capability files name one
 window apiece and avoid aggregate `core:default`, opener defaults, frontend
 event emission, image-from-path, and reveal-in-directory permissions. Plugins
@@ -46,10 +47,19 @@ may be registered for Rust use without granting their JavaScript permissions.
 
 `build.rs` declares every application command in a Tauri `AppManifest`.
 `generate_handler!`, generated command permissions, `main.toml`, and
-`importer.toml` must remain in parity. `scripts/check-tauri-acl.mjs` enforces
+`importer.toml` and `preferences.toml` must remain in parity. `scripts/check-tauri-acl.mjs` enforces
 that parity, the exact window capability sets, the importer allow-list, the
 absence of raw frontend path import, and the absence of sensitive core-event
 payloads.
+
+Preferences is a singleton native window with a standard title bar, resize
+handles, and a minimum size. It can move outside the main window. Cancel or
+native close discards draft preferences; OK persists a settings patch before
+closing. Text-size changes preview inside Preferences until OK. Its controls
+remain usable at the minimum size via scrolling. Labels do not select text;
+editable fields and diagnostics remain selectable. It receives only the commands
+used by its tabs, without playback or private main-channel authority. Account,
+settings, and import status changes arrive as targeted invalidations.
 
 The importer receives the narrow appearance and genre queries it needs. It
 does not receive full settings, Spotify connection or mutation, direct playback control,
@@ -89,7 +99,7 @@ owns queue advancement and visible playback state.
 - The single-instance plugin is registered first on desktop. A second launch
   shows, unminimizes, and focuses the existing main window.
 - Window-state persistence records size, position, and maximized state for the
-  main window only. The transient importer is denied.
+  main window only. The transient importer and Preferences windows are denied.
 - Native dialogs perform backup selection, restore selection, local-file
   selection, and user-facing confirmations. Rust receives their results.
 - Native file-drop events are accepted only for the intended window and are
@@ -140,8 +150,8 @@ form destinations; permits scripts from self; permits artwork from self,
 `https://i.scdn.co`, and data URLs; and limits connections to Tauri IPC. Adding
 a remote origin requires an explicit architecture review.
 
-The frontend entry loads only the component for its native window label. Main
-and importer view modules are separate chunks; shared theme/dialog CSS remains
+The frontend entry loads only the component for its native window label. Main,
+importer, and Preferences view modules are separate chunks; shared theme/dialog CSS remains
 eager. A loading status is replaced by the chosen view, and a chunk-load error
 offers a full-window retry without changing the webview's authority.
 

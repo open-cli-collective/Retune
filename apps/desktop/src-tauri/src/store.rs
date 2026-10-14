@@ -145,6 +145,8 @@ pub struct Settings {
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_desc: bool,
+    #[serde(default)]
+    pub ignore_leading_the: bool,
     pub auto_add_spotify_library: bool,
     #[serde(default = "default_true")]
     pub auto_connect: bool,
@@ -195,6 +197,7 @@ pub struct SettingsView {
     pub playlist_column_widths: BTreeMap<String, BTreeMap<String, u32>>,
     pub sort_column: Option<String>,
     pub sort_desc: bool,
+    pub ignore_leading_the: bool,
     pub auto_add_spotify_library: bool,
     pub auto_connect: bool,
     pub spotify_client_id: String,
@@ -226,6 +229,7 @@ impl From<&Settings> for SettingsView {
             playlist_column_widths: settings.playlist_column_widths.clone(),
             sort_column: settings.sort_column.clone(),
             sort_desc: settings.sort_desc,
+            ignore_leading_the: settings.ignore_leading_the,
             auto_add_spotify_library: settings.auto_add_spotify_library,
             auto_connect: settings.auto_connect,
             spotify_client_id: settings.spotify_client_id.clone(),
@@ -260,6 +264,7 @@ pub struct SettingsPatch {
     #[serde(deserialize_with = "present_nullable")]
     pub sort_column: Option<Option<String>>,
     pub sort_desc: Option<bool>,
+    pub ignore_leading_the: Option<bool>,
     pub auto_add_spotify_library: Option<bool>,
     pub auto_connect: Option<bool>,
     pub spotify_client_id: Option<String>,
@@ -356,6 +361,7 @@ impl SettingsPatch {
             playlist_column_widths,
             sort_column,
             sort_desc,
+            ignore_leading_the,
             auto_add_spotify_library,
             auto_connect,
             spotify_client_id,
@@ -427,6 +433,7 @@ impl Default for Settings {
             playlist_column_widths: BTreeMap::new(),
             sort_column: None,
             sort_desc: false,
+            ignore_leading_the: false,
             auto_add_spotify_library: true,
             auto_connect: true,
             spotify_client_id: String::new(),
@@ -2370,6 +2377,7 @@ mod tests {
             ]),
             sort_column: Some("artist".into()),
             sort_desc: true,
+            ignore_leading_the: true,
             auto_add_spotify_library: true,
             auto_connect: false,
             spotify_client_id: "client-id".into(),
@@ -2975,6 +2983,7 @@ mod tests {
                 owner: Some("Owner Name".into()),
                 track_count: 0,
                 tracks: vec![],
+                shadow: None,
                 track_metadata_version: crate::playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],
@@ -3263,9 +3272,34 @@ mod tests {
 
         assert_eq!(settings.sort_column, None);
         assert!(!settings.sort_desc);
+        assert!(!settings.ignore_leading_the);
         assert!(settings.playlist_hidden_columns.is_empty());
         assert!(settings.playlist_column_orders.is_empty());
         assert!(settings.playlist_column_widths.is_empty());
+    }
+
+    #[test]
+    fn alphabetizing_preference_round_trips_and_can_be_disabled() {
+        let mut settings = Settings::default();
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "ignoreLeadingThe": true
+        }))
+        .unwrap();
+        patch.validate().unwrap();
+        patch.apply(&mut settings);
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert!(restored.ignore_leading_the);
+        assert_eq!(
+            serde_json::to_value(SettingsView::from(&restored)).unwrap()["ignoreLeadingThe"],
+            true
+        );
+        SettingsPatch {
+            ignore_leading_the: Some(false),
+            ..SettingsPatch::default()
+        }
+        .apply(&mut settings);
+        assert!(!settings.ignore_leading_the);
     }
 
     #[test]

@@ -38,6 +38,16 @@ pub(super) struct LocalBackend {
 
 impl LocalBackend {
     #[cfg(test)]
+    pub(super) fn interrupt_session_for_test(&mut self) {
+        let runtime = self.runtime.as_mut().unwrap();
+        runtime.session.shutdown();
+        let disconnected = Session::new(runtime.session.config().clone(), None);
+        disconnected.shutdown();
+        runtime.player.set_session(disconnected.clone());
+        runtime.session = disconnected;
+    }
+
+    #[cfg(test)]
     pub(super) fn with_snapshot_for_test(snapshot: Snapshot) -> Self {
         Self {
             runtime: None,

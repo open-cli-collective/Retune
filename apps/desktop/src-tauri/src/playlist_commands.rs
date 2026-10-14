@@ -28,6 +28,7 @@ pub(super) struct PlaylistListView {
     contains: bool,
     track_count: usize,
     items_available: bool,
+    shadow: Option<crate::shadow_playlists::Shadow>,
 }
 
 #[derive(Serialize)]
@@ -63,6 +64,7 @@ fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec
             name: playlist.name.clone(),
             owned: playlist.owned,
             owner: playlist.owner.clone(),
+            shadow: playlist.shadow.clone(),
             contains: !uris.is_empty() && uris.iter().all(|uri| playlist.tracks.contains(uri)),
             track_count: playlist.track_count,
             items_available: playlist.owned
@@ -73,13 +75,20 @@ fn playlist_list_views(cache: &playlists::PlaylistCache, uris: &[String]) -> Vec
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub(super) fn playlists_list(
+pub(super) async fn playlists_list(
     state: tauri::State<'_, AppState>,
     uris: Option<Vec<String>>,
 ) -> Result<Vec<PlaylistListView>, String> {
     let uris = uris.unwrap_or_default();
     playlists::validate_playlist_uris(&uris)?;
-    Ok(playlist_list_views(&state.playlists.snapshot()?, &uris))
+    let mut cache = state.playlists.snapshot()?;
+    let account = shadow_credentials(&state).await.ok().map(|c| c.username);
+    cache.playlists.retain(|p| {
+        p.shadow
+            .as_ref()
+            .is_none_or(|s| Some(&s.account) == account.as_ref())
+    });
+    Ok(playlist_list_views(&cache, &uris))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -140,6 +149,20 @@ pub(super) async fn playlist_tracks(
     id: String,
 ) -> Result<Vec<PlaylistTrackView>, String> {
     playlists::validate_playlist_id(&id)?;
+    {
+        let state = app.state::<AppState>();
+        let cache = state.playlists.snapshot()?;
+        if let Some(shadow) = cache
+            .playlists
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.shadow.as_ref())
+        {
+            if shadow_credentials(&state).await?.username != shadow.account {
+                return Err("This shadow belongs to another Spotify account.".into());
+            }
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         playlist_track_views_from_state(&state.playlists, &state.library, &id)
@@ -268,6 +291,7 @@ mod tests {
                 owner: None,
                 track_count: 1,
                 tracks: vec!["spotify:track:one".into()],
+                shadow: None,
                 track_metadata_version: playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![playlists::CachedTrack {
                     uri: "spotify:track:one".into(),
@@ -300,6 +324,7 @@ mod tests {
                 owner: None,
                 track_count: 2,
                 tracks: vec!["one".into(), "two".into()],
+                shadow: None,
                 track_metadata_version: playlists::TRACK_METADATA_VERSION,
                 spotify_tracks: vec![],
             }],
@@ -612,4 +637,132 @@ pub(super) async fn playlist_remove(
     operation.remote_started();
     let result = playlists::remove(client.as_ref(), &mut cache, &id, &indices).await;
     finish_playlist_mutation(&app, client.as_ref(), operation, cache, result).await
+}
+
+async fn shadow_credentials(
+    state: &AppState,
+) -> Result<retune_spotify::tokens::PlaybackCredentials, String> {
+    provider_from(state)?.load_tokens().await.map_err(|e| e.to_string())?
+        .and_then(|t| t.playback_credentials)
+        .ok_or_else(|| "Connect to Spotify and authorize built-in playback in File → Account to shadow playlists.".into())
+}
+
+#[tauri::command]
+pub(super) async fn discover_shadow_playlists(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::shadow_playlists::Candidate>, String> {
+    let state = app.state::<AppState>();
+    let revision = state.spotify_session.revision();
+    let credentials = shadow_credentials(&state).await?;
+    let reader = crate::shadow_playlists::Reader::connect(&credentials).await?;
+    let candidates = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        reader.discover(&credentials.username),
+    )
+    .await
+    .map_err(|_| "Playlist discovery timed out. Try again.".to_string())??;
+    let _commit = state.spotify_session.commit_revision(revision).await?;
+    Ok(candidates)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(super) async fn shadow_playlist(
+    app: tauri::AppHandle,
+    id: String,
+    account: Option<String>,
+) -> Result<(), String> {
+    playlists::validate_playlist_id(&id)?;
+    let state = app.state::<AppState>();
+    let revision = state.spotify_session.revision();
+    let (operation, mut cache) = state.playlists.begin_mutation().await?;
+    let credentials = shadow_credentials(&state).await?;
+    if account.as_ref().is_some_and(|a| a != &credentials.username) {
+        return Err("Spotify account changed. Discover playlists again.".into());
+    }
+    let previous = cache.playlists.iter().find(|p| p.id == id);
+    if previous.is_some_and(|p| p.owned) {
+        return Err("Your own playlists already sync with Retune.".into());
+    }
+    let reader = crate::shadow_playlists::Reader::connect(&credentials).await?;
+    let fetched = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        reader.fetch(&id, &credentials.username, previous),
+    )
+    .await
+    .map_err(|_| "Shadowing timed out. Existing tracks are unchanged.".to_string())??;
+    if let Some(previous) = cache.playlists.iter_mut().find(|p| p.id == id) {
+        *previous = fetched;
+    } else {
+        cache.playlists.push(fetched);
+    }
+    let _commit = state.spotify_session.commit_revision(revision).await?;
+    save_playlists(&app, operation, cache, false).await
+}
+
+#[tauri::command]
+pub(super) async fn stop_shadowing_playlist(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    playlists::validate_playlist_id(&id)?;
+    let state = app.state::<AppState>();
+    let (operation, mut cache) = state.playlists.begin_mutation().await?;
+    cache.playlists.retain(|p| p.id != id || p.shadow.is_none());
+    save_playlists(&app, operation, cache, false).await
+}
+
+#[tauri::command]
+pub(super) async fn refresh_shadow_playlists(
+    app: tauri::AppHandle,
+    id: Option<String>,
+    force: bool,
+) -> Result<(), String> {
+    if let Some(id) = &id {
+        playlists::validate_playlist_id(id)?;
+    }
+    let state = app.state::<AppState>();
+    let revision = state.spotify_session.revision();
+    let (operation, mut cache) = state.playlists.begin_mutation().await?;
+    let credentials = shadow_credentials(&state).await?;
+    let now = crate::unix_now();
+    let indices = cache
+        .playlists
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            id.as_ref().is_none_or(|id| id == &p.id)
+                && p.shadow
+                    .as_ref()
+                    .is_some_and(|s| s.account == credentials.username && (force || s.due(now)))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        return Ok(());
+    }
+    let reader = crate::shadow_playlists::Reader::connect(&credentials).await;
+    let mut failure = None;
+    for index in indices {
+        let previous = &cache.playlists[index];
+        let fetched = match &reader {
+            Ok(reader) => tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                reader.fetch(&previous.id, &credentials.username, Some(previous)),
+            )
+            .await
+            .map_err(|_| "Playlist refresh timed out.".to_string())
+            .and_then(|r| r),
+            Err(error) => Err(error.clone()),
+        };
+        if let Err(error) = crate::shadow_playlists::apply_refresh(
+            &mut cache.playlists[index],
+            fetched,
+            crate::unix_now(),
+        ) {
+            failure = Some(error);
+        }
+    }
+    let _commit = state.spotify_session.commit_revision(revision).await?;
+    save_playlists(&app, operation, cache, false).await?;
+    failure.map_or(Ok(()), Err)
 }

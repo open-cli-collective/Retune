@@ -3,10 +3,11 @@
 import { act, createRef, Profiler, StrictMode, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AlbumPageView, ArtistPageView, BrowseView, DecisionTrack, LastFmImportState, LastFmState, LibrarySources, PlayerState, Settings, SpotifyNavEntry, SpotifyResults, SpotifySyncStatus, Track, TrackInfo, TrackMergePreview } from '../src/types.ts'
+import type { AlbumPageView, ArtistPageView, BrowseView, DecisionTrack, LastFmImportState, LastFmState, LibrarySources, PlayerState, PlaybackOrigin, Settings, SpotifyNavEntry, SpotifyResults, SpotifySyncStatus, Track, TrackInfo, TrackMergePreview } from '../src/types.ts'
 import type { MainEvent } from '../src/ipc.ts'
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(async () => null))
+const closeWindowMock = vi.hoisted(() => vi.fn(async () => {}))
 const nativeEventHandlers = vi.hoisted(() => new Map<string, Set<(payload: unknown) => void>>())
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
@@ -24,12 +25,13 @@ vi.mock('@tauri-apps/api/event', () => ({
     }
   }),
 }))
-vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn(async () => () => {}), setTitle: vi.fn(async () => {}) }) }))
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn(async () => () => {}), setTitle: vi.fn(async () => {}), close: closeWindowMock }) }))
 
 import App, { StatusBar, TransportBar } from '../src/App.tsx'
 import { defaultSettings } from '../src/appState.ts'
 import LastFmImporter, { ImportQueueFilter } from '../src/LastFmImporter.tsx'
 import { GetInfo, Preferences } from '../src/dialogViews.tsx'
+import PreferencesWindow from '../src/PreferencesWindow.tsx'
 import { filterImportQueue, type ImportQueueItem } from '../src/lastfmImportState.ts'
 import { TrackList } from '../src/libraryViews.tsx'
 import { SpotifySearch } from '../src/spotifyViews.tsx'
@@ -52,6 +54,7 @@ const sources = (overrides: Partial<LibrarySources> = {}): LibrarySources => ({ 
 const info = (track: Track, overrides: Partial<TrackInfo> = {}): TrackInfo => ({ ...track, source: 'music', localPath: null, origCat: null, inheritedRating: null, genres: [], sources: sources(), mergedSources: [], latestMergeAt: null, ...overrides })
 
 beforeEach(() => {
+  closeWindowMock.mockClear()
   nativeEventHandlers.clear()
   Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) })
   Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: class { observe() {} unobserve() {} disconnect() {} } })
@@ -400,6 +403,35 @@ describe('mounted native interaction boundaries', () => {
     expect(nativeEventHandlers.has('lastfm-import-playback')).toBe(false)
   })
 
+  it.each(['cat', 'art', 'alb'].flatMap(facet => [false, true].map(shuffle => ({ facet, shuffle }))))('double-clicking $facet starts its scope as a collection with shuffle=$shuffle', async ({ facet, shuffle }) => {
+    const tracks = [track(1, 'First'), { ...track(2, 'Disabled'), enabled: false }, track(3, 'Last')]
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: tracks.length, totalSecs: 360, perSource: { music: tracks.length, podcasts: 0, audiobooks: 0 } },
+    }
+    const projection = deferred<BrowseView>()
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'browse') return Object.values(args?.sel as Record<string, string[]>).some(values => values.length) ? projection.promise : browse
+      if (command === 'get_settings') return { ...defaultSettings, shuffle }
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return []
+      if (command === 'play_tracks') return 'started'
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => view.querySelector<HTMLButtonElement>(`[data-facet="${facet}"] [data-row-index="1"]`)!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
+    await act(async () => projection.resolve({ ...browse, tracks: tracks.slice(1), counts: { ...browse.counts, tracks: 2, totalSecs: 360 } }))
+    expect(view.querySelector('.status-library')?.textContent).toBe('2 songs, 0:06 hours')
+    expect(invokeMock).toHaveBeenCalledWith('play_tracks', {
+      resources: [{ id: tracks[2].id, uri: tracks[2].uri }], startIndex: null,
+    })
+  })
+
   it('reports unsupported fixture playback instead of simulating it', async () => {
     const tracks = [
       { ...track(1, 'Excluded'), uri: 'fixture:track:excluded', enabled: false },
@@ -639,6 +671,26 @@ describe('mounted native interaction boundaries', () => {
     range.value = '42'
     await act(async () => range.dispatchEvent(new Event('input', { bubbles: true })))
     expect(onSeek).toHaveBeenCalledWith(42)
+  })
+
+  it('captures and restores the Spotify album launch view with its playing row', async () => {
+    const page: AlbumPageView = {
+      uri: 'spotify:album:origin', name: 'Origin Album', artist: 'Artist', artistId: 'artist', albumType: 'Album', year: '2026',
+      imageUrl: null, totalDurationSecs: 180, savedAlbum: false, contentComplete: false, addedAt: null, albumRating: null,
+      tracks: [{ uri: 'spotify:track:origin', name: 'Origin Track', trackNo: 1, durationSecs: 180, enabled: true, trackId: null, savedIndividually: false, rating: null }],
+    }
+    invokeMock.mockImplementation(async command => command === 'spotify_album_page' ? page : null)
+    const onPlay = vi.fn<(id: number, tracks: unknown, origin?: PlaybackOrigin) => void>()
+    const props = { query: '', searching: false, results: null, playingUri: null, onAdd: vi.fn(async () => {}), onAddTrack: vi.fn(async () => {}), onRemoveTrack: vi.fn(async () => {}), onPlay, onPlaylist: vi.fn(), onClose: vi.fn(), onError: vi.fn() }
+    const view = await render(<SpotifySearch {...props} navigation={{ kind: 'album', uri: page.uri }} />)
+    await act(async () => view.querySelector<HTMLButtonElement>('.spotify-track-action')!.click())
+    const origin = onPlay.mock.calls[0][2]!
+    expect(origin.kind).toBe('spotify')
+    expect(origin).toMatchObject({ navigation: [{ kind: 'album', uri: page.uri }] })
+    await act(async () => root?.render(<SpotifySearch key="restored" {...props} restore={{ uri: page.tracks[0].uri, origin }} />))
+    expect(view.textContent).toContain('Origin Track')
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled()
+    expect(onPlay).toHaveBeenCalledTimes(1)
   })
 
   it('opens album artwork in the shared lightbox without refetching and restores focus when dismissed', async () => {
@@ -1283,6 +1335,289 @@ describe('mounted native interaction boundaries', () => {
     }
     await act(async () => root?.render(<TrackList {...props} columnOrder={[...props.columnOrder]} tracks={[tracks[0]]} />))
     expect(view.querySelector<HTMLElement>('[data-track-id="1"]')?.tabIndex).toBe(0)
+  })
+
+  it.each(['playlist', 'shadow', 'library', 'cat', 'art', 'alb'].flatMap(scope => [0.8, 1].map(zoom => ({ scope, zoom }))))('jumps to an offscreen title in $scope at zoom $zoom', async ({ scope, zoom }) => {
+    const tracks = Array.from({ length: 200 }, (_, index) => track(index + 1, index === 179 ? 'Man of Stone' : index === 99 ? 'May It Be' : `Song ${index + 1}`))
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: 200, totalSecs: 36000, perSource: { music: 200, podcasts: 0, audiobooks: 0 } },
+    }
+    invokeMock.mockImplementation(async command => {
+      if (command === 'browse') return browse
+      if (command === 'get_settings') return { ...defaultSettings, zoom }
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return [{ id: 'fixture', name: 'Fixture', owned: scope !== 'shadow', itemsAvailable: true, trackCount: tracks.length, ...(scope === 'shadow' ? { shadow: { account: 'me', refreshedAt: 100, attemptedAt: 100, error: null } } : {}) }]
+      if (command === 'playlist_tracks') return tracks
+      return null
+    })
+    const view = await render(<App />)
+    const playlist = scope === 'playlist' || scope === 'shadow'
+    if (playlist) await act(async () => view.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+    else if (scope !== 'library') await act(async () => view.querySelector<HTMLButtonElement>(`[data-facet="${scope}"] [data-row-index="1"]`)!.click())
+    const targetSelector = playlist ? '[data-upstream-index="179"]' : '[data-track-id="180"]'
+    expect(view.querySelector(targetSelector)).toBeNull()
+    await act(async () => view.querySelector<HTMLElement>('.track-row[data-keyboard-row]')!.focus())
+    for (const character of 'man of') {
+      await act(async () => { key(document.activeElement!, character) })
+    }
+    const target = view.querySelector<HTMLElement>(targetSelector)!
+    expect(target.classList.contains('selected')).toBe(true)
+    expect(document.activeElement === target).toBe(true)
+    const scroll = view.querySelector<HTMLElement>(playlist ? '.playlist-track-scroll' : '.track-scroll')
+    expect(scroll!.scrollTop).toBeGreaterThan(0)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
+  })
+
+  it.each([false, true])('jumps to playlist names from sidebar focus, row focus=%s', async rowFocus => {
+    const playlists = [
+      { id: 'metal', name: 'Metal', owned: true, itemsAvailable: true, trackCount: 1 },
+      { id: 'metalcore', name: 'Metalcore', owned: true, itemsAvailable: true, trackCount: 1 },
+      { id: 'shadow', name: 'Shadow Metal', owned: false, itemsAvailable: true, trackCount: 1, shadow: { account: 'me', refreshedAt: 100, attemptedAt: 100, error: null } },
+    ]
+    invokeMock.mockImplementation(async command => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return playlists
+      if (command === 'playlist_tracks') return [track(1, 'Song')]
+      return null
+    })
+    const view = await render(<App />)
+    const sidebar = view.querySelector<HTMLElement>('.sidebar')!
+    const rows = [...view.querySelectorAll<HTMLButtonElement>('.playlist-row')]
+    await act(async () => (rowFocus ? rows[0] : sidebar).focus())
+    for (const char of 'metalco') await act(async () => { key(document.activeElement!, char) })
+    expect(rows[1].classList.contains('active')).toBe(true)
+    expect(document.activeElement).toBe(rows[1])
+    expect(rows[1].scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    await act(async () => { key(rows[1], 'z') })
+    expect(rows[1].classList.contains('active')).toBe(true)
+    await act(async () => { key(rows[1], 'ArrowDown') })
+    expect(document.activeElement).toBe(rows[2])
+    for (const char of 'shadow m') await act(async () => { key(document.activeElement!, char) })
+    expect(rows[2].classList.contains('active')).toBe(true)
+    expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
+    await act(async () => view.querySelector<HTMLButtonElement>('[aria-label="New playlist"]')!.click())
+    const input = view.querySelector<HTMLInputElement>('[aria-label="Playlist name"]')!
+    await act(async () => { input.focus() })
+    expect(key(input, 'm').defaultPrevented).toBe(false)
+  })
+
+  it.each(['library', 'playlist', 'shadow'])('returns to the %s launch view and reveals the current track without replaying', async scope => {
+    const tracks = Array.from({ length: 200 }, (_, index) => ({ ...track(index + 1, index === 179 ? 'Target song' : `Song ${index + 1}`), uri: `spotify:track:${index + 1}` }))
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Artist'], albs: ['Album'] }, tracks,
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: 200, totalSecs: 36000, perSource: { music: 200, podcasts: 0, audiobooks: 0 } },
+    }
+    let channel: { onmessage: (event: MainEvent) => void }
+    let delayBrowse = false
+    const delayed = deferred<BrowseView>()
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'browse') return delayBrowse ? delayed.promise : browse
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return [{ id: 'fixture', name: 'Fixture', owned: scope !== 'shadow', itemsAvailable: true, trackCount: tracks.length, ...(scope === 'shadow' ? { shadow: { account: 'me', refreshedAt: 100, attemptedAt: 100, error: null } } : {}) }]
+      if (command === 'playlist_tracks') return tracks
+      if (command === 'subscribe_main_events') { channel = args?.channel as typeof channel; return 1 }
+      if (command === 'play_tracks') {
+        const resource = (args!.resources as { id: number; uri: string }[])[Number(args!.startIndex)]
+        channel.onmessage({ type: 'playerState', payload: { trackId: resource.id, uri: resource.uri, elapsed: 17, isPlaying: true, external: false, name: null, art: null, alb: null, durationSecs: 180, shuffle: false } })
+        return 'started'
+      }
+      return null
+    })
+    const view = await render(<App />)
+    if (scope !== 'library') await act(async () => view.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+    else for (const facet of ['cat', 'art', 'alb']) await act(async () => view.querySelector<HTMLButtonElement>(`[data-facet="${facet}"] [data-row-index="1"]`)!.click())
+    const row = view.querySelector<HTMLElement>('.track-row[data-keyboard-row]')!
+    await act(async () => row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    // Queue advancement must reveal the current URI, not the track originally clicked.
+    await act(async () => channel.onmessage({ type: 'playerState', payload: { trackId: 180, uri: tracks[179].uri, elapsed: 25, isPlaying: true, external: false, name: null, art: null, alb: null, durationSecs: 180, shuffle: false } }))
+    const playCount = invokeMock.mock.calls.filter(([command]) => command === 'play_tracks').length
+    await act(async () => view.querySelector<HTMLButtonElement>('.source-row')!.click())
+    if (scope === 'library') {
+      for (const facet of ['cat', 'art', 'alb']) await act(async () => view.querySelector<HTMLButtonElement>(`[data-facet="${facet}"] [data-row-index="0"]`)!.click())
+      delayBrowse = true
+    }
+    await act(async () => view.querySelector<HTMLElement>('[aria-label="Show playing source"]')!.click())
+    if (scope === 'library') await act(async () => delayed.resolve(browse))
+    const selector = scope === 'library' ? '[data-track-id="180"]' : '[data-upstream-index="179"]'
+    await waitFor(() => expect(view.querySelector(selector)?.classList.contains('selected')).toBe(true))
+    if (scope === 'library') {
+      for (const facet of ['cat', 'art', 'alb']) expect(view.querySelector(`[data-facet="${facet}"] [data-row-index="1"]`)?.classList.contains('active')).toBe(true)
+    }
+    const scroll = view.querySelector<HTMLElement>(scope === 'library' ? '.track-scroll' : '.playlist-track-scroll')!
+    expect(scroll.scrollTop).toBeGreaterThan(0)
+    await act(async () => { scroll.scrollTop = 0; scroll.dispatchEvent(new Event('scroll')) })
+    await act(async () => view.querySelector<HTMLElement>('[aria-label="Show playing source"]')!.click())
+    expect(scroll.scrollTop).toBeGreaterThan(0)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'play_tracks')).toHaveLength(playCount)
+  })
+
+  it('rates a playlist track without capturing the star click for reordering', async () => {
+    let song = track(1, 'Man of Stone')
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return [{ id: 'fixture', name: 'Fixture', owned: true, itemsAvailable: true, trackCount: 1 }]
+      if (command === 'playlist_tracks') return [song]
+      if (command === 'click_track_star') song = { ...song, rating: { stars: args?.stars as number, explicit: true } }
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => view.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+    const row = view.querySelector<HTMLElement>('.playlist-track-row')!
+    const capture = vi.fn()
+    row.setPointerCapture = capture
+    const star = row.querySelector<HTMLButtonElement>('[aria-label="4 stars"]')!
+    await act(async () => {
+      star.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+      star.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, button: 0 }))
+      star.click()
+    })
+    expect(capture).not.toHaveBeenCalled()
+    expect(invokeMock).toHaveBeenCalledWith('click_track_star', { id: 1, stars: 4 })
+    expect(row.querySelector('.rating-stars')?.getAttribute('aria-label')).toBe('4 out of 5 stars')
+    expect(invokeMock.mock.calls.some(([command]) => command === 'playlist_reorder' || command === 'play_tracks')).toBe(false)
+  })
+
+  it('keeps playlist rows and selection mounted while metadata refreshes', async () => {
+    const tracks = Array.from({ length: 115 }, (_, index) => track(index + 1, `Song ${index + 1}`))
+    const refreshed = deferred<typeof tracks>()
+    let refreshing = false
+    invokeMock.mockImplementation(async command => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return [{ id: 'fixture', name: 'Fixture', owned: true, itemsAvailable: true, trackCount: tracks.length }]
+      if (command === 'playlist_tracks') return refreshing ? refreshed.promise : tracks
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => view.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+    expect(view.querySelector('.status-library')?.textContent).toBe('115 tracks, 5:45 hours')
+    const scroll = view.querySelector<HTMLDivElement>('.playlist-track-scroll')!
+    await act(async () => {
+      scroll.scrollTop = 1700
+      scroll.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    const row = [...view.querySelectorAll<HTMLElement>('.playlist-track-row')].find(row => row.textContent?.includes('Song 112'))!
+    await act(async () => row.click())
+    refreshing = true
+    await emitNativeEvent('library-changed', null)
+    // Keeping the spacer height prevents the browser from clamping scrollTop to zero.
+    expect(view.querySelector<HTMLElement>('.playlist-track-window')!.style.height).toBe('2300px')
+    expect(row.isConnected).toBe(true)
+    expect(row.classList.contains('selected')).toBe(true)
+    await act(async () => refreshed.resolve(tracks.map(track => track.id === 112 ? { ...track, cat: 'Covers', durationSecs: 240 } : track)))
+    expect(view.querySelector('.status-library')?.textContent).toBe('115 tracks, 5:46 hours')
+    expect(row.textContent).toContain('Covers')
+    expect(row.classList.contains('selected')).toBe(true)
+    expect(scroll.scrollTop).toBe(1700)
+  })
+
+  it.each([false, true])('double-clicking a playlist starts the complete collection with shuffle=%s', async shuffle => {
+    const tracks = [track(1, 'First'), { ...track(2, 'Disabled'), enabled: false }, track(3, 'Last')]
+    invokeMock.mockImplementation(async command => {
+      if (command === 'get_settings') return { ...defaultSettings, shuffle }
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return [{ id: 'fixture', name: 'Fixture', owned: true, itemsAvailable: true, trackCount: tracks.length }]
+      if (command === 'playlist_tracks') return tracks
+      if (command === 'play_tracks') return 'started'
+      return null
+    })
+    const view = await render(<App />)
+    const playlist = view.querySelector<HTMLButtonElement>('.playlist-row')!
+    await act(async () => playlist.click())
+    expect(invokeMock.mock.calls.some(([command]) => command === 'play_tracks')).toBe(false)
+    await act(async () => playlist.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    expect(invokeMock).toHaveBeenCalledWith('play_tracks', {
+      resources: [tracks[0], tracks[2]].map(({ uri }) => ({ id: expect.any(Number), uri })),
+      startIndex: null,
+    })
+  })
+
+  it('discovers and shadows personalized playlists without a URL, then refreshes without replacing playback', async () => {
+    const tracks = [track(1, 'Weekly song')]
+    let shadowed = false
+    let refreshFailed = false
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'discover_shadow_playlists') return [{ id: 'weekly', name: 'Discover Weekly', owner: 'spotify', account: 'me' }]
+      if (command === 'shadow_playlist') { shadowed = true; return null }
+      if (command === 'playlists_list') return shadowed ? [{ id: 'weekly', name: 'Discover Weekly', owned: false, owner: 'spotify', itemsAvailable: true, trackCount: 1, shadow: { account: 'me', refreshedAt: 100, attemptedAt: 100, error: refreshFailed ? 'offline' : null } }] : []
+      if (command === 'playlist_tracks') return tracks
+      if (command === 'refresh_shadow_playlists' && args?.force) { refreshFailed = true; throw new Error('offline') }
+      if (command === 'play_tracks') return 'started'
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => [...view.querySelectorAll('button')].find(b => b.textContent === 'Shadow playlists…')!.click())
+    expect(invokeMock).toHaveBeenCalledWith('discover_shadow_playlists', undefined)
+    expect(document.querySelector('input[placeholder*="http"]')).toBeNull()
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Shadow Discover Weekly"]')!.click())
+    expect(invokeMock).toHaveBeenCalledWith('shadow_playlist', { id: 'weekly', account: 'me' })
+    await emitNativeEvent('playlists-changed', null)
+    await act(async () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Done')!.click())
+    expect(view.textContent).toContain('Shadowed playlists')
+    const row = view.querySelector<HTMLButtonElement>('.playlist-row')!
+    await act(async () => row.click())
+    expect(view.textContent).toContain('Shadow · read-only')
+    expect(view.querySelector('.playlist-track-row.reorderable')).toBeNull()
+    await act(async () => view.querySelector<HTMLElement>('.playlist-track-row')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    const plays = invokeMock.mock.calls.filter(([command]) => command === 'play_tracks').length
+    await act(async () => [...view.querySelectorAll('button')].find(b => b.textContent === 'Refresh shadow')!.click())
+    await emitNativeEvent('playlists-changed', null)
+    expect(view.textContent).toContain('Cached tracks kept')
+    expect(view.textContent).toContain('Weekly song')
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'play_tracks')).toHaveLength(plays)
+    expect(invokeMock.mock.calls.some(([command]) => ['playlist_add', 'playlist_remove', 'playlist_reorder'].includes(command))).toBe(false)
+  })
+
+  it('ignores a late playlist start after a newer double-click', async () => {
+    const first = deferred<Track[]>()
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'playlists_list') return ['first', 'second'].map(id => ({ id, name: id, owned: true, itemsAvailable: true, trackCount: 1 }))
+      if (command === 'playlist_tracks') return args?.id === 'first' ? first.promise : [track(2, 'Second')]
+      if (command === 'play_tracks') return 'started'
+      return null
+    })
+    const view = await render(<App />)
+    const playlists = view.querySelectorAll('.playlist-row')
+    await act(async () => playlists[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    await act(async () => playlists[1].dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    await act(async () => first.resolve([track(1, 'First')]))
+    const plays = invokeMock.mock.calls.filter(([command]) => command === 'play_tracks')
+    expect(plays).toHaveLength(1)
+    expect(plays[0][1]).toEqual({ resources: [{ id: 2, uri: track(2, 'Second').uri }], startIndex: null })
   })
 
   it('windows playlist rows while retaining duplicate positions, range selection, playback, and drag indices', async () => {
@@ -2403,7 +2738,7 @@ describe('type-ahead behavior', () => {
     let row = view.querySelector<HTMLElement>('[data-track-id="1"]')!
     row.focus()
     for (const character of 'alpha tw') {
-      await act(async () => { key(document.activeElement!, character); await new Promise(requestAnimationFrame) })
+      await act(async () => { key(document.activeElement!, character) })
     }
     expect(view.querySelector('[data-track-id="2"]')?.classList.contains('selected')).toBe(true)
 
@@ -2412,7 +2747,7 @@ describe('type-ahead behavior', () => {
     facet.focus()
     expect(key(facet, ' ').defaultPrevented).toBe(false)
     for (const character of 'classic r') {
-      await act(async () => { key(document.activeElement!, character); await new Promise(requestAnimationFrame) })
+      await act(async () => { key(document.activeElement!, character) })
     }
     expect(view.querySelector('[data-facet="cat"] [data-row-index="2"]')?.classList.contains('active')).toBe(true)
     expect(held).toHaveLength(1)
@@ -2740,3 +3075,91 @@ function albumCandidate(uri: string, name: string) {
     albumType: 'album', totalTracks: 1, trackNumbers: [1], trackDurations: [180],
   }
 }
+
+
+describe('native Preferences window', () => {
+  const preferencesFixture = () => {
+    invokeMock.mockImplementation(async command => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      return null
+    })
+  }
+
+  it('uses the saved preference for browser ordering and keeps selection identities', async () => {
+    let settings = { ...defaultSettings }
+    const tracks = [
+      { ...track(1, 'Queen song'), art: 'Queen', alb: 'Queen' },
+      { ...track(2, 'Beatles song'), art: 'The Beatles', alb: 'The Abbey Road' },
+    ]
+    const browse: BrowseView = {
+      facets: { cats: ['Rock'], arts: ['Queen', 'The Beatles'], albs: ['Queen', 'The Abbey Road'] }, tracks,
+      albumRating: null, albumRatingArtist: null, albumRatingAmbiguous: false,
+      counts: { tracks: 2, totalSecs: 360, perSource: { music: 2, podcasts: 0, audiobooks: 0 } },
+    }
+    invokeMock.mockImplementation(async command => {
+      if (command === 'get_settings') return settings
+      if (command === 'browse') return browse
+      if (command === 'playlists_list') return []
+      if (command === 'connection_state') return { connected: false, needs_reauth: false, playback_authorized: false }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      return null
+    })
+    const view = await render(<App />)
+    const artists = () => [...view.querySelectorAll('[data-facet="art"] [data-row-index]')].slice(1).map(row => row.textContent)
+    expect(artists()).toEqual(['Queen', 'The Beatles'])
+    settings = { ...settings, ignoreLeadingThe: true }
+    await emitNativeEvent('settings-changed', null)
+    expect(artists()).toEqual(['The Beatles', 'Queen'])
+    expect(view.querySelector('.track-window [data-track-id]')?.getAttribute('data-track-id')).toBe('2')
+    const artist = view.querySelector<HTMLButtonElement>('[data-facet="art"] [data-row-index="1"]')!
+    await act(async () => artist.click())
+    expect(invokeMock).toHaveBeenCalledWith('browse', expect.objectContaining({ sel: { cat: [], art: ['The Beatles'], alb: [] } }))
+    await act(async () => { key(document.body, ',', { metaKey: true }) })
+    expect(invokeMock).toHaveBeenCalledWith('open_preferences', undefined)
+    expect(view.querySelector('.preferences')).toBeNull()
+  })
+
+  it('discards local settings and text size changes on Cancel', async () => {
+    preferencesFixture()
+    const view = await render(<PreferencesWindow />)
+    const range = view.querySelector<HTMLInputElement>('[aria-label="Text size"]')!
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(range, '1.3')
+    await act(async () => range.dispatchEvent(new Event('input', { bubbles: true })))
+    await act(async () => view.querySelector<HTMLButtonElement>('#preferences-library-tab')!.click())
+    await act(async () => view.querySelector<HTMLInputElement>('.preference-content input[type="checkbox"]')!.click())
+    await clickText(view, 'Cancel')
+    expect(closeWindowMock).toHaveBeenCalledOnce()
+    expect(invokeMock.mock.calls.some(([command]) => command === 'update_settings')).toBe(false)
+  })
+
+  it('saves the alphabetizing preference and only closes after a successful save', async () => {
+    preferencesFixture()
+    const view = await render(<PreferencesWindow />)
+    await act(async () => view.querySelector<HTMLButtonElement>('#preferences-library-tab')!.click())
+    const checkbox = view.querySelector<HTMLInputElement>('.preference-content input[type="checkbox"]')!
+    expect(checkbox.checked).toBe(false)
+    await act(async () => checkbox.click())
+    invokeMock.mockImplementation(async command => {
+      if (command === 'update_settings') throw new Error('disk full')
+      return null
+    })
+    const submit = () => view.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await act(async () => { submit() })
+    expect(closeWindowMock).not.toHaveBeenCalled()
+    expect(view.querySelector('[role="alert"]')?.textContent).toContain('Couldn’t finish saving')
+    expect(checkbox.checked).toBe(true)
+    const pending = deferred<null>()
+    invokeMock.mockImplementation(async () => pending.promise)
+    await act(async () => { submit(); submit() })
+    expect(view.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'update_settings')).toHaveLength(2)
+    expect(invokeMock).toHaveBeenLastCalledWith('update_settings', { patch: expect.objectContaining({ ignoreLeadingThe: true, zoom: 1 }) })
+    expect(closeWindowMock).not.toHaveBeenCalled()
+    await act(async () => pending.resolve(null))
+    expect(closeWindowMock).toHaveBeenCalledOnce()
+  })
+})
