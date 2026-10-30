@@ -256,9 +256,8 @@ const sharedCommit = '74d24fcd862d7b9cbe8f6fdda31db6a833e3d706'
 required(ci, `open-cli-collective/.github/actions/pr-title@${sharedCommit}`)
 required(ci, 'title: ${{ github.event.pull_request.title }}')
 requireImmutableExternalActions('CI workflow', ci)
-for (const action of ['homebrew-alias', 'winget-submit']) {
-  required(workflow, `open-cli-collective/.github/actions/${action}@${sharedCommit}`)
-}
+required(workflow, `open-cli-collective/.github/actions/homebrew-alias@${sharedCommit}`)
+required(workflow, 'open-cli-collective/.github/actions/winget-submit@6ee65fbc893f13b8876f013ec0661219a3e18269')
 required(stableSigningSetupStep, `open-cli-collective/.github/actions/macos-codesign-setup@${sharedCommit}`, 'pinned stable macOS signing setup')
 for (const secret of [
   'MACOS_CERT_P12',
