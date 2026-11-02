@@ -75,9 +75,10 @@ brew uninstall --cask retune
 ```
 
 The app uses the Open CLI Collective's long-lived self-signed certificate but
-is not Apple-notarized. Homebrew leaves quarantine metadata intact; approve the
-first launch through Privacy & Security after Homebrew verifies the cask
-checksum.
+is not Apple-notarized. After verifying the cask checksum, Homebrew removes
+`com.apple.quarantine` recursively from the installed app on every install and
+upgrade, preserving other extended attributes. No manual quarantine removal
+is needed for Homebrew installs.
 
 ## Windows with Winget
 
