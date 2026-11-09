@@ -496,3 +496,7 @@ button.spotify-page-art:focus-visible { outline: 2px solid var(--accent); outlin
 .preferences-window > .modal-backdrop > .preferences { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; box-shadow: none; }
 .preferences-window .preferences > h2 { display: none; }
 .preferences-window .preference-toolbar, .preferences-window .modal-actions { flex-shrink: 0; }
+
+.shadow-progress { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px; color: var(--dim); }
+.shadow-progress progress { width: min(320px, 80vw); accent-color: var(--accent); }
+.shadow-error { padding: 8px 16px; color: var(--text); }

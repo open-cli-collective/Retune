@@ -455,6 +455,17 @@ impl SpotifyCatalog {
         album.to_api(self)
     }
 
+    pub fn track_primary_artist_genre(&self, uri: &str) -> Option<String> {
+        let artist = self.v1.tracks.get(uri)?.artists.as_ref()?.first()?;
+        self.v1
+            .artists
+            .get(artist.id.as_deref()?)?
+            .genres
+            .as_ref()?
+            .first()
+            .cloned()
+    }
+
     pub fn complete_track(&self, uri: &str) -> Option<Track> {
         self.v1
             .tracks

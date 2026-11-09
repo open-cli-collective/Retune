@@ -1507,8 +1507,8 @@ mod tests {
                         {"is_local": false, "item": {
                             "uri": "spotify:track:1", "name": "One",
                             "artists": [{"id": "artist", "name": "Artist"}],
-                            "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "images": []},
-                            "duration_ms": 1234
+                            "album": {"id": "album", "uri": "spotify:album:album", "name": "Album", "release_date": "2024-01-02", "images": []},
+                            "duration_ms": 1234, "disc_number": 2, "track_number": 7
                         }},
                         {"is_local": true, "item": {
                             "uri": "spotify:local:1", "name": "Local",
@@ -1533,6 +1533,29 @@ mod tests {
         assert_eq!(tracks.items.len(), 1);
         assert_eq!(tracks.skipped, 2);
         assert_eq!(tracks.items[0].uri, "spotify:track:1");
+
+        // Browsing a playlist already supplied every field the single-track endpoint needs.
+        let track = client.track("1").await.unwrap();
+        assert_eq!(track, tracks.items[0]);
+        assert_eq!(track.disc_number, Some(2));
+        assert_eq!(track.track_number, Some(7));
+        assert_eq!(
+            track.album.as_ref().unwrap().release_date.as_deref(),
+            Some("2024-01-02")
+        );
+        assert!(client.cached_track_genre(&track.uri).is_none());
+        client.catalog.lock().unwrap().observe_artist(&Artist {
+            id: "artist".into(),
+            name: "Artist".into(),
+            genres: vec!["rock".into()],
+            followers: None,
+            images: vec![],
+        });
+        assert_eq!(
+            client.cached_track_genre(&track.uri).as_deref(),
+            Some("rock")
+        );
+        assert_eq!(client.transport().requests().len(), 3);
 
         let requests = client.transport().requests();
         assert!(requests[0].url.ends_with("/me/playlists?offset=0&limit=1"));

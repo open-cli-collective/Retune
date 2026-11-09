@@ -1,3 +1,5 @@
+import { ShadowProgress } from './ShadowProgress'
+import type { ShadowProgress as ShadowProgressValue } from './spotifyGateway'
 import { ShadowDiscovery } from './ShadowDiscovery'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -1252,15 +1254,19 @@ function PlaylistView({ playlist, ignoreLeadingThe, onTotals, backLabel, revisio
   onError: (error: string) => void
 }) {
   const [shadowBusy, setShadowBusy] = useState(false)
+  const [shadowProgress, setShadowProgress] = useState<ShadowProgressValue>()
+  const [shadowError, setShadowError] = useState('')
   const shadowPending = useRef(false)
   const shadowAction = async () => {
     if (shadowPending.current) return
     shadowPending.current = true
     setShadowBusy(true)
+    setShadowProgress(undefined)
+    setShadowError('')
     try {
-      if (playlist.shadow) await spotifyGateway.refreshShadows(playlist.id, true)
-      else await spotifyGateway.shadowPlaylist(playlist.id)
-    } catch (error) { onError(String(error)) }
+      if (playlist.shadow) await spotifyGateway.refreshShadows(playlist.id, true, setShadowProgress)
+      else await spotifyGateway.shadowPlaylist(playlist.id, undefined, setShadowProgress)
+    } catch (error) { setShadowError(String(error)); onError(String(error)) }
     finally { shadowPending.current = false; setShadowBusy(false) }
   }
   const isShadow = !!playlist.shadow
@@ -1275,6 +1281,7 @@ function PlaylistView({ playlist, ignoreLeadingThe, onTotals, backLabel, revisio
   const pendingRowFocus = useRef<number>(undefined)
   const [insertBefore, setInsertBefore] = useState<number>()
   const [mutating, setMutating] = useState(false)
+  const [addingToLibrary, setAddingToLibrary] = useState(0)
   const [sortColumn, setSortColumn] = useState<ColumnKey | null>(null)
   const [sortDesc, setSortDesc] = useState(false)
   const [liveWidths, setLiveWidths] = useState(columnWidths)
@@ -1477,12 +1484,14 @@ function PlaylistView({ playlist, ignoreLeadingThe, onTotals, backLabel, revisio
     if (!uris.length) return
     setMenu(undefined)
     setMutating(true)
+    setAddingToLibrary(new Set(uris).size)
     try {
       await spotifyGateway.addTracks(uris)
     } catch {
       onError('Couldn’t confirm adding these tracks to Retune. Refresh your library and try again.')
     } finally {
       setMutating(false)
+      setAddingToLibrary(0)
     }
   }
   const addToAnotherPlaylist = (target?: number) => {
@@ -1500,8 +1509,11 @@ function PlaylistView({ playlist, ignoreLeadingThe, onTotals, backLabel, revisio
   return <div className="playlist-view">
     <SpotifyPageBack label={backLabel} onBack={onBack} />
     <header className="playlist-header"><strong>{playlist.name}</strong><span>{playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}{playlist.owner ? ` · by ${playlist.owner}` : ''}{sortColumn ? ` · sorted by ${headings[sortColumn]}` : ''}</span>{playlist.owned && <button disabled={!canChangePlaylist || !selected.size || mutating} onClick={() => void remove()}>Remove</button>}</header>
+    {addingToLibrary > 0 && <div className="shadow-progress" role="status"><span>Adding {addingToLibrary.toLocaleString()} {addingToLibrary === 1 ? 'song' : 'songs'} to your library…</span><progress aria-label="Adding songs to library" /></div>}
+    {playlist.itemsAvailable && shadowBusy && <ShadowProgress progress={shadowProgress} />}
+    {playlist.itemsAvailable && shadowError && <p className="shadow-error" role="alert">Shadow failed. {shadowError}</p>}
     {playlist.shadow && <div className="shadow-status"><span title={SHADOW_PLAYLIST_HINT}>◐ Shadow · read-only · Updated {new Date(playlist.shadow.refreshedAt * 1000).toLocaleString()}{playlist.shadow.error ? ` · Refresh failed: ${playlist.shadow.error} Cached tracks kept.` : ''}</span><button disabled={shadowBusy} onClick={() => void shadowAction()}>{shadowBusy ? 'Refreshing…' : 'Refresh shadow'}</button><button onClick={() => onOpen('app')}>Open in Spotify</button></div>}
-    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Shadow this playlist to cache and play its tracks in Retune. The original stays read-only.</span><div className="playlist-open-actions"><button disabled={shadowBusy} onClick={() => void shadowAction()}>{shadowBusy ? 'Shadowing…' : 'Shadow playlist'}</button><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
+    {!playlist.itemsAvailable ? <div className="playlist-unavailable"><strong>Tracks unavailable in Retune</strong><span>Shadow this playlist to cache and play its tracks in Retune. The original stays read-only.</span>{shadowBusy && <ShadowProgress progress={shadowProgress} />}{shadowError && <p className="shadow-error" role="alert">Shadow failed. {shadowError}</p>}<div className="playlist-open-actions"><button disabled={shadowBusy} onClick={() => void shadowAction()}>{shadowBusy ? 'Shadowing…' : 'Shadow playlist'}</button><button onClick={() => onOpen('app')}>Open in Spotify app</button><button onClick={() => onOpen('web')}>Open on Spotify Web</button></div></div> : <>
     <div ref={scroll} onScroll={readViewport} className="playlist-track-scroll" aria-label={`${playlist.name} tracks`} onClick={(event) => {
       if (event.target !== event.currentTarget && !(event.target as Element).matches('.playlist-end-drop, .playlist-track-window')) return
       setSelected(new Set())

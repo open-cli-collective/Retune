@@ -125,6 +125,17 @@ impl PlaylistState {
             })
     }
 
+    pub(crate) fn cached_library_tracks(
+        &self,
+        uris: &[String],
+    ) -> Vec<retune_core::model::NewTrack> {
+        let current = self.current.lock().expect("playlist mutex poisoned");
+        if !current.authoritative {
+            return Vec::new();
+        }
+        crate::playlists::cached_library_tracks(&current.cache, uris)
+    }
+
     pub(crate) async fn begin_mutation(
         &self,
     ) -> Result<(PlaylistOperation, PlaylistCache), String> {

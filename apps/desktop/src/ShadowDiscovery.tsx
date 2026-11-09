@@ -1,3 +1,5 @@
+import { ShadowProgress } from './ShadowProgress'
+import type { ShadowProgress as ShadowProgressValue } from './spotifyGateway'
 import { useEffect, useRef, useState } from 'react'
 import { spotifyGateway } from './spotifyGateway'
 import type { PlaylistListView, ShadowCandidate } from './types'
@@ -7,6 +9,7 @@ export function ShadowDiscovery({ playlists, onClose }: { playlists: PlaylistLis
   const [candidates, setCandidates] = useState<ShadowCandidate[]>()
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string>()
+  const [progress, setProgress] = useState<ShadowProgressValue>()
   const pending = useRef(false)
   const [retry, setRetry] = useState(0)
   useEffect(() => {
@@ -21,8 +24,9 @@ export function ShadowDiscovery({ playlists, onClose }: { playlists: PlaylistLis
     if (pending.current) return
     pending.current = true
     setBusy(candidate.id)
+    setProgress(undefined)
     setError('')
-    try { await spotifyGateway.shadowPlaylist(candidate.id, candidate.account) }
+    try { await spotifyGateway.shadowPlaylist(candidate.id, candidate.account, setProgress) }
     catch (error) { setError(String(error)) }
     finally { pending.current = false; setBusy(undefined) }
   }
@@ -30,6 +34,7 @@ export function ShadowDiscovery({ playlists, onClose }: { playlists: PlaylistLis
     <h2 id="shadow-discovery-title">Shadow playlists</h2>
     <p>Keep a read-only copy of a saved Spotify playlist in Retune. Shadows refresh automatically and keep their last successful tracks if refresh fails.</p>
     <p>Discover Weekly and Release Radar appear here when saved in your Spotify library.</p>
+    {busy && <ShadowProgress progress={progress} />}
     {error && <p role="alert">{error}</p>}
     {!candidates && !error && <p role="status">Discovering your saved playlists…</p>}
     <div className="shadow-candidates">{candidates?.map(candidate => {

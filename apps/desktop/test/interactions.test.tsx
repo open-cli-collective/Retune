@@ -1556,6 +1556,43 @@ describe('mounted native interaction boundaries', () => {
     })
   })
 
+  it('shows real shadow progress until saving finishes and keeps failures visible', async () => {
+    const finished = deferred<void>()
+    let sendProgress: (value: { completed: number; total: number }) => void = () => {}
+    let fail = false
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === 'get_settings') return defaultSettings
+      if (command === 'connection_state') return { connected: true, needs_reauth: false, playback_authorized: true }
+      if (command === 'spotify_sync_status') return spotifyStatus()
+      if (command === 'lastfm_import_state') return idleLastFmImport()
+      if (command === 'lastfm_state') return { available: false, connected: false }
+      if (command === 'playlists_list') return [{ id: 'large', name: 'Large playlist', owned: false, itemsAvailable: false, trackCount: 2189 }]
+      if (command === 'shadow_playlist') {
+        sendProgress = (args!.progress as { onmessage: typeof sendProgress }).onmessage
+        await finished.promise
+        if (fail) throw new Error('Spotify rate limited this request')
+      }
+      return null
+    })
+    const view = await render(<App />)
+    await act(async () => view.querySelector<HTMLButtonElement>('.playlist-row')!.click())
+    const shadow = [...view.querySelectorAll('button')].find(b => b.textContent === 'Shadow playlist')!
+    await act(async () => shadow.click())
+    expect(view.textContent).toContain('Connecting to Spotify')
+    expect(shadow.disabled).toBe(true)
+    await act(async () => sendProgress({ completed: 50, total: 2189 }))
+    expect(view.textContent).toContain('Loaded details for 50 of 2,189 songs')
+    expect(view.querySelector('progress')?.value).toBe(50)
+    await act(async () => sendProgress({ completed: 2189, total: 2189 }))
+    expect(view.textContent).toContain('Saving shadow…')
+    expect(shadow.disabled).toBe(true)
+    fail = true
+    await act(async () => finished.resolve())
+    expect(shadow.disabled).toBe(false)
+    expect(view.querySelector('.shadow-error')?.textContent).toContain('Spotify rate limited this request')
+    expect(view.querySelector('progress')).toBeNull()
+  })
+
   it('discovers and shadows personalized playlists without a URL, then refreshes without replacing playback', async () => {
     const tracks = [track(1, 'Weekly song')]
     let shadowed = false
@@ -1579,7 +1616,7 @@ describe('mounted native interaction boundaries', () => {
     expect(invokeMock).toHaveBeenCalledWith('discover_shadow_playlists', undefined)
     expect(document.querySelector('input[placeholder*="http"]')).toBeNull()
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Shadow Discover Weekly"]')!.click())
-    expect(invokeMock).toHaveBeenCalledWith('shadow_playlist', { id: 'weekly', account: 'me' })
+    expect(invokeMock).toHaveBeenCalledWith('shadow_playlist', { id: 'weekly', account: 'me', progress: expect.anything() })
     await emitNativeEvent('playlists-changed', null)
     await act(async () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Done')!.click())
     expect(view.textContent).toContain('Shadowed playlists')

@@ -1246,8 +1246,6 @@ pub async fn album_content<T: Transport>(
     album: &str,
     added_at: Option<u64>,
 ) -> Result<(Album, Vec<NewTrack>), AlbumContentError> {
-    let health = SyncHealth::new(None);
-    let genres = GenreSource::new(client, &health);
     let album = SpotifyClient::album(
         client,
         spotify_id(album, "album").map_err(AlbumContentError::Other)?,
@@ -1269,19 +1267,15 @@ pub async fn album_content<T: Transport>(
                 .collect()
         })
         .unwrap_or_default();
-    let tracks = match enrich_music(&genres, vec![normalized.clone()]).await {
-        Ok(mut batches) => batches.pop().unwrap_or_default(),
-        Err(error) => {
-            log::warn!(
-                "Spotify album {} is missing optional artist enrichment: {error}",
-                album.uri
-            );
-            normalized
-                .into_iter()
-                .map(|pending| pending.track)
-                .collect()
-        }
-    };
+    let tracks = normalized
+        .into_iter()
+        .map(|mut pending| {
+            if let Some(genre) = client.cached_track_genre(&pending.track.uri) {
+                pending.track.cat = genre;
+            }
+            pending.track
+        })
+        .collect();
     Ok((album, tracks))
 }
 
@@ -1815,7 +1809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_album_content_degrades_optional_artist_enrichment() {
+    async fn explicit_album_content_does_not_fetch_optional_artist_enrichment() {
         let client = client([
             Response::json(
                 200,
@@ -1837,7 +1831,7 @@ mod tests {
 
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].art, "Artist");
-        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(client.transport().requests().len(), 1);
     }
 
     #[tokio::test]
