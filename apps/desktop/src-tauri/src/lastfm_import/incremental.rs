@@ -6,6 +6,11 @@ pub(super) async fn set_sync_problem(
     service: &Service,
     message: Option<String>,
 ) -> Result<(), String> {
+    if let Some(problem) = &message {
+        if service.sync_status().await.sync_problem.as_ref() != Some(problem) {
+            log::warn!(target: crate::diagnostics::LOG_TARGET, "Last.fm sync: {problem}");
+        }
+    }
     service
         .mutate_sync(|state| {
             state.sync_problem = message;
@@ -234,7 +239,11 @@ pub(super) async fn run_incremental_sync(
         .as_deref()
         .is_some_and(|expected| spotify_account_id.as_deref() != Some(expected))
     {
-        let message = "Last.fm sync is suspended because the connected Spotify account changed.";
+        let message = if spotify_account_id.is_none() {
+            "Last.fm sync is paused until Spotify account identity is available. Connect Spotify and sync your library, then retry here."
+        } else {
+            "Last.fm sync is paused because a different Spotify account is connected. Reconnect the Spotify account used for this import, then retry. Your saved progress is preserved."
+        };
         set_sync_problem(service, Some(message.into())).await?;
         return Err(message.into());
     }
@@ -409,4 +418,32 @@ pub(super) async fn wait_for_incremental_window_retry(
         return Err(error.message);
     }
     Ok(())
+}
+
+/// Resolve identity without requiring a complete saved-library download.
+pub(super) async fn recover_sync_identity<T: retune_spotify::client::Transport>(
+    membership: &crate::spotify_membership::SpotifyMembership,
+    provider: impl FnOnce() -> Result<Arc<retune_spotify::client::SpotifyClient<T>>, String>,
+) -> Result<(), String> {
+    let mut guard = membership.lock().await;
+    let mut cached = guard.snapshot();
+    if !cached.account_id.is_empty() {
+        return Ok(());
+    }
+    let profile = provider()?.me().await.map_err(|error| {
+        format!("Could not verify Spotify for Last.fm sync: {error}. Reconnect Spotify and retry.")
+    })?;
+    cached.account_id = profile
+        .account_id()
+        .ok_or_else(|| {
+            "Spotify did not return an account ID. Reconnect Spotify and retry Last.fm sync."
+                .to_string()
+        })?
+        .to_owned();
+    // Identity alone does not make the membership snapshot complete.
+    cached.complete = false;
+    guard
+        .replace(cached)
+        .await
+        .map_err(|error| error.to_string())
 }

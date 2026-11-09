@@ -44,6 +44,13 @@ const permissionList = (file) => {
 };
 const allow = (command) => `allow-${command.replaceAll("_", "-")}`;
 const importerCommands = [
+  "lastfm_state",
+  "connect_lastfm",
+  "finish_lastfm",
+  "sync_lastfm_plays",
+  "open_preferences",
+  "lastfm_sync_status",
+
   "get_appearance",
   "genre_values",
   "lastfm_import_state",
@@ -75,6 +82,12 @@ const importerCommands = [
   "open_external_destination",
 ];
 const sharedImporterCommands = new Set([
+  "lastfm_state",
+  "connect_lastfm",
+  "finish_lastfm",
+  "sync_lastfm_plays",
+  "open_preferences",
+
   "get_appearance",
   "genre_values",
   "lastfm_import_state",

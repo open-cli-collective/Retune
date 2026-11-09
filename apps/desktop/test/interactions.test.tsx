@@ -29,6 +29,7 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDrop
 
 import App, { StatusBar, TransportBar } from '../src/App.tsx'
 import { defaultSettings } from '../src/appState.ts'
+import { LastFmSync } from '../src/LastFmSync.tsx'
 import LastFmImporter, { ImportQueueFilter } from '../src/LastFmImporter.tsx'
 import { GetInfo, Preferences } from '../src/dialogViews.tsx'
 import PreferencesWindow from '../src/PreferencesWindow.tsx'
@@ -3030,7 +3031,7 @@ describe('library track decisions', () => {
     const lastfm: LastFmState = { available: false, connected: false, username: null, pending: false, reconnectRequired: false, problem: null }
     const changed = vi.fn()
     invokeMock.mockImplementation(async (command) => command === 'removed_retune_tracks' ? [] : null)
-    const view = await render(<Preferences settings={settings} lastfm={lastfm} lastfmImport={idleLastFmImport()} onZoom={vi.fn()} onCancel={vi.fn()} onLastfm={vi.fn()} onImport={vi.fn()} onSyncLastfm={vi.fn()} onLibraryChanged={changed} onSave={vi.fn()} />)
+    const view = await render(<Preferences settings={settings} lastfm={lastfm} lastfmImport={idleLastFmImport()} onZoom={vi.fn()} onCancel={vi.fn()} onLastfm={vi.fn()} onImport={vi.fn()} onLibraryChanged={changed} onSave={vi.fn()} />)
 
     await act(async () => view.querySelector<HTMLButtonElement>('#preferences-library-tab')!.click())
     expect(view.textContent).toContain('Removed tracks')
@@ -3198,5 +3199,134 @@ describe('native Preferences window', () => {
     expect(closeWindowMock).not.toHaveBeenCalled()
     await act(async () => pending.resolve(null))
     expect(closeWindowMock).toHaveBeenCalledOnce()
+  })
+})
+
+
+describe('Last.fm sync footer', () => {
+  it('shows incremental progress, preserves the failure reason, and allows retry', async () => {
+    let state = idleLastFmImport({ syncing: true, syncProgress: { downloadedPages: 2, totalPages: 5 } })
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_state') return { available: true, connected: true, username: 'user', pending: false, reconnectRequired: false, problem: null }
+      if (command === 'lastfm_sync_status') return state
+      if (command === 'sync_lastfm_plays') throw 'Spotify account could not be verified. Reconnect Spotify.'
+      return null
+    })
+    const view = await render(<LastFmSync state={state} />)
+    expect(view.textContent).toContain('Downloaded 2 of 5 pages')
+    expect(view.querySelector('progress')?.value).toBe(2)
+    state = idleLastFmImport()
+    await act(async () => root!.render(<LastFmSync state={state} />))
+    await clickText(view, 'Sync now')
+    expect(view.textContent).toContain('Spotify account could not be verified. Reconnect Spotify.')
+    expect(view.querySelector('progress')).toBeNull()
+    expect([...view.querySelectorAll('button')].find((button) => button.textContent === 'Retry sync')?.disabled).toBe(false)
+  })
+
+  it('offers Last.fm reconnection and finish authorization in the footer', async () => {
+    const account = { available: true, connected: false, username: 'user', pending: false, reconnectRequired: true, problem: 'Last.fm session expired.' }
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'lastfm_state') return account
+      if (command === 'connect_lastfm') return { ...account, pending: true }
+      if (command === 'lastfm_sync_status') return idleLastFmImport()
+      return null
+    })
+    const view = await render(<LastFmSync state={idleLastFmImport()} />)
+    await clickText(view, 'Reconnect Last.fm')
+    expect(view.textContent).toContain('Finish connecting')
+    expect(invokeMock).toHaveBeenCalledWith('connect_lastfm', undefined)
+  })
+})
+
+
+describe('Last.fm cross-window recovery', () => {
+  const connected = { available: true, connected: true, username: 'user', pending: false, reconnectRequired: false, problem: null }
+  it('refreshes the footer after connection changes in another window', async () => {
+    let account = connected
+    invokeMock.mockImplementation(async command => command === 'lastfm_state' ? account : null)
+    const view = await render(<LastFmSync state={idleLastFmImport()} />)
+    expect(view.textContent).toContain('Sync now')
+    account = { ...connected, connected: false, reconnectRequired: true }
+    await emitNativeEvent('lastfm-changed', undefined)
+    expect(view.textContent).toContain('Reconnect Last.fm')
+    account = connected
+    await emitNativeEvent('lastfm-changed', undefined)
+    expect(view.textContent).toContain('Sync now')
+    expect(view.textContent).not.toContain('Reconnect Last.fm')
+  })
+
+  it('clears a transient status error after a successful poll', async () => {
+    vi.useFakeTimers()
+    let polls = 0
+    invokeMock.mockImplementation(async command => {
+      if (command === 'lastfm_state') return connected
+      if (command === 'lastfm_sync_status') {
+        if (++polls === 1) throw 'Temporary status failure'
+        return idleLastFmImport({ syncing: true, syncProgress: { downloadedPages: 3, totalPages: 7 } })
+      }
+      return null
+    })
+    const view = await render(<LastFmSync state={idleLastFmImport({ syncing: true })} />)
+    expect(view.textContent).toContain('Temporary status failure')
+    await act(async () => vi.advanceTimersByTimeAsync(750))
+    expect(view.textContent).not.toContain('Temporary status failure')
+    expect(view.textContent).toContain('Downloaded 3 of 7 pages')
+  })
+
+  it('ignores an old operation poll after the next sync starts', async () => {
+    const oldPoll = deferred<LastFmImportState>()
+    const firstRun = deferred<LastFmImportState>()
+    const secondRun = deferred<LastFmImportState>()
+    let polls = 0
+    let runs = 0
+    invokeMock.mockImplementation(async command => {
+      if (command === 'lastfm_state') return connected
+      if (command === 'sync_lastfm_plays') return ++runs === 1 ? firstRun.promise : secondRun.promise
+      if (command === 'lastfm_sync_status') return ++polls === 1 ? oldPoll.promise : idleLastFmImport({ syncing: true, syncProgress: { downloadedPages: 4, totalPages: 8 } })
+      return null
+    })
+    const view = await render(<LastFmSync state={idleLastFmImport()} />)
+    await clickText(view, 'Sync now')
+    await act(async () => firstRun.resolve(idleLastFmImport()))
+    await clickText(view, 'Sync now')
+    expect(view.textContent).toContain('Downloaded 4 of 8 pages')
+    await act(async () => oldPoll.resolve(idleLastFmImport({ syncing: true, syncProgress: { downloadedPages: 1, totalPages: 99 } })))
+    expect(view.textContent).toContain('Downloaded 4 of 8 pages')
+    expect(polls).toBe(2)
+    await act(async () => secondRun.resolve(idleLastFmImport()))
+  })
+
+  it.each([false, true])('reconciles external scrobbling settings while preserving an intentional edit (edited=%s)', async edited => {
+    const save = vi.fn()
+    const props = { lastfm: connected, lastfmImport: idleLastFmImport(), onZoom: vi.fn(), onCancel: vi.fn(), onLastfm: vi.fn(), onImport: vi.fn(), onSave: save }
+    const view = await render(<Preferences {...props} settings={{ ...defaultSettings, lastfmScrobbling: false }} />)
+    await act(async () => view.querySelector<HTMLButtonElement>('#preferences-library-tab')!.click())
+    const checkbox = [...view.querySelectorAll('label')].find(label => label.textContent?.includes('Scrobble tracks to Last.fm'))!.querySelector<HTMLInputElement>('input')!
+    if (edited) await act(async () => { checkbox.click(); checkbox.click() })
+    await act(async () => root!.render(<Preferences {...props} settings={{ ...defaultSettings, lastfmScrobbling: true }} />))
+    expect(checkbox.checked).toBe(!edited)
+    await act(async () => view.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ lastfmScrobbling: !edited }))
+  })
+
+  it('clears recovered diagnostics load errors without clearing an email failure', async () => {
+    vi.useFakeTimers()
+    let loads = 0
+    invokeMock.mockImplementation(async command => {
+      if (command === 'load_diagnostics') {
+        if (++loads === 1) throw 'temporary read failure'
+        return { emailAvailable: true, entries: [{ date: '2026-11-09', time: '12:00:00', level: 'ERROR', target: 'retune::diagnostics', message: 'Last.fm sync failed' }] }
+      }
+      if (command === 'email_diagnostics') throw 'mail unavailable'
+      return null
+    })
+    const view = await render(<Preferences settings={defaultSettings} lastfm={connected} lastfmImport={idleLastFmImport()} onZoom={vi.fn()} onCancel={vi.fn()} onLastfm={vi.fn()} onImport={vi.fn()} onSave={vi.fn()} />)
+    await act(async () => view.querySelector<HTMLButtonElement>('#preferences-bug-tab')!.click())
+    expect(view.textContent).toContain('Couldn’t load diagnostics')
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(view.textContent).not.toContain('Couldn’t load diagnostics')
+    await clickText(view, 'Email…')
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(view.textContent).toContain('Couldn’t email diagnostics')
   })
 })

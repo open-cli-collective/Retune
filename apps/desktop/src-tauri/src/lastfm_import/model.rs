@@ -406,11 +406,19 @@ pub(crate) struct ImportStateView {
     pub retryable_error: Option<RetryableError>,
     pub search_terms: bool,
     pub syncing: bool,
+    pub sync_progress: Option<SyncProgress>,
     pub last_synced_at: Option<u64>,
     pub pending_review: usize,
     pub sync_problem: Option<String>,
     pub applying_all: bool,
     pub spotify_limit: Option<crate::store::Cooldown>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncProgress {
+    pub downloaded_pages: u32,
+    pub total_pages: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -827,4 +835,14 @@ mod tests {
         }
         assert!(serde_json::from_str::<ReviewAction>("\"unknown\"").is_err());
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncStatus {
+    pub syncing: bool,
+    pub sync_progress: Option<SyncProgress>,
+    pub sync_problem: Option<String>,
+    pub last_synced_at: Option<u64>,
+    pub pending_review: usize,
 }

@@ -80,6 +80,7 @@ export type LastFmImportState = {
   retryableError: { message: string; attempt: number; retryable: boolean } | null
   searchTerms: boolean
   syncing: boolean
+  syncProgress?: { downloadedPages: number; totalPages: number | null } | null
   lastSyncedAt: number | null
   pendingReview: number
   syncProblem: string | null

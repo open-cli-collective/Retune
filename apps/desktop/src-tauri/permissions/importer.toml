@@ -2,6 +2,13 @@
 identifier = "importer-commands"
 description = "Minimal commands available to the Last.fm importer window."
 permissions = [
+  "allow-lastfm-state",
+  "allow-connect-lastfm",
+  "allow-finish-lastfm",
+  "allow-sync-lastfm-plays",
+  "allow-open-preferences",
+  "allow-lastfm-sync-status",
+
   "allow-get-appearance",
   "allow-genre-values",
   "allow-lastfm-import-state",

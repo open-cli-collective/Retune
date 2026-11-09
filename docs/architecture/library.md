@@ -259,12 +259,24 @@ does not create one.
 
 ### Last.fm incremental reconciliation
 
+The importer footer owns manual sync, incremental page progress, Last.fm reconnect,
+and persistent recovery feedback. The backend projects the active range's actual
+checkpoint counts independently of historical import progress; the footer polls
+a lightweight sync-only snapshot while a sync runs, without matching or provider
+requests. Completion releases the runner before publishing its final
+snapshot. Failures from manual, startup, and reconnect syncs enter diagnostics.
+Account identity does not depend on a complete saved-library snapshot: a known
+Spotify account remains valid during partial library sync. Missing identity is recovered through the shared Spotify profile client under
+the membership owner lock, without marking membership complete. Unavailable
+identity and an actual account mismatch preserve the incremental checkpoint and explain how
+to resume; neither silently rebinds existing history to another account.
+
 The first exact sync establishes `syncedThrough=now`; it does not backfill
 older post-enable history. Launch, reconnect, and the explicit “Sync Last.fm
 plays” action each process one fixed half-open window. The query is padded for
 Last.fm’s exclusive bounds and the exact window is filtered locally. Incremental
 download reuses the historical parser, 200-row pages, four-page downloader,
-manifest/cache, retry protections, and oldest-to-newest checkpoints. It never
+manifest/cache, retry protections, and oldest-to-newest checkpoints. The source downloader never
 calls Spotify and does not aggregate until the range is complete.
 
 Retune-origin scrobbles are represented by accepted local receipts and are

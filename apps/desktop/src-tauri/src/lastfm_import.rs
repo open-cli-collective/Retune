@@ -872,6 +872,7 @@ fn state_view(session: Option<&LastFmImportSessionV2>) -> ImportStateView {
         retryable_error: session.and_then(|session| session.retryable_error.clone()),
         search_terms: session.map(|session| session.search_terms).unwrap_or(true),
         syncing: false,
+        sync_progress: None,
         last_synced_at: None,
         pending_review: 0,
         sync_problem: None,
@@ -936,6 +937,7 @@ fn suspended_state_view(session: &LastFmImportSessionV2) -> ImportStateView {
         }),
         search_terms: true,
         syncing: false,
+        sync_progress: None,
         last_synced_at: None,
         pending_review: 0,
         sync_problem: None,
@@ -1073,7 +1075,7 @@ fn cached_spotify_account(
     spotify_membership: &crate::spotify_membership::SpotifyMembership,
 ) -> Option<String> {
     let library = spotify_membership.snapshot();
-    library.is_exact().then_some(library.account_id)
+    (!library.account_id.is_empty()).then_some(library.account_id)
 }
 
 async fn recover_before_apply_job(
