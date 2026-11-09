@@ -493,19 +493,19 @@ where
         StartWorker: FnMut(),
         Changed: FnMut(),
     {
-        let username = lastfm_username(self.lastfm).await?;
-        if self.service.next_apply_job().await.is_some()
-            || self.service.sync_snapshot().await.accept_all.is_some()
-        {
-            start_worker();
-        }
         let Some(run) = self.service.claim_sync_runner() else {
             return Ok(self.service.state().await);
         };
         changed();
-        self.lastfm.settle_before_import().await;
         let result = async {
             set_sync_problem(self.service, None).await?;
+            let username = lastfm_username(self.lastfm).await?;
+            if self.service.next_apply_job().await.is_some()
+                || self.service.sync_snapshot().await.accept_all.is_some()
+            {
+                start_worker();
+            }
+            self.lastfm.settle_before_import().await;
             if self.service.sync_snapshot().await.spotify_account_id.is_some()
                 && super::cached_spotify_account(self.membership).is_none()
             {
@@ -520,14 +520,13 @@ where
                 self.lastfm,
                 self.service,
                 &username,
-            ).await
+            ).await?;
+            set_sync_problem(self.service, None).await
         }.await;
         if let Err(error) = &result {
             let _ = set_sync_problem(self.service, Some(error.clone())).await;
         }
-        if result.is_ok() {
-            set_sync_problem(self.service, None).await?;
-        }
+        // All status writes, including preflight failures, belong to this runner.
         drop(run);
         let view = self.service.state().await;
         changed();

@@ -264,8 +264,7 @@ pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportSta
         }
         Ok(_) => {}
         Err(error) => {
-            let _ = super::set_sync_problem(&state.lastfm_import, Some(error.clone())).await;
-            let _ = emit_import_invalidated(&app);
+            log::warn!(target: crate::diagnostics::LOG_TARGET, "Last.fm sync failed: {error}");
         }
     }
     result

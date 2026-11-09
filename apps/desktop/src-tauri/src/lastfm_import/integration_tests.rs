@@ -12097,3 +12097,46 @@ async fn incremental_progress_projects_checkpoint_counts_separately_from_history
         }
     );
 }
+
+#[tokio::test]
+async fn sync_preflight_failure_cannot_overwrite_another_runner() {
+    let directory = tempfile::tempdir().unwrap();
+    let (lastfm, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+    lastfm.disconnect().await.unwrap();
+    let use_cases = application::UseCases::new(
+        application::Owners {
+            service: &service,
+            lastfm: &lastfm,
+            membership: &state.spotify_membership,
+            library: &state.library,
+            settings: &state.settings,
+            cooldown_store: &state.cooldown_store,
+        },
+        || Err("provider should not be needed".into()),
+        || Ok(true),
+    );
+    let active = service.claim_sync_runner().unwrap();
+    set_sync_problem(&service, Some("active retry status".into()))
+        .await
+        .unwrap();
+    let view = use_cases
+        .sync(
+            || panic!("must not start work"),
+            || panic!("must not publish a change"),
+        )
+        .await
+        .unwrap();
+    assert!(view.syncing);
+    assert_eq!(view.sync_problem.as_deref(), Some("active retry status"));
+    drop(active);
+    let mut changes = 0;
+    let error = use_cases
+        .sync(|| panic!("preflight must fail first"), || changes += 1)
+        .await
+        .unwrap_err();
+    let status = service.sync_status().await;
+    assert!(!status.syncing);
+    assert_eq!(status.sync_problem.as_deref(), Some(error.as_str()));
+    assert_eq!(changes, 2);
+    assert!(service.claim_sync_runner().is_some());
+}
