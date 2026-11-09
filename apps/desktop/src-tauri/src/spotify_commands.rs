@@ -1832,13 +1832,14 @@ pub(super) async fn add_spotify_tracks(
     let state = app.state::<AppState>();
     let provider = provider_from(&state)?;
     let library_owner = state.library.owner();
+    let cached_tracks = state.playlists.cached_library_tracks(&uris);
     let ids = spotify_membership::save_tracks(
         provider.as_ref(),
         &state.spotify_membership,
         &library_owner,
         &state.cooldown_store,
         uris,
-        Vec::new(),
+        cached_tracks,
         unix_now(),
     )
     .await

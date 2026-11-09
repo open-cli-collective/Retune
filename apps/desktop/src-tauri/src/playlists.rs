@@ -14,7 +14,7 @@ pub(crate) const MAX_PLAYLIST_NAME_BYTES: usize = 1024;
 pub(crate) const MAX_PLAYLIST_ID_BYTES: usize = 1024;
 pub(crate) const MAX_PLAYLIST_URI_BYTES: usize = 4096;
 pub(crate) const MAX_PLAYLIST_VECTOR_ITEMS: usize = 10_000;
-pub(crate) const TRACK_METADATA_VERSION: u8 = 1;
+pub(crate) const TRACK_METADATA_VERSION: u8 = 2;
 pub const RECONNECT_HINT: &str = "Reconnect to Spotify to enable playlists (File → Account).";
 pub const STALE_PLAYLIST: &str = "Playlist changed elsewhere — reloaded.";
 
@@ -96,6 +96,43 @@ pub struct CachedTrack {
     pub track_no: Option<u32>,
     #[serde(default)]
     pub release_date: Option<String>,
+}
+
+/// Reuse the metadata already shown in playlists; membership remains owned by
+/// SpotifyMembership. Technical fields absent from older caches stay unknown.
+pub(crate) fn cached_library_tracks(
+    cache: &PlaylistCache,
+    uris: &[String],
+) -> Vec<retune_core::model::NewTrack> {
+    let wanted = uris.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    cache
+        .playlists
+        .iter()
+        .flat_map(|playlist| &playlist.spotify_tracks)
+        .filter(|track| {
+            wanted.contains(track.uri.as_str())
+                && !track.name.is_empty()
+                && !track.art.is_empty()
+                && !track.alb.is_empty()
+                && track.duration > 0
+                && seen.insert(track.uri.as_str())
+        })
+        .map(|track| retune_core::model::NewTrack {
+            uri: track.uri.clone(),
+            source: retune_core::model::SourceId::Music,
+            name: track.name.clone(),
+            art: track.art.clone(),
+            alb: track.alb.clone(),
+            cat: retune_core::UNCATEGORIZED.into(),
+            duration: std::time::Duration::from_millis(track.duration),
+            disc_no: track.disc_no,
+            track_no: track.track_no,
+            release_date: track.release_date.clone(),
+            kind: Some("Spotify".into()),
+            ..Default::default()
+        })
+        .collect()
 }
 
 pub async fn sync<T: Transport>(

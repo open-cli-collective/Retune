@@ -60,7 +60,7 @@ impl<T: Transport> SpotifyClient<T> {
         limit: u32,
     ) -> Result<Page<Track>> {
         let playlist_id = spotify_path_id(playlist_id, "playlist")?;
-        let fields = "items(is_local,item(uri,name,artists(id,name),album(id,uri,name,images(url)),duration_ms)),next,total";
+        let fields = "items(is_local,item(uri,name,artists(id,name),album(id,uri,name,release_date,images(url,width)),duration_ms,disc_number,track_number)),next,total";
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("offset", &offset.to_string())
             .append_pair("limit", &limit.to_string())
@@ -92,7 +92,21 @@ impl<T: Transport> SpotifyClient<T> {
         };
         let mut catalog = self.catalog.lock().expect("Spotify catalog mutex poisoned");
         for track in &page.items {
-            catalog.observe_track_summary(track);
+            // Requesting full fields does not guarantee Spotify returned them.
+            if !track.name.is_empty()
+                && !track.artists.is_empty()
+                && track.duration_ms.is_some()
+                && track.disc_number.is_some()
+                && track.track_number.is_some()
+                && track
+                    .album
+                    .as_ref()
+                    .is_some_and(|album| !album.name.is_empty() && album.release_date.is_some())
+            {
+                catalog.observe_track(track);
+            } else {
+                catalog.observe_track_summary(track);
+            }
         }
         Ok(page)
     }
@@ -305,6 +319,14 @@ impl<T: Transport> SpotifyClient<T> {
             .expect("Spotify catalog mutex poisoned")
             .observe_album(&album, complete);
         Ok(album)
+    }
+
+    /// Optional genre enrichment must not add network work to an explicit save.
+    pub fn cached_track_genre(&self, uri: &str) -> Option<String> {
+        self.catalog
+            .lock()
+            .expect("Spotify catalog mutex poisoned")
+            .track_primary_artist_genre(uri)
     }
 
     pub async fn track(&self, id: &str) -> Result<Track> {

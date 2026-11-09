@@ -614,11 +614,14 @@ pub(crate) async fn save_tracks_locked<T: Transport>(
         return Ok(vec![]);
     }
     let initially_present = library_owner.read(|library| {
+        let known = library
+            .known_tracks()
+            .map(|track| track.uri.as_str())
+            .collect::<HashSet<_>>();
         requested_uris
             .iter()
             .filter(|uri| {
-                library.get_by_uri(uri).is_some()
-                    || library.known_tracks().any(|track| &track.uri == *uri)
+                known.contains(uri.as_str()) || known.contains(library.canonical_uri(uri))
             })
             .cloned()
             .collect::<HashSet<_>>()
@@ -635,27 +638,22 @@ pub(crate) async fn save_tracks_locked<T: Transport>(
         })
         .collect::<HashMap<_, _>>();
     for uri in &missing_uris {
-        if tracks.contains_key(uri) {
+        if let Some(track) = tracks.get_mut(uri) {
+            if track.cat == retune_core::UNCATEGORIZED {
+                if let Some(genre) = provider.cached_track_genre(uri) {
+                    track.cat = genre;
+                }
+            }
             continue;
         }
         let track = provider
             .track(crate::track_id(uri).expect("validated above"))
             .await
             .map_err(|error| spotify_action_error(cooldown_store, error))?;
-        let artist = match track.artists.first() {
-            Some(artist) => match provider.artist(&artist.id).await {
-                Ok(artist) => Some(artist),
-                Err(error) => {
-                    log::warn!(
-                        "Spotify track {uri} is missing optional artist enrichment for {}: {error}",
-                        artist.id
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-        let mut normalized = retune_spotify::normalize::track(&track, artist.as_ref(), None);
+        let mut normalized = retune_spotify::normalize::track(&track, None, None);
+        if let Some(genre) = provider.cached_track_genre(uri) {
+            normalized.cat = genre;
+        }
         normalized.added_at = Some(added_at);
         tracks.insert(uri.clone(), normalized);
     }
@@ -1150,6 +1148,136 @@ mod tests {
             .unwrap();
         assert!(durable.tracks().is_empty());
         assert!(durable.get(retune_core::model::TrackId(stale_id)).is_none());
+    }
+
+    #[tokio::test]
+    async fn saving_85_cached_playlist_tracks_uses_only_three_batched_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState {
+                account_id: "account".into(),
+                complete: true,
+                ..Default::default()
+            },
+            crate::lastfm::Service::new_for_test(directory.path(), true, false),
+            crate::lastfm_import::Service::new(directory.path()),
+        );
+        let client = fake_client(
+            (0..3).map(|_| Response::json(204, serde_json::Value::Null)),
+            "user-library-modify",
+        );
+        let cached_tracks = (0..85)
+            .map(|index| crate::playlists::CachedTrack {
+                uri: format!("spotify:track:{index}"),
+                name: format!("Song {index}"),
+                art: "Artist".into(),
+                alb: "Album".into(),
+                duration: 123000,
+                disc_no: Some(1),
+                track_no: Some(index + 1),
+                release_date: Some("2020".into()),
+            })
+            .collect::<Vec<_>>();
+        let mut uris = cached_tracks
+            .iter()
+            .map(|track| track.uri.clone())
+            .collect::<Vec<_>>();
+        let cache = crate::playlists::PlaylistCache {
+            playlists: vec![crate::playlists::CachedPlaylist {
+                id: "mine".into(),
+                name: "Mine".into(),
+                snapshot_id: "version".into(),
+                owned: true,
+                owner: None,
+                track_count: uris.len(),
+                tracks: uris.clone(),
+                track_metadata_version: 1,
+                shadow: None,
+                spotify_tracks: cached_tracks,
+            }],
+        };
+        // Simulate loading the existing playlist cache after a restart with an empty catalog.
+        let cache: crate::playlists::PlaylistCache =
+            serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+        uris.push(uris[0].clone());
+        let seeds = crate::playlists::cached_library_tracks(&cache, &uris);
+        let ids = save_tracks(
+            &client,
+            &state.spotify_membership,
+            &state.library.owner(),
+            &state.cooldown_store,
+            uris,
+            seeds,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids.len(), 85);
+        assert_eq!(state.spotify_membership.snapshot().saved_tracks.len(), 85);
+        let library = state.library.snapshot();
+        assert_eq!(library.tracks().len(), 85);
+        assert_eq!(library.tracks()[0].track_no, Some(1));
+        assert_eq!(library.tracks()[0].release_date.as_deref(), Some("2020"));
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 3);
+        for (request, expected) in requests.iter().zip([40, 40, 5]) {
+            assert_eq!(request.method, retune_spotify::client::Method::Put);
+            let url = url::Url::parse(&request.url).unwrap();
+            assert_eq!(url.path(), "/v1/me/library");
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == "uris")
+                    .unwrap()
+                    .1
+                    .split(',')
+                    .count(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uncached_track_save_fetches_track_but_not_optional_artist() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::test_app_state(
+            directory.path(),
+            Library::new(),
+            SpotifyLibraryState {
+                account_id: "account".into(),
+                complete: true,
+                ..Default::default()
+            },
+            crate::lastfm::Service::new_for_test(directory.path(), true, false),
+            crate::lastfm_import::Service::new(directory.path()),
+        );
+        let client = fake_client(
+            [
+                Response::json(
+                    200,
+                    serde_json::json!({"uri":"spotify:track:one","name":"One","duration_ms":123000,"artists":[{"id":"artist","name":"Artist"}],"album":{"id":"album","uri":"spotify:album:album","name":"Album"}}),
+                ),
+                Response::json(204, serde_json::Value::Null),
+            ],
+            "user-library-modify",
+        );
+        save_tracks(
+            &client,
+            &state.spotify_membership,
+            &state.library.owner(),
+            &state.cooldown_store,
+            vec!["spotify:track:one".into()],
+            vec![],
+            10,
+        )
+        .await
+        .unwrap();
+        let requests = client.transport().requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.ends_with("/tracks/one"));
+        assert_eq!(requests[1].method, retune_spotify::client::Method::Put);
+        assert_eq!(state.library.snapshot().tracks()[0].art, "Artist");
     }
 
     #[tokio::test]

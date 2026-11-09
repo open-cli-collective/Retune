@@ -3,6 +3,8 @@ import type { ImportSummary, PlaybackAuthorizationPrompt, PlayerState } from './
 
 export type Invoker = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
 
+export const createProgressChannel = <T>(handler: (progress: T) => void) => new Channel<T>(handler)
+
 export const tauriInvoker: Invoker = (command, args) => invoke(command, args)
 
 export type SpotifyPlayRequest = { uri: string; name: string; artist: string; album: string; durationSecs: number }

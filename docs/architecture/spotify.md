@@ -242,8 +242,10 @@ pages, and deduplicates requests. Full sync alone composes the independent
 Artist pages expose Follow or Following only after the saved-state check
 succeeds. A failed check makes the page unavailable with an explicit Retry;
 late retries cannot replace a newer artist. Optional artist enrichment for
-track normalization may degrade to unenriched metadata, but the native shell
-logs that degradation with the affected track and artist identities.
+track normalization is supplied by cached artist genres during explicit track and
+album actions. Uncached optional genres are left for the normal library sync, so
+saving or removing content never waits for one artist request per track. Sync
+retains its deduplicated, paced artist enrichment.
 
 The shared client also owns a versioned `SpotifyCatalog` keyed by artist ID and
 album/track URI. It stores exact search result identity by normalized request
@@ -338,6 +340,16 @@ them in order-preserving groups of 40, matching Spotify's current
 desktop track-add command additionally rejects malformed/non-track URIs before
 reading managed state or creating provider/event effects.
 
+Explicit track saves reuse validated display metadata from the native playlist
+cache, including caches loaded after a restart. Existing library identities are
+indexed once per action. Playlist page requests include track/disc numbers and
+album release dates and populate complete track catalog records; metadata version
+2 causes older owned-playlist caches to refresh at the next playlist sync.
+Only tracks absent from these caches require individual Web API track reads.
+The removed Development Mode multi-track endpoint is not used. Metadata reuse
+does not imply saved membership: explicit saves still use the shared membership
+owner and its batched writes, atomic persistence, and overlay preservation.
+
 Spotify is canonical for owned-playlist content. Reordering uses snapshot IDs to
 detect concurrent changes, then reloads stale state. Ordinary Web API sync only
 requests contents for owned or collaborative playlists. Other playlists can be
@@ -364,7 +376,12 @@ become due after six hours, with 15-minute backoff after failure; a manual
 Refresh bypasses that age check. Complete metadata is required before replacement.
 Partial/truncated lists, unsupported non-track items, and metadata failures keep
 the last successful snapshot and report an error. Metadata for unchanged track
-URIs is reused. Refresh never changes the playback controller's current queue.
+URIs is reused. Missing unique tracks are fetched sequentially in batches of 50
+through librespot’s existing extended-metadata client, with response identity and
+completeness checked before committing. Playlist order and repeated tracks are
+retained. Command-scoped IPC channels report resolved playlist entries to the
+initiating view; completion is shown only after the atomic save. Failures never
+replace the previous snapshot with partial results. Refresh never changes the playback controller's current queue.
 `Stop shadowing` removes only Retune's cached copy; it does not unfollow Spotify.
 Shadows appear under **Shadowed playlists**, with a ◐ hint and a read-only status
 showing their last successful refresh. All content mutation guards remain in

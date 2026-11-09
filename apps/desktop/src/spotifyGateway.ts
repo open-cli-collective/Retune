@@ -1,5 +1,8 @@
-import { tauriInvoker, type Invoker } from './ipc.ts'
+import { createProgressChannel, tauriInvoker, type Invoker } from './ipc.ts'
 import type { AlbumPageView, ArtistAlbumsPage, ArtistPageView, ConnectionState, PlaylistListView, PlaylistTrack, SpotifyNavEntry, SpotifyResults, SpotifySyncStatus } from './types.ts'
+
+export type ShadowProgress = { completed: number; total: number }
+const progressArgs = (handler?: (progress: ShadowProgress) => void) => ({ progress: createProgressChannel(handler ?? (() => {})) })
 
 export const spotifyEvents = {
   connectionChanged: 'connection-changed',
@@ -35,9 +38,9 @@ export function createSpotifyGateway(invoke: Invoker) {
     unfollowPlaylist: (id: string) => invoke<void>('playlist_unfollow', { id }),
     reorderPlaylists: (ids: string[]) => invoke<void>('reorder_playlists', { ids }),
     discoverShadows: () => invoke<import('./types').ShadowCandidate[]>('discover_shadow_playlists'),
-    shadowPlaylist: (id: string, account?: string) => invoke<void>('shadow_playlist', { id, account: account ?? null }),
+    shadowPlaylist: (id: string, account?: string, progress?: (update: ShadowProgress) => void) => invoke<void>('shadow_playlist', { id, account: account ?? null, ...progressArgs(progress) }),
     stopShadowing: (id: string) => invoke<void>('stop_shadowing_playlist', { id }),
-    refreshShadows: (id?: string, force = false) => invoke<void>('refresh_shadow_playlists', { id: id ?? null, force }),
+    refreshShadows: (id?: string, force = false, progress?: (update: ShadowProgress) => void) => invoke<void>('refresh_shadow_playlists', { id: id ?? null, force, ...progressArgs(progress) }),
     playlistTracks: (id: string) => invoke<PlaylistTrack[]>('playlist_tracks', { id }),
     addToPlaylist: (id: string, uris: string[]) => invoke<void>('playlist_add', { id, uris }),
     addAlbumToPlaylist: (id: string, albumUri: string, albumLabel: string) => invoke<void>('playlist_add_album', { id, albumUri, albumLabel }),

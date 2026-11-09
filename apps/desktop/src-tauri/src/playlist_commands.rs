@@ -670,6 +670,7 @@ pub(super) async fn shadow_playlist(
     app: tauri::AppHandle,
     id: String,
     account: Option<String>,
+    progress: tauri::ipc::Channel<crate::shadow_playlists::Progress>,
 ) -> Result<(), String> {
     playlists::validate_playlist_id(&id)?;
     let state = app.state::<AppState>();
@@ -686,7 +687,9 @@ pub(super) async fn shadow_playlist(
     let reader = crate::shadow_playlists::Reader::connect(&credentials).await?;
     let fetched = tokio::time::timeout(
         std::time::Duration::from_secs(180),
-        reader.fetch(&id, &credentials.username, previous),
+        reader.fetch(&id, &credentials.username, previous, |update| {
+            let _ = progress.send(update);
+        }),
     )
     .await
     .map_err(|_| "Shadowing timed out. Existing tracks are unchanged.".to_string())??;
@@ -716,6 +719,7 @@ pub(super) async fn refresh_shadow_playlists(
     app: tauri::AppHandle,
     id: Option<String>,
     force: bool,
+    progress: tauri::ipc::Channel<crate::shadow_playlists::Progress>,
 ) -> Result<(), String> {
     if let Some(id) = &id {
         playlists::validate_playlist_id(id)?;
@@ -747,7 +751,14 @@ pub(super) async fn refresh_shadow_playlists(
         let fetched = match &reader {
             Ok(reader) => tokio::time::timeout(
                 std::time::Duration::from_secs(180),
-                reader.fetch(&previous.id, &credentials.username, Some(previous)),
+                reader.fetch(
+                    &previous.id,
+                    &credentials.username,
+                    Some(previous),
+                    |update| {
+                        let _ = progress.send(update);
+                    },
+                ),
             )
             .await
             .map_err(|_| "Playlist refresh timed out.".to_string())
