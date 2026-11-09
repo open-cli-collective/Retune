@@ -11996,3 +11996,104 @@ async fn legacy_failed_job_without_known_code_restarts_as_apply_failed() {
     assert_eq!(projected.error_code, Some(ApplyFailureCode::ApplyFailed));
     assert_eq!(projected.retry_at, Some(9_999));
 }
+
+#[tokio::test]
+async fn incremental_sync_recovers_missing_identity_without_full_library_sync() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, service, state) = test_app_state(directory.path(), Library::new(), &[]);
+    let client = Arc::new(fake_client(
+        [Response::json(
+            200,
+            serde_json::json!({
+                "id": "display-id", "account_id": "spotify"
+            }),
+        )],
+        "",
+    ));
+    super::incremental::recover_sync_identity(&state.spotify_membership, || {
+        Ok(Arc::clone(&client))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        cached_spotify_account(&state.spotify_membership).as_deref(),
+        Some("spotify")
+    );
+    assert!(!state.spotify_membership.snapshot().complete);
+    super::incremental::recover_sync_identity(&state.spotify_membership, || {
+        Ok(Arc::clone(&client))
+    })
+    .await
+    .unwrap();
+    assert_eq!(client.transport().requests().len(), 1);
+    service
+        .mutate_sync(|sync| {
+            sync.lastfm_username = Some("user".into());
+            sync.spotify_account_id = Some("spotify".into());
+            sync.synced_through = Some(u64::MAX);
+            sync.sync_problem = Some("previous failure".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let use_cases = application::UseCases::new(
+        application::Owners {
+            service: &service,
+            lastfm: &state.lastfm,
+            membership: &state.spotify_membership,
+            library: &state.library,
+            settings: &state.settings,
+            cooldown_store: &state.cooldown_store,
+        },
+        || Err("provider should not be needed".into()),
+        || Ok(true),
+    );
+    let view = use_cases.sync(|| {}, || {}).await.unwrap();
+    assert!(!view.syncing);
+    assert!(view.sync_problem.is_none());
+    state.spotify_membership.set_for_test(SpotifyLibraryState {
+        account_id: "different".into(),
+        ..SpotifyLibraryState::default()
+    });
+    assert!(use_cases
+        .sync(|| {}, || {})
+        .await
+        .unwrap_err()
+        .contains("different Spotify account"));
+    assert!(!service.state().await.syncing);
+    assert_eq!(service.sync_snapshot().await.synced_through, Some(u64::MAX));
+}
+
+#[tokio::test]
+async fn incremental_progress_projects_checkpoint_counts_separately_from_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::new(directory.path());
+    service
+        .mutate_sync(|sync| {
+            sync.lastfm_username = Some("user".into());
+            sync.synced_through = Some(10);
+            sync.active = Some(IncrementalRange {
+                from: 10,
+                to: 20,
+                query_from: 9,
+                query_to: 21,
+                cache_id: incremental_cache_id("user", 10, 20),
+                next_page: 5,
+                downloaded_pages: 3,
+                total_pages: Some(8),
+                ..IncrementalRange::default()
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let view = service.state().await;
+    assert_eq!(view.downloaded_pages, 0);
+    assert_eq!(
+        view.sync_progress.unwrap(),
+        super::model::SyncProgress {
+            downloaded_pages: 3,
+            total_pages: Some(8)
+        }
+    );
+}

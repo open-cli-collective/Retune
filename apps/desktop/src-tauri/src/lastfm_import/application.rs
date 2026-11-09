@@ -499,22 +499,36 @@ where
         {
             start_worker();
         }
-        self.lastfm.settle_before_import().await;
-        let Some(_run) = self.service.claim_sync_runner() else {
+        let Some(run) = self.service.claim_sync_runner() else {
             return Ok(self.service.state().await);
         };
         changed();
-        let result = run_incremental_sync(
-            self.library,
-            self.membership,
-            self.lastfm,
-            self.service,
-            &username,
-        )
-        .await;
+        self.lastfm.settle_before_import().await;
+        let result = async {
+            set_sync_problem(self.service, None).await?;
+            if self.service.sync_snapshot().await.spotify_account_id.is_some()
+                && super::cached_spotify_account(self.membership).is_none()
+            {
+                if !(self.connected)()? {
+                    return Err("Connect Spotify, then retry Last.fm sync. Your saved progress is preserved.".into());
+                }
+                super::incremental::recover_sync_identity(self.membership, &self.provider).await?;
+            }
+            run_incremental_sync(
+                self.library,
+                self.membership,
+                self.lastfm,
+                self.service,
+                &username,
+            ).await
+        }.await;
         if let Err(error) = &result {
             let _ = set_sync_problem(self.service, Some(error.clone())).await;
         }
+        if result.is_ok() {
+            set_sync_problem(self.service, None).await?;
+        }
+        drop(run);
         let view = self.service.state().await;
         changed();
         result.map(|()| view)

@@ -220,10 +220,12 @@ function BugPreferences() {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     let active = true
-    appGateway.diagnostics()
+    const refresh = () => appGateway.diagnostics()
       .then((next) => { if (active) setReport(next) })
       .catch(() => { if (active) setError('Couldn’t load diagnostics. Try again.') })
-    return () => { active = false }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 3000)
+    return () => { active = false; window.clearInterval(timer) }
   }, [])
   const counts = Object.fromEntries(diagnosticLevels.map((level) => [level, report.entries.filter((entry) => entry.level === level).length])) as Record<DiagnosticLevel, number>
   const visible = report.entries.filter((entry) => levels.has(entry.level))
@@ -274,7 +276,7 @@ function BugPreferences() {
   </>
 }
 
-export function Preferences({ settings, saving = false, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSyncLastfm, onSave, onLibraryChanged = () => {} }: {
+export function Preferences({ settings, saving = false, lastfm, lastfmImport, onZoom, onCancel, onLastfm, onImport, onSave, onLibraryChanged = () => {} }: {
   settings: Settings
   saving?: boolean
   lastfm: LastFmState
@@ -283,7 +285,6 @@ export function Preferences({ settings, saving = false, lastfm, lastfmImport, on
   onCancel: () => void
   onLastfm: (state: LastFmState) => void
   onImport: () => void
-  onSyncLastfm: () => void
   onLibraryChanged?: () => void
   onSave: (settings: Pick<Settings, 'theme' | 'browserVisible' | 'browserPanes' | 'autoAddSpotifyLibrary' | 'autoConnect' | 'spotifyClientId' | 'playbackBackend' | 'streamingBitrate' | 'normalizeVolume' | 'gapless' | 'playThresholdPercent' | 'lastfmScrobbling' | 'ignoreLeadingThe'>) => void
 }) {
@@ -341,7 +342,7 @@ export function Preferences({ settings, saving = false, lastfm, lastfmImport, on
       <div className="preference-toolbar" role="tablist">
         {tabs.map(([value, glyph, label]) => <button type="button" key={value} id={`preferences-${value}-tab`} className={tab === value ? 'active' : ''} role="tab" aria-selected={tab === value} aria-controls={`preferences-${value}`} onClick={() => setTab(value)}><span aria-hidden="true">{glyph}</span>{label}</button>)}
       </div>
-      <div className="preference-content" id={`preferences-${tab}`} role="tabpanel" aria-labelledby={`preferences-${tab}-tab`}>
+      <div className={`preference-content${tab === 'bug' ? ' preference-bug' : ''}`} id={`preferences-${tab}`} role="tabpanel" aria-labelledby={`preferences-${tab}-tab`}>
         {tab === 'appearance' && <>
           <section className="preference-group"><h3>Theme</h3><div className="preference-inset preference-options">
             {themeOptions.map(([value, label, help]) => <label className="preference-choice" key={value}><input type="radio" name="theme" value={value} checked={theme === value} onChange={() => setTheme(value)} /><span><strong>{label}</strong><small>{help}</small></span></label>)}
@@ -378,10 +379,6 @@ export function Preferences({ settings, saving = false, lastfm, lastfmImport, on
                   <button type="button" className="lastfm-pill" onClick={() => void lastfmAction('disconnect')} disabled={lastfmBusy}>Disconnect</button>
                 </div>
                 <label className="preference-choice"><input type="checkbox" checked={lastfmScrobbling} onChange={(event) => setLastfmScrobbling(event.target.checked)} /><span><strong>Scrobble tracks to Last.fm</strong><small>Sent once a track passes Last.fm's listening threshold.</small></span></label>
-                <div className="lastfm-actions">
-                  <button type="button" className="lastfm-pill primary" onClick={onSyncLastfm} disabled={lastfmImport.syncing}>{lastfmImport.syncing ? 'Syncing…' : 'Sync Last.fm plays'}</button>
-                  <button type="button" className="lastfm-pill" onClick={onImport}>Import / Resume</button>
-                </div>
                 <small className="lastfm-sync-status">
                   {lastfmImport.syncProblem ?? (lastfmImport.pendingReview ? `${lastfmImport.pendingReview.toLocaleString()} plays need review.` : lastfmImport.lastSyncedAt ? `Last synced ${new Date(lastfmImport.lastSyncedAt * 1000).toLocaleString()}.` : 'Exact play reconciliation starts with the next sync.')}
                 </small>
@@ -395,6 +392,7 @@ export function Preferences({ settings, saving = false, lastfm, lastfmImport, on
               </div>}
               {lastfm.problem && lastfm.available && <small className="error-text" role="alert">{lastfm.problem}</small>}
               {lastfmError && lastfmError !== lastfm.problem && <small className="error-text" role="alert">{lastfmError}</small>}
+              <div className="lastfm-actions"><button type="button" className="lastfm-pill" onClick={onImport}>Open Last.fm importer</button></div>
             </div>
             <small className="lastfm-attribution">Powered by <a href="https://www.last.fm/" onClick={(event) => { event.preventDefault(); void openExternalDestination({ kind: 'lastFm' }).catch(() => setLastfmError('Couldn’t open Last.fm. Try again.')) }}>Last.fm</a>.</small>
           </div></section>

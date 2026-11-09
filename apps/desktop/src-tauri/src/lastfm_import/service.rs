@@ -435,6 +435,13 @@ impl Service {
             view.last_synced_at = sync.last_synced_at;
             view.pending_review = sync.backlog.len();
             view.sync_problem = sync.sync_problem.clone();
+            view.sync_progress = sync
+                .active
+                .as_ref()
+                .map(|range| super::model::SyncProgress {
+                    downloaded_pages: range.downloaded_pages,
+                    total_pages: range.total_pages,
+                });
             view.applying_all = sync.accept_all.is_some();
             drop(sync);
             let previous = std::mem::replace(&mut *slot, SessionResidency::Parked { owner, view });
@@ -617,6 +624,23 @@ impl Service {
         Arc::clone(&self.restore_mutations)
     }
 
+    pub(crate) async fn sync_status(&self) -> super::model::SyncStatus {
+        let sync = self.sync_state.lock().await;
+        super::model::SyncStatus {
+            syncing: self.sync_running.load(Ordering::Acquire),
+            sync_progress: sync
+                .active
+                .as_ref()
+                .map(|range| super::model::SyncProgress {
+                    downloaded_pages: range.downloaded_pages,
+                    total_pages: range.total_pages,
+                }),
+            sync_problem: sync.sync_problem.clone(),
+            last_synced_at: sync.last_synced_at,
+            pending_review: sync.backlog.len(),
+        }
+    }
+
     pub(crate) async fn state(&self) -> ImportStateView {
         if self.hydration.load(Ordering::Acquire) != 1 {
             let mut view = state_view(None);
@@ -649,6 +673,13 @@ impl Service {
         view.last_synced_at = sync.last_synced_at;
         view.pending_review = sync.backlog.len();
         view.sync_problem = sync.sync_problem.clone();
+        view.sync_progress = sync
+            .active
+            .as_ref()
+            .map(|range| super::model::SyncProgress {
+                downloaded_pages: range.downloaded_pages,
+                total_pages: range.total_pages,
+            });
         view.applying_all = sync.accept_all.is_some();
         view
     }

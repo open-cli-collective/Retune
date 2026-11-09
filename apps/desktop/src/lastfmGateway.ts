@@ -55,6 +55,7 @@ export function createLastFmGateway(invoke: Invoker) {
     connectAccount: () => invoke<LastFmState>('connect_lastfm'),
     finishAccount: () => invoke<LastFmState>('finish_lastfm'),
     disconnectAccount: () => invoke<LastFmState>('disconnect_lastfm'),
+    syncStatus: () => invoke<Pick<LastFmImportState, 'syncing' | 'syncProgress' | 'syncProblem' | 'lastSyncedAt' | 'pendingReview'>>('lastfm_sync_status'),
     syncPlays: () => invoke<LastFmImportState>('sync_lastfm_plays'),
   }
 }

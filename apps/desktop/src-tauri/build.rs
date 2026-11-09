@@ -72,6 +72,7 @@ const APP_COMMANDS: &[&str] = &[
     "lastfm_import_rename_batch",
     "start_lastfm_import",
     "sync_lastfm_plays",
+    "lastfm_sync_status",
     "lastfm_import_review",
     "lastfm_import_options",
     "lastfm_import_count_mode",

@@ -233,6 +233,14 @@ fn queue_page_request(
 }
 
 #[tauri::command]
+pub(crate) async fn lastfm_sync_status(app: tauri::AppHandle) -> super::model::SyncStatus {
+    app.state::<crate::AppState>()
+        .lastfm_import
+        .sync_status()
+        .await
+}
+
+#[tauri::command]
 pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportStateView, String> {
     let state = app.state::<crate::AppState>();
     let worker_app = app.clone();
@@ -250,6 +258,16 @@ pub(crate) async fn sync_lastfm_plays(app: tauri::AppHandle) -> Result<ImportSta
             },
         )
         .await;
+    match &result {
+        Ok(view) if !view.syncing => {
+            log::info!(target: crate::diagnostics::LOG_TARGET, "Last.fm sync completed; {} plays pending review.", view.pending_review)
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let _ = super::set_sync_problem(&state.lastfm_import, Some(error.clone())).await;
+            let _ = emit_import_invalidated(&app);
+        }
+    }
     result
 }
 

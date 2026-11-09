@@ -299,6 +299,7 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
   await lastfm.finishAccount()
   await lastfm.disconnectAccount()
   await lastfm.syncPlays()
+  await lastfm.syncStatus()
 
   assert.deepEqual(calls, [
     ['lastfm_import_state', undefined],
@@ -330,6 +331,7 @@ test('Last.fm gateway preserves every command name and camel-case argument', asy
     ['finish_lastfm', undefined],
     ['disconnect_lastfm', undefined],
     ['sync_lastfm_plays', undefined],
+    ['lastfm_sync_status', undefined],
   ])
 })
 

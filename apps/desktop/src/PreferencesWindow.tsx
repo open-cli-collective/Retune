@@ -51,7 +51,6 @@ export default function PreferencesWindow() {
     {settings ? <Preferences settings={settings} lastfm={lastfm} lastfmImport={lastfmImport} saving={saving}
       onZoom={(zoom) => setSettings({ ...settings, zoom })} onCancel={close} onLastfm={setLastfm}
       onImport={() => { void appGateway.openLastFmImporter().catch(() => setError('Couldn’t open the Last.fm importer. Try again.')) }}
-      onSyncLastfm={() => { void lastfmGateway.syncPlays().then(setLastfmImport).catch(() => setError('Couldn’t sync Last.fm. Try again.')) }}
       onSave={save} /> : <p role="status">Loading preferences…</p>}
   </main>
 }
