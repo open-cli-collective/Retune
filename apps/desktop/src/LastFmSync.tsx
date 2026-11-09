@@ -14,22 +14,27 @@ export function LastFmSync({ state }: { state: LastFmImportState }) {
   const [progress, setProgress] = useState<Awaited<ReturnType<typeof lastfmGateway.syncStatus>> | null>(null)
   const [pending, setPending] = useState<'sync' | 'connect' | 'finish' | 'preferences' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [pollError, setPollError] = useState<string | null>(null)
+  const [accountError, setAccountError] = useState<string | null>(null)
+  const generation = useRef(0)
   const running = useRef(false)
-  useTauriInvalidationSnapshot('lastfm-changed', lastfmGateway.accountState, (next) => { if (next) setAccount(next) }, (reason) => setError(message(reason)))
+  useTauriInvalidationSnapshot('lastfm-changed', lastfmGateway.accountState, (next) => { if (next) { setAccount(next); setAccountError(null) } }, (reason) => setAccountError(message(reason)))
   const syncing = pending === 'sync' || state.syncing
   const view = syncing ? progress ?? state : state
   useEffect(() => {
     if (!state.syncing && pending !== 'sync') return
     let active = true
+    const operation = generation.current
+    const current = () => active && operation === generation.current
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
       try {
         const next = await lastfmGateway.syncStatus()
-        if (active) setProgress(next)
+        if (current()) { setProgress(next); setPollError(null) }
       } catch (reason) {
-        if (active) setError(message(reason))
+        if (current()) setPollError(message(reason))
       } finally {
-        if (active) timer = setTimeout(() => void poll(), 750)
+        if (current()) timer = setTimeout(() => void poll(), 750)
       }
     }
     void poll()
@@ -40,9 +45,11 @@ export function LastFmSync({ state }: { state: LastFmImportState }) {
   const action = async (kind: 'sync' | 'connect' | 'finish' | 'preferences') => {
     if (running.current) return
     running.current = true
+    generation.current += 1
     setPending(kind)
     setProgress(null)
     setError(null)
+    setPollError(null)
     try {
       if (kind === 'sync') setProgress(await lastfmGateway.syncPlays())
       else if (kind === 'connect') setAccount(await lastfmGateway.connectAccount())
@@ -53,11 +60,10 @@ export function LastFmSync({ state }: { state: LastFmImportState }) {
     } finally {
       running.current = false
       setPending(null)
-      void lastfmGateway.syncStatus().then(setProgress).catch(() => {})
     }
   }
   const needsConnection = !account.connected || account.reconnectRequired
-  const problem = error ?? account.problem ?? displayed.syncProblem
+  const problem = error ?? accountError ?? (syncing ? pollError : null) ?? account.problem ?? displayed.syncProblem
   const pages = view.syncProgress
   const status = problem ?? (!account.available ? 'Last.fm is unavailable in this build.' : syncing
     ? pages?.totalPages != null

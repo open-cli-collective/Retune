@@ -217,12 +217,13 @@ function BugPreferences() {
   const [report, setReport] = useState<DiagnosticReport>({ entries: [], emailAvailable: false })
   const [levels, setLevels] = useState<Set<DiagnosticLevel>>(() => new Set(diagnosticLevels))
   const [error, setError] = useState<string>()
+  const [loadError, setLoadError] = useState<string>()
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     let active = true
     const refresh = () => appGateway.diagnostics()
-      .then((next) => { if (active) setReport(next) })
-      .catch(() => { if (active) setError('Couldn’t load diagnostics. Try again.') })
+      .then((next) => { if (active) { setReport(next); setLoadError(undefined) } })
+      .catch(() => { if (active) setLoadError('Couldn’t load diagnostics. Try again.') })
     void refresh()
     const timer = window.setInterval(() => void refresh(), 3000)
     return () => { active = false; window.clearInterval(timer) }
@@ -270,6 +271,7 @@ function BugPreferences() {
     <section className="preference-group"><h3>Report a problem</h3><div className="preference-inset diagnostic-report">
       <div><strong>{problemCount ? `Copies ${reportEntries.length} entries — the session run-up through the last problem.` : 'No warnings or errors this session.'}</strong><small>Filters change the view only. Reports always include the full diagnostic window.</small></div>
       <div className="diagnostic-actions"><button type="button" disabled={!body} onClick={() => void copy()}>{copied ? '✓ Copied' : 'Copy Logs'}</button><button type="button" className="primary" disabled={!body || !report.emailAvailable} title={report.emailAvailable ? undefined : 'Email support is unavailable in this build.'} onClick={() => void email()}>Email…</button></div>
+      {loadError && <small className="error-text" role="alert">{loadError}</small>}
       {error && <small className="error-text" role="alert">{error}</small>}
       {!report.emailAvailable && <small>Email support is unavailable in this build. Copy Logs and share the report instead.</small>}
     </div></section>
@@ -302,7 +304,8 @@ export function Preferences({ settings, saving = false, lastfm, lastfmImport, on
   const [normalizeVolume, setNormalizeVolume] = useState(settings.normalizeVolume)
   const [gapless, setGapless] = useState(settings.gapless)
   const [playThresholdPercent, setPlayThresholdPercent] = useState(settings.playThresholdPercent)
-  const [lastfmScrobbling, setLastfmScrobbling] = useState(settings.lastfmScrobbling)
+  const [lastfmScrobblingDraft, setLastfmScrobbling] = useState<boolean | null>(null)
+  const lastfmScrobbling = lastfmScrobblingDraft ?? settings.lastfmScrobbling
   const [lastfmBusy, setLastfmBusy] = useState(false)
   const [lastfmError, setLastfmError] = useState<string>()
   const [removedTracksOpen, setRemovedTracksOpen] = useState(false)

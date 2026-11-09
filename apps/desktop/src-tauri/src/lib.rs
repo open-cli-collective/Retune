@@ -1104,6 +1104,7 @@ fn finish_startup(
         Arc::new(move |_| {
             let _ = emit_main(&lastfm_app, "lastfm-changed", ());
             let _ = lastfm_app.emit_to("preferences", "lastfm-changed", ());
+            let _ = lastfm_app.emit_to("lastfm-importer", "lastfm-changed", ());
         }),
     );
     let restore_mutations = Arc::new(restore_latch::RestoreMutationState::default());
